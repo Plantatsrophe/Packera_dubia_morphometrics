@@ -1310,5 +1310,158 @@ class TestMultimodalSpatialRF(unittest.TestCase):
             self.assertIn("STEP05_ZERO_TRUST_SUITE_OK", res.stdout)
 
 
+    def test_step05_morphometric_independence_and_min_bedrock_buffer_contracts(self):
+        """Static + R execution verification that Step 05 ENM is 100% independent of Step 04 morphometrics and uses min() for buffered bedrock depth."""
+        pe_src = (PROJECT_ROOT / "scripts" / "analysis" / "step05_phenology_ecotypes.R").read_text(encoding="utf-8")
+        ed_src = (PROJECT_ROOT / "scripts" / "analysis" / "edaphic_fine_grain_utils.R").read_text(encoding="utf-8")
+        s05_src = (PROJECT_ROOT / "scripts" / "analysis" / "05_multimodal_spatial_rf.R").read_text(encoding="utf-8")
+        rp_src = (PROJECT_ROOT / "run_pipeline.sh").read_text(encoding="utf-8")
+
+        # 1. Verify resolve_analysis_group has zero Step 04 Morphotype_K copying and zero pass_pheno_gate / symp_10km vetoes
+        rag_slice = pe_src.split("resolve_analysis_group <- function(")[1].split("resolve_active_anchor_groups <- function(")[0]
+        self.assertNotIn("Morphotype_K", rag_slice)
+        self.assertNotIn("pass_pheno_gate", rag_slice)
+        self.assertNotIn("symp_10km", rag_slice)
+        self.assertIn("lithic_outcrop_index", ed_src)
+        self.assertIn("summer_moisture_deficit_idx", ed_src)
+        self.assertIn("maritime_continentality_idx", ed_src)
+
+        # 2. Verify min_bedrock_depth_buffer_cm uses min(xf), NEVER mean(x, na.rm = TRUE)
+        buf_slice = ed_src.split("extract_uncertainty_buffered_predictors <- function(")[1].split("# Explicit demonstration simulation mode ONLY")[0]
+        self.assertIn("min(xf)", buf_slice)
+        self.assertNotIn("mean(x, na.rm = TRUE)", buf_slice)
+
+        # 3. Verify run_pipeline.sh Step 05 invocation does not pass --morphometrics and Step 05 main() does not require_step04 = TRUE
+        step05_sh_slice = rp_src.split("05_multimodal_spatial_rf.R")[1].split("06_triage_dashboard_synthesis.R")[0]
+        self.assertNotIn("--morphometrics", step05_sh_slice)
+        self.assertNotIn("require_step04 = TRUE", s05_src)
+
+        if not rscript_available():
+            return
+
+        with tempfile.TemporaryDirectory() as tmp_d:
+            r_code = f"""
+            suppressPackageStartupMessages({{ library(readr); library(dplyr); library(terra) }})
+            source("scripts/core/db_utils.R")
+            source("scripts/morphometrics/authority_weighting_utils.R")
+            source("scripts/morphometrics/pub_figures_utils.R")
+            source("scripts/analysis/edaphic_fine_grain_utils.R")
+            source("scripts/analysis/05_multimodal_spatial_rf.R")
+            source("scripts/analysis/06_triage_dashboard_synthesis.R")
+
+            tmp_root <- {repr(str(tmp_d))}
+            sol_dir <- file.path(tmp_root, "env", "solus_100m")
+            dir.create(sol_dir, recursive = TRUE, showWarnings = FALSE)
+
+            # A. Verify 20 cm granite flatrock pixel inside 180 cm Ultisol matrix is recovered as 20 cm by min_bedrock_depth_buffer_cm
+            r_bd <- terra::rast(xmin = -80.10, xmax = -79.90, ymin = 35.90, ymax = 36.10, nrows = 100, ncols = 100, crs = "EPSG:4326")
+            terra::values(r_bd) <- 180.0
+            cell_outcrop <- terra::cellFromXY(r_bd, cbind(-80.001, 36.000))
+            r_bd[cell_outcrop] <- 18.0
+            terra::writeRaster(r_bd, file.path(sol_dir, "anylithicdpt_cm_p.tif"), overwrite = TRUE)
+
+            df_out <- data.frame(
+              catalogNumber = "FLATROCK_01",
+              latitude = 36.000,
+              longitude = -80.000,
+              coordinateUncertaintyInMeters = 350.0,
+              stringsAsFactors = FALSE
+            )
+            df_out_buf <- extract_uncertainty_buffered_predictors(df_out, env_dir = file.path(tmp_root, "env"), demo = FALSE)
+            stopifnot(is.finite(df_out_buf$min_bedrock_depth_buffer_cm[1]) && df_out_buf$min_bedrock_depth_buffer_cm[1] <= 20.0)
+
+            # B. Verify 4-habitat Packera dubia (Granite Flatrocks, parapatric Sandhills, Coastal Dunes, Western Prairies)
+            #    discovers K >= 3 independent ecological regimes EVEN WHEN gmm_cluster = 1, and is 100% invariant to morphometric mutations!
+            set.seed(2027)
+            n_h <- 16
+            hab <- rep(c("Flatrock", "Sandhills", "CoastalDune", "WesternPrairie"), each = n_h)
+            n_tot <- length(hab)
+            # Flatrocks & Sandhills placed parapatrically along the Fall Line (~5-12 km apart) to verify zero symp_10km suppression!
+            lat_v <- ifelse(hab == "Flatrock", 34.65 + rnorm(n_tot, 0, 0.04),
+                     ifelse(hab == "Sandhills", 34.60 + rnorm(n_tot, 0, 0.04),
+                     ifelse(hab == "CoastalDune", 33.85 + rnorm(n_tot, 0, 0.08),
+                            34.10 + rnorm(n_tot, 0, 0.25))))
+            lon_v <- ifelse(hab == "Flatrock", -80.55 + rnorm(n_tot, 0, 0.04),
+                     ifelse(hab == "Sandhills", -80.48 + rnorm(n_tot, 0, 0.04),
+                     ifelse(hab == "CoastalDune", -78.00 + rnorm(n_tot, 0, 0.08),
+                            -94.20 + rnorm(n_tot, 0, 0.30))))
+            df_dub <- data.frame(
+              catalogNumber = sprintf("PD_%03d", seq_len(n_tot)),
+              plant_individual_id = 1L,
+              species_standardized = "Packera dubia",
+              determiner_tier = "Tier_1_Gold",
+              coordinateUncertaintyInMeters = 200.0,
+              latitude = lat_v,
+              longitude = lon_v,
+              decimalLatitude = lat_v,
+              decimalLongitude = lon_v,
+              gmm_cluster = 1L,
+              cda_predicted_taxon = "Morphotype_K1",
+              morphometric_outlier_flag = FALSE,
+              PC1 = rnorm(n_tot, 0, 0.6),
+              PC2 = rnorm(n_tot, 0, 0.5),
+              doy = round(102 + rnorm(n_tot, 0, 5)),
+              delta_doy = rnorm(n_tot, 0, 4),
+              delta_doy_resid = rnorm(n_tot, 0, 4),
+              is_verified_anthesis = TRUE,
+              fine_bedrock_depth_cm = ifelse(hab == "Flatrock", rnorm(n_tot, 22, 6), rnorm(n_tot, 195, 5)),
+              min_bedrock_depth_buffer_cm = ifelse(hab == "Flatrock", rnorm(n_tot, 14, 4), rnorm(n_tot, 185, 8)),
+              ssurgo_rock_outcrop_pct = ifelse(hab == "Flatrock", runif(n_tot, 30, 65), rep(0.0, n_tot)),
+              ssurgo_aws_0_50cm = ifelse(hab == "Flatrock", rnorm(n_tot, 1.8, 0.3),
+                                  ifelse(hab == "Sandhills", rnorm(n_tot, 2.9, 0.4),
+                                  ifelse(hab == "CoastalDune", rnorm(n_tot, 3.4, 0.5), rnorm(n_tot, 10.5, 0.9)))),
+              fine_soil_ph = ifelse(hab %in% c("Flatrock", "Sandhills"), rnorm(n_tot, 4.8, 0.2),
+                             ifelse(hab == "CoastalDune", rnorm(n_tot, 6.7, 0.25), rnorm(n_tot, 6.9, 0.3))),
+              fine_soil_cec = ifelse(hab == "WesternPrairie", rnorm(n_tot, 34.0, 5.0), rnorm(n_tot, 4.5, 1.2)),
+              ilr_texture_1 = ifelse(hab %in% c("Sandhills", "CoastalDune"), rnorm(n_tot, 2.3, 0.2),
+                              ifelse(hab == "Flatrock", rnorm(n_tot, 1.1, 0.2), rnorm(n_tot, -0.8, 0.25))),
+              ilr_texture_2 = ifelse(hab == "WesternPrairie", rnorm(n_tot, 0.9, 0.15), rnorm(n_tot, -0.2, 0.15)),
+              bio4_temp_seasonality = ifelse(hab == "CoastalDune", rnorm(n_tot, 560, 18),
+                                      ifelse(hab == "WesternPrairie", rnorm(n_tot, 835, 22), rnorm(n_tot, 690, 20))),
+              bio6_min_temp_coldest_month = ifelse(hab == "CoastalDune", rnorm(n_tot, 4.8, 0.5),
+                                            ifelse(hab == "WesternPrairie", rnorm(n_tot, -2.5, 0.6), rnorm(n_tot, 0.5, 0.5))),
+              bio10_mean_temp_warmest_qtr = ifelse(hab == "WesternPrairie", rnorm(n_tot, 27.8, 0.4), rnorm(n_tot, 25.8, 0.4)),
+              bio14_precip_driest_month = ifelse(hab == "WesternPrairie", rnorm(n_tot, 42, 6), rnorm(n_tot, 88, 7)),
+              stringsAsFactors = FALSE
+            )
+
+            res_clean <- resolve_analysis_group(df_dub, intraspecific_mode = TRUE)
+            u_eco <- sort(unique(res_clean$analysis_group))
+            stopifnot(length(u_eco) >= 3L)
+            stopifnot(all(grepl("^Ecotype_[1-4]_", u_eco)))
+
+            # Perturb ALL Step 04 morphometric columns wildly and verify 0.0 effect on Step 05 ENM!
+            df_mut <- df_dub
+            df_mut$gmm_cluster <- sample(1:3, n_tot, replace = TRUE)
+            df_mut$PC1 <- rnorm(n_tot, 50, 20)
+            df_mut$cda_predicted_taxon <- sample(c("Packera anonyma", "Packera paupercula"), n_tot, replace = TRUE)
+            df_mut$morphometric_outlier_flag <- sample(c(TRUE, FALSE), n_tot, replace = TRUE)
+            res_mut <- resolve_analysis_group(df_mut, intraspecific_mode = TRUE)
+            stopifnot(identical(res_clean$analysis_group, res_mut$analysis_group))
+
+            cand_d <- discover_candidate_eco_predictors(res_clean, include_pheno = FALSE)
+            stopifnot(all(c("lithic_outcrop_index", "summer_moisture_deficit_idx", "maritime_continentality_idx") %in% cand_d))
+            srf_c <- compute_spatial_rf_mems(res_clean, cand_d, n_trees = 60, intraspecific_mode = TRUE)
+            srf_m <- compute_spatial_rf_mems(res_mut, cand_d, n_trees = 60, intraspecific_mode = TRUE)
+            stopifnot(max(abs(srf_c$oof_prob_matrix - srf_m$oof_prob_matrix), na.rm = TRUE) < 1e-12)
+
+            # Verify Step 06 synthesizes multi-ecotype + unimodal morphology as Confirmed_Species without Morph=0.05 / Edaphic=0.95 tautology
+            res_clean$rf_predicted_taxon <- srf_c$rf_predicted_taxon
+            res_clean$rf_predicted_prob <- srf_c$rf_predicted_prob
+            res_clean$edaphic_best_fit_taxon <- srf_c$rf_predicted_taxon
+            res_clean$edaphic_z_score <- runif(n_tot, 0.3, 1.4)
+            tri_out <- apply_taxonomic_decision_matrix(res_clean, intraspecific_mode = TRUE, gmm_two_delta_bic = 0.0)
+            stopifnot(mean(tri_out$taxonomic_treatment_subtype == "Confirmed_Species") >= 0.90)
+            stopifnot(tri_out$w_morph_kappa[1] >= 0.30 && tri_out$w_edaphic_kappa[1] < 0.90)
+            stopifnot(mean(tri_out$probabilistic_consensus_score) >= 0.70)
+            cat("INDEPENDENT_STEP05_AND_STEP06_OK\n")
+            """
+            r_f = Path(tmp_d) / "test_indep_s05.R"
+            r_f.write_text(r_code, encoding="utf-8")
+            res = run_warm_r_cmd(["Rscript", str(r_f)], stage_key="step05", cwd=PROJECT_ROOT)
+            self.assertEqual(res.returncode, 0, f"Independent Step 05/06 R check failed:\n{res.stderr}\n{res.stdout}")
+            self.assertIn("INDEPENDENT_STEP05_AND_STEP06_OK", res.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

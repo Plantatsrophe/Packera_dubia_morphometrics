@@ -50,7 +50,14 @@ render_step06a_integrative_synthesis_png <- function(
 
   tdf <- as.data.frame(df, stringsAsFactors = FALSE)
   if (nrow(tdf) == 0L) return(invisible(""))
-  tdf$plot_group <- resolve_plot_group_labels(tdf)
+  sp_u_06 <- unique(stats::na.omit(as.character(tdf$species_standardized)))
+  sp_u_06 <- sp_u_06[nzchar(trimws(sp_u_06)) & sp_u_06 != "Unknown"]
+  grp_col_06 <- if (length(sp_u_06) < 2L && "ecotype_regime" %in% names(tdf) && length(unique(stats::na.omit(tdf$ecotype_regime[grepl("^Ecotype_", as.character(tdf$ecotype_regime))]))) >= 2L) {
+    "ecotype_regime"
+  } else if (length(sp_u_06) >= 2L) {
+    "species_standardized"
+  } else NULL
+  tdf$plot_group <- resolve_plot_group_labels(tdf, group_col = grp_col_06)
   active_taxa <- sort(unique(tdf$plot_group[!is.na(tdf$plot_group) & nzchar(tdf$plot_group) & tdf$plot_group != "Unknown"]))
   if (length(active_taxa) == 0L) active_taxa <- unique(tdf$plot_group)
 
@@ -136,15 +143,40 @@ render_step06a_integrative_synthesis_png <- function(
   wett_rows <- lapply(active_taxa, function(tx) {
     sub_tx <- tdf[tdf$plot_group == tx, , drop = FALSE]
     n_tx <- max(1L, nrow(sub_tx))
-    # Independent stream 1: Shrinkage CDA / Type morphometric concordance
-    c_pred <- if ("cda_predicted_taxon" %in% names(sub_tx)) as.character(sub_tx$cda_predicted_taxon) else rep(NA_character_, n_tx)
-    m_ok <- !is.na(c_pred) & nzchar(c_pred)
-    pct_morph <- if (any(m_ok)) 100.0 * mean(c_pred[m_ok] == sub_tx$species_standardized[m_ok], na.rm = TRUE) else NA_real_
+    is_single_sp_06 <- length(sp_u_06) < 2L
+    # Independent stream 1: Shrinkage CDA (multi-taxon) or Self/Type Morphospace Cohesion (single-taxon)
+    if (is_single_sp_06) {
+      mo_f <- if ("morphometric_outlier_flag" %in% names(sub_tx)) as.logical(sub_tx$morphometric_outlier_flag) else rep(FALSE, n_tx)
+      mo_f[is.na(mo_f)] <- FALSE
+      sd2 <- if ("self_morph_mahal_d2" %in% names(sub_tx)) suppressWarnings(as.numeric(sub_tx$self_morph_mahal_d2)) else rep(NA_real_, n_tx)
+      sdf <- if ("self_morph_df" %in% names(sub_tx)) suppressWarnings(as.numeric(sub_tx$self_morph_df)) else rep(6.0, n_tx)
+      sdf[!is.finite(sdf) | sdf < 1.0] <- 6.0
+      in_self95 <- ifelse(is.finite(sd2), sd2 <= stats::qchisq(0.95, df = sdf), !mo_f)
+      pct_morph <- 100.0 * mean(!mo_f & in_self95, na.rm = TRUE)
+    } else {
+      c_pred <- if ("cda_predicted_taxon" %in% names(sub_tx)) as.character(sub_tx$cda_predicted_taxon) else rep(NA_character_, n_tx)
+      m_ok <- !is.na(c_pred) & nzchar(c_pred)
+      pct_morph <- if (any(m_ok)) 100.0 * mean(c_pred[m_ok] == sub_tx$species_standardized[m_ok], na.rm = TRUE) else NA_real_
+    }
 
-    # Independent stream 2: Spatial RF / Edaphic niche concordance
+    # Independent stream 2: Spatial RF / Edaphic niche concordance (against Ecotype_* in single-species multi-regime mode)
     r_pred <- if ("rf_predicted_taxon" %in% names(sub_tx)) as.character(sub_tx$rf_predicted_taxon) else if ("edaphic_best_fit_taxon" %in% names(sub_tx)) as.character(sub_tx$edaphic_best_fit_taxon) else rep(NA_character_, n_tx)
-    e_ok <- !is.na(r_pred) & nzchar(r_pred)
-    pct_eco <- if (any(e_ok)) 100.0 * mean(r_pred[e_ok] == sub_tx$species_standardized[e_ok], na.rm = TRUE) else NA_real_
+    ez_v <- if ("edaphic_z_score" %in% names(sub_tx)) suppressWarnings(as.numeric(sub_tx$edaphic_z_score)) else rep(NA_real_, n_tx)
+    if (is_single_sp_06) {
+      er_ref <- if ("ecotype_regime" %in% names(sub_tx)) as.character(sub_tx$ecotype_regime) else if ("analysis_group" %in% names(sub_tx)) as.character(sub_tx$analysis_group) else as.character(sub_tx$species_standardized)
+      has_multi_er <- any(grepl("^Ecotype_", er_ref), na.rm = TRUE)
+      if (has_multi_er && any(!is.na(r_pred) & nzchar(r_pred))) {
+        e_ok <- !is.na(r_pred) & nzchar(r_pred) & !is.na(er_ref) & nzchar(er_ref)
+        pct_eco <- if (any(e_ok)) 100.0 * mean(r_pred[e_ok] == er_ref[e_ok], na.rm = TRUE) else NA_real_
+      } else if (any(is.finite(ez_v))) {
+        pct_eco <- 100.0 * mean(ez_v[is.finite(ez_v)] <= 2.5, na.rm = TRUE)
+      } else {
+        pct_eco <- NA_real_
+      }
+    } else {
+      e_ok <- !is.na(r_pred) & nzchar(r_pred)
+      pct_eco <- if (any(e_ok)) 100.0 * mean(r_pred[e_ok] == sub_tx$species_standardized[e_ok], na.rm = TRUE) else NA_real_
+    }
 
     # Independent stream 3: Topological ECT & Open-Set Recognition (OSR) in-distribution support
     osr_p <- if ("open_set_novelty_p" %in% names(sub_tx)) suppressWarnings(as.numeric(sub_tx$open_set_novelty_p)) else rep(NA_real_, n_tx)

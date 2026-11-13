@@ -1056,6 +1056,141 @@ REUSE_CANONICAL_DATA="false"
 
 
 
+    def test_purge_runs_only_preserves_step01_and_step02_segmentation(self) -> None:
+        """Verify --purge-runs-only / purge_runs_only wipes Step 03-06 run outputs & Tier B tables while preserving Step 01 & Step 02 segmentation."""
+        import sqlite3
+        import subprocess
+        from scripts.core.db import get_db_connection, purge_runs_only
+        from scripts.pipeline.resolve_focal_species_complex import build_four_stage_commands
+
+        parser = main.build_parser()
+        args_top = parser.parse_args(["--purge-runs-only"])
+        self.assertTrue(args_top.purge_runs_only)
+        self.assertFalse(args_top.purge_segments)
+
+        args_sub = parser.parse_args(["purge-runs-only"])
+        self.assertEqual(args_sub.subcommand, "purge-runs-only")
+
+        stages_skip = build_four_stage_commands(
+            run_script=PROJECT_ROOT / "run_pipeline.sh",
+            focal_taxon="Packera dubia",
+            prefix="dubia",
+            skip_harvest=True,
+        )
+        self.assertIn("--skip-harvest", stages_skip[0][2])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ws = Path(tmpdir)
+            (ws / "data" / "raw_vouchers").mkdir(parents=True)
+            (ws / "data" / "raw_vouchers" / "NCU0001.webp").write_bytes(b"WEBP")
+            (ws / "data" / "masks").mkdir(parents=True)
+            (ws / "data" / "masks" / "NCU0001_leaf_1.png").write_bytes(b"PNG")
+            (ws / "data" / "contours").mkdir(parents=True)
+            (ws / "data" / "contours" / "NCU0001_leaf_1.csv").write_text("x,y\n0,0\n", encoding="utf-8")
+            (ws / "data" / "ect").mkdir(parents=True)
+            (ws / "data" / "ect" / "NCU0001_leaf_1_ect.npy").write_bytes(b"NPY")
+            (ws / "data" / "cropped_patches" / "capitula").mkdir(parents=True)
+            (ws / "data" / "cropped_patches" / "capitula" / "NCU0001_cap_1.webp").write_bytes(b"WEBP")
+
+            tables = ws / "data" / "tables"
+            tables.mkdir(parents=True)
+            for s01_02_tbl in (
+                "curated_vouchers.csv",
+                "extracted_leaf_manifest.csv",
+                "failed_qc_vouchers.csv",
+                "voucher_reproductive_metrics.csv",
+                "voucher_phenological_states.csv",
+            ):
+                (tables / s01_02_tbl).write_text("catalogNumber\nNCU0001\n", encoding="utf-8")
+            for s03_06_tbl in (
+                "leaf_efa_harmonics.csv",
+                "morphometric_flags.csv",
+                "multimodal_conflict_flags.csv",
+                "triage_queue.csv",
+            ):
+                (tables / s03_06_tbl).write_text("catalogNumber\nNCU0001\n", encoding="utf-8")
+
+            env_dir = ws / "data" / "environmental"
+            env_dir.mkdir(parents=True)
+            (env_dir / "fine_grain_edaphic_cache.csv").write_text(
+                "catalogNumber,lat_lon_key,fine_soil_ph,min_bedrock_depth_buffer_cm\nNCU0001,35.90000_-79.05000,5.1,162.4\n",
+                encoding="utf-8",
+            )
+
+            (ws / "runs" / "dubia_04_gold_thin_audit" / "outputs" / "figures").mkdir(parents=True)
+            (ws / "runs" / "dubia_04_gold_thin_audit" / "outputs" / "figures" / "fig05a.png").write_bytes(b"PNG")
+            (ws / "outputs" / "reports").mkdir(parents=True)
+            (ws / "outputs" / "reports" / "old_summary.md").write_text("old", encoding="utf-8")
+
+            db_file = ws / "data" / "packera_pipeline.sqlite"
+            conn = get_db_connection(db_file, init_schema=True)
+            conn.execute(
+                "INSERT INTO vouchers (catalogNumber, scientificName, qc_status, pixels_per_mm, is_calibrated_mm) VALUES ('NCU0001', 'Packera dubia', 'PASS', 24.5, 1);"
+            )
+            conn.execute("INSERT INTO plant_individuals (catalogNumber, plant_individual_id) VALUES ('NCU0001', 1);")
+            conn.execute(
+                "INSERT INTO extracted_leaves (catalogNumber, plant_individual_id, leaf_id, leaf_zone, contour_xy_json) VALUES ('NCU0001', 1, 'L1', 'basal', '[[0,0]]');"
+            )
+            conn.execute(
+                "INSERT INTO environmental_cache (lat_lon_key, catalogNumber, fine_soil_ph, min_bedrock_depth_buffer_cm) VALUES ('35.90000_-79.05000', 'NCU0001', 5.1, 162.4);"
+            )
+            conn.execute("INSERT INTO pipeline_runs (run_id, run_dir) VALUES ('dubia_04_gold_thin_audit', 'runs/dubia_04_gold_thin_audit');")
+            conn.execute("INSERT INTO run_active_cohort (run_id, catalogNumber, plant_individual_id) VALUES ('dubia_04_gold_thin_audit', 'NCU0001', 1);")
+            conn.execute("INSERT INTO otu_morphometrics (run_id, catalogNumber, plant_individual_id, gmm_cluster) VALUES ('dubia_04_gold_thin_audit', 'NCU0001', 1, '1');")
+            conn.execute("INSERT INTO spatial_rf_predictions (run_id, catalogNumber, plant_individual_id, rf_predicted_taxon, ecotype_regime) VALUES ('dubia_04_gold_thin_audit', 'NCU0001', 1, 'Packera dubia', 'Ecotype_1_lithic_outcrop_index_High');")
+            conn.execute("INSERT INTO curation_triage (run_id, catalogNumber, plant_individual_id, taxonomic_treatment_subtype) VALUES ('dubia_04_gold_thin_audit', 'NCU0001', 1, 'Confirmed_Species');")
+            conn.commit()
+            conn.close()
+
+            summary = purge_runs_only(workspace_root=ws, db_path=db_file, refresh_env_buffers=True, vacuum=True)
+            self.assertGreaterEqual(summary["removed_files"], 6)
+            self.assertEqual(summary["purged_db_rows"], 5)
+
+            # Verify 100% of Step 01 & Step 02 segmentation files preserved
+            self.assertTrue((ws / "data" / "raw_vouchers" / "NCU0001.webp").is_file())
+            self.assertTrue((ws / "data" / "masks" / "NCU0001_leaf_1.png").is_file())
+            self.assertTrue((ws / "data" / "contours" / "NCU0001_leaf_1.csv").is_file())
+            self.assertTrue((ws / "data" / "ect" / "NCU0001_leaf_1_ect.npy").is_file())
+            self.assertTrue((ws / "data" / "cropped_patches" / "capitula" / "NCU0001_cap_1.webp").is_file())
+            for s01_02_tbl in (
+                "curated_vouchers.csv",
+                "extracted_leaf_manifest.csv",
+                "failed_qc_vouchers.csv",
+                "voucher_reproductive_metrics.csv",
+                "voucher_phenological_states.csv",
+            ):
+                self.assertTrue((tables / s01_02_tbl).is_file(), f"Step 01/02 table {s01_02_tbl} must be preserved!")
+
+            # Verify 100% of Step 03-06 run/output artifacts wiped
+            for s03_06_tbl in ("leaf_efa_harmonics.csv", "morphometric_flags.csv", "multimodal_conflict_flags.csv", "triage_queue.csv"):
+                self.assertFalse((tables / s03_06_tbl).exists(), f"Step 03-06 table {s03_06_tbl} must be purged!")
+            self.assertEqual(list((ws / "runs").iterdir()), [])
+            self.assertEqual(list((ws / "outputs" / "reports").iterdir()), [])
+
+            # Verify SQLite Tier A preserved (including qc_status='PASS') and Tier B wiped + buffer refreshed
+            conn_chk = sqlite3.connect(str(db_file))
+            self.assertEqual(conn_chk.execute("SELECT catalogNumber, qc_status, pixels_per_mm FROM vouchers;").fetchone(), ("NCU0001", "PASS", 24.5))
+            self.assertEqual(conn_chk.execute("SELECT COUNT(*) FROM plant_individuals;").fetchone()[0], 1)
+            self.assertEqual(conn_chk.execute("SELECT COUNT(*) FROM extracted_leaves;").fetchone()[0], 1)
+            for tier_b_tbl in ("pipeline_runs", "run_active_cohort", "otu_morphometrics", "spatial_rf_predictions", "curation_triage"):
+                self.assertEqual(conn_chk.execute(f"SELECT COUNT(*) FROM {tier_b_tbl};").fetchone()[0], 0)
+            self.assertEqual(
+                conn_chk.execute("SELECT fine_soil_ph, min_bedrock_depth_buffer_cm FROM environmental_cache WHERE catalogNumber='NCU0001';").fetchone(),
+                (5.1, None),
+            )
+            conn_chk.close()
+
+            # Verify standalone bash ./run_pipeline.sh --purge-runs-only --db <path> exits 0 cleanly
+            res_sh = subprocess.run(
+                ["bash", str(PROJECT_ROOT / "run_pipeline.sh"), "--purge-runs-only", "--db", str(db_file)],
+                cwd=PROJECT_ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(res_sh.returncode, 0, f"run_pipeline.sh --purge-runs-only failed:\n{res_sh.stderr}\n{res_sh.stdout}")
+            self.assertIn("Step 01 vouchers & Step 02 segments preserved", res_sh.stdout)
+
     def test_resolve_focal_species_complex_dry_run_and_cli_flags(self) -> None:
         """Verify resolve_focal_species_complex.py and resolve_packera_dubia_complex.sh construct all 4 ordered stages."""
         import subprocess

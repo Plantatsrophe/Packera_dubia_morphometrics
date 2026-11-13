@@ -509,14 +509,36 @@ compute_modality_reliability_weights <- function(df) {
   anchor_mask <- .resolve_step06_anchor_mask(df)
   sub_a <- df[anchor_mask, , drop = FALSE]; y_true <- as.character(sub_a$species_standardized)
 
+  n_true_taxa <- length(unique(y_true[!is.na(y_true) & nzchar(y_true) & y_true != "Unknown"]))
   m_pure <- if ("morph_tier_source" %in% names(sub_a)) (is.na(sub_a$morph_tier_source) | sub_a$morph_tier_source == "Basal_Rosette") else rep(TRUE, nrow(sub_a))
   y_morph <- if ("cda_predicted_taxon" %in% names(sub_a)) as.character(sub_a$cda_predicted_taxon) else rep(NA_character_, nrow(sub_a))
   def_morph <- if ("loocv_accuracy" %in% names(df) && any(is.finite(as.numeric(df$loocv_accuracy)))) stats::median(as.numeric(df$loocv_accuracy), na.rm = TRUE) else 0.80
-  w_morph <- max(0.05, compute_cohens_kappa(y_true[m_pure], y_morph[m_pure], default_kappa = def_morph))
 
-  y_edaph <- if ("edaphic_best_fit_taxon" %in% names(sub_a)) as.character(sub_a$edaphic_best_fit_taxon) else if ("rf_predicted_taxon" %in% names(sub_a)) as.character(sub_a$rf_predicted_taxon) else rep(NA_character_, nrow(sub_a))
-  def_edaph <- if ("spatial_block_cv_acc" %in% names(df) && any(is.finite(as.numeric(df$spatial_block_cv_acc)))) stats::median(as.numeric(df$spatial_block_cv_acc), na.rm = TRUE) else 0.65
-  w_edaph <- max(0.05, compute_cohens_kappa(y_true, y_edaph, default_kappa = def_edaph))
+  if (n_true_taxa < 2L) {
+    # Single-taxon / intraspecific reliability weights: avoid degenerate K=1 Cohen's kappa tautology
+    # ("Morphotype_K1" != "Packera dubia" -> 0.05 vs "Packera dubia" == "Packera dubia" -> 0.95).
+    out_m_a <- if ("morphometric_outlier_flag" %in% names(sub_a)) as.logical(sub_a$morphometric_outlier_flag[m_pure]) else rep(FALSE, sum(m_pure))
+    out_m_a[is.na(out_m_a)] <- FALSE
+    inlier_rate_m <- if (length(out_m_a) > 0L) mean(!out_m_a) else 0.80
+    w_morph <- round(min(0.80, max(0.30, inlier_rate_m * 0.65)), 4)
+
+    eco_reg_a <- if ("ecotype_regime" %in% names(sub_a)) as.character(sub_a$ecotype_regime) else if ("analysis_group" %in% names(sub_a)) as.character(sub_a$analysis_group) else rep(NA_character_, nrow(sub_a))
+    rf_reg_a <- if ("rf_predicted_taxon" %in% names(sub_a)) as.character(sub_a$rf_predicted_taxon) else if ("edaphic_best_fit_taxon" %in% names(sub_a)) as.character(sub_a$edaphic_best_fit_taxon) else rep(NA_character_, nrow(sub_a))
+    u_eco_reg <- unique(eco_reg_a[!is.na(eco_reg_a) & nzchar(eco_reg_a) & eco_reg_a != "Unknown"])
+    if (length(u_eco_reg) >= 2L && any(rf_reg_a %in% u_eco_reg, na.rm = TRUE)) {
+      w_edaph <- max(0.15, min(0.85, compute_cohens_kappa(eco_reg_a, rf_reg_a, default_kappa = 0.50)))
+    } else {
+      cv_acc_s <- if ("spatial_block_cv_acc" %in% names(df) && any(is.finite(suppressWarnings(as.numeric(df$spatial_block_cv_acc))))) {
+        stats::median(suppressWarnings(as.numeric(df$spatial_block_cv_acc)), na.rm = TRUE)
+      } else 0.65
+      w_edaph <- round(min(0.75, max(0.20, 2.0 * (cv_acc_s - 0.50))), 4)
+    }
+  } else {
+    w_morph <- max(0.05, compute_cohens_kappa(y_true[m_pure], y_morph[m_pure], default_kappa = def_morph))
+    y_edaph <- if ("edaphic_best_fit_taxon" %in% names(sub_a)) as.character(sub_a$edaphic_best_fit_taxon) else if ("rf_predicted_taxon" %in% names(sub_a)) as.character(sub_a$rf_predicted_taxon) else rep(NA_character_, nrow(sub_a))
+    def_edaph <- if ("spatial_block_cv_acc" %in% names(df) && any(is.finite(as.numeric(df$spatial_block_cv_acc)))) stats::median(as.numeric(df$spatial_block_cv_acc), na.rm = TRUE) else 0.65
+    w_edaph <- max(0.05, compute_cohens_kappa(y_true, y_edaph, default_kappa = def_edaph))
+  }
 
   # Evaluate w_pheno on the identical multi-class out-of-fold Cohen's kappa scale (Dawid & Skene 1979)
   # by testing leave-one-out circular Hopkins-adjusted DOY taxon discrimination across active anchors.
@@ -596,14 +618,41 @@ compute_probabilistic_consensus_scores <- function(df) {
   is_anth_cv <- if ("is_active_anthesis" %in% df_nms_c) (!is.na(df$is_active_anthesis) & as.logical(df$is_active_anthesis)) else rep(TRUE, n)
   w_morph_base <- w_vec[["morph"]]; w_edaph_base <- w_vec[["edaphic"]]; w_pheno_base <- w_vec[["pheno"]]
 
+  is_single_sp_cons <- length(unique(given_sp_cv[!is.na(given_sp_cv) & nzchar(given_sp_cv) & given_sp_cv != "Unknown"])) < 2L
+  eco_reg_cv <- if ("ecotype_regime" %in% df_nms_c) as.character(df$ecotype_regime) else if ("analysis_group" %in% df_nms_c) as.character(df$analysis_group) else rep(NA_character_, n)
+  sd2_cv <- if ("self_morph_mahal_d2" %in% df_nms_c) suppressWarnings(as.numeric(df$self_morph_mahal_d2)) else rep(NA_real_, n)
+  sdf_cv <- if ("self_morph_df" %in% df_nms_c) suppressWarnings(as.numeric(df$self_morph_df)) else rep(6.0, n)
+  sdf_cv[!is.finite(sdf_cv) | sdf_cv < 1.0] <- 6.0
+
   for (i in seq_len(n)) {
     given_sp <- given_sp_cv[i]; morph_sp <- morph_sp_cv[i]; cda_p <- cda_p_cv[i]; is_mo <- is_mo_cv[i]
     has_geo <- has_geo_cv[i]; edaph_sp <- edaph_sp_cv[i]
     rf_p <- rf_p_cv[i]; rf_g <- rf_g_cv[i]; ez_i <- ez_cv[i]; tez_i <- tez_cv[i]; ded_i <- ded_cv[i]
     ddoy_r <- ddoy_r_cv[i]; is_anth <- is_anth_cv[i]
 
-    p_m <- if (!is.na(morph_sp)) (if (morph_sp != given_sp) max(if (is.finite(cda_p)) cda_p else 0.75, if (is_mo) 0.80 else 0.55) else if (is_mo) 0.65 else if (is.finite(cda_p)) max(0.0, 1.0 - cda_p) else 0.10) else NA_real_
-    p_e <- if (!is.na(edaph_sp)) {
+    morph_is_subcluster <- !is.na(morph_sp) && grepl("^Morphotype_K", morph_sp)
+    edaph_is_ecotype <- !is.na(edaph_sp) && grepl("^Ecotype_", edaph_sp)
+
+    p_m <- if (is_single_sp_cons || morph_is_subcluster) {
+      if (is_mo) 0.72
+      else if (is.finite(sd2_cv[i])) min(0.85, max(0.05, stats::pchisq(sd2_cv[i], df = sdf_cv[i]) * 0.45))
+      else if (!is.na(morph_sp) || "gmm_cluster" %in% df_nms_c) 0.08
+      else NA_real_
+    } else if (!is.na(morph_sp)) {
+      if (morph_sp != given_sp) max(if (is.finite(cda_p)) cda_p else 0.75, if (is_mo) 0.80 else 0.55)
+      else if (is_mo) 0.65
+      else if (is.finite(cda_p)) max(0.0, 1.0 - cda_p)
+      else 0.10
+    } else NA_real_
+
+    p_e <- if (is_single_sp_cons || edaph_is_ecotype) {
+      if (has_geo && (is.finite(ez_i) || is.finite(tez_i))) {
+        z_use <- if (is.finite(ez_i)) ez_i else tez_i
+        min(0.92, max(0.04, stats::pchisq(z_use^2, df = 1) * 0.55))
+      } else if (edaph_is_ecotype && !is.na(eco_reg_cv[i]) && nzchar(eco_reg_cv[i])) {
+        if (edaph_sp == eco_reg_cv[i]) 0.08 else 0.35
+      } else NA_real_
+    } else if (!is.na(edaph_sp)) {
       if (edaph_sp != given_sp) {
         if (is.finite(rf_p)) max(0.55, min(0.98, rf_p))
         else if (is.finite(ez_i) && ez_i > 2.0) min(0.95, 0.55 + 0.10 * (ez_i - 2.0))
@@ -3145,6 +3194,18 @@ generate_taxonomic_revision_report <- function(df, opts) {
       head_sp,
       sprintf("  - **Examined Vouchers:** $n = %d$ (Nomenclatural Types: %d; Active Gold/Silver Anchors: %d)", n_sp, n_types, n_gs),
       sprintf("  - **Dominant US EPA Level III Ecoregions:** %s", eco_str),
+      {
+        er_col <- if ("ecotype_regime" %in% names(sub_sp)) as.character(sub_sp$ecotype_regime) else if ("analysis_group" %in% names(sub_sp)) as.character(sub_sp$analysis_group) else character(0)
+        er_col <- trimws(er_col[!is.na(er_col) & nzchar(trimws(er_col)) & !(tolower(trimws(er_col)) %in% c("na", "unknown"))])
+        er_multi <- er_col[grepl("^Ecotype_", er_col)]
+        if (length(unique(er_multi)) >= 2L) {
+          er_tab <- sort(table(er_multi), decreasing = TRUE)
+          sprintf("  - **Independent Step 05 Ecological Regimes ($K_{\\text{eco}} = %d$):** %s",
+                  length(er_tab), paste(sprintf("`%s` (n=%d)", names(er_tab), as.integer(er_tab)), collapse = "; "))
+        } else {
+          "  - **Independent Step 05 Ecological Regimes:** Unimodal broad niche envelope ($K_{\text{eco}} = 1$)"
+        }
+      },
       sprintf("  - **Edaphic Envelope (Median [IQR]):** `fine_soil_ph` = %s; `fine_soil_sand` = %s; `fine_bedrock_depth_cm` = %s", ph_str, sand_str, bed_str),
       sprintf("  - **Verified Anthesis Window:** %s", doy_str),
       sprintf(

@@ -316,7 +316,11 @@ PACKERA_DB_WC_BIO_COLS <- c(
         primary_edaph_predictors = "TEXT",
         type_edaphic_z_score = "REAL",
         nearest_type_niche_taxon = "TEXT",
-        matches_type_lithology = "INTEGER"
+        matches_type_lithology = "INTEGER",
+        ecotype_regime = "TEXT",
+        lithic_outcrop_index = "REAL",
+        summer_moisture_deficit_idx = "REAL",
+        maritime_continentality_idx = "REAL"
       )
     ))
   }
@@ -1694,7 +1698,7 @@ persist_step05_to_sqlite <- function(
   for (pc in intersect(c("primary_env_predictors", "primary_clim_predictors", "primary_edaph_predictors"), names(srf_df))) {
     srf_df[[pc]] <- .normalize_semicolon_col_r(srf_df[[pc]])
   }
-  for (nc in intersect(c("edaphic_z_score", "climatic_z_score", "type_edaphic_z_score", PACKERA_DB_WC_BIO_COLS), names(srf_df))) {
+  for (nc in intersect(c("edaphic_z_score", "climatic_z_score", "type_edaphic_z_score", "lithic_outcrop_index", "summer_moisture_deficit_idx", "maritime_continentality_idx", PACKERA_DB_WC_BIO_COLS), names(srf_df))) {
     srf_df[[nc]] <- suppressWarnings(as.numeric(srf_df[[nc]]))
   }
 

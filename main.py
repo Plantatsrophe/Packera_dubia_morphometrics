@@ -62,6 +62,7 @@ from scripts.core.db import (
     get_db_connection,
     is_canonical_or_explicit_db_context,
     populate_run_active_cohort,
+    purge_runs_only,
     purge_segments_and_runs,
 )
 from scripts.core.logger import setup_logging
@@ -1413,6 +1414,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Purge all previous Step 02 to 07 segments, masks, contours, run directories, and SQLite segmentation tables while preserving Step 01 vouchers and raw images.",
     )
     parser.add_argument(
+        "--purge-runs-only",
+        "--purge-run-outputs",
+        dest="purge_runs_only",
+        action="store_true",
+        default=False,
+        help="Purge only Step 03 to 06 run outputs and Tier B SQLite tables while preserving Step 01 vouchers and Step 02 segmentation.",
+    )
+    parser.add_argument(
         "--no-purge-runs",
         dest="purge_runs",
         action="store_false",
@@ -1436,6 +1445,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=True,
         help="Preserve historical runs/ directories when purging Step 02 segments.",
     )
+
+    # Subcommand: purge-runs-only
+    p_purge_runs = subparsers.add_parser(
+        "purge-runs-only",
+        aliases=["purge-run-outputs"],
+        help="Purge only Step 03 to 06 run outputs and Tier B SQLite tables while preserving Step 01 & Step 02 segmentation",
+    )
+    _add_common_subparser_args(p_purge_runs, include_gpu=False)
+    p_purge_runs.add_argument("--output-dir", type=Path, default=None, help="Optional root data directory override")
 
     # Subcommand: check-env
     p_check = subparsers.add_parser(
@@ -1816,6 +1834,24 @@ def run_purge_segments(args: argparse.Namespace, cfg: Optional[PipelineConfig] =
     )
 
 
+def run_purge_runs_only(args: argparse.Namespace, cfg: Optional[PipelineConfig] = None) -> None:
+    """Purges only Step 03 to 06 run outputs and Tier B SQLite tables while preserving Step 02 segmentation."""
+    _ = cfg
+    _apply_explicit_db_arg(args)
+    summary = purge_runs_only(
+        workspace_root=PROJECT_ROOT,
+        db_path=getattr(args, "db", None),
+        output_dir=getattr(args, "output_dir", None),
+        refresh_env_buffers=True,
+        vacuum=True,
+    )
+    logger.info(
+        "Run-output purge complete: removed %d run/output files and %d Tier B SQLite rows (Step 01 & Step 02 segmentation preserved).",
+        summary["removed_files"],
+        summary["purged_db_rows"],
+    )
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
@@ -1823,6 +1859,14 @@ def main() -> None:
 
     if args.verbose:
         logger.setLevel(logging.DEBUG)
+
+    if args.subcommand in ("purge-runs-only", "purge-run-outputs"):
+        run_purge_runs_only(args)
+        return
+
+    if getattr(args, "purge_runs_only", False) and not args.subcommand:
+        run_purge_runs_only(args)
+        return
 
     if args.subcommand in ("purge-segments", "purge-old-data"):
         run_purge_segments(args)
@@ -1850,6 +1894,8 @@ def main() -> None:
         "download-env": run_download_env,
         "purge-segments": run_purge_segments,
         "purge-old-data": run_purge_segments,
+        "purge-runs-only": run_purge_runs_only,
+        "purge-run-outputs": run_purge_runs_only,
         "harvest": run_harvest,
         "segment": run_segment,
         "morphometrics": run_morphometrics,

@@ -1076,5 +1076,142 @@ class TestSQLPipelineHandshake(unittest.TestCase):
                 conn.close()
 
 
+
+    def test_legacy_extracted_leaves_check_constraint_rebuilt_on_init_and_purge(self) -> None:
+        """Verify pre-LM3 extracted_leaves CHECK constraints and retired NOT NULL columns are stripped by init_db_schema, savepoint transactions, and purge_segments_and_runs."""
+        from scripts.core.db import purge_segments_and_runs, record_voucher_segmentation_transaction
+
+        leg_col = "_".join(("assigned", "tier"))
+        leg_v1 = "_".join(("Tier", "1", "Direct"))
+        leg_v2 = "_".join(("Tier", "2", "Reflected"))
+
+        def _seed_legacy_db(db_file: Path) -> None:
+            init_conn = get_db_connection(db_file, init_schema=True)
+            init_conn.close()
+            raw = sqlite3.connect(db_file)
+            raw.executescript(
+                f"""
+                PRAGMA foreign_keys = OFF;
+                PRAGMA user_version = 20261121;
+                INSERT INTO vouchers (catalogNumber, scientificName, species_standardized, qc_status) VALUES
+                    ('WILLI_82182', 'Packera dubia', 'Packera dubia', 'PASS'),
+                    ('GA202225', 'Packera anonyma', 'Packera anonyma', 'PENDING'),
+                    ('VSC0067189', 'Packera aurea', 'Packera aurea', 'PENDING');
+                INSERT INTO plant_individuals (catalogNumber, plant_individual_id) VALUES ('WILLI_82182', 0);
+                DROP TABLE IF EXISTS extracted_leaves;
+                CREATE TABLE extracted_leaves (
+                    catalogNumber TEXT NOT NULL,
+                    plant_individual_id INTEGER NOT NULL DEFAULT 0,
+                    leaf_id INTEGER NOT NULL,
+                    shape_id TEXT UNIQUE,
+                    {leg_col} TEXT NOT NULL CHECK({leg_col} IN ('{leg_v1}', '{leg_v2}')),
+                    solidity REAL,
+                    contour_xy_json TEXT NOT NULL,
+                    PRIMARY KEY (catalogNumber, plant_individual_id, leaf_id),
+                    FOREIGN KEY (catalogNumber, plant_individual_id)
+                        REFERENCES plant_individuals(catalogNumber, plant_individual_id) ON DELETE CASCADE
+                );
+                INSERT INTO extracted_leaves (
+                    catalogNumber, plant_individual_id, leaf_id, shape_id, {leg_col}, solidity, contour_xy_json
+                ) VALUES (
+                    'WILLI_82182', 0, 1, 'WILLI_82182_p0_leaf1', '{leg_v1}', 0.84, '[[0,0],[10,0],[5,8]]'
+                );
+                """
+            )
+            raw.commit()
+            raw.close()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            # Case A: In-place init_db_schema + Step 02 savepoint transaction without --purge-segments
+            db_a = Path(tmp) / "inplace" / "data" / "packera_pipeline.sqlite"
+            db_a.parent.mkdir(parents=True, exist_ok=True)
+            _seed_legacy_db(db_a)
+
+            conn_a = get_db_connection(db_a, init_schema=True)
+            try:
+                el_cols_a = {str(r[1]) for r in conn_a.execute("PRAGMA table_info(extracted_leaves);").fetchall()}
+                self.assertNotIn(leg_col, el_cols_a)
+                self.assertIn("efa_qc_pass", el_cols_a)
+                # Existing row preserved across table rebuild
+                kept = conn_a.execute(
+                    "SELECT solidity FROM extracted_leaves WHERE catalogNumber = 'WILLI_82182';"
+                ).fetchone()
+                self.assertIsNotNone(kept)
+                self.assertAlmostEqual(float(kept[0]), 0.84, places=3)
+
+                # Step 02 per-voucher savepoint pattern must commit cleanly
+                with conn_a:
+                    for idx, cat in enumerate(("WILLI_82182", "GA202225", "VSC0067189")):
+                        sp = f"sp_v_{idx}"
+                        conn_a.execute(f"SAVEPOINT {sp};")
+                        record_voucher_segmentation_transaction(
+                            conn=conn_a,
+                            catalog_number=cat,
+                            extracted_records=[
+                                {
+                                    "catalogNumber": cat,
+                                    "plant_individual_id": 0,
+                                    "leaf_id": 1,
+                                    "solidity": 0.79,
+                                    "area_px": 1200.0,
+                                    "pixels_per_mm": 11.5,
+                                    "is_calibrated_mm": 1,
+                                    "scale_source": "ruler_calibrated",
+                                    "leaf_zone": "basal",
+                                    "efa_qc_pass": 1,
+                                    "qc_flag_reason": "PASS",
+                                    "contour_xy_json": "[[0,0],[12,0],[12,9],[0,9]]",
+                                }
+                            ],
+                            commit=False,
+                        )
+                        conn_a.execute(f"RELEASE SAVEPOINT {sp};")
+                n_leaves = conn_a.execute("SELECT COUNT(*) FROM extracted_leaves;").fetchone()[0]
+                self.assertEqual(int(n_leaves), 3)
+            finally:
+                conn_a.close()
+
+            # Case B: purge_segments_and_runs drops & recreates clean Step 02-06 schema
+            ws_b = Path(tmp) / "purge_ws"
+            (ws_b / "data" / "tables").mkdir(parents=True, exist_ok=True)
+            (ws_b / "data" / "tables" / "curated_vouchers.csv").write_text("catalogNumber\nWILLI_82182\n", encoding="utf-8")
+            db_b = ws_b / "data" / "packera_pipeline.sqlite"
+            _seed_legacy_db(db_b)
+
+            summary = purge_segments_and_runs(workspace_root=ws_b, db_path=db_b, purge_runs=True, vacuum=True)
+            self.assertEqual(summary["purged_db_rows"], 2)
+
+            conn_b = get_db_connection(db_b, init_schema=False)
+            try:
+                el_cols_b = {str(r[1]) for r in conn_b.execute("PRAGMA table_info(extracted_leaves);").fetchall()}
+                self.assertNotIn(leg_col, el_cols_b)
+                ddl_b = str(
+                    conn_b.execute(
+                        "SELECT sql FROM sqlite_master WHERE type='table' AND name='extracted_leaves';"
+                    ).fetchone()[0]
+                )
+                self.assertNotIn("CHECK", ddl_b.upper())
+                record_voucher_segmentation_transaction(
+                    conn=conn_b,
+                    catalog_number="GA202225",
+                    extracted_records=[
+                        {
+                            "catalogNumber": "GA202225",
+                            "plant_individual_id": 0,
+                            "leaf_id": 1,
+                            "solidity": 0.81,
+                            "contour_xy_json": "[[0,0],[10,0],[5,7]]",
+                        }
+                    ],
+                    commit=True,
+                )
+                self.assertEqual(
+                    int(conn_b.execute("SELECT COUNT(*) FROM extracted_leaves;").fetchone()[0]),
+                    1,
+                )
+            finally:
+                conn_b.close()
+
+
 if __name__ == "__main__":
     unittest.main()

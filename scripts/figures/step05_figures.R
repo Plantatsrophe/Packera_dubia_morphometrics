@@ -10,7 +10,7 @@
 .classify_env_domain <- function(var_names) {
   vapply(as.character(var_names), function(v) {
     vl <- tolower(v)
-    if (grepl("^bio[0-9]+|temp|precip|clim", vl)) return("Climatic (WorldClim)")
+    if (grepl("^bio[0-9]+|temp|precip|clim|summer_moisture|maritime_continentality", vl)) return("Climatic (WorldClim)")
     if (grepl("elev|slope|aspect|tpi|tri|topo|dem", vl)) return("Topographic (3DEP)")
     "Edaphic & Lithic (SOLUS/POLARIS/SSURGO/SGMC)"
   }, character(1), USE.NAMES = FALSE)
@@ -38,7 +38,11 @@ render_step05a_ecological_niche_png <- function(
 
   vdf <- as.data.frame(df, stringsAsFactors = FALSE)
   if (nrow(vdf) == 0L) return(invisible(""))
-  grp_col <- if ("ecotype_cluster" %in% names(vdf) && length(unique(stats::na.omit(vdf$species_standardized))) < 2L) "ecotype_cluster" else NULL
+  grp_col <- if ("analysis_group" %in% names(vdf) && any(!is.na(vdf$analysis_group) & nzchar(trimws(as.character(vdf$analysis_group))))) {
+    "analysis_group"
+  } else if ("ecotype_regime" %in% names(vdf) && any(!is.na(vdf$ecotype_regime) & nzchar(trimws(as.character(vdf$ecotype_regime))))) {
+    "ecotype_regime"
+  } else NULL
   vdf$plot_group <- resolve_plot_group_labels(vdf, group_col = grp_col)
   active_groups <- sort(unique(vdf$plot_group[!is.na(vdf$plot_group) & nzchar(vdf$plot_group) & vdf$plot_group != "Unknown"]))
   if (length(active_groups) == 0L) active_groups <- unique(vdf$plot_group)
@@ -261,7 +265,8 @@ render_step05b_hopkins_phenology_png <- function(
 
   vdf <- as.data.frame(df, stringsAsFactors = FALSE)
   if (nrow(vdf) == 0L) return(invisible(""))
-  vdf$plot_group <- resolve_plot_group_labels(vdf)
+  grp_col_ph <- if ("analysis_group" %in% names(vdf) && any(!is.na(vdf$analysis_group) & nzchar(trimws(as.character(vdf$analysis_group))))) "analysis_group" else NULL
+  vdf$plot_group <- resolve_plot_group_labels(vdf, group_col = grp_col_ph)
   vdf$doy_num <- suppressWarnings(as.numeric(vdf$doy))
   vdf$lat_num <- if ("decimalLatitude" %in% names(vdf)) suppressWarnings(as.numeric(vdf$decimalLatitude)) else suppressWarnings(as.numeric(vdf$latitude))
   vdf$hop_doy <- if ("hopkins_adjusted_doy" %in% names(vdf)) suppressWarnings(as.numeric(vdf$hopkins_adjusted_doy)) else vdf$doy_num

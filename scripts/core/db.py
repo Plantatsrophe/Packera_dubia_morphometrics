@@ -425,6 +425,9 @@ from scripts.core.db_schema import (
     MASTER_VIEW_DDL,
     PACKERA_SCHEMA_USER_VERSION,
     SCHEMA_DDL,
+    _CANONICAL_EXTRACTED_LEAVES_COLS,
+    _CANONICAL_PLANT_INDIVIDUALS_COLS,
+    _CANONICAL_VOUCHER_REPRO_COLS,
     _DYNAMIC_TABLE_MIGRATION_SPECS,
     _MASTER_VIEW_REQUIRED_TABLES,
     _VOUCHERS_MIGRATION_COLUMNS,
@@ -432,6 +435,7 @@ from scripts.core.db_schema import (
     _build_schema_ddl,
     _migrate_dynamic_schema_columns,
     _migrate_vouchers_schema_columns,
+    _table_needs_canonical_rebuild,
     init_db_schema,
 )
 
@@ -2039,6 +2043,14 @@ def _normalize_semicolon_list_str(val: Any) -> Optional[str]:
 
 
 def _ensure_dynamic_table_migrated(conn: sqlite3.Connection, table_name: str) -> None:
+    canon_map = {
+        "plant_individuals": _CANONICAL_PLANT_INDIVIDUALS_COLS,
+        "extracted_leaves": _CANONICAL_EXTRACTED_LEAVES_COLS,
+        "voucher_reproductive_phenology": _CANONICAL_VOUCHER_REPRO_COLS,
+    }
+    if table_name in canon_map and _table_needs_canonical_rebuild(conn, table_name, canon_map[table_name]):
+        _migrate_dynamic_schema_columns(conn)
+        return
     specs = _DYNAMIC_TABLE_MIGRATION_SPECS.get(table_name)
     if not specs:
         return
@@ -2931,11 +2943,16 @@ def purge_segments_and_runs(
                 "extracted_leaves",
                 "plant_individuals",
             )
+            conn.execute("DROP VIEW IF EXISTS v_integrative_triage_master;")
             for tbl in purge_tables:
                 try:
-                    cur = conn.execute(f"DELETE FROM {tbl};")
-                    if cur.rowcount and cur.rowcount > 0:
-                        purged_rows += int(cur.rowcount)
+                    cnt_row = conn.execute(f"SELECT COUNT(*) FROM {tbl};").fetchone()
+                    if cnt_row and cnt_row[0]:
+                        purged_rows += int(cnt_row[0])
+                except sqlite3.Error:
+                    pass
+                try:
+                    conn.execute(f"DROP TABLE IF EXISTS {tbl};")
                 except sqlite3.Error:
                     pass
             try:
@@ -2944,7 +2961,9 @@ def purge_segments_and_runs(
                 )
             except sqlite3.Error:
                 pass
+            conn.execute("PRAGMA user_version = 0;")
             conn.commit()
+            init_db_schema(conn)
             if vacuum:
                 try:
                     conn.execute("VACUUM;")
@@ -2956,4 +2975,143 @@ def purge_segments_and_runs(
 
     summary = {"removed_files": int(removed_files), "purged_db_rows": int(purged_rows)}
     logger.info("Purged Step 02-06 segments and run artifacts: %s", summary)
+    return summary
+
+
+def purge_runs_only(
+    workspace_root: Optional[Union[str, Path]] = None,
+    db_path: Optional[Union[str, Path]] = None,
+    output_dir: Optional[Union[str, Path]] = None,
+    refresh_env_buffers: bool = True,
+    vacuum: bool = True,
+) -> Dict[str, int]:
+    """
+    Purges ONLY Step 03 to 06 run outputs (`runs/*`, `outputs/figures/*`,
+    `outputs/reports/*`, `outputs/rasters/*`, non-Step-01/02 tables in `data/tables/`,
+    and Tier B SQLite run/morphometrics/ENM/triage tables) while 100% preserving
+    Step 01 harvested vouchers, raw voucher images, and Step 02 segmentation assets
+    (`data/masks`, `data/contours`, `data/ect`, `data/cropped_patches`,
+    `extracted_leaf_manifest.csv`, `voucher_reproductive_metrics.csv`,
+    `voucher_phenological_states.csv`, `failed_qc_vouchers.csv`, and SQLite
+    `vouchers`, `plant_individuals`, `extracted_leaves`, `voucher_reproductive_phenology`).
+
+    When `refresh_env_buffers=True`, resets cached `min_bedrock_depth_buffer_cm` to NULL/NA
+    in `environmental_cache` and `fine_grain_edaphic_cache.csv` so Step 05 recomputes true
+    minimum bedrock depth within coordinate-uncertainty buffers from local rasters without
+    re-querying network APIs.
+    """
+    import shutil as _shutil
+
+    ws = Path(workspace_root).resolve() if workspace_root is not None else PROJECT_ROOT
+    data_root = Path(output_dir).resolve() if output_dir is not None else (ws / "data")
+
+    target_dirs: List[Path] = []
+    if data_root == (ws / "data").resolve():
+        target_dirs.extend([
+            ws / "runs",
+            ws / "outputs" / "figures",
+            ws / "outputs" / "reports",
+            ws / "outputs" / "rasters",
+        ])
+
+    removed_files = 0
+    for d in target_dirs:
+        if d.exists() or d.is_symlink():
+            if d.is_symlink() or d.is_file():
+                try:
+                    d.unlink(missing_ok=True)
+                    removed_files += 1
+                except OSError:
+                    pass
+            else:
+                removed_files += sum(1 for p in d.rglob("*") if p.is_file() or p.is_symlink())
+                _shutil.rmtree(d, ignore_errors=True)
+        d.mkdir(parents=True, exist_ok=True)
+
+    preserved_step01_02_tables = {
+        "curated_vouchers.csv",
+        "extracted_leaf_manifest.csv",
+        "failed_qc_vouchers.csv",
+        "voucher_reproductive_metrics.csv",
+        "voucher_phenological_states.csv",
+    }
+    tables_dir = data_root / "tables"
+    if tables_dir.exists():
+        for f in tables_dir.iterdir():
+            if f.is_file() and f.name not in preserved_step01_02_tables:
+                try:
+                    f.unlink(missing_ok=True)
+                    removed_files += 1
+                except OSError:
+                    pass
+
+    if refresh_env_buffers:
+        env_cache_csv = data_root / "environmental" / "fine_grain_edaphic_cache.csv"
+        if env_cache_csv.is_file() and env_cache_csv.stat().st_size > 0:
+            try:
+                with open(env_cache_csv, "r", encoding="utf-8", newline="") as fh:
+                    reader = csv.DictReader(fh)
+                    fieldnames = list(reader.fieldnames or [])
+                    rows_c = list(reader)
+                if "min_bedrock_depth_buffer_cm" in fieldnames and rows_c:
+                    for rc in rows_c:
+                        rc["min_bedrock_depth_buffer_cm"] = ""
+                    tmp_c = env_cache_csv.with_suffix(".csv.tmp")
+                    with open(tmp_c, "w", encoding="utf-8", newline="") as out_fh:
+                        writer = csv.DictWriter(out_fh, fieldnames=fieldnames, lineterminator="\n")
+                        writer.writeheader()
+                        writer.writerows(rows_c)
+                        out_fh.flush()
+                        os.fsync(out_fh.fileno())
+                    tmp_c.replace(env_cache_csv)
+            except Exception:
+                pass
+
+    resolved_db = resolve_db_path(db_path=db_path, workspace_root=ws)
+    purged_rows = 0
+    if resolved_db != ":memory:" and Path(resolved_db).exists():
+        conn = get_db_connection(db_path=resolved_db, init_schema=True, workspace_root=ws)
+        try:
+            conn.execute("PRAGMA foreign_keys = OFF;")
+            tier_b_run_tables = (
+                "taxon_complexes",
+                "curation_triage",
+                "spatial_rf_predictions",
+                "otu_morphometrics",
+                "leaf_efa_harmonics",
+                "run_active_cohort",
+                "pipeline_runs",
+            )
+            conn.execute("DROP VIEW IF EXISTS v_integrative_triage_master;")
+            for tbl in tier_b_run_tables:
+                try:
+                    cnt_row = conn.execute(f"SELECT COUNT(*) FROM {tbl};").fetchone()
+                    if cnt_row and cnt_row[0]:
+                        purged_rows += int(cnt_row[0])
+                except sqlite3.Error:
+                    pass
+                try:
+                    conn.execute(f"DROP TABLE IF EXISTS {tbl};")
+                except sqlite3.Error:
+                    pass
+            if refresh_env_buffers:
+                try:
+                    env_cols = get_table_columns(conn, "environmental_cache")
+                    if "min_bedrock_depth_buffer_cm" in env_cols:
+                        conn.execute("UPDATE environmental_cache SET min_bedrock_depth_buffer_cm = NULL;")
+                except sqlite3.Error:
+                    pass
+            conn.commit()
+            init_db_schema(conn)
+            if vacuum:
+                try:
+                    conn.execute("VACUUM;")
+                    conn.commit()
+                except sqlite3.Error:
+                    pass
+        finally:
+            conn.close()
+
+    summary = {"removed_files": int(removed_files), "purged_db_rows": int(purged_rows)}
+    logger.info("Purged Step 03-06 run outputs only (Step 01 & Step 02 segmentation preserved): %s", summary)
     return summary

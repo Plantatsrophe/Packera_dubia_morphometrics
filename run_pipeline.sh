@@ -28,6 +28,7 @@ SKIP_HARVEST=false
 FORCE_FLAG=""
 RESEGMENT=false
 PURGE_SEGMENTS=false
+PURGE_RUNS_ONLY=false
 START_STEP=1
 START_STEP_EXPLICIT=false
 FOCAL_TAXON=""
@@ -215,6 +216,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --resegment|--force-segment)
       RESEGMENT=true
+      shift
+      ;;
+    --purge-runs-only|--purge-run-outputs)
+      PURGE_RUNS_ONLY=true
       shift
       ;;
     --purge-segments|--purge-old-data|--purge-runs)
@@ -478,6 +483,46 @@ if [[ "${INTRASPECIFIC_MODE}" == "true" ]]; then
   INTRASPECIFIC_ARGS=("--intraspecific-mode")
 fi
 
+# Resolve Python interpreter early if --purge-runs-only was requested (preserves Step 01 & Step 02 segmentation)
+if [[ "${PURGE_RUNS_ONLY}" == "true" && "${PURGE_SEGMENTS}" != "true" ]]; then
+  if [[ -x "${PROJECT_ROOT}/.venv/bin/python" ]]; then
+    _PURGE_PY="${PROJECT_ROOT}/.venv/bin/python"
+  else
+    _PURGE_PY="python3"
+  fi
+  echo "[Purge] Purging Step 03 to 06 run outputs and Tier B SQLite tables (preserving Step 01 & Step 02 segmentation)..."
+  "${_PURGE_PY}" -c "
+from pathlib import Path
+from scripts.core.db import purge_runs_only
+db_override = '${CUSTOM_DB_PATH}' or None
+res = purge_runs_only(workspace_root=Path('${PROJECT_ROOT}'), db_path=db_override, refresh_env_buffers=True, vacuum=True)
+rf = res['removed_files']
+pr = res['purged_db_rows']
+print(f'[Purge] Removed {rf} run/output files and {pr} Tier B SQLite rows (Step 01 vouchers & Step 02 segments preserved).')
+"
+  _NON_PURGE_RUN_ARGS=0
+  _SKIP_NEXT_DB_VAL=false
+  for _arg in "${ORIG_ARGS[@]}"; do
+    if [[ "${_SKIP_NEXT_DB_VAL}" == "true" ]]; then
+      _SKIP_NEXT_DB_VAL=false
+      continue
+    fi
+    case "${_arg}" in
+      --purge-runs-only|--purge-run-outputs|--db=*)
+        ;;
+      --db)
+        _SKIP_NEXT_DB_VAL=true
+        ;;
+      *)
+        _NON_PURGE_RUN_ARGS=$((_NON_PURGE_RUN_ARGS + 1))
+        ;;
+    esac
+  done
+  if [[ "${_NON_PURGE_RUN_ARGS}" -eq 0 ]]; then
+    exit 0
+  fi
+fi
+
 # Resolve Python interpreter early if --purge-segments was requested
 if [[ "${PURGE_SEGMENTS}" == "true" ]]; then
   if [[ -x "${PROJECT_ROOT}/.venv/bin/python" ]]; then
@@ -641,7 +686,7 @@ fi
 
 if [[ "${HAS_UPSTREAM_VOUCHERS}" == "true" && "${HAS_UPSTREAM_STEP02}" == "true" ]]; then
   if [[ "${RESEGMENT}" == "false" && ${#LIMIT_ARG[@]} -eq 0 ]]; then
-    if [[ "${START_STEP}" -ge 3 ]] || [[ -z "${FORCE_FLAG} $([[ "${RESEGMENT}" == "true" ]] && echo "--force")" && ( "${CUSTOM_GEO_SCOPE}" == "false" || "${SKIP_HARVEST}" == "true" || "${HAS_EXPLICIT_SOURCE_RUN}" == "true" ) ]]; then
+    if [[ "${START_STEP}" -ge 3 ]] || [[ -z "${FORCE_FLAG}" && ( "${CUSTOM_GEO_SCOPE}" == "false" || "${SKIP_HARVEST}" == "true" || "${HAS_EXPLICIT_SOURCE_RUN}" == "true" || "${GEOGRAPHIC_SCOPE:-eastern_na}" == "eastern_na" ) ]]; then
       REUSE_CANONICAL_DATA=true
     fi
   fi
@@ -1444,7 +1489,6 @@ if [[ "${START_STEP}" -le 5 ]]; then
   echo "[Step 05/06] Running Multimodal Spatial RF & Niche Identity Tests..."
   Rscript scripts/analysis/05_multimodal_spatial_rf.R \
     --vouchers "${RUN_DIR}/data/tables/curated_vouchers.csv" \
-    --morphometrics "${RUN_DIR}/data/tables/morphometric_flags.csv" \
     --pheno-states "${RUN_DIR}/data/tables/voucher_phenological_states.csv" \
     --env-dir "data/environmental" \
     --ssurgo-table "${RUN_DIR}/data/tables/ssurgo_edaphic_validation.csv" \

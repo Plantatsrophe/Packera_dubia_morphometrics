@@ -584,7 +584,10 @@ extract_uncertainty_buffered_predictors <- function(df, env_dir = "data/environm
             tryCatch({
               r_bd <- terra::rast(rt_p)
               buf_bd <- .project_vect_to_rast(buf_v, r_bd)
-              ex_m <- suppressWarnings(as.numeric(terra::extract(r_bd, buf_bd, fun = function(x) mean(x, na.rm = TRUE))[[2]]))
+              ex_m <- suppressWarnings(as.numeric(terra::extract(r_bd, buf_bd, fun = function(x) {
+                xf <- x[is.finite(x)]
+                if (length(xf) == 0L) NA_real_ else min(xf)
+              })[[2]]))
               ok_m <- is.finite(ex_m) & ex_m >= 0.0
               min_accum[ok_m] <- pmin(min_accum[ok_m], ex_m[ok_m])
             }, error = function(e) NULL)
@@ -1634,6 +1637,7 @@ load_and_update_fine_grain_cache <- function(
       sub_df <- enrich_ssurgo_pedology_from_series(sub_df, demo = demo)
       sub_df <- extract_polaris_and_solus_predictors(sub_df, env_dir = env_dir, demo = demo)
       sub_df <- extract_micro_topography_3dep(sub_df, env_dir = env_dir, demo = demo)
+      sub_df <- extract_uncertainty_buffered_predictors(sub_df, env_dir = env_dir, demo = demo)
       for (col in setdiff(names(sub_df), c("catalogNumber", "lat_lon_key", "latitude", "longitude"))) {
         if (!(col %in% names(df))) df[[col]] <- rep(NA, n)
         df[[col]][uncached_mask] <- sub_df[[col]]
@@ -1699,9 +1703,26 @@ load_and_update_fine_grain_cache <- function(
       }
     }
 
+    need_buf_refresh <- !isTRUE(demo) && has_sol_disk && (
+      !("min_bedrock_depth_buffer_cm" %in% names(df)) ||
+      any(df$is_edaphic_eligible_coord & is.na(df$min_bedrock_depth_buffer_cm))
+    )
+    if (isTRUE(need_buf_refresh)) {
+      b_mask <- df$is_edaphic_eligible_coord & (if ("min_bedrock_depth_buffer_cm" %in% names(df)) is.na(df$min_bedrock_depth_buffer_cm) else rep(TRUE, n))
+      if (any(b_mask)) {
+        b_sub <- extract_uncertainty_buffered_predictors(df[b_mask, , drop = FALSE], env_dir = env_dir, demo = demo)
+        for (bcol in c("ph_q10_buffer", "ph_q90_buffer", "min_bedrock_depth_buffer_cm", "max_cfvo_buffer_pct", "azonal_lithology_presence_buffer")) {
+          if (bcol %in% names(b_sub)) {
+            if (!(bcol %in% names(df))) df[[bcol]] <- rep(NA, n)
+            df[[bcol]][b_mask] <- b_sub[[bcol]]
+          }
+        }
+      }
+    }
+
     df$is_rock_outcrop <- as.logical(df$is_rock_outcrop)
     df$is_rock_outcrop[is.na(df$is_rock_outcrop)] <- FALSE
-    if (!sanitized_stale && n_uncached == 0L && !any(need_sgmc)) {
+    if (!sanitized_stale && n_uncached == 0L && !any(need_sgmc) && !isTRUE(need_buf_refresh)) {
       return(df)
     }
   } else {
@@ -2507,4 +2528,86 @@ evaluate_multiclass_substrate_contingency <- function(
     multiclass_details = multiclass_df,
     omnibus_test = omnibus_fisher
   )
+}
+
+
+# ------------------------------------------------------------------------------
+# 8. Deterministic Multi-Scale Habitat & Hydrothermal Covariate Synthesis
+#    (Separates Lithic Outcrops, Xeric Sandhills, Maritime Coastal Strand &
+#     Summer-Drought Western Prairies Strictly From Measured Covariates)
+# ------------------------------------------------------------------------------
+compute_derived_habitat_predictors <- function(df) {
+  if (is.null(df) || !is.data.frame(df) || nrow(df) == 0L) return(df)
+  n <- nrow(df)
+  nms <- names(df)
+  num_or_na <- function(col_nm) {
+    if (!(col_nm %in% nms)) return(rep(NA_real_, n))
+    suppressWarnings(as.numeric(df[[col_nm]]))
+  }
+
+  # 1. Lithic / Outcrop Confinement Index [0, 1]: integrates point + uncertainty-buffered
+  #    minimum bedrock depth (capturing 20-50 m granite flatrocks & diabase glades inside
+  #    herbarium GPS error circles) and SSURGO rock-outcrop aerial percentage.
+  #    Activated ONLY when buffered bedrock or explicit SSURGO outcrop pedology is present
+  #    (preserving legacy synthetic fixture schemas that lack outcrop/buffer columns).
+  has_outcrop_inputs <- any(c("min_bedrock_depth_buffer_cm", "ssurgo_rock_outcrop_pct", "is_rock_outcrop") %in% nms)
+  if (has_outcrop_inputs) {
+    bd_pt <- num_or_na("fine_bedrock_depth_cm")
+    bd_buf <- num_or_na("min_bedrock_depth_buffer_cm")
+    ro_pct <- num_or_na("ssurgo_rock_outcrop_pct")
+    eff_bd <- ifelse(is.finite(bd_pt) & is.finite(bd_buf), pmin(bd_pt, bd_buf),
+              ifelse(is.finite(bd_buf), bd_buf, bd_pt))
+    has_lith <- is.finite(eff_bd) | is.finite(ro_pct)
+    if (sum(has_lith) >= 3L) {
+      shallow_score <- ifelse(is.finite(eff_bd), pmax(0.0, pmin(1.0, (150.0 - eff_bd) / 135.0))^1.35, 0.0)
+      ro_score <- ifelse(is.finite(ro_pct), pmax(0.0, pmin(1.0, ro_pct / 35.0)), 0.0)
+      az_flag <- if ("is_rock_outcrop" %in% nms) {
+        b <- as.logical(df$is_rock_outcrop); b[is.na(b)] <- FALSE; as.numeric(b)
+      } else rep(0.0, n)
+      lith_idx <- ifelse(has_lith, round(pmin(1.0, pmax(shallow_score, 0.75 * ro_score + 0.25 * shallow_score, 0.65 * az_flag + 0.35 * shallow_score)), 4), NA_real_)
+      if (sum(is.finite(lith_idx)) >= 3L && is.finite(stats::sd(lith_idx, na.rm = TRUE)) && stats::sd(lith_idx, na.rm = TRUE) > 1e-6) {
+        df$lithic_outcrop_index <- lith_idx
+      }
+    }
+  }
+
+  # 2. Warm-Season / Dry-Month Hydrothermal Moisture Deficit Index:
+  #    Separates summer-xeric Western Tallgrass Prairies & West Gulf grasslands
+  #    from summer-humid Atlantic Coastal Plain & Piedmont forests using artifact-free
+  #    BIO10 (warmest quarter mean temp) and BIO14/BIO17 (driest month/quarter precip).
+  if (all(c("bio10_mean_temp_warmest_qtr", "bio14_precip_driest_month") %in% nms)) {
+    b10 <- num_or_na("bio10_mean_temp_warmest_qtr")
+    b14 <- num_or_na("bio14_precip_driest_month")
+    b17 <- num_or_na("bio17_precip_driest_qtr")
+    dry_p <- ifelse(is.finite(b17), b17 / 3.0, b14)
+    ok_sm <- is.finite(b10) & is.finite(dry_p)
+    if (sum(ok_sm) >= 3L) {
+      pet_proxy <- pmax(4.0, 2.5 * pmax(0.0, b10))
+      smd_idx <- ifelse(ok_sm, round(pet_proxy / pmax(dry_p + 10.0, 5.0), 4), NA_real_)
+      if (sum(is.finite(smd_idx)) >= 3L && is.finite(stats::sd(smd_idx, na.rm = TRUE)) && stats::sd(smd_idx, na.rm = TRUE) > 1e-6) {
+        df$summer_moisture_deficit_idx <- smd_idx
+      }
+    }
+  }
+
+  # 3. Maritime vs. Continental Thermal Buffering Index:
+  #    Separates frost-buffered Atlantic/Gulf barrier dunes & coastal strand
+  #    (mild winter BIO6 + low BIO4 thermal seasonality + damped BIO2 diurnal range)
+  #    from continental interior grasslands and upland Piedmont forests.
+  if (all(c("bio4_temp_seasonality", "bio6_min_temp_coldest_month") %in% nms)) {
+    b4 <- num_or_na("bio4_temp_seasonality")
+    b6 <- num_or_na("bio6_min_temp_coldest_month")
+    b2 <- num_or_na("bio2_diurnal_range")
+    ok_mc <- is.finite(b4) & is.finite(b6)
+    if (sum(ok_mc) >= 3L) {
+      b4_norm <- ifelse(stats::median(abs(b4[ok_mc]), na.rm = TRUE) > 50.0, b4 / 100.0, b4)
+      diurn_term <- ifelse(is.finite(b2), pmax(4.0, b2) / 12.0, 1.0)
+      mc_idx <- ifelse(ok_mc, round((b6 + 20.0) / pmax(b4_norm * diurn_term, 1.0), 4), NA_real_)
+      if (sum(is.finite(mc_idx)) >= 3L && is.finite(stats::sd(mc_idx, na.rm = TRUE)) && stats::sd(mc_idx, na.rm = TRUE) > 1e-6) {
+        df$maritime_continentality_idx <- mc_idx
+      }
+    }
+  }
+
+  df
 }

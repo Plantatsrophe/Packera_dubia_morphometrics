@@ -71,6 +71,7 @@ def build_four_stage_commands(
     gpu_batch_size: Optional[int] = None,
     db_path: Optional[Path] = None,
     skip_discovery: bool = False,
+    skip_harvest: bool = False,
 ) -> List[Tuple[str, str, List[str]]]:
     """Return ordered (stage_label, run_id, argv) tuples for the four-stage funnel."""
     common_tail: List[str] = []
@@ -91,6 +92,7 @@ def build_four_stage_commands(
             str(run_script),
             "--run-id",
             r1,
+            *(["--skip-harvest"] if skip_harvest else []),
             "--geographic-scope",
             geographic_scope,
             *common_tail,
@@ -629,6 +631,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Directory for cross-run comparison CSV and synthesis Markdown report (default: outputs/reports).",
     )
     parser.add_argument(
+        "--skip-harvest",
+        action="store_true",
+        default=False,
+        help="Reuse existing canonical Step 01 vouchers and Step 02 segments in Stage 1 without GBIF harvesting.",
+    )
+    parser.add_argument(
         "--skip-discovery",
         action="store_true",
         default=False,
@@ -666,6 +674,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         gpu_batch_size=args.gpu_batch_size,
         db_path=args.db,
         skip_discovery=args.skip_discovery,
+        skip_harvest=args.skip_harvest,
     )
 
     if args.dry_run:

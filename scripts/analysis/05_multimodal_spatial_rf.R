@@ -602,12 +602,18 @@ discover_candidate_eco_predictors <- function(df, include_pheno = FALSE, min_fin
   if (has_finite_col("fine_bedrock_depth_cm")) {
     edaph_cols <- c(edaph_cols, "fine_bedrock_depth_cm")
   }
+  for (extra_ed in c("lithic_outcrop_index", "ssurgo_rock_outcrop_pct", "ssurgo_aws_0_50cm")) {
+    if (has_finite_col(extra_ed)) edaph_cols <- c(edaph_cols, extra_ed)
+  }
 
   # Block A2: 4 micro-topographic predictors
   topo_cols <- VALID_TOPO_PREDICTORS[vapply(VALID_TOPO_PREDICTORS, has_finite_col, logical(1))]
 
-  # Block B: 13 artifact-free bioclimatic predictors
+  # Block B: 13 artifact-free bioclimatic predictors + derived hydrothermal/maritime indices
   wc_cols <- VALID_CLIM_BIO_PREDICTORS[vapply(VALID_CLIM_BIO_PREDICTORS, has_finite_col, logical(1))]
+  for (extra_cl in c("summer_moisture_deficit_idx", "maritime_continentality_idx")) {
+    if (has_finite_col(extra_cl)) wc_cols <- c(wc_cols, extra_cl)
+  }
 
   # Phenology is an organismal reproductive trait, excluded from X_env by default (include_pheno = FALSE)
   pheno_cols <- if (isTRUE(include_pheno) && has_finite_col("delta_doy")) "delta_doy" else character(0)
@@ -2669,8 +2675,8 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
 
     pred_names <- rownames(imp_mat)
     is_mem_pred <- grepl("^MEM", pred_names)
-    is_fine_edaphic_pred <- grepl("^(fine_|ilr_texture_|ssurgo_|polaris_|solus_|topo_|soil_|sgmc_|is_azonal)", pred_names)
-    is_climate_pred <- grepl("^(bio|delta_doy|doy)", pred_names, ignore.case = TRUE)
+    is_fine_edaphic_pred <- grepl("^(fine_|ilr_texture_|ssurgo_|polaris_|solus_|topo_|soil_|sgmc_|is_azonal|lithic_outcrop_)", pred_names)
+    is_climate_pred <- grepl("^(bio|delta_doy|doy|summer_moisture_|maritime_continentality_)", pred_names, ignore.case = TRUE)
     imp_df <- data.frame(
       Predictor = pred_names,
       MeanDecreaseAccuracy = imp_mat[, 1],
@@ -2684,8 +2690,8 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
     )
     imp_df <- imp_df[order(imp_df$MeanDecreaseAccuracy, decreasing = TRUE), ]
 
-    fine_edaphic_vars <- intersect(env_vars, grep("^(fine_|ilr_texture_|ssurgo_|polaris_|solus_|topo_|soil_|sgmc_|is_azonal)", env_vars, value = TRUE))
-    macro_climate_vars <- intersect(env_vars, grep("^(bio|delta_doy|doy)", env_vars, value = TRUE, ignore.case = TRUE))
+    fine_edaphic_vars <- intersect(env_vars, grep("^(fine_|ilr_texture_|ssurgo_|polaris_|solus_|topo_|soil_|sgmc_|is_azonal|lithic_outcrop_)", env_vars, value = TRUE))
+    macro_climate_vars <- intersect(env_vars, grep("^(bio|delta_doy|doy|summer_moisture_|maritime_continentality_)", env_vars, value = TRUE, ignore.case = TRUE))
     ibe_df <- if (exists("compute_isolation_by_environment", mode = "function")) {
       tryCatch(compute_isolation_by_environment(df[anchor_idx, , drop = FALSE], edaph_vars = fine_edaphic_vars, clim_vars = macro_climate_vars, mem_mat = MEMs[anchor_idx, , drop = FALSE]), error = function(e) NULL)
     } else NULL
@@ -2881,8 +2887,8 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
   # Spatial vs Environmental Variance Partitioning (vegan::varpart across [A] Fine-Grain Edaphic & Outcrop Lithology, [B] Macro-Climate, [C] Spatial MEMs)
   pred_names <- rownames(imp_mat)
   is_mem_pred <- grepl("^MEM", pred_names)
-  is_fine_edaphic_pred <- grepl("^(fine_|ilr_texture_|ssurgo_|polaris_|solus_|topo_|soil_|sgmc_|is_azonal)", pred_names)
-  is_climate_pred <- grepl("^(bio|delta_doy|doy)", pred_names, ignore.case = TRUE)
+  is_fine_edaphic_pred <- grepl("^(fine_|ilr_texture_|ssurgo_|polaris_|solus_|topo_|soil_|sgmc_|is_azonal|lithic_outcrop_)", pred_names)
+  is_climate_pred <- grepl("^(bio|delta_doy|doy|summer_moisture_|maritime_continentality_)", pred_names, ignore.case = TRUE)
 
   imp_df <- data.frame(
     Predictor = pred_names,
@@ -2901,8 +2907,8 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
   )
   imp_df <- imp_df[order(imp_df$MeanDecreaseAccuracy, decreasing = TRUE), ]
 
-  fine_edaphic_vars <- intersect(env_vars, grep("^(fine_|ilr_texture_|ssurgo_|polaris_|solus_|topo_|soil_|sgmc_|is_azonal)", env_vars, value = TRUE))
-  macro_climate_vars <- intersect(env_vars, grep("^(bio|delta_doy|doy)", env_vars, value = TRUE, ignore.case = TRUE))
+  fine_edaphic_vars <- intersect(env_vars, grep("^(fine_|ilr_texture_|ssurgo_|polaris_|solus_|topo_|soil_|sgmc_|is_azonal|lithic_outcrop_)", env_vars, value = TRUE))
+  macro_climate_vars <- intersect(env_vars, grep("^(bio|delta_doy|doy|summer_moisture_|maritime_continentality_)", env_vars, value = TRUE, ignore.case = TRUE))
 
   varpart_obj <- NULL
   if (requireNamespace("vegan", quietly = TRUE) && length(fine_edaphic_vars) >= 1 && length(macro_climate_vars) >= 1) {
@@ -3759,63 +3765,27 @@ main <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
     sp_cand[m] <- v[m]
   }
   vouchers_df$species_standardized <- sp_cand
-  sql_master <- if (!isTRUE(opts$demo) && exists("try_fetch_master_view_for_cohort", mode = "function")) {
-    tryCatch(try_fetch_master_view_for_cohort(vouchers_df = vouchers_df, vouchers_path = opts$vouchers, demo = isTRUE(opts$demo), require_step04 = TRUE), error = function(e) NULL)
-  } else NULL
-  if (!is.null(sql_master) && nrow(sql_master) > 0L) {
-    vouchers_df <- sql_master
-    vouchers_df$species_standardized <- standardize_packera_taxon(ifelse(!is.na(vouchers_df$species_standardized) & nzchar(vouchers_df$species_standardized), vouchers_df$species_standardized, vouchers_df$scientificName))
-    message(sprintf("Hydrated %d specimen rows across Steps 01-04 directly from SQLite v_integrative_triage_master.", nrow(vouchers_df)))
-  } else {
-  # Merge Morphometrics if present (prefer canonical morphometric_flags.csv)
-  if (!file.exists(opts$morphometrics)) {
-    for (cand_m in c(
-      file.path(dirname(opts$vouchers), "morphometric_flags.csv"),
-      "data/tables/morphometric_flags.csv"
-    )) {
-      if (file.exists(cand_m)) { opts$morphometrics <- cand_m; break }
+  # Strictly Independent Step 05 Ingestion:
+  # Step 05 ENM, ecological regime discovery, Spatial Block-CV RF, and circular Hopkins phenology
+  # operate 100% independently of Step 04 morphometrics (zero morphometric columns ingested prior
+  # to ecological modeling; cross-modal comparison is performed strictly downstream in Step 06).
+  if (!isTRUE(opts$demo) && exists("connect_packera_db", mode = "function") &&
+      exists("is_sqlite_active_for_inputs", mode = "function") &&
+      is_sqlite_active_for_inputs(opts$vouchers, demo = isTRUE(opts$demo))) {
+    conn_rac <- tryCatch(connect_packera_db(read_only = TRUE, demo = FALSE), error = function(e) NULL)
+    if (!is.null(conn_rac)) {
+      rid_rac <- resolve_packera_run_id()
+      rac_rows <- tryCatch(
+        DBI::dbGetQuery(conn_rac, "SELECT catalogNumber, plant_individual_id FROM run_active_cohort WHERE run_id = $1 ORDER BY catalogNumber, plant_individual_id;", params = list(rid_rac)),
+        error = function(e) NULL
+      )
+      disconnect_packera_db(conn_rac)
+      if (!is.null(rac_rows) && nrow(rac_rows) > 0L) {
+        vouchers_df <- left_join_by_voucher_individual(vouchers_df, rac_rows, c("catalogNumber", "plant_individual_id"))
+      }
     }
-  }
-  if (file.exists(opts$morphometrics)) {
-    morph_df <- readr::read_csv(opts$morphometrics, show_col_types = FALSE)
-    morph_df$catalogNumber <- as.character(morph_df$catalogNumber)
-    if ("cda_predicted" %in% names(morph_df) && !("cda_predicted_taxon" %in% names(morph_df))) {
-      morph_df$cda_predicted_taxon <- morph_df$cda_predicted
-    }
-    if ("is_outlier" %in% names(morph_df) && !("morphometric_outlier_flag" %in% names(morph_df))) {
-      morph_df$morphometric_outlier_flag <- as.logical(morph_df$is_outlier)
-    }
-    if (!("morphometric_outlier_flag" %in% names(morph_df))) morph_df$morphometric_outlier_flag <- FALSE
-    if (!("misidentification_flag" %in% names(morph_df))) morph_df$misidentification_flag <- FALSE
-    if ("plant_height_mm" %in% names(morph_df) && !("plant_height_cm" %in% names(morph_df))) {
-      morph_df$plant_height_cm <- round(suppressWarnings(as.numeric(morph_df$plant_height_mm)) / 10.0, 2)
-    }
-    dyn_pc_cols <- grep("^(ECT_|Cauline_)?PC[0-9]+$|^ECT_[0-9]+$", names(morph_df), value = TRUE)
-    dyn_het_cols <- grep("^(Cauline_|heteroblasty_|basal_vs_cauline_)", names(morph_df), value = TRUE)
-    m_cols <- intersect(names(morph_df), unique(c(
-      "catalogNumber", "plant_individual_id", "morph_tier_source",
-      "gmm_cluster", "gmm_uncertainty", "is_novel_morphotype", "cryptic_cluster_cohesion_pass",
-      "cda_predicted_taxon", "cda_predicted", "cda_posterior_prob",
-      "cda_second_taxon", "cda_second_posterior_prob", "cda_posterior_margin",
-      "loocv_accuracy", "mahalanobis_d2", "mahalanobis_pval",
-      "is_outlier", "morphometric_outlier_flag", "misidentification_flag", "is_confident_label_noise",
-      "can1", "can2", "can3", dyn_pc_cols, dyn_het_cols,
-      "efd_harmonic_opt", "efd_k95_pcs", "selected_morph_features",
-      "solidity", "q25_solidity", "dissection_index", "dissected_leaf_fraction",
-      "basal_leaf_count", "n_basal_leaves", "n_cauline_leaves", "within_rosette_efa_dispersion", "is_dissected",
-      "petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio",
-      "plant_height_mm", "plant_height_cm", "scape_to_basal_leaf_ratio", "is_bent_stem",
-      "capitula_count", "involucre_height_mm", "involucre_width_mm", "AR_inv",
-      "ecoregion_cda_predicted", "ecoregion_cda_posterior_prob",
-      "type_status", "is_type_specimen", "has_empirical_type_anchor",
-      "type_morph_mahal_d2", "nearest_type_morph_taxon", "type_morph_concordance", "is_typical_morphotype",
-      "min_congener_mahal_d2", "min_congener_taxon", "open_set_novelty_p",
-      "is_promoted_bronze", "authority_weight"
-    )))
-    vouchers_df <- left_join_by_voucher_individual(vouchers_df, morph_df, m_cols)
   }
 
-  # Ingest Voucher Phenological States (Computer Vision Anthesis Ingestion via left_join)
   if (file.exists(opts$pheno_states)) {
     message(sprintf("Ingesting voucher phenological states from %s...", opts$pheno_states))
     pheno_states_df <- readr::read_csv(opts$pheno_states, show_col_types = FALSE)
@@ -3834,6 +3804,25 @@ main <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
     vouchers_df$n_bud <- NA_real_
     vouchers_df$dominant_pappus_ratio <- NA_real_
   }
+
+  # Optional passive morphometrics table retained ONLY for post-ENM standalone flag compatibility when explicitly passed
+  passive_morph_df <- NULL
+  if (!is.null(opts$morphometrics) && nzchar(trimws(opts$morphometrics)) &&
+      opts$morphometrics != "data/tables/morphometric_flags.csv" && file.exists(opts$morphometrics)) {
+    passive_morph_df <- tryCatch(readr::read_csv(opts$morphometrics, show_col_types = FALSE), error = function(e) NULL)
+    if (!is.null(passive_morph_df) && "catalogNumber" %in% names(passive_morph_df)) {
+      passive_morph_df$catalogNumber <- as.character(passive_morph_df$catalogNumber)
+      if ("cda_predicted" %in% names(passive_morph_df) && !("cda_predicted_taxon" %in% names(passive_morph_df))) {
+        passive_morph_df$cda_predicted_taxon <- passive_morph_df$cda_predicted
+      }
+      if ("is_outlier" %in% names(passive_morph_df) && !("morphometric_outlier_flag" %in% names(passive_morph_df))) {
+        passive_morph_df$morphometric_outlier_flag <- as.logical(passive_morph_df$is_outlier)
+      }
+      if ("plant_individual_id" %in% names(passive_morph_df)) {
+        ramet_keys <- passive_morph_df[, intersect(c("catalogNumber", "plant_individual_id"), names(passive_morph_df)), drop = FALSE]
+        vouchers_df <- left_join_by_voucher_individual(vouchers_df, ramet_keys, c("catalogNumber", "plant_individual_id"))
+      }
+    }
   }
 
   # Filter strictly for primary duplicate vouchers (exsiccatae deduplication)
@@ -3901,6 +3890,9 @@ main <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
     contingency_out = opts$contingency_table,
     demo = demo_mode
   )
+  if (exists("compute_derived_habitat_predictors", mode = "function")) {
+    vouchers_df <- compute_derived_habitat_predictors(vouchers_df)
+  }
 
   # Stage 1c: Cohort-Adaptive Latitudinal Baseline & Circular Anthesis Phenology Engine (independent organismal trait)
   pheno_res <- compute_phenological_anomalies(
@@ -3921,13 +3913,14 @@ main <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
   }
   env_vars <- cand_eco
 
-  # Stage 2: Empirical 3-Block Collinearity Pruning (|r| <= 0.70, VIF <= 5.0) & Spatial RF Importance Gating
+  # Stage 2: Independent Ecological Regime Discovery & 3-Block Collinearity Pruning
   is_intra_run <- isTRUE(opts$intraspecific_mode) || (length(unique(stats::na.omit(vouchers_df$species_standardized))) < 2L)
   if (is_intra_run) {
     vouchers_df <- resolve_analysis_group(vouchers_df, intraspecific_mode = TRUE)
   } else {
     vouchers_df$analysis_group <- vouchers_df$species_standardized
   }
+  vouchers_df$ecotype_regime <- as.character(vouchers_df$analysis_group)
 
   anc_grp <- resolve_active_anchor_groups(vouchers_df, intraspecific_mode = is_intra_run)
   anc_rows_vif <- which(!is.na(anc_grp))
@@ -3973,7 +3966,14 @@ main <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
     paste(primary_env_vars, collapse = ", ")
   ))
 
-  # Stage 3: Preserve Non-Circular Analysis Group Resolution (zero post-RF re-clustering) & Run Cross-Modal Consensus
+  # Stage 3: Preserve Independent Ecological Regime Resolution & Compute Ecological/Phenological Envelope Z-Scores
+  if (!is.null(passive_morph_df) && nrow(passive_morph_df) > 0L) {
+    p_m_cols <- intersect(names(passive_morph_df), c(
+      "catalogNumber", "plant_individual_id", "cda_predicted_taxon", "cda_posterior_prob",
+      "cda_posterior_margin", "morphometric_outlier_flag"
+    ))
+    vouchers_df <- left_join_by_voucher_individual(vouchers_df, passive_morph_df, p_m_cols)
+  }
   vouchers_df <- execute_crossmodal_consensus(
     vouchers_df,
     intraspecific_mode = is_intra_run,
@@ -3983,6 +3983,7 @@ main <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
     primary_edaph_vars = primary_edaph_vars,
     rf_var_weights = rf_var_weights
   )
+  vouchers_df$ecotype_regime <- as.character(vouchers_df$analysis_group)
   vouchers_df$primary_env_predictors <- paste(primary_env_vars, collapse = ";")
   vouchers_df$primary_clim_predictors <- paste(primary_clim_vars, collapse = ";")
   vouchers_df$primary_edaph_predictors <- paste(primary_edaph_vars, collapse = ";")
@@ -4017,10 +4018,9 @@ main <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
   geo_vouchers_df <- vouchers_df
   if (nrow(non_geo_df) > 0L) {
     non_geo_df$analysis_group <- if (is_intra_run) {
-      if ("gmm_cluster" %in% names(non_geo_df) && any(grepl("^Morphotype_K", vouchers_df$analysis_group))) {
-        ifelse(is.na(non_geo_df$gmm_cluster), vouchers_df$analysis_group[1L], paste0("Morphotype_K", as.integer(non_geo_df$gmm_cluster)))
-      } else rep(vouchers_df$analysis_group[1L], nrow(non_geo_df))
+      rep(as.character(non_geo_df$species_standardized[1L]), nrow(non_geo_df))
     } else non_geo_df$species_standardized
+    non_geo_df$ecotype_regime <- rep(NA_character_, nrow(non_geo_df))
     non_geo_df$rf_prediction_source <- "Passive_Ungeoreferenced"
     non_geo_df$spatial_block_id <- NA_character_
     non_geo_df$high_coord_uncertainty_flag <- TRUE
