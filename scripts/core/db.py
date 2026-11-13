@@ -1150,6 +1150,13 @@ def record_voucher_segmentation_transaction(
             _to_float(r.get("si_a")),
             _to_bool_int(r.get("lm3_gates_pass"), default=1),
             max(1, int(_to_int(r.get("n_lamina_components")) or 1)),
+            int(_to_int(r.get("detector_class_id"), default=0) or 0),
+            _to_bool_int(r.get("is_crop_clipped"), default=0),
+            _to_float(r.get("hole_area_frac")) if r.get("hole_area_frac") is not None else 0.0,
+            _to_float(r.get("enclosed_void_frac")) if r.get("enclosed_void_frac") is not None else 0.0,
+            _to_bool_int(r.get("bilateral_lobe_symmetry"), default=0),
+            _to_bool_int(r.get("efa_qc_pass"), default=1),
+            _to_str(r.get("qc_flag_reason")) or "PASS",
             _to_float(r.get("blade_cie_l_norm")),
             _to_float(r.get("blade_cie_l_sd")),
         ))
@@ -1251,6 +1258,13 @@ def record_voucher_segmentation_transaction(
                 "si_a",
                 "lm3_gates_pass",
                 "n_lamina_components",
+                "detector_class_id",
+                "is_crop_clipped",
+                "hole_area_frac",
+                "enclosed_void_frac",
+                "bilateral_lobe_symmetry",
+                "efa_qc_pass",
+                "qc_flag_reason",
                 "blade_cie_l_norm",
                 "blade_cie_l_sd",
             ]
@@ -1317,6 +1331,8 @@ def load_step02_records_from_db(
                 el.midrib_angle_deg, el.pixels_per_mm, el.is_calibrated_mm, el.scale_source,
                 el.leaf_zone, el.leaf_zone_confidence, el.dist_from_crown_norm, el.cy_rel_plant_bbox,
                 el.archetype_score, el.bilateral_dice, el.si_a, el.lm3_gates_pass, el.n_lamina_components,
+                el.detector_class_id, el.is_crop_clipped, el.hole_area_frac, el.enclosed_void_frac,
+                el.bilateral_lobe_symmetry, el.efa_qc_pass, el.qc_flag_reason,
                 el.blade_cie_l_norm, el.blade_cie_l_sd,
                 el.petiole_length_px,
                 el.blade_length_px,
@@ -1348,6 +1364,12 @@ def load_step02_records_from_db(
             d["mask_is_upright"] = True if raw_up is None else bool(raw_up)
             if d.get("lm3_gates_pass") is not None:
                 d["lm3_gates_pass"] = bool(d.get("lm3_gates_pass"))
+            if d.get("is_crop_clipped") is not None:
+                d["is_crop_clipped"] = bool(d.get("is_crop_clipped"))
+            if d.get("bilateral_lobe_symmetry") is not None:
+                d["bilateral_lobe_symmetry"] = bool(d.get("bilateral_lobe_symmetry"))
+            if d.get("efa_qc_pass") is not None:
+                d["efa_qc_pass"] = bool(d.get("efa_qc_pass"))
             if "cf_source" not in d or d.get("cf_source") is None:
                 s_src = str(d.get("scale_source") or "").strip().lower()
                 if s_src == "mp_estimated":

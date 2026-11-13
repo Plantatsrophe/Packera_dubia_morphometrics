@@ -493,11 +493,11 @@ def _load_mask_or_contour_u8(row: pd.Series, out_dir: Path) -> Tuple[Optional[np
     base_rgb = rgb_patch if rgb_patch is not None else np.full((*mask_u8.shape[:2], 3), 42, dtype=np.uint8)
     prods = render_leaf_products(
         base_rgb,
-        {"silhouette": mask_u8 > 0, "silhouettepet": mask_u8 > 0, "hole": None},
+        {"lamina": mask_u8 > 0, "silhouette": mask_u8 > 0, "silhouettepet": mask_u8 > 0, "hole": None},
         angle_cw=angle_cw,
-        want={"silhouette", "rgb_cropped"} if rgb_patch is not None else {"silhouette"},
+        want={"lamina", "rgb_cropped"} if rgb_patch is not None else {"lamina"},
     )
-    sil_prod = prods.get("silhouette")
+    sil_prod = prods.get("lamina") if prods.get("lamina") is not None else prods.get("silhouette")
     if sil_prod is not None and np.count_nonzero(sil_prod) > 0:
         mask_u8 = (np.asarray(sil_prod) > 0).astype(np.uint8) * 255
     if rgb_patch is not None:
@@ -741,7 +741,11 @@ def export_taxon_ect_exemplars(
         if len(sp_df) == 0:
             continue
 
-        # Filter to clean closed/unclipped masks when available
+        # Filter to QC-passing, clean closed/unclipped masks when available
+        if "efa_qc_pass" in sp_df.columns:
+            eqc_flags = [_parse_bool_val(v, default=True) for v in sp_df["efa_qc_pass"]]
+            if any(eqc_flags):
+                sp_df = sp_df[eqc_flags]
         valid_mask_flags = [
             _is_valid_smooth_closed_mask(r.get("mask_path", ""), fig_dir) for _, r in sp_df.iterrows()
         ]

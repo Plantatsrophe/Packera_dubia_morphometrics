@@ -593,6 +593,13 @@ def _build_schema_ddl() -> str:
         si_a REAL,
         lm3_gates_pass INTEGER,
         n_lamina_components INTEGER DEFAULT 1,
+        detector_class_id INTEGER DEFAULT 0,
+        is_crop_clipped INTEGER DEFAULT 0,
+        hole_area_frac REAL DEFAULT 0.0,
+        enclosed_void_frac REAL DEFAULT 0.0,
+        bilateral_lobe_symmetry INTEGER DEFAULT 0,
+        efa_qc_pass INTEGER DEFAULT 1,
+        qc_flag_reason TEXT DEFAULT 'PASS',
         blade_cie_l_norm REAL,
         blade_cie_l_sd REAL,
         PRIMARY KEY (catalogNumber, plant_individual_id, leaf_id),
@@ -996,6 +1003,13 @@ _DYNAMIC_TABLE_MIGRATION_SPECS: Dict[str, Tuple[Tuple[str, str], ...]] = {
         ("blade_width_mm", "REAL"),
         ("mask_is_upright", "INTEGER DEFAULT 1"),
         ("area_mm2", "REAL"),
+        ("detector_class_id", "INTEGER DEFAULT 0"),
+        ("is_crop_clipped", "INTEGER DEFAULT 0"),
+        ("hole_area_frac", "REAL DEFAULT 0.0"),
+        ("enclosed_void_frac", "REAL DEFAULT 0.0"),
+        ("bilateral_lobe_symmetry", "INTEGER DEFAULT 0"),
+        ("efa_qc_pass", "INTEGER DEFAULT 1"),
+        ("qc_flag_reason", "TEXT DEFAULT 'PASS'"),
         ("blade_cie_l_norm", "REAL"),
         ("blade_cie_l_sd", "REAL"),
     ),
@@ -1155,7 +1169,7 @@ def _migrate_vouchers_schema_columns(conn: sqlite3.Connection) -> None:
             existing_cols.add(col_name)
 
 
-PACKERA_SCHEMA_USER_VERSION: int = 20261119
+PACKERA_SCHEMA_USER_VERSION: int = 20261121
 
 
 def _migrate_dynamic_schema_columns(
@@ -1324,6 +1338,9 @@ def init_db_schema(conn: sqlite3.Connection) -> None:
                 or "ect_path" not in el_cols
                 or "mask_is_upright" not in el_cols
                 or "petiole_width_mm" not in el_cols
+                or "efa_qc_pass" not in el_cols
+                or "enclosed_void_frac" not in el_cols
+                or "bilateral_lobe_symmetry" not in el_cols
                 or "cauline_leaf_count" not in om_cols
                 or "ECT_PC1" not in om_cols
                 or "blade_width_mm" not in om_cols

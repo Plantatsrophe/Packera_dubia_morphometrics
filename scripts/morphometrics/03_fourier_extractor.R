@@ -439,10 +439,12 @@ run_fourier_extraction <- function(opts) {
     shape_name <- meta$shape_id
     m_zone <- if (!is.null(m_match) && nrow(m_match) > 0 && "leaf_zone" %in% names(m_match) && !is.na(m_match$leaf_zone[1])) as.character(m_match$leaf_zone[1]) else NA_character_
     m_ect <- if (!is.null(m_match) && nrow(m_match) > 0 && "ect_path" %in% names(m_match) && !is.na(m_match$ect_path[1])) as.character(m_match$ect_path[1]) else NA_character_
+    m_evf <- if (!is.na(m_num("enclosed_void_frac"))) m_num("enclosed_void_frac") else 0.0
+    m_qfr <- if (!is.null(m_match) && nrow(m_match) > 0 && "qc_flag_reason" %in% names(m_match) && !is.na(m_match$qc_flag_reason[1])) as.character(m_match$qc_flag_reason[1]) else "PASS"
     m_amm2 <- if (!is.na(m_num("area_mm2"))) m_num("area_mm2") else if (is_calibrated_mm) round(area_px / (resolved_ppm^2), 2) else NA_real_
     rec <- data.frame(
       shape_id = shape_name, catalogNumber = meta$catalogNumber, plant_individual_id = resolved_pid,
-      leaf_id = meta$leaf_id, n_lamina_components = m_ncc, mask_is_upright = if (!is.na(m_upright)) as.logical(m_upright) else was_tipup, ect_path = m_ect,
+      leaf_id = meta$leaf_id, n_lamina_components = m_ncc, enclosed_void_frac = m_evf, qc_flag_reason = m_qfr, mask_is_upright = if (!is.na(m_upright)) as.logical(m_upright) else was_tipup, ect_path = m_ect,
       leaf_zone = m_zone, leaf_zone_confidence = m_num("leaf_zone_confidence"), dist_from_crown_norm = m_num("dist_from_crown_norm"),
       area_mm2 = m_amm2, pixels_per_mm = resolved_ppm, is_calibrated_mm = is_calibrated_mm, scale_source = scale_source, aspect_ratio = aspect_ratio,
       circularity = circularity, solidity = resolved_solidity, dissection_index = dissection_index, archetype_score = m_num("archetype_score"),
@@ -529,8 +531,20 @@ run_fourier_extraction <- function(opts) {
     harm_mat <- do.call(rbind, harm_list); colnames(harm_mat) <- harmonic_names
   }
   if (all(harmonic_names %in% colnames(harm_mat))) harm_mat <- harm_mat[, harmonic_names, drop = FALSE] else if (ncol(harm_mat) == length(harmonic_names)) colnames(harm_mat) <- harmonic_names
-  if ("n_lamina_components" %in% names(fac_df) && any(!is.na(fac_df$n_lamina_components) & as.integer(fac_df$n_lamina_components) > 1L)) {
-    harm_mat[which(!is.na(fac_df$n_lamina_components) & as.integer(fac_df$n_lamina_components) > 1L), ] <- NA_real_
+  non_jordan_mask <- rep(FALSE, nrow(fac_df))
+  if ("n_lamina_components" %in% names(fac_df)) {
+    non_jordan_mask <- non_jordan_mask | (!is.na(fac_df$n_lamina_components) & as.integer(fac_df$n_lamina_components) > 1L)
+  }
+  if ("enclosed_void_frac" %in% names(fac_df)) {
+    evf_v <- suppressWarnings(as.numeric(fac_df$enclosed_void_frac))
+    non_jordan_mask <- non_jordan_mask | (!is.na(evf_v) & is.finite(evf_v) & evf_v > 0.020)
+  }
+  if ("qc_flag_reason" %in% names(fac_df)) {
+    qfr_v <- toupper(trimws(as.character(fac_df$qc_flag_reason)))
+    non_jordan_mask <- non_jordan_mask | (!is.na(qfr_v) & grepl("ENCLOSED_INTERLOBE_VOID|MULTI_COMPONENT_PINNAE", qfr_v))
+  }
+  if (any(non_jordan_mask)) {
+    harm_mat[which(non_jordan_mask), ] <- NA_real_
     if (!is.null(ef_res) && !is.null(ef_res$coe)) { ef_res$coe <- harm_mat; ef_res$fac <- fac_df }
   }
   if (!is.null(vouchers_df)) {
@@ -670,23 +684,19 @@ run_fourier_extraction <- function(opts) {
   efa_df <- efa_df[, c(lead_cols, setdiff(names(efa_df), lead_cols))]
   for (anm in intersect(c("ect_sym_mats", "ect_sym_vecs", "ect_coo_list", "ect_basal_var_exp", "ect_sym_dim"), names(ect_attrs))) attr(efa_df, anm) <- ect_attrs[[anm]]
 
-  # 5a. Export Disaggregated Individual Leaf Harmonics Archive (Atomic write-then-replace)
-  if (!is.null(opts$output_individual) && nzchar(opts$output_individual)) {
-    ind_export_df <- if (isTRUE(had_explicit_lz) || !("leaf_zone" %in% names(efa_df)) || !any(efa_df$leaf_zone == "basal", na.rm = TRUE)) efa_df else efa_df[is.na(efa_df$leaf_zone) | efa_df$leaf_zone == "basal", , drop = FALSE]
-    write_step03_csv_fast(ind_export_df, opts$output_individual)
-    message("Individual leaf EFA harmonics archive exported: ", opts$output_individual, " (Rows: ", nrow(ind_export_df), ")")
-  }
-
   # Consolidate false Step 02 single-plant DBSCAN splits (cauline-only upper stems & 1-leaf strays)
-  # onto the sheet's primary basal rosette individual while preserving genuine multi-rosette sheets (>=2 basal leaves each)
+  # onto the sheet's primary basal rosette individual while re-zoning upper-stem strays to cauline
   if (all(c("catalogNumber", "plant_individual_id") %in% names(efa_df)) && nrow(efa_df) >= 2L) {
     cat_s03 <- as.character(efa_df$catalogNumber)
     pid_s03 <- ifelse(is.na(efa_df$plant_individual_id), 0L, as.integer(efa_df$plant_individual_id))
     lz_s03 <- if ("leaf_zone" %in% names(efa_df)) tolower(trimws(as.character(efa_df$leaf_zone))) else rep("basal", nrow(efa_df))
     lz_s03[is.na(lz_s03) | !(lz_s03 %in% c("basal", "cauline"))] <- "basal"
-    multi_cats_s03 <- unique(cat_s03[duplicated(paste(cat_s03, pid_s03, sep = "__")) == FALSE])
+    cy_s03 <- if ("cy_rel_plant_bbox" %in% names(efa_df)) suppressWarnings(as.numeric(efa_df$cy_rel_plant_bbox)) else rep(NA_real_, nrow(efa_df))
+    dc_s03 <- if ("dist_from_crown_norm" %in% names(efa_df)) suppressWarnings(as.numeric(efa_df$dist_from_crown_norm)) else rep(NA_real_, nrow(efa_df))
+    pbr_s03 <- if ("petiole_to_blade_ratio" %in% names(efa_df)) suppressWarnings(as.numeric(efa_df$petiole_to_blade_ratio)) else rep(NA_real_, nrow(efa_df))
     by_cat_s03 <- split(seq_len(nrow(efa_df)), cat_s03)
     reassigned_s03 <- 0L
+    rezoned_strays_s03 <- 0L
     for (c_idx_vec in by_cat_s03) {
       u_pids <- sort(unique(pid_s03[c_idx_vec]))
       if (length(u_pids) < 2L) next
@@ -695,6 +705,10 @@ run_fourier_extraction <- function(opts) {
       hub_mask <- bas_counts >= 2L
       kept_pids <- if (any(hub_mask)) u_pids[hub_mask] else u_pids[which.max(bas_counts * 1000L + tot_counts)]
       primary_pid <- kept_pids[which.max(bas_counts[match(kept_pids, u_pids)] * 1000L + tot_counts[match(kept_pids, u_pids)])]
+      prim_bas_rows <- c_idx_vec[pid_s03[c_idx_vec] == primary_pid & lz_s03[c_idx_vec] == "basal"]
+      prim_cy_fin <- cy_s03[prim_bas_rows][is.finite(cy_s03[prim_bas_rows])]
+      min_prim_bas_cy <- if (length(prim_cy_fin) > 0L) min(prim_cy_fin) else NA_real_
+      med_prim_bas_cy <- if (length(prim_cy_fin) > 0L) stats::median(prim_cy_fin) else NA_real_
       for (k_p in seq_along(u_pids)) {
         p_cur <- u_pids[k_p]
         if (p_cur %in% kept_pids) next
@@ -702,13 +716,34 @@ run_fourier_extraction <- function(opts) {
           hit_rows <- c_idx_vec[pid_s03[c_idx_vec] == p_cur]
           pid_s03[hit_rows] <- primary_pid
           reassigned_s03 <- reassigned_s03 + length(hit_rows)
+          for (hr in hit_rows) {
+            if (lz_s03[hr] == "basal" && length(prim_bas_rows) >= 2L) {
+              is_upper_stray <- (is.finite(dc_s03[hr]) && dc_s03[hr] > 0.24) ||
+                (is.finite(cy_s03[hr]) && is.finite(min_prim_bas_cy) && (cy_s03[hr] < (min_prim_bas_cy - 0.12) || (med_prim_bas_cy >= 0.60 && cy_s03[hr] < 0.45))) ||
+                (is.finite(pbr_s03[hr]) && pbr_s03[hr] < 0.08 && (!is.finite(cy_s03[hr]) || (is.finite(med_prim_bas_cy) && cy_s03[hr] < (med_prim_bas_cy - 0.08))))
+              if (isTRUE(is_upper_stray)) {
+                lz_s03[hr] <- "cauline"
+                rezoned_strays_s03 <- rezoned_strays_s03 + 1L
+              }
+            }
+          }
         }
       }
     }
     if (reassigned_s03 > 0L) {
       efa_df$plant_individual_id <- pid_s03
-      message(sprintf("[Step 03 Multi-Plant Hygiene] Consolidated %d cauline-split / single-leaf stray rows onto primary basal individuals.", reassigned_s03))
+      if ("leaf_zone" %in% names(efa_df) && rezoned_strays_s03 > 0L) {
+        efa_df$leaf_zone <- lz_s03
+      }
+      message(sprintf("[Step 03 Multi-Plant Hygiene] Consolidated %d cauline-split / single-leaf stray rows onto primary basal individuals (re-zoned %d upper-stem strays to cauline).", reassigned_s03, rezoned_strays_s03))
     }
+  }
+
+  # 5a. Export Disaggregated Individual Leaf Harmonics Archive (Atomic write-then-replace)
+  if (!is.null(opts$output_individual) && nzchar(opts$output_individual)) {
+    ind_export_df <- if (isTRUE(had_explicit_lz) || !("leaf_zone" %in% names(efa_df)) || !any(efa_df$leaf_zone == "basal", na.rm = TRUE)) efa_df else efa_df[is.na(efa_df$leaf_zone) | efa_df$leaf_zone == "basal", , drop = FALSE]
+    write_step03_csv_fast(ind_export_df, opts$output_individual)
+    message("Individual leaf EFA harmonics archive exported: ", opts$output_individual, " (Rows: ", nrow(ind_export_df), ")")
   }
 
   # 5b. Primary Basal Track & Separate Cauline Track Specimen-Level (OTU) Aggregation (Slenker et al. 2022)

@@ -145,7 +145,14 @@ Three cross-language invariants govern every column documented below:
 | `bilateral_dice` | `REAL` | Score $[0, 1]$ | Dice overlap between left and right lamina halves reflected across the midrib. |
 | `si_a` | `REAL` | Dimensionless $\ge 0$ | Native `LeafMachine3` areal asymmetry index (`0` = perfectly symmetric). |
 | `lm3_gates_pass` | `INTEGER` | `{0, 1}` | Native `LeafMachine3` completeness flag audited alongside R-side clump/boundary checks in Step 03. |
-| `n_lamina_components` | `INTEGER` | Integer $\ge 1$ | Connected foreground components after UNet++ v9 rachis bridging (`1` = single contiguous outline). |
+| `n_lamina_components` | `INTEGER` | Integer $\ge 1$ | Connected foreground components on the focal `Leaf` mask (`1` = single contiguous outline; `> 1` withheld from EFA and retained for multi-component ECT). |
+| `detector_class_id` | `INTEGER` | `{0, 1}` | Stage 1 plant detector organ class (`0` = `Leaf_WHOLE`, `1` = `Leaf_PARTIAL` rescue). |
+| `is_crop_clipped` | `INTEGER` | `{0, 1}` | Equals `1` when lamina pixels are truncated flat along a Stage 1 crop box or sheet edge. |
+| `hole_area_frac` | `REAL` | Fraction $[0, 1]$ | Fraction of focal blade area occupied by Stage 2 Class-2 insect or herbivory holes (`> 0.035` flags `SEVERE_HERBIVORY_HOLES`). |
+| `enclosed_void_frac` | `REAL` | Fraction $[0, 1]$ | Fraction of lamina area enclosed inside unopened inter-lobe overlap loops (`> 0.020` flags `ENCLOSED_INTERLOBE_VOID`, withholding single-loop EFA while retaining ECT). |
+| `bilateral_lobe_symmetry` | `INTEGER` | `{0, 1}` | Equals `1` when both left and right lamina halves show balanced multi-lobe inflections and `|si_a| < 0.28`, gating dissected `bilateral_dice` tolerance. |
+| `efa_qc_pass` | `INTEGER` | `{0, 1}` | Equals `1` when the leaf passes all Step 02 damage, fold, clipping, symmetry, and single-Jordan-loop EFA QC gates. |
+| `qc_flag_reason` | `TEXT` | Semicolon codes | `'PASS'` or semicolon-delimited diagnostic flags (`LEAF_PARTIAL_FRAGMENT`, `CROP_BORDER_CLIPPED`, `SEVERE_HERBIVORY_HOLES`, `LOW_LANDMARK_CONFIDENCE`, `FOLDED_MIDVEIN_TRACE`, `APICAL_TIP_FOLD`, `LONGITUDINAL_MARGIN_CREASE`, `UNILATERAL_ASYMMETRY_OR_TEAR`, `UNRESOLVED_CLUMP`, `ENCLOSED_INTERLOBE_VOID`, `MULTI_COMPONENT_PINNAE`). |
 
 ### 2.6 `voucher_reproductive_phenology` (Step 02 Optical Capitulum Staging)
 

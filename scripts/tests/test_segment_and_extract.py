@@ -2288,8 +2288,10 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
         )
         step2_sources = [
             PROJECT_ROOT / "scripts" / "pipeline" / "02_segment_and_extract.py",
+            PROJECT_ROOT / "scripts" / "vision" / "leaf_geometry_utils.py",
             PROJECT_ROOT / "scripts" / "vision" / "lm3_inference_engines.py",
             PROJECT_ROOT / "scripts" / "vision" / "organ_crown_metrics.py",
+            PROJECT_ROOT / "scripts" / "vision" / "rescore_step02_qc_and_zones.py",
             PROJECT_ROOT / "scripts" / "vision" / "capitulum_phenology_classifier.py",
             PROJECT_ROOT / "scripts" / "vision" / "step02_figures.py",
         ]
@@ -2478,6 +2480,391 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
         out_two = cluster_plant_individuals([p0_a, p0_b, p1_a, p1_b], sheet_width=2000, sheet_height=3000, root_boxes=roots)
         self.assertEqual([inst.plant_individual_id for inst in out_two], [0, 0, 1, 1])
 
+
+    def test_unfilled_dissected_masks_paper_pockets_and_sinus_bridge_opening(self) -> None:
+        """
+        Verify:
+          1. `_reduce_crop_predictions_native_lm3` and `_build_native_lm3_crop_masks` preserve unfilled
+             `cls == 0` (`Leaf`) masks when touching dissected lobes enclose a white-paper pocket missed by `cls == 2` (`Hole`).
+          2. `_subtract_interior_mounting_paper_pockets` carves out interior mounting-paper pockets via
+             `specimen_paper_cleaned_mask` and bimodal CIE L*a*b* without severing cross-blade linen mounting straps.
+          3. `open_hairline_sinus_bridges_and_measure_voids` opens hairline (`<= 3.5 px`) lobe-tip bridges so
+             single-loop contours enter the sinus, while retaining broad (`> 3.5 px`) overlap loops with
+             void-aware `compute_lm3_shape_metrics` solidity and `ENCLOSED_INTERLOBE_VOID` flagging.
+        """
+        from scripts.vision.leaf_geometry_utils import (
+            compute_lm3_shape_metrics,
+            open_hairline_sinus_bridges_and_measure_voids,
+        )
+        from scripts.vision.lm3_inference_engines import (
+            _reduce_crop_predictions_native_lm3,
+            evaluate_leaf_damage_and_fold_qc,
+        )
+
+        # 1. Dissected leaf mask with enclosed sinus pocket (no cls==2 Hole prediction)
+        raw_ring = np.zeros((120, 120), dtype=np.uint8)
+        cv2.circle(raw_ring, (60, 60), 42, 1, -1)
+        cv2.circle(raw_ring, (60, 60), 16, 0, -1)
+        crop_det_tuple = [((18, 18, 102, 102), raw_ring, 0.93, 0)]
+
+        red_dets = _reduce_crop_predictions_native_lm3(crop_det_tuple, (120, 120))
+        self.assertEqual(len(red_dets), 1)
+        _red_bbox, red_lam, red_sc, red_cls = red_dets[0]
+        self.assertEqual(red_cls, 0)
+        self.assertAlmostEqual(red_sc, 0.93, places=2)
+        self.assertEqual(int(red_lam[60, 60]), 0, "Unfilled cls==0 Leaf mask must preserve interior sinus zero-pocket.")
+
+        built_lam, built_sc, built_pet, built_hole = step02._build_native_lm3_crop_masks(crop_det_tuple, (120, 120))
+        self.assertIsNotNone(built_lam)
+        self.assertAlmostEqual(built_sc, 0.93, places=2)
+        self.assertIsNone(built_pet)
+        self.assertIsNone(built_hole)
+        self.assertEqual(int(built_lam[60, 60]), 0, "_build_native_lm3_crop_masks must not flood-fill outer Leaf polygons.")
+
+        # 2. Bimodal CIE L*a*b* + specimen_mask interior paper-pocket subtraction (sparing linen straps)
+        crop_bgr = np.full((140, 140, 3), (232, 238, 242), dtype=np.uint8)
+        solid_blob = np.zeros((140, 140), dtype=bool)
+        yy, xx = np.ogrid[:140, :140]
+        solid_blob[((yy - 70) ** 2) / (52.0 ** 2) + ((xx - 70) ** 2) / (38.0 ** 2) <= 1.0] = True
+        crop_bgr[solid_blob] = (48, 92, 58)
+        pocket_reg = ((yy - 52) ** 2 + (xx - 70) ** 2) <= (9.0 ** 2)
+        crop_bgr[pocket_reg] = (234, 239, 243)
+        strap_reg = solid_blob & (yy >= 88) & (yy <= 92)
+        crop_bgr[strap_reg] = (233, 238, 242)
+
+        spec_clean = solid_blob.astype(np.uint8) * 255
+        spec_clean[pocket_reg] = 0
+
+        cleaned_bool = step02._subtract_interior_mounting_paper_pockets(
+            solid_blob,
+            specimen_paper_cleaned_mask=spec_clean,
+            crop_bgr=crop_bgr,
+            paper_l_ref=94.0,
+        )
+        self.assertFalse(bool(cleaned_bool[52, 70]), "Compact interior mounting-paper pocket must be subtracted.")
+        self.assertTrue(bool(cleaned_bool[90, 70]), "Cross-blade linen mounting strap must not sever the lamina.")
+        n_cc_strap, _ = cv2.connectedComponents(cleaned_bool.astype(np.uint8))
+        self.assertEqual(n_cc_strap - 1, 1, "Cross-blade mounting strap must leave lamina as 1 connected component.")
+
+        # 3A. Hairline (2 px) lobe-tip contact bridge opens cleanly -> enclosed_void_frac == 0.0
+        hairline_mask = np.zeros((140, 140), dtype=np.uint8)
+        cv2.ellipse(hairline_mask, (70, 70), (42, 52), 0, 0, 360, 255, -1)
+        hairline_mask[60:80, 72:118] = 0
+        hairline_mask[60:80, 108:110] = 255
+        opened_u8, evf_hair, n_open_hair = open_hairline_sinus_bridges_and_measure_voids(hairline_mask, max_bridge_px=3.5)
+        self.assertGreaterEqual(n_open_hair, 1)
+        self.assertEqual(evf_hair, 0.0)
+        n_bg_open, _ = cv2.connectedComponents((opened_u8 == 0).astype(np.uint8), connectivity=8)
+        self.assertEqual(n_bg_open - 1, 1, "Hairline 2 px lobe-tip bridge must connect interior sinus to exterior background.")
+
+        # 3B. Broad (10 px) lobe overlap retains topology, lowers void-aware solidity, and triggers ENCLOSED_INTERLOBE_VOID
+        broad_mask = np.zeros((140, 140), dtype=np.uint8)
+        cv2.ellipse(broad_mask, (70, 70), (44, 54), 0, 0, 360, 255, -1)
+        broad_mask[52:88, 54:86] = 0
+        kept_u8, evf_broad, n_open_broad = open_hairline_sinus_bridges_and_measure_voids(broad_mask, max_bridge_px=3.5)
+        self.assertEqual(n_open_broad, 0)
+        self.assertGreater(evf_broad, 0.05)
+        self.assertEqual(int(kept_u8[70, 70]), 0)
+
+        filled_ref = broad_mask.copy()
+        cv2.ellipse(filled_ref, (70, 70), (44, 54), 0, 0, 360, 255, -1)
+        m_void = compute_lm3_shape_metrics(broad_mask)
+        m_fill = compute_lm3_shape_metrics(filled_ref)
+        self.assertLess(m_void["solidity"], m_fill["solidity"] - 0.08, "Void-aware solidity must subtract interior interlobe voids.")
+
+        qc_broad = evaluate_leaf_damage_and_fold_qc(
+            oriented_mask_u8=broad_mask,
+            solidity=m_void["solidity"],
+            bilateral_dice=0.92,
+            si_a=0.02,
+            lm3_gates_pass=True,
+            enclosed_void_frac=evf_broad,
+        )
+        self.assertFalse(qc_broad["efa_qc_pass"])
+        self.assertIn("ENCLOSED_INTERLOBE_VOID", qc_broad["qc_flag_reason"])
+
+    def test_folded_damaged_leaf_qc_gates_and_bilateral_dissection_symmetry(self) -> None:
+        """
+        Verify `evaluate_leaf_damage_and_fold_qc` accurately separates:
+          - `LEAF_PARTIAL_FRAGMENT`, `CROP_BORDER_CLIPPED`, `SEVERE_HERBIVORY_HOLES`
+          - `FOLDED_MIDVEIN_TRACE` and `APICAL_TIP_FOLD` on 31-keypoint pose predictions
+          - `LONGITUDINAL_MARGIN_CREASE` on half-creased ("taco") leaves
+          - `UNILATERAL_ASYMMETRY_OR_TEAR` on one-sided torn blades with `solidity < 0.72`
+          - `PASS` (`bilateral_lobe_symmetry == True`) on genuine bilaterally pinnatifid Packera leaves.
+        """
+        from scripts.vision.lm3_inference_engines import evaluate_leaf_damage_and_fold_qc
+
+        ovate = np.zeros((160, 120), dtype=np.uint8)
+        cv2.ellipse(ovate, (60, 80), (32, 60), 0, 0, 360, 255, -1)
+
+        r_part = evaluate_leaf_damage_and_fold_qc(ovate, detector_class_id=1, segment_partial_leaves=False)
+        self.assertFalse(r_part["efa_qc_pass"])
+        self.assertIn("LEAF_PARTIAL_FRAGMENT", r_part["qc_flag_reason"])
+
+        r_clip = evaluate_leaf_damage_and_fold_qc(ovate, is_crop_clipped=True)
+        self.assertFalse(r_clip["efa_qc_pass"])
+        self.assertIn("CROP_BORDER_CLIPPED", r_clip["qc_flag_reason"])
+
+        r_hole = evaluate_leaf_damage_and_fold_qc(ovate, hole_area_frac=0.055)
+        self.assertFalse(r_hole["efa_qc_pass"])
+        self.assertIn("SEVERE_HERBIVORY_HOLES", r_hole["qc_flag_reason"])
+
+        creased = ovate.copy()
+        creased[:, :58] = 0
+        r_crease = evaluate_leaf_damage_and_fold_qc(
+            creased, solidity=0.93, bilateral_dice=0.82, si_a=0.12, lm3_gates_pass=True
+        )
+        self.assertFalse(r_crease["efa_qc_pass"])
+        self.assertIn("LONGITUDINAL_MARGIN_CREASE", r_crease["qc_flag_reason"])
+
+        bent_kps = {
+            "lamina_tip": (60.0, 22.0, 0.92),
+            "midvein_3": (66.0, 48.0, 0.90),
+            "midvein_7": (96.0, 80.0, 0.91),
+            "midvein_11": (68.0, 112.0, 0.89),
+            "lamina_base": (60.0, 138.0, 0.93),
+        }
+        r_bent = evaluate_leaf_damage_and_fold_qc(
+            ovate, keypoints_31=bent_kps, is_geometric_fallback_pose=False
+        )
+        self.assertFalse(r_bent["efa_qc_pass"])
+        self.assertIn("FOLDED_MIDVEIN_TRACE", r_bent["qc_flag_reason"])
+
+        tucked_kps = {
+            "lamina_tip": (60.0, 52.0, 0.88),
+            "midvein_7": (60.0, 95.0, 0.90),
+            "lamina_base": (60.0, 138.0, 0.92),
+        }
+        r_tip = evaluate_leaf_damage_and_fold_qc(
+            ovate,
+            bilateral_dice=0.76,
+            si_a=0.18,
+            oriented_points={"lamina_tip": (60.0, 52.0), "lamina_base": (60.0, 138.0)},
+            keypoints_31=tucked_kps,
+            is_geometric_fallback_pose=False,
+        )
+        self.assertFalse(r_tip["efa_qc_pass"])
+        self.assertIn("APICAL_TIP_FOLD", r_tip["qc_flag_reason"])
+
+        torn_one_side = np.zeros((180, 140), dtype=np.uint8)
+        for y_r in range(25, 155):
+            frac = (y_r - 25.0) / 130.0
+            hw_r = int(round(8.0 + 34.0 * np.sin(np.pi * frac) * (0.45 + 0.55 * (np.sin(3.0 * np.pi * frac) ** 2))))
+            hw_l = 6
+            torn_one_side[y_r, 70 - hw_l : 70 + hw_r] = 255
+        r_torn = evaluate_leaf_damage_and_fold_qc(
+            torn_one_side,
+            solidity=0.61,
+            bilateral_dice=0.60,
+            si_a=0.24,
+            lm3_gates_pass=False,
+            oriented_points={"lamina_tip": (70.0, 25.0), "lamina_base": (70.0, 154.0)},
+        )
+        self.assertFalse(r_torn["bilateral_lobe_symmetry"])
+        self.assertFalse(r_torn["efa_qc_pass"])
+        self.assertIn("UNILATERAL_ASYMMETRY_OR_TEAR", r_torn["qc_flag_reason"])
+
+        pinnatifid = np.zeros((180, 140), dtype=np.uint8)
+        for y_r in range(25, 155):
+            frac = (y_r - 25.0) / 130.0
+            hw = int(round(7.0 + 36.0 * (0.35 + 0.65 * (np.sin(4.0 * np.pi * frac) ** 2))))
+            pinnatifid[y_r, 70 - hw : 70 + hw] = 255
+        r_pinn = evaluate_leaf_damage_and_fold_qc(
+            pinnatifid,
+            solidity=0.56,
+            bilateral_dice=0.88,
+            si_a=0.04,
+            lm3_gates_pass=False,
+            oriented_points={"lamina_tip": (70.0, 25.0), "lamina_base": (70.0, 154.0)},
+        )
+        self.assertTrue(r_pinn["bilateral_lobe_symmetry"])
+        self.assertTrue(r_pinn["efa_qc_pass"], f"Expected bilateral pinnatifid leaf to PASS, got {r_pinn}")
+        self.assertEqual(r_pinn["qc_flag_reason"], "PASS")
+
+    def test_flowering_shoot_basal_vs_cauline_tuning_and_cpu_rescorer(self) -> None:
+        """
+        Verify:
+          1. Subpetiolate lower-cauline stem leaves (`s_stem ~ 0.30`) on flowering shoots are classified
+             `cauline` rather than `basal` even when angled toward the crown.
+          2. Unrooted upper flowering stem fragments with sessile alternate leaves stay `cauline` (Case 4B).
+          3. `rescore_step02_qc_and_zones.py` migrates SQLite (`user_version = 20261121`), refreshes QC gates,
+             opens hairline sinus bridges, and updates `leaf_zone` across SQLite and `extracted_leaf_manifest.csv`.
+        """
+        from scripts.core.db import get_db_connection
+        from scripts.core.db_schema import PACKERA_SCHEMA_USER_VERSION
+        from scripts.vision.organ_crown_metrics import classify_leaf_zone_anatomical
+        from scripts.vision.rescore_step02_qc_and_zones import rescore_tier_a_leaves
+
+        leaves_flowering = [
+            {
+                "leaf_id": 1,
+                "plant_individual_id": 0,
+                "p_petiole_tip": (495.0, 2190.0),
+                "p_base_sheet": (460.0, 2120.0),
+                "p_apex_sheet": (420.0, 2030.0),
+                "blade_length_px": 98.0,
+                "petiole_length_px": 80.0,
+                "petiole_to_blade_ratio": 0.82,
+                "has_petiole_mask": True,
+            },
+            {
+                "leaf_id": 2,
+                "plant_individual_id": 0,
+                "p_petiole_tip": (506.0, 2185.0),
+                "p_base_sheet": (548.0, 2115.0),
+                "p_apex_sheet": (590.0, 2025.0),
+                "blade_length_px": 99.0,
+                "petiole_length_px": 81.0,
+                "petiole_to_blade_ratio": 0.82,
+                "has_petiole_mask": True,
+            },
+            {
+                "leaf_id": 3,
+                "plant_individual_id": 0,
+                "p_petiole_tip": (502.0, 1660.0),
+                "p_base_sheet": (530.0, 1635.0),
+                "p_apex_sheet": (585.0, 1585.0),
+                "blade_length_px": 74.0,
+                "petiole_length_px": 22.0,
+                "petiole_to_blade_ratio": 0.30,
+                "has_petiole_mask": True,
+            },
+        ]
+        zones_fl = classify_leaf_zone_anatomical(
+            leaves_flowering,
+            crowns_by_pid={0: (500.0, 2200.0)},
+            capitula_detections=[(380.0, 480.0, 420.0, 520.0)],
+        )
+        self.assertEqual(zones_fl[1]["leaf_zone"], "basal")
+        self.assertEqual(zones_fl[2]["leaf_zone"], "basal")
+        self.assertEqual(zones_fl[3]["leaf_zone"], "cauline")
+
+        leaves_cut_stem = [
+            {
+                "leaf_id": 10,
+                "plant_individual_id": 0,
+                "p_petiole_tip": (400.0, 1280.0),
+                "p_base_sheet": (400.0, 1280.0),
+                "p_apex_sheet": (455.0, 1210.0),
+                "blade_length_px": 89.0,
+                "petiole_length_px": 0.0,
+                "petiole_to_blade_ratio": 0.0,
+                "has_petiole_mask": False,
+            },
+            {
+                "leaf_id": 11,
+                "plant_individual_id": 0,
+                "p_petiole_tip": (398.0, 920.0),
+                "p_base_sheet": (398.0, 920.0),
+                "p_apex_sheet": (345.0, 855.0),
+                "blade_length_px": 84.0,
+                "petiole_length_px": 0.0,
+                "petiole_to_blade_ratio": 0.0,
+                "has_petiole_mask": False,
+            },
+            {
+                "leaf_id": 12,
+                "plant_individual_id": 0,
+                "p_petiole_tip": (402.0, 610.0),
+                "p_base_sheet": (402.0, 610.0),
+                "p_apex_sheet": (450.0, 550.0),
+                "blade_length_px": 77.0,
+                "petiole_length_px": 0.0,
+                "petiole_to_blade_ratio": 0.0,
+                "has_petiole_mask": False,
+            },
+        ]
+        zones_cut = classify_leaf_zone_anatomical(
+            leaves_cut_stem,
+            crowns_by_pid={},
+            capitula_detections=[(240.0, 380.0, 280.0, 420.0)],
+        )
+        self.assertEqual([zones_cut[k]["leaf_zone"] for k in (10, 11, 12)], ["cauline", "cauline", "cauline"])
+
+        with tempfile.TemporaryDirectory() as tmp_d:
+            tmp_p = Path(tmp_d)
+            data_dir = tmp_p / "data"
+            masks_dir = data_dir / "masks"
+            contours_dir = data_dir / "contours"
+            tables_dir = data_dir / "tables"
+            for d in (masks_dir, contours_dir, tables_dir):
+                d.mkdir(parents=True, exist_ok=True)
+
+            db_file = data_dir / "packera_pipeline.sqlite"
+            conn = get_db_connection(db_path=db_file, init_schema=True)
+            try:
+                uv = int(conn.execute("PRAGMA user_version;").fetchone()[0])
+                self.assertEqual(uv, PACKERA_SCHEMA_USER_VERSION)
+                self.assertEqual(uv, 20261121)
+
+                m1 = np.zeros((150, 110), dtype=np.uint8)
+                cv2.ellipse(m1, (55, 75), (30, 54), 0, 0, 360, 255, -1)
+                m2 = m1.copy()
+                m2[:, :53] = 0
+                m3 = np.zeros((130, 96), dtype=np.uint8)
+                cv2.ellipse(m3, (48, 65), (22, 46), 0, 0, 360, 255, -1)
+
+                p_m1 = masks_dir / "RESC_1_leaf1.png"
+                p_m2 = masks_dir / "RESC_1_leaf2.png"
+                p_m3 = masks_dir / "RESC_1_leaf3.png"
+                cv2.imwrite(str(p_m1), m1)
+                cv2.imwrite(str(p_m2), m2)
+                cv2.imwrite(str(p_m3), m3)
+
+                dummy_cjson = "[[55.0,129.0],[25.0,75.0],[55.0,21.0],[85.0,75.0]]"
+                with conn:
+                    conn.execute(
+                        "INSERT INTO vouchers (catalogNumber, scientificName, species_standardized, determiner_tier, qc_status) VALUES ('RESC_1', 'Packera dubia', 'Packera dubia', 'Tier_1_Gold', 'PASS');"
+                    )
+                    conn.execute(
+                        "INSERT INTO plant_individuals (catalogNumber, plant_individual_id, crown_x, crown_y, plant_height_px, is_bent_stem) VALUES ('RESC_1', 0, 500.0, 2200.0, 1600.0, 0);"
+                    )
+                    conn.execute(
+                        "INSERT INTO voucher_reproductive_phenology (catalogNumber, plant_individual_id, capitula_count) VALUES ('RESC_1', 0, 6);"
+                    )
+                    rows_ins = [
+                        ("RESC_1", 0, 1, "basal", 0.92, 0.05, 0.94, 0.85, 1.80, 95.0, 75.0, 0.79, 4500.0, 0.94, 0.03, 1, 1, 0.95, str(p_m1), dummy_cjson),
+                        ("RESC_1", 0, 2, "basal", 0.90, 0.06, 0.93, 0.80, 3.60, 95.0, 70.0, 0.74, 2250.0, 0.82, 0.12, 1, 1, 0.93, str(p_m2), dummy_cjson),
+                        ("RESC_1", 0, 3, "basal", 0.70, 0.20, 0.92, 0.82, 2.09, 80.0, 16.0, 0.20, 2800.0, 0.93, 0.04, 1, 1, 0.62, str(p_m3), dummy_cjson),
+                    ]
+                    conn.executemany(
+                        """
+                        INSERT INTO extracted_leaves (
+                            catalogNumber, plant_individual_id, leaf_id, leaf_zone, leaf_zone_confidence,
+                            dist_from_crown_norm, solidity, circularity, aspect_ratio, blade_length_px,
+                            petiole_length_px, petiole_to_blade_ratio, area_px, bilateral_dice, si_a,
+                            lm3_gates_pass, n_lamina_components, cy_rel_plant_bbox, mask_path, contour_xy_json
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                        """,
+                        rows_ins,
+                    )
+                pd.DataFrame(
+                    [
+                        {"catalogNumber": "RESC_1", "plant_individual_id": 0, "leaf_id": 1, "leaf_zone": "basal", "solidity": 0.94},
+                        {"catalogNumber": "RESC_1", "plant_individual_id": 0, "leaf_id": 2, "leaf_zone": "basal", "solidity": 0.93},
+                        {"catalogNumber": "RESC_1", "plant_individual_id": 0, "leaf_id": 3, "leaf_zone": "basal", "solidity": 0.92},
+                    ]
+                ).to_csv(tables_dir / "extracted_leaf_manifest.csv", index=False)
+            finally:
+                conn.close()
+
+            stats = rescore_tier_a_leaves(
+                db_path=db_file,
+                data_dir=data_dir,
+                manifest_csv=tables_dir / "extracted_leaf_manifest.csv",
+            )
+            self.assertEqual(stats["total"], 3)
+            self.assertEqual(stats["efa_qc_pass"], 2)
+            self.assertEqual(stats["flagged"], 1)
+            self.assertEqual(stats["basal"], 2)
+            self.assertEqual(stats["cauline"], 1)
+
+            man_after = pd.read_csv(tables_dir / "extracted_leaf_manifest.csv").set_index("leaf_id")
+            self.assertTrue(bool(man_after.loc[1, "efa_qc_pass"]))
+            self.assertFalse(bool(man_after.loc[2, "efa_qc_pass"]))
+            self.assertIn("LONGITUDINAL_MARGIN_CREASE", str(man_after.loc[2, "qc_flag_reason"]))
+            self.assertEqual(str(man_after.loc[1, "leaf_zone"]), "basal")
+            self.assertEqual(str(man_after.loc[3, "leaf_zone"]), "cauline")
 
 if __name__ == "__main__":
     unittest.main()

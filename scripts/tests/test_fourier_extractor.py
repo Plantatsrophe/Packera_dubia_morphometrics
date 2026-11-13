@@ -1130,5 +1130,74 @@ class TestFourierExtractor(unittest.TestCase):
             self.assertEqual(proc.returncode, 0, f"Step 03 R zero-trust test failed:\n{proc.stderr}\n{proc.stdout}")
             self.assertIn("STEP03_ZERO_TRUST_OK", proc.stdout)
 
+    def test_step03_enclosed_void_efa_withholding_bilateral_qc_and_stray_pid_rezoning(self) -> None:
+        """
+        Verify Step 03 R contracts across `db_utils.R`, `dissected_leaf_utils.R`, and `03_fourier_extractor.R`:
+          1. Schema version `20261121L` and 7 new `extracted_leaves` QC columns (`enclosed_void_frac`,
+             `bilateral_lobe_symmetry`, `hole_area_frac`, `is_crop_clipped`, `detector_class_id`, `efa_qc_pass`, `qc_flag_reason`).
+          2. `03_fourier_extractor.R` (`non_jordan_mask`) and `db_utils.R` withhold single-loop EFA harmonics when
+             `enclosed_void_frac > 0.020` (`ENCLOSED_INTERLOBE_VOID`) while retaining the row for hole-aware `32x360` ECT descriptors.
+          3. `evaluate_step03_lm3_efa_qc` enforces `bilateral_lobe_symmetry` (`is_verified_diss`) before granting
+             `solidity < 0.72` asymmetry exemptions, and rejects `hole_area_frac` (`haf > 0.035`) and `is_crop_clipped`.
+          4. `dissected_leaf_utils.R` tightens `d_crown[ii]` fallback (`<= 0.18` basal vs `> 0.24` cauline, plus `> 0.28`
+             cauline-only stem guard) and `03_fourier_extractor.R` re-zones merged upper-stem stray PIDs (`rezoned_strays_s03`) to `cauline`.
+        """
+        dbu_txt = (PROJECT_ROOT / "scripts" / "core" / "db_utils.R").read_text(encoding="utf-8")
+        dlu_txt = (PROJECT_ROOT / "scripts" / "morphometrics" / "dissected_leaf_utils.R").read_text(encoding="utf-8")
+        s03_txt = (PROJECT_ROOT / "scripts" / "morphometrics" / "03_fourier_extractor.R").read_text(encoding="utf-8")
+
+        self.assertIn("PACKERA_SCHEMA_USER_VERSION <- 20261121L", dbu_txt)
+        for col_name in (
+            "detector_class_id",
+            "is_crop_clipped",
+            "hole_area_frac",
+            "enclosed_void_frac",
+            "bilateral_lobe_symmetry",
+            "efa_qc_pass",
+            "qc_flag_reason",
+        ):
+            self.assertIn(col_name, dbu_txt)
+
+        self.assertIn("is_enc_void", dbu_txt)
+        self.assertIn("ENCLOSED_INTERLOBE_VOID", dbu_txt)
+        self.assertIn("is_verified_diss", dbu_txt)
+        self.assertIn("haf > 0.035", dbu_txt)
+
+        self.assertIn("d_crown[ii] <= 0.18", dlu_txt)
+        self.assertIn("d_crown[ii] > 0.24", dlu_txt)
+        self.assertIn("> 0.28", dlu_txt)
+        self.assertIn("crown_verified_cauline_only", dlu_txt)
+
+        self.assertIn("non_jordan_mask", s03_txt)
+        self.assertIn("ENCLOSED_INTERLOBE_VOID", s03_txt)
+        self.assertIn("enclosed_void_frac", s03_txt)
+        self.assertIn("min_prim_bas_cy - 0.12", s03_txt)
+        self.assertIn("rezoned_strays_s03", s03_txt)
+
+        if not rscript_available():
+            return
+
+        r_expr = (
+            "source('scripts/core/db_utils.R'); "
+            "df_q <- data.frame("
+            "  solidity = c(0.60, 0.60, 0.88, 0.88), "
+            "  bilateral_dice = c(0.62, 0.62, 0.91, 0.91), "
+            "  si_a = c(0.22, 0.22, 0.03, 0.03), "
+            "  lm3_gates_pass = c(FALSE, FALSE, TRUE, TRUE), "
+            "  bilateral_lobe_symmetry = c(FALSE, TRUE, TRUE, TRUE), "
+            "  enclosed_void_frac = c(0.0, 0.0, 0.045, 0.0), "
+            "  hole_area_frac = c(0.0, 0.0, 0.0, 0.050), "
+            "  stringsAsFactors = FALSE"
+            "); "
+            "res_efa <- evaluate_step03_lm3_efa_qc(df_q, allow_multi_component_ect = FALSE); "
+            "res_ect <- evaluate_step03_lm3_efa_qc(df_q, allow_multi_component_ect = TRUE); "
+            "stopifnot(identical(as.logical(res_efa), c(FALSE, TRUE, FALSE, FALSE))); "
+            "stopifnot(identical(as.logical(res_ect), c(FALSE, TRUE, TRUE, FALSE))); "
+            "cat('STEP03_QC_GATES_OK\n')"
+        )
+        proc = run_warm_r_cmd(["Rscript", "-e", r_expr], stage_key="step03", cwd=PROJECT_ROOT)
+        self.assertEqual(proc.returncode, 0, f"R QC gate check failed:\n{proc.stderr}\n{proc.stdout}")
+        self.assertIn("STEP03_QC_GATES_OK", proc.stdout)
+
 if __name__ == "__main__":
     unittest.main()

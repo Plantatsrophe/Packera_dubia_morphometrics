@@ -46,12 +46,111 @@ from scripts.vision.organ_crown_metrics import (
 )
 
 
+def open_hairline_sinus_bridges_and_measure_voids(
+    mask: Optional[np.ndarray],
+    hole_mask: Optional[np.ndarray] = None,
+    max_bridge_px: float = 3.5,
+) -> Tuple[np.ndarray, float, int]:
+    """
+    Inspects interior `0`-pixel voids inside an unfilled lamina `mask`:
+      1. Opens hairline `<= max_bridge_px` lobe-tip contact bridges separating non-hole
+         dissected sinus pockets from the exterior background (without disconnecting the
+         lamina) so single-contour `extract_contour` enters the true sinus.
+      2. Measures `enclosed_void_frac` across any remaining broadly bridged (`> max_bridge_px`)
+         interior non-hole voids so Step 02/03 can withhold distorted single-loop EFA harmonics
+         while retaining the hole-preserved mask for topological ECT and solidity.
+    Returns `(contour_ready_mask_u8, enclosed_void_frac, n_opened_bridges)`.
+    """
+    if mask is None or np.asarray(mask).size == 0:
+        return np.zeros((0, 0), dtype=np.uint8), 0.0, 0
+    work_u8 = (np.asarray(mask) > 0).astype(np.uint8) * 255
+    fg_area = int(np.count_nonzero(work_u8))
+    if fg_area < 32:
+        return work_u8, 0.0, 0
+
+    h, w = work_u8.shape[:2]
+    padded_inv = np.ones((h + 2, w + 2), dtype=np.uint8)
+    padded_inv[1 : h + 1, 1 : w + 1] = (work_u8 == 0).astype(np.uint8)
+    num_bg, bg_labels, bg_stats, _ = cv2.connectedComponentsWithStats(padded_inv, connectivity=8)
+    if num_bg <= 2:
+        return work_u8, 0.0, 0
+
+    ext_lbl = int(bg_labels[0, 0])
+    ext_bg = (bg_labels[1 : h + 1, 1 : w + 1] == ext_lbl)
+    min_void_px = max(16, int(round(0.003 * float(fg_area))))
+    hole_bool = (
+        (np.asarray(hole_mask) > 0)
+        if (hole_mask is not None and isinstance(hole_mask, np.ndarray) and hole_mask.shape[:2] == (h, w))
+        else None
+    )
+
+    cand_void_lbls = [
+        lbl
+        for lbl in range(1, num_bg)
+        if lbl != ext_lbl and int(bg_stats[lbl, cv2.CC_STAT_AREA]) >= min_void_px
+    ]
+    if not cand_void_lbls:
+        return work_u8, 0.0, 0
+
+    dt_from_ext = cv2.distanceTransform((~ext_bg).astype(np.uint8), cv2.DIST_L2, 5)
+    n_fg_init, _, fg_stats_init, _ = cv2.connectedComponentsWithStats((work_u8 > 0).astype(np.uint8), connectivity=8)
+    sig_fg_init = sum(1 for c_i in range(1, n_fg_init) if int(fg_stats_init[c_i, cv2.CC_STAT_AREA]) >= 32)
+
+    opened_count = 0
+    unopened_void_px = 0
+    inner_bg_lbls = bg_labels[1 : h + 1, 1 : w + 1]
+
+    for v_lbl in cand_void_lbls:
+        v_mask = inner_bg_lbls == v_lbl
+        v_area = int(np.count_nonzero(v_mask))
+        if v_area < min_void_px:
+            continue
+        if hole_bool is not None:
+            overlap_h = float(np.count_nonzero(v_mask & hole_bool)) / float(max(v_area, 1))
+            if overlap_h > 0.30:
+                continue
+
+        v_dt_vals = dt_from_ext[v_mask]
+        if v_dt_vals.size == 0:
+            continue
+        min_dt = float(np.min(v_dt_vals))
+        bridge_px = max(0.0, min_dt - 1.0)
+        if bridge_px <= float(max_bridge_px):
+            v_ys, v_xs = np.where(v_mask)
+            best_v_i = int(np.argmin(v_dt_vals))
+            vy0, vx0 = int(v_ys[best_v_i]), int(v_xs[best_v_i])
+            rad_w = int(math.ceil(max_bridge_px)) + 4
+            wy0, wy1 = max(0, vy0 - rad_w), min(h, vy0 + rad_w + 1)
+            wx0, wx1 = max(0, vx0 - rad_w), min(w, vx0 + rad_w + 1)
+            ext_sub = ext_bg[wy0:wy1, wx0:wx1]
+            if np.any(ext_sub):
+                ey_s, ex_s = np.where(ext_sub)
+                d2_ext = (ey_s + wy0 - vy0) ** 2 + (ex_s + wx0 - vx0) ** 2
+                best_e_i = int(np.argmin(d2_ext))
+                ey0, ex0 = int(ey_s[best_e_i] + wy0), int(ex_s[best_e_i] + wx0)
+                trial_u8 = work_u8.copy()
+                cv2.line(trial_u8, (vx0, vy0), (ex0, ey0), 0, thickness=2)
+                n_fg_tr, _, fg_stats_tr, _ = cv2.connectedComponentsWithStats((trial_u8 > 0).astype(np.uint8), connectivity=8)
+                sig_fg_tr = sum(1 for c_i in range(1, n_fg_tr) if int(fg_stats_tr[c_i, cv2.CC_STAT_AREA]) >= 32)
+                if sig_fg_tr <= max(1, sig_fg_init):
+                    work_u8 = trial_u8
+                    ext_bg = ext_bg | v_mask | (work_u8 == 0)
+                    dt_from_ext = cv2.distanceTransform((~ext_bg).astype(np.uint8), cv2.DIST_L2, 5)
+                    opened_count += 1
+                    continue
+
+        unopened_void_px += v_area
+
+    enclosed_void_frac = float(unopened_void_px) / float(max(fg_area, 1))
+    return work_u8, round(enclosed_void_frac, 4), opened_count
+
+
 def compute_lm3_shape_metrics(
     mask: Optional[np.ndarray],
     angle_cw: Optional[float] = None,
     bbox: Optional[Tuple[int, int, int, int]] = None,
 ) -> Dict[str, float]:
-    """Computes polygon morphology scalars (`area_px`, `solidity`, `circularity`, `extent`, anatomical `aspect_ratio`) via LeafMachine3 `polygon_morphology`, aggregating across all retained pinna islands on multi-component leaves."""
+    """Computes polygon morphology scalars (`area_px`, `solidity`, `circularity`, `extent`, anatomical `aspect_ratio`) via LeafMachine3 `polygon_morphology`, preserving interior sinus voids (`cv2.RETR_CCOMP`) and multi-component pinna islands."""
     empty = {
         "area_px": 0.0,
         "solidity": 0.0,
@@ -69,8 +168,18 @@ def compute_lm3_shape_metrics(
     if bw <= 0 or bh <= 0:
         return empty
     sub = mask_u8[by : by + bh, bx : bx + bw]
-    cnts_ext, _ = cv2.findContours(sub, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-    sig_cnts = [c for c in cnts_ext if len(c) >= 3 and abs(float(cv2.contourArea(c))) >= 16.0]
+    cnts_ccomp, hier_ccomp = cv2.findContours(sub, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_NONE)
+    outer_cnts = [
+        cnts_ccomp[i]
+        for i in range(len(cnts_ccomp))
+        if hier_ccomp is not None and int(hier_ccomp[0][i][3]) == -1 and len(cnts_ccomp[i]) >= 3
+    ]
+    hole_cnts = [
+        cnts_ccomp[i]
+        for i in range(len(cnts_ccomp))
+        if hier_ccomp is not None and int(hier_ccomp[0][i][3]) != -1 and abs(float(cv2.contourArea(cnts_ccomp[i]))) >= 12.0
+    ]
+    sig_cnts = [c for c in outer_cnts if abs(float(cv2.contourArea(c))) >= 16.0]
     cnt_xy = extract_contour(sub)
     if cnt_xy is None or len(cnt_xy) < 3:
         return {
@@ -81,14 +190,20 @@ def compute_lm3_shape_metrics(
             "aspect_ratio": float(max(bw, bh)) / float(max(min(bw, bh), 1)),
         }
     morph = polygon_morphology(cnt_xy, method="minarearect")
-    if len(sig_cnts) > 1:
-        all_pts_mc = np.vstack([c.reshape(-1, 2) for c in sig_cnts]).astype(np.float64)
-        tot_area_mc = float(sum(abs(cv2.contourArea(c)) for c in sig_cnts))
-        tot_perim_mc = float(sum(cv2.arcLength(c, True) for c in sig_cnts))
+    if len(sig_cnts) > 1 or len(hole_cnts) > 0:
+        use_outers = sig_cnts if sig_cnts else outer_cnts
+        all_pts_mc = np.vstack([c.reshape(-1, 2) for c in use_outers]).astype(np.float64)
+        outer_area_sum = float(sum(abs(cv2.contourArea(c)) for c in use_outers))
+        hole_area_sum = float(sum(abs(cv2.contourArea(hc)) for hc in hole_cnts))
+        net_poly_area = max(1.0, outer_area_sum - hole_area_sum) if hole_cnts else outer_area_sum
+        tot_perim_mc = float(sum(cv2.arcLength(c, True) for c in use_outers)) + float(
+            sum(cv2.arcLength(hc, True) for hc in hole_cnts)
+        )
         hull_mc = cv2.convexHull(all_pts_mc.astype(np.float32).reshape(-1, 1, 2))
         hull_area_mc = float(abs(cv2.contourArea(hull_mc))) if hull_mc is not None and len(hull_mc) >= 3 else 0.0
-        solidity = (tot_area_mc / hull_area_mc) if hull_area_mc > 0.0 else 0.0
-        circularity = (4.0 * math.pi * tot_area_mc / (tot_perim_mc * tot_perim_mc)) if tot_perim_mc > 0.0 else 0.0
+        eff_sol_num = min(area_px, hull_area_mc) if hole_cnts else net_poly_area
+        solidity = (eff_sol_num / hull_area_mc) if hull_area_mc > 0.0 else 0.0
+        circularity = (4.0 * math.pi * net_poly_area / (tot_perim_mc * tot_perim_mc)) if tot_perim_mc > 0.0 else 0.0
         pts_for_span = all_pts_mc
     else:
         solidity = float(getattr(morph, "solidity", getattr(morph, "convexity", 0.0)) or 0.0) if morph is not None else 0.0
@@ -247,6 +362,7 @@ def _extract_resampled_contour_pts(
             raw_u8 = (arr_in > 0).astype(np.uint8) * 255
             if not is_preoriented and hole_mask is not None and isinstance(hole_mask, np.ndarray) and hole_mask.shape[:2] == raw_u8.shape[:2]:
                 raw_u8 = np.where((raw_u8 > 0) & (hole_mask == 0), 255, 0).astype(np.uint8)
+            raw_u8, _, _ = open_hairline_sinus_bridges_and_measure_voids(raw_u8, hole_mask=hole_mask)
             extracted_xy = extract_contour(raw_u8)
             if extracted_xy is None or len(extracted_xy) < 10:
                 return None
@@ -409,6 +525,7 @@ def export_standardized_contour(
 
 
 __all__ = [
+    "open_hairline_sinus_bridges_and_measure_voids",
     "compute_lm3_shape_metrics",
     "save_leaf_mask_png",
     "resample_normalized_contour",

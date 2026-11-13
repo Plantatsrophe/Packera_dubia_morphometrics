@@ -16,7 +16,7 @@
 #       with seamless CSV fallback merging.
 # ==============================================================================
 
-PACKERA_SCHEMA_USER_VERSION <- 20261119L
+PACKERA_SCHEMA_USER_VERSION <- 20261121L
 
 resolve_packera_workers <- function(max_workers = 32L, n_tasks = NULL) {
   if (!identical(.Platform$OS.type, "unix") || !requireNamespace("parallel", quietly = TRUE)) {
@@ -102,7 +102,7 @@ packera_mclapply <- function(X, FUN, mc.cores = 1L, mc.preschedule = TRUE) {
 
 PACKERA_DB_LOGICAL_COLS <- c(
   "is_primary_duplicate", "is_calibrated_mm", "is_bent_stem",
-  "is_dissected", "lm3_gates_pass", "mask_is_upright", "is_verified_anthesis",
+  "is_dissected", "lm3_gates_pass", "is_crop_clipped", "bilateral_lobe_symmetry", "efa_qc_pass", "mask_is_upright", "is_verified_anthesis",
   "is_rock_outcrop", "is_azonal_lithology", "high_coord_uncertainty_flag",
   "is_training_eligible_coord", "is_clim_eligible_coord", "is_edaphic_eligible_coord", "azonal_lithology_presence_buffer",
   "is_promoted_bronze", "is_passive",
@@ -180,6 +180,13 @@ PACKERA_DB_WC_BIO_COLS <- c(
       blade_width_mm = "REAL",
       mask_is_upright = "INTEGER DEFAULT 1",
       area_mm2 = "REAL",
+      detector_class_id = "INTEGER DEFAULT 0",
+      is_crop_clipped = "INTEGER DEFAULT 0",
+      hole_area_frac = "REAL DEFAULT 0.0",
+      enclosed_void_frac = "REAL DEFAULT 0.0",
+      bilateral_lobe_symmetry = "INTEGER DEFAULT 0",
+      efa_qc_pass = "INTEGER DEFAULT 1",
+      qc_flag_reason = "TEXT DEFAULT 'PASS'",
       blade_cie_l_norm = "REAL",
       blade_cie_l_sd = "REAL"
     ))
@@ -726,35 +733,85 @@ evaluate_step03_lm3_efa_qc <- function(df, allow_multi_component_ect = FALSE) {
   if (is.null(df) || nrow(df) == 0L) return(logical(0))
   n <- nrow(df)
   keep <- rep(TRUE, n)
+
+  n_cc_vec <- if ("n_lamina_components" %in% names(df)) suppressWarnings(as.integer(df$n_lamina_components)) else rep(1L, n)
+  is_multi_cc <- !is.na(n_cc_vec) & (n_cc_vec > 1L)
+  evf_vec <- if ("enclosed_void_frac" %in% names(df)) suppressWarnings(as.numeric(df$enclosed_void_frac)) else rep(0.0, n)
+  is_enc_void <- !is.na(evf_vec) & is.finite(evf_vec) & (evf_vec > 0.020)
+
+  ect_only_codes <- c("MULTI_COMPONENT_PINNAE", "ENCLOSED_INTERLOBE_VOID")
+  raw_qfr <- if ("qc_flag_reason" %in% names(df)) toupper(trimws(as.character(df$qc_flag_reason))) else rep("", n)
+  raw_qfr[is.na(raw_qfr)] <- ""
+  is_ect_only_flag <- vapply(raw_qfr, function(s) {
+    if (!nzchar(s) || s %in% c("PASS", "OK", "NONE", "NA")) return(FALSE)
+    toks <- trimws(unlist(strsplit(s, "[;,]")))
+    toks <- toks[nzchar(toks) & !(toks %in% c("PASS", "OK", "NONE", "NA"))]
+    length(toks) > 0L && all(toks %in% ect_only_codes)
+  }, logical(1))
+
   if ("efa_qc_pass" %in% names(df)) {
     raw_eqc <- tolower(trimws(as.character(df$efa_qc_pass)))
-    keep[!is.na(raw_eqc) & raw_eqc %in% c("0", "false", "f", "no")] <- FALSE
+    eqc_fail <- !is.na(raw_eqc) & raw_eqc %in% c("0", "0.0", "false", "f", "no")
+    if (isTRUE(allow_multi_component_ect)) {
+      keep[eqc_fail & !(is_ect_only_flag | ((is_multi_cc | is_enc_void) & !nzchar(raw_qfr)))] <- FALSE
+    } else {
+      keep[eqc_fail] <- FALSE
+    }
   }
   if ("qc_flag_reason" %in% names(df)) {
-    raw_qfr <- toupper(trimws(as.character(df$qc_flag_reason)))
-    keep[!is.na(raw_qfr) & nzchar(raw_qfr) & !(raw_qfr %in% c("PASS", "OK", "NONE", "NA"))] <- FALSE
+    bad_qfr <- nzchar(raw_qfr) & !(raw_qfr %in% c("PASS", "OK", "NONE", "NA"))
+    if (isTRUE(allow_multi_component_ect)) {
+      keep[bad_qfr & !is_ect_only_flag] <- FALSE
+    } else {
+      keep[bad_qfr] <- FALSE
+    }
   }
+  if ("detector_class_id" %in% names(df)) {
+    dcid <- suppressWarnings(as.integer(df$detector_class_id))
+    has_exp_pass <- if ("efa_qc_pass" %in% names(df)) {
+      tolower(trimws(as.character(df$efa_qc_pass))) %in% c("1", "1.0", "true", "t", "yes")
+    } else rep(FALSE, n)
+    keep[!is.na(dcid) & (dcid == 1L) & !has_exp_pass] <- FALSE
+  }
+  if ("is_crop_clipped" %in% names(df)) {
+    raw_cc <- tolower(trimws(as.character(df$is_crop_clipped)))
+    keep[!is.na(raw_cc) & raw_cc %in% c("1", "1.0", "true", "t", "yes")] <- FALSE
+  }
+  if ("hole_area_frac" %in% names(df)) {
+    haf <- suppressWarnings(as.numeric(df$hole_area_frac))
+    keep[!is.na(haf) & is.finite(haf) & (haf > 0.035)] <- FALSE
+  }
+
   sol <- if ("solidity" %in% names(df)) suppressWarnings(as.numeric(df$solidity)) else rep(NA_real_, n)
-  n_cc_vec <- if ("n_lamina_components" %in% names(df)) suppressWarnings(as.integer(df$n_lamina_components)) else rep(1L, n)
-  is_multi_cc <- !is.na(n_cc_vec) & n_cc_vec > 1L
-  is_diss <- (!is.na(sol) & is.finite(sol) & (sol < 0.72)) | is_multi_cc
+  sia_abs <- if ("si_a" %in% names(df)) abs(suppressWarnings(as.numeric(df$si_a))) else rep(NA_real_, n)
+  bls_vec <- if ("bilateral_lobe_symmetry" %in% names(df)) {
+    raw_bls <- tolower(trimws(as.character(df$bilateral_lobe_symmetry)))
+    ifelse(is.na(raw_bls) | !nzchar(raw_bls) | raw_bls == "na", NA, raw_bls %in% c("1", "1.0", "true", "t", "yes"))
+  } else {
+    rep(NA, n)
+  }
+  # Grant alternate-pinna bilateral_dice relaxation ONLY when bilateral_lobe_symmetry is verified
+  is_verified_diss <- ((!is.na(sol) & is.finite(sol) & (sol < 0.72)) &
+    ifelse(!is.na(bls_vec), bls_vec, is.na(sia_abs) | (sia_abs < 0.28))) |
+    (is_multi_cc & ifelse(!is.na(bls_vec), bls_vec, is.na(sia_abs) | (sia_abs < 0.28)))
+
   if ("lm3_gates_pass" %in% names(df)) {
     raw_gp <- tolower(trimws(as.character(df$lm3_gates_pass)))
-    gp_fail <- !is.na(raw_gp) & raw_gp %in% c("0", "false", "f", "no")
-    keep[!is_diss & gp_fail] <- FALSE
+    gp_fail <- !is.na(raw_gp) & raw_gp %in% c("0", "0.0", "false", "f", "no")
+    keep[!is_verified_diss & gp_fail] <- FALSE
   }
   if ("bilateral_dice" %in% names(df)) {
     bd <- suppressWarnings(as.numeric(df$bilateral_dice))
-    min_bd <- ifelse(is_diss, 0.45, 0.70)
-    keep[!is.na(bd) & is.finite(bd) & bd < min_bd] <- FALSE
+    min_bd <- ifelse(is_verified_diss, 0.58, 0.70)
+    keep[!is.na(bd) & is.finite(bd) & (bd < min_bd)] <- FALSE
   }
   if ("si_a" %in% names(df)) {
-    sia <- abs(suppressWarnings(as.numeric(df$si_a)))
-    max_sia <- ifelse(is_diss, 0.48, 0.35)
-    keep[!is.na(sia) & is.finite(sia) & sia >= max_sia] <- FALSE
+    max_sia <- ifelse(!is.na(sol) & is.finite(sol) & (sol < 0.72), 0.28, 0.32)
+    keep[!is.na(sia_abs) & is.finite(sia_abs) & (sia_abs >= max_sia)] <- FALSE
   }
-  if (!isTRUE(allow_multi_component_ect) && any(is_multi_cc)) {
-    keep[is_multi_cc] <- FALSE
+  if (!isTRUE(allow_multi_component_ect)) {
+    if (any(is_multi_cc)) keep[is_multi_cc] <- FALSE
+    if (any(is_enc_void)) keep[is_enc_void] <- FALSE
   }
   keep
 }
@@ -815,6 +872,11 @@ fetch_step03_contours_from_db <- function(
   } else {
     "NULL AS petiole_width_mm"
   }
+  sel_dcid <- if ("detector_class_id" %in% el_fields) "el.detector_class_id" else "0 AS detector_class_id"
+  sel_cclip <- if ("is_crop_clipped" %in% el_fields) "el.is_crop_clipped" else "0 AS is_crop_clipped"
+  sel_haf <- if ("hole_area_frac" %in% el_fields) "el.hole_area_frac" else "0.0 AS hole_area_frac"
+  sel_evf <- if ("enclosed_void_frac" %in% el_fields) "el.enclosed_void_frac" else "0.0 AS enclosed_void_frac"
+  sel_bls <- if ("bilateral_lobe_symmetry" %in% el_fields) "el.bilateral_lobe_symmetry" else "NULL AS bilateral_lobe_symmetry"
   sel_eqc <- if ("efa_qc_pass" %in% el_fields) "el.efa_qc_pass" else "NULL AS efa_qc_pass"
   sel_qfr <- if ("qc_flag_reason" %in% el_fields) "el.qc_flag_reason" else "NULL AS qc_flag_reason"
 
@@ -824,7 +886,8 @@ fetch_step03_contours_from_db <- function(
     "  el.solidity, el.aspect_ratio, el.area_px, ",
     "  ", sel_ect, ", ", sel_zone, ", ", sel_zone_conf, ", ", sel_dist_cr, ", ", sel_cy_rel, ", ",
     "  ", sel_arch, ", ", sel_bdice, ", ", sel_sia, ", ", sel_lgates, ", ", sel_ncc, ", ", sel_scale_src, ", ",
-    "  ", sel_upright, ", ", sel_amm2, ", ", sel_bl_lnorm, ", ", sel_bl_lsd, ", ", sel_bw_mm, ", ", sel_pw_mm, ", ", sel_eqc, ", ", sel_qfr, ", ",
+    "  ", sel_upright, ", ", sel_amm2, ", ", sel_bl_lnorm, ", ", sel_bl_lsd, ", ", sel_bw_mm, ", ", sel_pw_mm, ", ",
+    "  ", sel_dcid, ", ", sel_cclip, ", ", sel_haf, ", ", sel_evf, ", ", sel_bls, ", ", sel_eqc, ", ", sel_qfr, ", ",
     "  COALESCE(el.pixels_per_mm, v.pixels_per_mm) AS pixels_per_mm, ",
     "  COALESCE(el.is_calibrated_mm, v.is_calibrated_mm) AS is_calibrated_mm, ",
     "  COALESCE(el.petiole_length_mm, pi.petiole_length_mm) AS petiole_length_mm, ",
@@ -1166,6 +1229,8 @@ fetch_step03_contours_from_db <- function(
     plant_individual_id = pid_vec,
     leaf_id = lid_vec,
     n_lamina_components = if ("n_lamina_components" %in% names(sub_rows)) pmax(1L, ifelse(is.na(suppressWarnings(as.integer(sub_rows$n_lamina_components))), 1L, suppressWarnings(as.integer(sub_rows$n_lamina_components)))) else rep(1L, n_kept),
+    enclosed_void_frac = if ("enclosed_void_frac" %in% names(sub_rows)) ifelse(is.na(suppressWarnings(as.numeric(sub_rows$enclosed_void_frac))), 0.0, suppressWarnings(as.numeric(sub_rows$enclosed_void_frac))) else rep(0.0, n_kept),
+    qc_flag_reason = if ("qc_flag_reason" %in% names(sub_rows)) ifelse(is.na(sub_rows$qc_flag_reason) | !nzchar(trimws(as.character(sub_rows$qc_flag_reason))), "PASS", trimws(as.character(sub_rows$qc_flag_reason))) else rep("PASS", n_kept),
     solidity = sol_kept,
     dissection_index = merged$di[ok_idx],
     archetype_score = arch_kept,

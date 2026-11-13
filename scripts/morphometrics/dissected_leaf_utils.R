@@ -107,10 +107,10 @@ classify_and_partition_leaf_zones <- function(
       pos_ii <- match(ii, lam_ok)
       rel_a <- if (!is.na(pos_ii) && is.finite(a_pool[pos_ii]) && max_pid_a > 0.0) a_pool[pos_ii] / max_pid_a else 1.0
       if (is.finite(d_crown[ii])) {
-        s_b <- if (d_crown[ii] <= 0.42) 0.76 else if (d_crown[ii] > 0.45) 0.22 else 0.50
-        if (is.finite(cy_p[ii])) s_b <- s_b + (if (cy_p[ii] >= min_cy_plant) 0.12 else -0.12)
-        if (is.finite(pbr[ii])) s_b <- s_b + (if (pbr[ii] >= 0.12) 0.14 else if (pbr[ii] < 0.08 && d_crown[ii] > 0.38) -0.14 else 0.0)
-        if (is.finite(rel_a)) s_b <- s_b + (if (rel_a < 0.45 && d_crown[ii] > 0.38) -0.12 else if (rel_a >= 0.65) 0.08 else 0.0)
+        s_b <- if (d_crown[ii] <= 0.18) 0.78 else if (d_crown[ii] > 0.24) 0.20 else 0.50
+        if (is.finite(cy_p[ii])) s_b <- s_b + (if (cy_p[ii] >= min_cy_plant) 0.10 else -0.12)
+        if (is.finite(pbr[ii])) s_b <- s_b + (if (pbr[ii] >= 0.22 && d_crown[ii] <= 0.24) 0.14 else if (pbr[ii] < 0.10 && d_crown[ii] > 0.18) -0.16 else 0.0)
+        if (is.finite(rel_a)) s_b <- s_b + (if (rel_a < 0.45 && d_crown[ii] > 0.18) -0.12 else if (rel_a >= 0.65 && d_crown[ii] <= 0.24) 0.08 else 0.0)
         p_b <- min(1.0, max(0.0, s_b))
         leaf_zone[ii] <- if (p_b >= 0.50) "basal" else "cauline"
         zone_conf[ii] <- round(max(0.55, abs(p_b - 0.50) * 2.0), 4)
@@ -127,13 +127,14 @@ classify_and_partition_leaf_zones <- function(
 
     has_basal <- any(leaf_zone[lam_ok] == "basal", na.rm = TRUE)
     if (!has_basal) {
-      if (all_explicit_cauline) {
+      has_dc <- is.finite(d_crown[lam_ok])
+      crown_verified_cauline_only <- any(has_dc) && (min(d_crown[lam_ok[has_dc]], na.rm = TRUE) > 0.28)
+      if (all_explicit_cauline || crown_verified_cauline_only) {
         is_caul_only_vec[lam_ok] <- TRUE
         is_fallback_vec[lam_ok] <- TRUE
       } else {
         has_cy_p <- is.finite(cy_p[lam_ok])
         has_cy_s <- !has_cy_p & is.finite(cy_s[lam_ok])
-        has_dc <- is.finite(d_crown[lam_ok])
         if (any(has_cy_p)) {
           c_max <- max(cy_p[lam_ok[has_cy_p]], na.rm = TRUE)
           fb_hit <- has_cy_p & (cy_p[lam_ok] >= (c_max - fallback_band))

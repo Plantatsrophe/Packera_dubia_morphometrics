@@ -105,6 +105,7 @@ from scripts.vision.leaf_geometry_utils import (
     compute_lm3_shape_metrics,
     estimate_rosette_crown_point,
     export_standardized_contour,
+    open_hairline_sinus_bridges_and_measure_voids,
     save_leaf_mask_png,
 )
 from scripts.vision.capitulum_phenology_classifier import (
@@ -147,11 +148,112 @@ from scripts.vision.lm3_inference_engines import (
     compute_capitulum_metrics,
     compute_leaf_ect_descriptor,
     crop_leaf_bbox_with_padding,
+    evaluate_leaf_damage_and_fold_qc,
     is_stock_lm3_weights,
     orient_and_score_leaf_lm3,
     reproject_crop_mask_to_sheet,
     torch_cuda_available,
 )
+
+
+def _subtract_interior_mounting_paper_pockets(
+    lamina_bool: np.ndarray,
+    specimen_paper_cleaned_mask: Optional[np.ndarray] = None,
+    crop_bgr: Optional[np.ndarray] = None,
+    paper_l_ref: Optional[float] = None,
+    min_pocket_px: int = 20,
+) -> np.ndarray:
+    """
+    Removes mounting-paper pockets trapped between touching dissected lobes when YOLO26x-seg
+    prototype masks bleed across narrow white-paper sinuses, without eroding leaf margins
+    or altering synthetic blank-canvas unit test masks:
+      1. Subtracts interior background pockets identified by `LM3SpecimenSegmenter` (`UNet++ v9`
+         + `LLR_Hyst_KeepBlobs` `specimen_paper_cleaned_mask`) strictly interior to a 2 px
+         eroded lamina rim when `>= 55%` of the lamina agrees with the whole-sheet plant mask.
+      2. Applies a guarded bimodal CIE L*a*b* check on `crop_bgr` strictly inside the lamina's
+         eroded interior (`dist >= 2 px`) when `>= 65%` of `lamina_bool` exhibits genuine dark
+         or chromatic plant tissue (`L* < paper_l_ref - 8.0` or `C*ab >= 9.0`), punching out
+         compact bright-neutral paper pockets (`L* >= paper_l_ref - 4.5` and `C*ab <= 7.5`)
+         while ignoring elongated linen mounting straps crossing opposite edges of the blade.
+    """
+    if lamina_bool is None or lamina_bool.size == 0:
+        return lamina_bool
+    fg_total = int(np.count_nonzero(lamina_bool))
+    if fg_total < max(64, min_pocket_px * 3):
+        return lamina_bool
+
+    h, w = lamina_bool.shape[:2]
+    dist_in = cv2.distanceTransform(lamina_bool.astype(np.uint8), cv2.DIST_L2, 3)
+    deep_interior = dist_in >= 2.0
+    if int(np.count_nonzero(deep_interior)) < min_pocket_px:
+        return lamina_bool
+
+    pocket_union = np.zeros((h, w), dtype=bool)
+
+    if (
+        specimen_paper_cleaned_mask is not None
+        and isinstance(specimen_paper_cleaned_mask, np.ndarray)
+        and specimen_paper_cleaned_mask.shape[:2] == (h, w)
+        and np.any(specimen_paper_cleaned_mask > 0)
+    ):
+        spec_fg = specimen_paper_cleaned_mask > 0
+        agree_frac = float(np.count_nonzero(lamina_bool & spec_fg)) / float(max(fg_total, 1))
+        if agree_frac >= 0.55:
+            cand_spec_paper = deep_interior & (~spec_fg)
+            n_sp, sp_lbls, sp_stats, _ = cv2.connectedComponentsWithStats(cand_spec_paper.astype(np.uint8), connectivity=8)
+            for lbl in range(1, n_sp):
+                area_p = int(sp_stats[lbl, cv2.CC_STAT_AREA])
+                if min_pocket_px <= area_p <= int(0.35 * fg_total):
+                    pocket_union |= (sp_lbls == lbl)
+
+    if (
+        crop_bgr is not None
+        and isinstance(crop_bgr, np.ndarray)
+        and crop_bgr.ndim == 3
+        and crop_bgr.shape[:2] == (h, w)
+    ):
+        eff_l_ref = (
+            float(paper_l_ref)
+            if (paper_l_ref is not None and np.isfinite(float(paper_l_ref)) and float(paper_l_ref) >= 65.0)
+            else estimate_sheet_paper_cie_l_ref(crop_bgr)
+        )
+        if eff_l_ref >= 72.0:
+            lab = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2LAB)
+            l_cie = lab[:, :, 0].astype(np.float32) * (100.0 / 255.0)
+            a_c = lab[:, :, 1].astype(np.float32) - 128.0
+            b_c = lab[:, :, 2].astype(np.float32) - 128.0
+            chroma = np.hypot(a_c, b_c)
+            is_plant_px = (l_cie < (eff_l_ref - 8.0)) | (chroma >= 9.0)
+            plant_frac = float(np.count_nonzero(lamina_bool & is_plant_px)) / float(max(fg_total, 1))
+            if plant_frac >= 0.65:
+                is_paper_px = deep_interior & (l_cie >= (eff_l_ref - 4.5)) & (chroma <= 7.5)
+                n_lp, lp_lbls, lp_stats, _ = cv2.connectedComponentsWithStats(is_paper_px.astype(np.uint8), connectivity=8)
+                rim_band = lamina_bool & (~deep_interior)
+                rim_dil = cv2.dilate(rim_band.astype(np.uint8), np.ones((3, 3), dtype=np.uint8), iterations=1) > 0
+                for lbl in range(1, n_lp):
+                    area_p = int(lp_stats[lbl, cv2.CC_STAT_AREA])
+                    if area_p < min_pocket_px or area_p > int(0.32 * fg_total):
+                        continue
+                    comp_p = lp_lbls == lbl
+                    pts_p = np.column_stack(np.where(comp_p))[::-1]
+                    pw = int(lp_stats[lbl, cv2.CC_STAT_WIDTH])
+                    ph = int(lp_stats[lbl, cv2.CC_STAT_HEIGHT])
+                    # Exclude elongated linen mounting straps crossing the blade from rim to rim
+                    if max(pw, ph) >= 12:
+                        ys_p, xs_p = np.where(comp_p)
+                        rect_p = cv2.minAreaRect(np.column_stack((xs_p, ys_p)).astype(np.float32))
+                        rw_p, rh_p = float(max(rect_p[1])), float(max(min(rect_p[1]), 1.0))
+                        ar_p = rw_p / rh_p
+                        rim_contacts = int(np.count_nonzero(comp_p & rim_dil))
+                        if ar_p >= 4.0 and rim_contacts >= 4:
+                            continue
+                    _ = pts_p
+                    pocket_union |= comp_p
+
+    if not np.any(pocket_union):
+        return lamina_bool
+    cleaned = lamina_bool & (~pocket_union)
+    return cleaned if int(np.count_nonzero(cleaned)) >= max(32, int(0.50 * fg_total)) else lamina_bool
 
 
 def _build_native_lm3_crop_masks(
@@ -161,26 +263,26 @@ def _build_native_lm3_crop_masks(
     min_leaf_area: int = 0,
     specimen_paper_cleaned_mask: Optional[np.ndarray] = None,
     subtract_holes: bool = True,
+    crop_bgr: Optional[np.ndarray] = None,
+    paper_l_ref: Optional[float] = None,
 ) -> Tuple[Optional[np.ndarray], float, Optional[np.ndarray], Optional[np.ndarray]]:
     """
-    Constructs `best_mask` (`cls == 0`), `petiole_crop_mask` (`cls == 1`), and `hole_crop_mask` (`cls == 2`)
-    delegating component isolation to `leafmachine3.inference.leaf_segmenter._largest_component`,
-    `_components`, `_outer_polygons`, and `leafmachine3.core.imaging.polygon_mask`, while isolating
-    the focal leaf from overlapping neighbor leaves and retaining strictly unbridged focal pinnae:
+    Constructs unfilled `best_mask` (`cls == 0`), `petiole_crop_mask` (`cls == 1`), and `hole_crop_mask` (`cls == 2`)
+    while isolating the focal leaf from overlapping neighbor leaves and preserving interior dissected sinuses:
       - Rank `cls == 0` (`Leaf`) candidate instance masks by confidence, crop centrality, and area to
         select the primary focal leaf instance (`leaf_primary = _largest_component(primary_inst)`),
         preventing touching neighbor leaf instances from fusing into the focal leaf.
       - Retain all connected pinna components (`>= min_cc_area`) belonging to the primary focal
-        `cls == 0` (`Leaf`) instance strictly unbridged (zero synthetic morphological dilation or
-        cross-instance bridging), preserving exact LeafMachine3 lamina boundaries.
-      - Rasterize outer polygons of `leaf_mask` via `_outer_polygons` + `polygon_mask` as `silhouette`.
+        `cls == 0` (`Leaf`) instance strictly unbridged and WITHOUT outer-polygon hole flood-filling,
+        so native `0`-pixel sinus voids enclosed by touching *Packera* lobes stay open even when
+        `cls == 2` (`Hole`) misses them.
+      - Apply `_subtract_interior_mounting_paper_pockets` using `specimen_paper_cleaned_mask` and
+        guarded bimodal CIE L*a*b* background checks to punch out white mounting-paper pockets.
       - Union all `cls == 1` (`Petiole`) candidate masks -> keep `_largest_component` (`area >= 64` px).
-      - Union all `cls == 2` (`Hole`) candidate masks -> keep `_components(min_area=64)` -> rasterize outer
-        polygons via `_outer_polygons` + `polygon_mask` as `hole_crop_mask`.
-      - When `subtract_holes=True`, compute `best_mask` as `silhouette & ~hole_crop_mask`, keeping
+      - Union all `cls == 2` (`Hole`) candidate masks -> keep `_components(min_area=64)` as `hole_crop_mask`.
+      - When `subtract_holes=True`, compute `best_mask` as `unfilled_lamina & ~hole_crop_mask`, keeping
         `petiole_crop_mask` separate from `best_mask`.
     """
-    _ = specimen_paper_cleaned_mask
     crop_h, crop_w = int(crop_shape[0]), int(crop_shape[1])
     if crop_h <= 0 or crop_w <= 0 or not crop_preds:
         return None, 0.0, None, None
@@ -278,11 +380,15 @@ def _build_native_lm3_crop_masks(
     else:
         leaf_mask_bool = leaf_primary.copy()
 
-    silhouette_bool = np.zeros((crop_h, crop_w), dtype=bool)
-    for poly_l in _outer_polygons(leaf_mask_bool):
-        silhouette_bool |= polygon_mask(poly_l, (crop_h, crop_w))
-    silhouette_bool |= leaf_mask_bool
-    silhouette = np.where(silhouette_bool, 255, 0).astype(np.uint8)
+    min_pocket_area = 24 if is_full_crop else 16
+    unfilled_lamina_bool = _subtract_interior_mounting_paper_pockets(
+        leaf_mask_bool,
+        specimen_paper_cleaned_mask=specimen_paper_cleaned_mask,
+        crop_bgr=crop_bgr,
+        paper_l_ref=paper_l_ref,
+        min_pocket_px=min_pocket_area,
+    )
+    silhouette = np.where(unfilled_lamina_bool, 255, 0).astype(np.uint8)
 
     hole_crop_mask = np.zeros((crop_h, crop_w), dtype=np.uint8)
     if has_hole and np.any(hole_union > 0):
@@ -631,11 +737,25 @@ class SegmentAndExtractPipeline:
         self._is_dummy_test_weights = bool(_is_dummy_test_weights)
         _aux_default_weights = self.model_weights if _is_dummy_test_weights else None
 
+        _ls_conf_cfg = float(_ls_cfg.get("conf_thres", 0.35) or 0.35)
+        _cfg_default_thresh = float(getattr(_seg_cfg, "score_thresh", 0.25) or 0.25) if _seg_cfg is not None else 0.25
+        _is_default_score_arg = abs(float(self.score_thresh) - _cfg_default_thresh) < 1e-6
+        _eff_s1_conf = (
+            _s1_conf_cfg
+            if (_is_default_score_arg and not _is_dummy_test_weights)
+            else min(float(self.score_thresh), _s1_conf_cfg)
+        )
+        _eff_s2_conf = (
+            max(float(self.score_thresh), _ls_conf_cfg)
+            if (_is_default_score_arg and not _is_dummy_test_weights)
+            else float(self.score_thresh)
+        )
+
         # 1. Stage 1 Full-Sheet Plant Organ Detector (YOLO26x 1280px, 9 classes)
         self.stage1_detector = LM3PlantDetector(
             weights_path=stage1_weights if stage1_weights is not None else _aux_default_weights,
             device=self.device,
-            conf_thres=min(self.score_thresh, _s1_conf_cfg),
+            conf_thres=_eff_s1_conf,
             iou_thres=_s1_iou_cfg,
             img_size=_s1_img_size,
             max_working_dim=_s1_work_dim,
@@ -647,7 +767,7 @@ class SegmentAndExtractPipeline:
         self.model_engine = LM3LeafSegmenterEngine(
             weights_path=self.model_weights,
             device=self.device,
-            score_thresh=self.score_thresh,
+            score_thresh=_eff_s2_conf,
             min_area_px=_s2_min_area,
             img_size=_s2_img_size,
         )
@@ -1155,6 +1275,19 @@ class SegmentAndExtractPipeline:
         root_detections: List[Tuple[int, int, int, int]] = []
         upper_cauline_pts: List[Tuple[float, float]] = []
         rosette_bbox_fallback_used: bool = False
+        _sheet_paper_l_ref = estimate_sheet_paper_cie_l_ref(img_bgr)
+        _spec_mask_sheet: Optional[np.ndarray] = None
+        if (
+            is_high_dpi
+            and isinstance(img_bgr, np.ndarray)
+            and img_bgr.ndim >= 2
+            and getattr(self, "specimen_segmenter", None) is not None
+            and getattr(self.specimen_segmenter, "model", None) is not None
+        ):
+            try:
+                _spec_mask_sheet = self.specimen_segmenter.predict_mask(img_bgr, return_sheet_size=True)
+            except Exception:
+                _spec_mask_sheet = None
         # Each tuple: (full_bbox, mask, score, cls_id, crop_offset, mask_origin, already_trimmed, trim_meta, m_solidity, fg_area)
         leaf_detections: List[Tuple[Tuple[int, int, int, int], np.ndarray, float, int, Tuple[int, int], Tuple[int, int], bool, Optional[Dict[str, Any]], float, int]] = []
 
@@ -1231,11 +1364,20 @@ class SegmentAndExtractPipeline:
                             for _pb, pm_u8, _p_sc, p_cls in c_preds
                         )
                         if has_leaf_cand:
+                            _cy0_p, _cx0_p, _cy1_p, _cx1_p = c_item[4]
+                            _spec_crop_p = (
+                                _spec_mask_sheet[_cy0_p:_cy1_p, _cx0_p:_cx1_p]
+                                if (_spec_mask_sheet is not None and _spec_mask_sheet.shape[:2] == (sheet_h, sheet_w))
+                                else None
+                            )
                             _bm_c, _, _pm_c, _ = _build_native_lm3_crop_masks(
                                 c_preds,
                                 c_item[3].shape[:2],
                                 is_high_dpi=is_high_dpi,
                                 min_leaf_area=0,
+                                specimen_paper_cleaned_mask=_spec_crop_p,
+                                crop_bgr=c_item[3],
+                                paper_l_ref=_sheet_paper_l_ref,
                             )
                             p_idxs.append(idx_c)
                             p_crops.append(c_item[3])
@@ -1301,22 +1443,33 @@ class SegmentAndExtractPipeline:
                 if not crop_preds:
                     continue
 
+                _cy0_s, _cx0_s, _cy1_s, _cx1_s = crop_box
+                _spec_crop_s2 = (
+                    _spec_mask_sheet[_cy0_s:_cy1_s, _cx0_s:_cx1_s]
+                    if (_spec_mask_sheet is not None and _spec_mask_sheet.shape[:2] == (sheet_h, sheet_w))
+                    else None
+                )
                 best_mask, best_score, best_petiole_mask, best_hole_mask = _build_native_lm3_crop_masks(
                     crop_preds,
                     crop_bgr.shape[:2],
                     is_high_dpi=is_high_dpi,
                     min_leaf_area=0,
+                    specimen_paper_cleaned_mask=_spec_crop_s2,
                     subtract_holes=bool(getattr(self, "subtract_holes", True)),
+                    crop_bgr=crop_bgr,
+                    paper_l_ref=_sheet_paper_l_ref,
                 )
                 if best_mask is None:
                     continue
 
                 keypoints_31_crop: Optional[Dict[str, Tuple[float, float, float]]] = None
                 petiole_width_px_crop: Optional[float] = None
+                is_geom_fb_pose_crop: bool = True
                 pre_pose_crop = all_crop_pose_preds[crop_idx_s2] if crop_idx_s2 < len(all_crop_pose_preds) else None
                 if pre_pose_crop is not None and bool(getattr(self, "do_apply_landmarks", True)):
                     keypoints_31_crop = getattr(pre_pose_crop, "keypoints_31", None) or None
                     petiole_width_px_crop = getattr(pre_pose_crop, "petiole_width_px", None)
+                    is_geom_fb_pose_crop = bool(getattr(pre_pose_crop, "is_geometric_fallback", False))
                 elif (
                     bool(getattr(self, "do_apply_landmarks", True))
                     and getattr(self, "pose_engine", None) is not None
@@ -1331,6 +1484,7 @@ class SegmentAndExtractPipeline:
                         )
                         keypoints_31_crop = pose_res.keypoints_31 or None
                         petiole_width_px_crop = pose_res.petiole_width_px
+                        is_geom_fb_pose_crop = bool(getattr(pose_res, "is_geometric_fallback", False))
                     except Exception:
                         keypoints_31_crop = None
 
@@ -1396,7 +1550,27 @@ class SegmentAndExtractPipeline:
                 native_pet_meta["keypoints_31"] = _shift_crop_keypoints_to_local_win(
                     keypoints_31_crop, (cy0, cx0, cy1, cx1), (win_y0, win_x0, win_y1, win_x1)
                 )
+                native_pet_meta["is_geometric_fallback_pose"] = bool(is_geom_fb_pose_crop)
                 native_pet_meta["petiole_width_px"] = petiole_width_px_crop
+                # Detect lamina truncation along Stage 1 crop or full-sheet borders (excluding petiole exit zone)
+                _ch_m, _cw_m = m_raw.shape[:2]
+                _clip_mask = m_raw > 0
+                if best_petiole_mask is not None and best_petiole_mask.shape[:2] == (_ch_m, _cw_m):
+                    _pet_dil_edge = cv2.dilate((best_petiole_mask > 0).astype(np.uint8), np.ones((9, 9), dtype=np.uint8), iterations=1) > 0
+                    _clip_mask = _clip_mask & (~_pet_dil_edge)
+                _max_edge_allow = max(8, int(round(0.08 * float(max(bw_c, bh_c)))))
+                _sheet_edge_allow = max(6, int(round(0.05 * float(max(bw_c, bh_c)))))
+                _is_clipped_crop = bool(
+                    _ch_m >= 16
+                    and _cw_m >= 16
+                    and (
+                        int(np.count_nonzero(_clip_mask[0, :])) > (_sheet_edge_allow if cy0 <= 2 else _max_edge_allow)
+                        or int(np.count_nonzero(_clip_mask[-1, :])) > (_sheet_edge_allow if cy1 >= sheet_h - 2 else _max_edge_allow)
+                        or int(np.count_nonzero(_clip_mask[:, 0])) > (_sheet_edge_allow if cx0 <= 2 else _max_edge_allow)
+                        or int(np.count_nonzero(_clip_mask[:, -1])) > (_sheet_edge_allow if cx1 >= sheet_w - 2 else _max_edge_allow)
+                    )
+                )
+                native_pet_meta["is_crop_clipped"] = _is_clipped_crop
 
                 leaf_detections.append((
                     full_bbox,
@@ -1675,19 +1849,6 @@ class SegmentAndExtractPipeline:
             ))
 
         # 4. Stem-Aware Spatial Clustering (bridged Specimen_Segmenter mask + vertical shoot continuity)
-        _spec_mask_sheet: Optional[np.ndarray] = None
-        if (
-            len(instances) >= 2
-            and is_high_dpi
-            and isinstance(img_bgr, np.ndarray)
-            and img_bgr.ndim >= 2
-            and getattr(self, "specimen_segmenter", None) is not None
-            and getattr(self.specimen_segmenter, "model", None) is not None
-        ):
-            try:
-                _spec_mask_sheet = self.specimen_segmenter.predict_mask(img_bgr, return_sheet_size=True)
-            except Exception:
-                _spec_mask_sheet = None
 
         instances = cluster_plant_individuals(
             instances,
@@ -1909,7 +2070,6 @@ class SegmentAndExtractPipeline:
                     _best_root_pt = _nearest_r
             _crown_hints_sheet[_pid_h] = _best_root_pt if _best_root_pt is not None else _rc_h
 
-        _sheet_paper_l_ref = estimate_sheet_paper_cie_l_ref(img_bgr)
         for inst in instances:
             if int(np.count_nonzero(inst.mask)) <= 0:
                 continue
@@ -2038,6 +2198,61 @@ class SegmentAndExtractPipeline:
                 else 1
             )
             inst.n_lamina_components = max(1, _n_sig_comps)  # type: ignore[attr-defined]
+
+            # Measure herbivory hole fraction (`cls == 2`) and unopened inter-lobe void fraction
+            _ori_hole_m = lm3_bm_raw.get("oriented_hole_mask") if _is_upright_mask else inst.hole_mask
+            _lam_fg_px = float(max(np.count_nonzero(_persisted_mask_u8 > 0), 1))
+            _hole_px = 0.0
+            if _ori_hole_m is not None and isinstance(_ori_hole_m, np.ndarray) and _ori_hole_m.shape[:2] == _persisted_mask_u8.shape[:2]:
+                _cnts_h_hull, _ = cv2.findContours(_persisted_mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                if _cnts_h_hull:
+                    _hull_mask_h = np.zeros_like(_persisted_mask_u8)
+                    _all_hull_pts = np.vstack([c.reshape(-1, 1, 2) for c in _cnts_h_hull])
+                    cv2.fillPoly(_hull_mask_h, [cv2.convexHull(_all_hull_pts)], 255)
+                    _hole_px = float(np.count_nonzero((_ori_hole_m > 0) & (_hull_mask_h > 0)))
+                else:
+                    _hole_px = float(np.count_nonzero(_ori_hole_m > 0))
+            _hole_area_frac = _hole_px / max(_lam_fg_px + _hole_px, 1.0)
+            _, _enclosed_void_frac, _ = open_hairline_sinus_bridges_and_measure_voids(
+                _persisted_mask_u8,
+                hole_mask=_ori_hole_m if isinstance(_ori_hole_m, np.ndarray) else None,
+            )
+            _trim_d = inst.trim_meta if isinstance(inst.trim_meta, dict) else {}
+            _is_clipped = bool(_trim_d.get("is_crop_clipped", False))
+            if not _is_clipped and inst.mask.shape[:2] == (sheet_h, sheet_w):
+                _sh_allow = max(8, int(round(0.08 * max(inst.bbox[2] - inst.bbox[0], inst.bbox[3] - inst.bbox[1], 1))))
+                _is_clipped = bool(
+                    int(np.count_nonzero(inst.mask[0, :] > 0)) > _sh_allow
+                    or int(np.count_nonzero(inst.mask[-1, :] > 0)) > _sh_allow
+                    or int(np.count_nonzero(inst.mask[:, 0] > 0)) > _sh_allow
+                    or int(np.count_nonzero(inst.mask[:, -1] > 0)) > _sh_allow
+                )
+            _is_geom_fb = bool(_trim_d.get("is_geometric_fallback_pose", inst.keypoints_31 is None))
+            _seg_partial_allow = bool(getattr(self.config.segmentation, "segment_partial_leaves", False))
+            _qc_eval = evaluate_leaf_damage_and_fold_qc(
+                oriented_mask_u8=_persisted_mask_u8,
+                solidity=float(inst.solidity),
+                bilateral_dice=float(inst.bilateral_dice),  # type: ignore[attr-defined]
+                si_a=float(inst.si_a),  # type: ignore[attr-defined]
+                lm3_gates_pass=bool(inst.lm3_gates_pass),  # type: ignore[attr-defined]
+                n_lamina_components=int(inst.n_lamina_components),  # type: ignore[attr-defined]
+                detector_class_id=int(inst.class_id),
+                segment_partial_leaves=_seg_partial_allow,
+                is_crop_clipped=_is_clipped,
+                hole_area_frac=_hole_area_frac,
+                enclosed_void_frac=_enclosed_void_frac,
+                oriented_points=_ori_pts_map,
+                keypoints_31=inst.keypoints_31 if isinstance(inst.keypoints_31, dict) else None,
+                is_geometric_fallback_pose=_is_geom_fb,
+            )
+            inst.detector_class_id = int(inst.class_id)  # type: ignore[attr-defined]
+            inst.is_crop_clipped = bool(_is_clipped)  # type: ignore[attr-defined]
+            inst.hole_area_frac = round(float(_hole_area_frac), 4)  # type: ignore[attr-defined]
+            inst.enclosed_void_frac = round(float(_enclosed_void_frac), 4)  # type: ignore[attr-defined]
+            inst.bilateral_lobe_symmetry = bool(_qc_eval["bilateral_lobe_symmetry"])  # type: ignore[attr-defined]
+            inst.efa_qc_pass = bool(_qc_eval["efa_qc_pass"])  # type: ignore[attr-defined]
+            inst.qc_flag_reason = str(_qc_eval["qc_flag_reason"])  # type: ignore[attr-defined]
+            inst.min_margin_rms_norm = float(_qc_eval["min_margin_rms_norm"])  # type: ignore[attr-defined]
             candidate_extractions.append(
                 (inst, p_base_use, p_apex_use, angle_cw_val, _persisted_mask_u8, _ori_pts_map, _is_upright_mask)
             )
@@ -2300,6 +2515,35 @@ class SegmentAndExtractPipeline:
             _ph_sub["plant_individual_id"] = int(_pid_r)
             _pheno_by_pid_out[_pid_r] = _ph_sub
 
+        # Screen basal rosettes (>= 3 basal leaves) for half-folded blades (`AR > 1.85 * sibling_median` + straight fold edge)
+        _basal_by_pid_qc: Dict[int, List[DetectedInstance]] = defaultdict(list)
+        for _inst_q, *_ in candidate_extractions:
+            _lz_q = str((leaf_zones_by_id.get(int(_inst_q.leaf_id)) or {}).get("leaf_zone", "basal") or "basal").lower()
+            if _lz_q == "basal" and np.isfinite(float(_inst_q.aspect_ratio)) and float(_inst_q.aspect_ratio) > 0.0:
+                _basal_by_pid_qc[int(_inst_q.plant_individual_id)].append(_inst_q)
+        for _pid_q, _b_list in _basal_by_pid_qc.items():
+            if len(_b_list) < 3:
+                continue
+            _clean_pool = [b for b in _b_list if bool(getattr(b, "efa_qc_pass", True))]
+            _ref_pool = _clean_pool if len(_clean_pool) >= 2 else _b_list
+            _med_ar = float(np.median([float(b.aspect_ratio) for b in _ref_pool]))
+            _med_area = float(np.median([_raw_px_by_leaf_id.get(b.leaf_id, 1.0) for b in _ref_pool]))
+            for _b_inst in _b_list:
+                _b_rms = float(getattr(_b_inst, "min_margin_rms_norm", np.nan))
+                _b_bd = float(getattr(_b_inst, "bilateral_dice", 1.0))
+                _b_area = float(_raw_px_by_leaf_id.get(_b_inst.leaf_id, _med_area))
+                if (
+                    float(_b_inst.aspect_ratio) > 1.85 * max(_med_ar, 0.5)
+                    and _b_area < 0.65 * max(_med_area, 1.0)
+                    and ((np.isfinite(_b_rms) and _b_rms < 0.028) or _b_bd < 0.78)
+                ):
+                    _cur_reason = str(getattr(_b_inst, "qc_flag_reason", "PASS") or "PASS")
+                    _toks = [t for t in _cur_reason.split(";") if t and t != "PASS"]
+                    if "LONGITUDINAL_MARGIN_CREASE" not in _toks:
+                        _toks.append("LONGITUDINAL_MARGIN_CREASE")
+                    _b_inst.efa_qc_pass = False  # type: ignore[attr-defined]
+                    _b_inst.qc_flag_reason = ";".join(_toks)  # type: ignore[attr-defined]
+
         _contours_by_leaf: Dict[int, List[List[float]]] = {}
 
         for inst, p_base_pt, p_apex_pt, angle_cw, persisted_mask_u8, ori_pts_map, is_upright_mask in candidate_extractions:
@@ -2420,6 +2664,13 @@ class SegmentAndExtractPipeline:
                 "si_a": round(float(getattr(inst, "si_a", 0.0)), 4),
                 "lm3_gates_pass": bool(getattr(inst, "lm3_gates_pass", True)),
                 "n_lamina_components": int(getattr(inst, "n_lamina_components", 1)),
+                "detector_class_id": int(getattr(inst, "detector_class_id", inst.class_id)),
+                "is_crop_clipped": bool(getattr(inst, "is_crop_clipped", False)),
+                "hole_area_frac": round(float(getattr(inst, "hole_area_frac", 0.0)), 4),
+                "enclosed_void_frac": round(float(getattr(inst, "enclosed_void_frac", 0.0)), 4),
+                "bilateral_lobe_symmetry": bool(getattr(inst, "bilateral_lobe_symmetry", False)),
+                "efa_qc_pass": bool(getattr(inst, "efa_qc_pass", True)),
+                "qc_flag_reason": str(getattr(inst, "qc_flag_reason", "PASS") or "PASS"),
                 "blade_cie_l_norm": getattr(inst, "blade_cie_l_norm", np.nan),
                 "blade_cie_l_sd": getattr(inst, "blade_cie_l_sd", np.nan),
                 "midrib_angle_deg": round(float(inst.midrib_angle_deg), 2),
@@ -2499,7 +2750,9 @@ class SegmentAndExtractPipeline:
             "catalogNumber", "plant_individual_id", "leaf_id", "solidity",
             "circularity", "extent", "aspect_ratio", "area_px", "area_mm2",
             "archetype_score", "bilateral_dice", "si_a", "lm3_gates_pass",
-            "n_lamina_components", "blade_cie_l_norm", "blade_cie_l_sd",
+            "n_lamina_components", "detector_class_id", "is_crop_clipped",
+            "hole_area_frac", "enclosed_void_frac", "bilateral_lobe_symmetry",
+            "efa_qc_pass", "qc_flag_reason", "blade_cie_l_norm", "blade_cie_l_sd",
             "scale_source", "pixels_per_mm", "is_calibrated_mm",
             "mask_path", "mask_is_upright", "contour_path", "ect_path", "leaf_zone",
         ]
@@ -3155,6 +3408,7 @@ class SegmentAndExtractPipeline:
                                         is_high_dpi=True,
                                         min_leaf_area=0,
                                         subtract_holes=bool(getattr(self, "subtract_holes", True)),
+                                        crop_bgr=c_bgr,
                                     )
                                     pose_indices.append(idx_f)
                                     pose_crops.append(c_bgr)

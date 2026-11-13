@@ -1736,14 +1736,17 @@ def classify_leaf_zone_anatomical(
                 stat_rad = float(st_tup[3])
             elif len(st_tup) == 3 and np.isfinite(st_tup[2]) and 10.0 < float(st_tup[2]) <= 2500.0:
                 stat_rad = float(st_tup[2])
+        dists_tip_c = [float(math.hypot(g["p_tip"][0] - c_pt[0], g["p_tip"][1] - c_pt[1])) for g in g_list]
+        low_dists = sorted(dists_tip_c)[: max(1, min(3, int(math.ceil(0.30 * len(dists_tip_c)))))]
+        est_rad = float(np.median(low_dists)) * 1.20 if low_dists else 0.0
         if stat_rad > 10.0:
-            rosette_rad = max(stat_rad, 1.15 * med_blade_px, 45.0)
+            rosette_rad = max(min(stat_rad, max(est_rad * 1.35, 1.65 * med_blade_px, 95.0)) if has_caps else stat_rad, 1.15 * med_blade_px, 45.0)
         else:
-            dists_tip_c = [float(math.hypot(g["p_tip"][0] - c_pt[0], g["p_tip"][1] - c_pt[1])) for g in g_list]
-            low_dists = sorted(dists_tip_c)[: max(1, int(math.ceil(0.6 * len(dists_tip_c))))]
-            est_rad = float(np.median(low_dists)) * 1.25 if low_dists else 0.0
-            rosette_rad = max(est_rad, 1.35 * med_blade_px, 50.0)
-        r_hub = max(rosette_rad, 1.35 * med_blade_px, 55.0)
+            rosette_rad = max(est_rad, 1.25 * med_blade_px, 45.0)
+        if has_caps:
+            r_hub = min(max(rosette_rad, 1.15 * med_blade_px, 45.0), max(1.65 * med_blade_px, 95.0))
+        else:
+            r_hub = max(rosette_rad, 1.35 * med_blade_px, 55.0)
 
         # Trace each leaf's inward petiole ray R_i(t) = p_tip + t * u_in toward c_pt and/or specimen_mask
         traced_att_pts: List[Tuple[float, float]] = []
@@ -1799,14 +1802,14 @@ def classify_leaf_zone_anatomical(
                 if valid_steps >= 4 and (float(hits) / float(valid_steps)) < 0.35:
                     mask_ray_ok = False
 
-            # Guard against upper sessile cauline leaves whose downward blade angle happens to point parallel to the stem
-            is_distant_upper_sessile = False
-            if has_caps and prelim_scape_len > 60.0 and raw_d_crown > 1.65 * r_hub:
+            # Guard against aerial cauline leaves along a flowering scape whose downward angle points parallel to the stem
+            is_aerial_stem_node = False
+            if has_caps and prelim_scape_len > 60.0 and raw_d_crown > 1.25 * r_hub:
                 s_prelim = ((p_tip_i[0] - c_pt[0]) * prelim_scape_dx + (p_tip_i[1] - c_pt[1]) * prelim_scape_dy) / (
                     prelim_scape_len * prelim_scape_len
                 )
-                if s_prelim > 0.45 and not has_pet_i and pet_ratio_i < 0.12:
-                    is_distant_upper_sessile = True
+                if s_prelim > 0.16:
+                    is_aerial_stem_node = True
 
             converges = (
                 raw_d_crown <= r_hub
@@ -1815,8 +1818,8 @@ def classify_leaf_zone_anatomical(
                     and raw_d_crown <= max_ray_reach
                     and d_perp_crown <= 0.95 * r_hub
                     and mask_ray_ok
-                    and not is_distant_upper_sessile
-                    and (not has_caps or has_pet_i or raw_d_crown <= 1.85 * r_hub)
+                    and not is_aerial_stem_node
+                    and (not has_caps or (has_pet_i and raw_d_crown <= 1.45 * r_hub) or raw_d_crown <= 1.25 * r_hub)
                 )
             )
 
@@ -1969,12 +1972,19 @@ def classify_leaf_zone_anatomical(
 
         # Evaluate Case 4A: Detached sterile basal rosette / basal tuft (no roots, no capitula, radial/fasciculate hub)
         is_detached_sterile_rosette = False
+        n_pet_pid = sum(1 for hp in effective_has_pet if hp)
         if not has_roots and not has_caps:
-            if (
-                (n_leaves_pid <= 2 and max_dist_att <= 2.2 * r_hub)
+            is_sessile_stem_fragment = (
+                n_leaves_pid >= 2
+                and n_pet_pid == 0
+                and max(effective_pet_ratios, default=0.0) < 0.12
+                and att_span_px > 1.15 * med_blade_px
+            )
+            if not is_sessile_stem_fragment and (
+                (n_leaves_pid <= 2 and max_dist_att <= 2.2 * r_hub and (n_pet_pid >= 1 or att_span_px <= 1.15 * med_blade_px))
                 or (frac_converging >= 0.85 and max_dist_att <= 1.85 * r_hub)
-                or att_span_px < 2.5 * med_blade_px
-                or (att_elongation < 2.8 and max_dist_att <= 2.2 * r_hub)
+                or (att_span_px < 1.85 * med_blade_px and (n_pet_pid >= 1 or frac_converging >= 0.65))
+                or (att_elongation < 2.4 and max_dist_att <= 1.85 * r_hub and n_pet_pid >= 1)
             ):
                 is_detached_sterile_rosette = True
 
@@ -2010,20 +2020,24 @@ def classify_leaf_zone_anatomical(
                 p_basal = max(0.04, min(0.32, 0.35 * (1.0 - dist_norm)))
             elif has_caps and cap_pt is not None:
                 # Cases 1 & 3A: Stem path from basal crown c_pt (s = 0.0) to apical corymb cap_pt (s = 1.0)
-                s_stem = _project_along_stem_polyline(p_att, c_pt, cap_pt, p_bend)
+                p_tip_raw = g_list[idx_item]["p_tip"]
+                raw_d_tip = float(math.hypot(p_tip_raw[0] - c_pt[0], p_tip_raw[1] - c_pt[1]))
+                s_stem_att = _project_along_stem_polyline(p_att, c_pt, cap_pt, p_bend)
+                s_stem_tip = _project_along_stem_polyline(p_tip_raw, c_pt, cap_pt, p_bend)
+                s_stem = max(s_stem_att, 0.85 * s_stem_tip)
                 scape_span = max(math.hypot(cap_pt[0] - c_pt[0], cap_pt[1] - c_pt[1]), 1.5 * r_hub, 100.0)
-                radial_norm = min(1.0, dist_crown_px / scape_span)
-                dist_norm = max(0.0, min(1.0, 0.72 * s_stem + 0.28 * radial_norm))
+                radial_norm = min(1.0, raw_d_tip / scape_span)
+                dist_norm = max(0.0, min(1.0, 0.78 * s_stem_tip + 0.22 * radial_norm))
 
-                if converges_i and (dist_crown_px <= 1.15 * r_hub or (dist_norm <= 0.36 and has_pet)):
-                    dist_norm = min(dist_norm, 0.28)
-                    p_basal = max(0.68, min(0.98, 0.88 - 0.45 * dist_norm + min(0.10, 0.15 * pet_ratio)))
-                elif dist_norm <= 0.32 or dist_crown_px <= 1.05 * r_hub:
-                    p_basal = max(0.62, min(0.96, 0.84 - 0.50 * dist_norm + (0.08 if has_pet else 0.0)))
-                elif dist_norm <= 0.42 and has_pet and pet_ratio >= 0.18 and dist_crown_px <= 1.45 * r_hub:
-                    p_basal = max(0.55, min(0.88, 0.74 - 0.40 * dist_norm + min(0.12, 0.15 * pet_ratio)))
+                if converges_i and s_stem_tip <= 0.16 and (raw_d_tip <= 1.15 * r_hub or (has_pet and pet_ratio >= 0.22 and raw_d_tip <= 1.45 * r_hub)):
+                    dist_norm = min(dist_norm, 0.18)
+                    p_basal = max(0.68, min(0.98, 0.90 - 0.55 * dist_norm + min(0.10, 0.15 * pet_ratio)))
+                elif s_stem_tip <= 0.12 and raw_d_tip <= 1.05 * r_hub:
+                    p_basal = max(0.62, min(0.95, 0.84 - 0.60 * dist_norm + (0.08 if has_pet else 0.0)))
+                elif s_stem_tip <= 0.18 and has_pet and pet_ratio >= 0.25 and raw_d_tip <= 1.45 * r_hub:
+                    p_basal = max(0.56, min(0.88, 0.78 - 0.55 * dist_norm + min(0.12, 0.15 * pet_ratio)))
                 else:
-                    p_basal = max(0.04, min(0.46, 0.44 * (1.0 - dist_norm) + (0.06 if (has_pet and dist_norm < 0.50) else 0.0)))
+                    p_basal = max(0.04, min(0.44, 0.40 * (1.0 - dist_norm) + (0.04 if (has_pet and s_stem_tip < 0.28) else 0.0)))
             elif has_roots and not has_caps:
                 # Case 2 (bolting/decapitated stem with roots): leaves outside root hub along stem axis
                 denom = max(max_dist_att, 2.5 * r_hub, 120.0)

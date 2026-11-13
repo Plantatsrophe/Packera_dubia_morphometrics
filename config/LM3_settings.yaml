@@ -6,7 +6,7 @@ ingest:
 modules:
   plant_detector:
     model_name: "lm3_plant_detector__yolo26x_det_1280"
-    conf_thres: 0.25
+    conf_thres: 0.35
     iou_thres: 0.55
   archival_detector:
     model_name: "lm3_archival_detector__yolo26x_det_1280"
@@ -19,10 +19,10 @@ modules:
   leaf_segmenter:
     model_name: "lm3_leaf_segmenter__yolo26x_seg_1024"
     retina_masks: true
-    conf_thres: 0.25
+    conf_thres: 0.35
   landmark_detector:
     model_name: "lm3_landmark_detector__yolo26x_pose_640"
-    conf_thres: 0.25
+    conf_thres: 0.35
   ect:
     num_dirs: 360
     num_thresh: 32
