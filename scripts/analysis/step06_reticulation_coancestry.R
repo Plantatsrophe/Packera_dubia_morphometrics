@@ -502,3 +502,4 @@ compute_quartet_concordance_snps2cf <- function(pass_df, dos_mat) {
   sample_gamma[!is.finite(sample_gamma)] <- 0.0
   list(cf_df = cf_df, sample_gamma = sample_gamma)
 }
+

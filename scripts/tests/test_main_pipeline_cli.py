@@ -74,7 +74,7 @@ class TestMainPipelineCLI(unittest.TestCase):
         # genomics (Step 06 standalone phylogenomics)
         args_gen = parser.parse_args(["genomics", "--genomics-dir", "data/genomics"])
         self.assertEqual(args_gen.subcommand, "genomics")
-        self.assertEqual(args_gen.genomics_dir, "data/genomics")
+        self.assertEqual(args_gen.genomics_dir, Path("data/genomics"))
 
         # skim-organellar
         args_skim = parser.parse_args(["skim-organellar", "--reads", "raw_reads.zip"])
