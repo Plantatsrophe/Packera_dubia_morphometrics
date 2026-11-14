@@ -413,6 +413,19 @@ def download_public_packera_sequences(
     src_list = [s.strip().lower() for raw in sources for s in str(raw).split(",") if s.strip()] or ["ncbi", "dryad", "bold"]
     counts = {"nuccore_plastid": 0, "nuccore_its": 0, "nuccore_waxy": 0, "sra_runs": 0, "dryad_files": 0, "bold_records": 0, "sra_skimmed_fastqs": 0}
     dryad_status = "skipped"
+    prev_sources: List[str] = []
+    manifest_path = genomics_dir / "public_packera_sources_manifest.json"
+    if manifest_path.is_file():
+        try:
+            prev = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if isinstance(prev.get("counts"), dict):
+                counts.update({k: int(v) for k, v in prev["counts"].items() if k in counts and isinstance(v, int)})
+            if "dryad" not in src_list and isinstance(prev.get("dryad_status"), str) and prev["dryad_status"] != "skipped":
+                dryad_status = prev["dryad_status"]
+            if isinstance(prev.get("sources_run"), list):
+                prev_sources = [str(s).strip().lower() for s in prev["sources_run"] if str(s).strip()]
+        except Exception:
+            pass
     with tempfile.TemporaryDirectory(prefix="plantmatics_pub_") as tmp_str:
         tmpd, sra_rows = Path(tmp_str), []
         if "ncbi" in src_list:
@@ -429,7 +442,7 @@ def download_public_packera_sequences(
         if "bold" in src_list:
             counts["bold_records"] = _fetch_bold(genomics_dir, force=force)
     files_meta = {p.name: {"size_bytes": p.stat().st_size} for p in sorted(genomics_dir.iterdir()) if p.is_file() and p.name.startswith("public_packera_") and p.name != "public_packera_sources_manifest.json"}
-    summary: Dict[str, Any] = {"timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "genomics_dir": str(genomics_dir), "sources_run": src_list, "dryad_status": dryad_status, "counts": counts, "files": files_meta}
+    summary: Dict[str, Any] = {"timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "genomics_dir": str(genomics_dir), "sources_run": list(dict.fromkeys([*prev_sources, *src_list])), "dryad_status": dryad_status, "counts": counts, "files": files_meta}
     _atomic_save(genomics_dir, "public_packera_sources_manifest.json", json.dumps(summary, indent=2).encode("utf-8"), force=True)
     return summary
 

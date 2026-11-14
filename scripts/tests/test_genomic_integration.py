@@ -1653,6 +1653,74 @@ cat("BATCHED_PHASE2_R_OK\\n")
             finally:
                 conn_chk.close()
 
+    def test_public_backbone_digit_prefix_and_phytop_node_tree_lookup(self) -> None:
+        """(e) Verify Dryad file routing, digit-prefixed tip normalization, and PhyTop node-tree lookup."""
+        self.assertEqual(
+            PUBLIC_DL_MOD._route_dryad_file(Path("PhyTop_results/MO_phytop.info.tsv"), "PhyTop_results.zip"),
+            "public_packera_PhyTop_MO.tsv",
+        )
+        self.assertEqual(
+            PUBLIC_DL_MOD._route_dryad_file(Path("PhyTop_results/MO_phytop.tree"), "PhyTop_results.zip"),
+            "public_packera_PhyTop_MO.tre",
+        )
+        self.assertEqual(
+            PUBLIC_DL_MOD._route_dryad_file(Path("PhyTop_results/ASTRAL-Pro_phytop.info.tsv"), "PhyTop_results.zip"),
+            "public_packera_PhyTop_ASTRALPro.tsv",
+        )
+        self.assertEqual(
+            PUBLIC_DL_MOD._route_dryad_file(Path("RelTime_trees/S1outTest-HybPiper-df_nexus.tre"), "RelTime_trees.zip"),
+            "public_packera_RelTime_S1outTest-HybPiper-df_nexus.tre",
+        )
+        self.assertIsNone(
+            PUBLIC_DL_MOD._route_dryad_file(Path("__MACOSX/PhyTop_results/._MO_phytop.tree"), "PhyTop_results.zip"),
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            geno_dir = tmp / "genomics"
+            out_dir = tmp / "out"
+            geno_dir.mkdir(parents=True, exist_ok=True)
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+            (geno_dir / "public_packera_MO_Astral_lpp.tre").write_text(
+                "(((Packera_2aurea:0.02,Packera_2obovata:0.02):0.05,Packera_dubia:0.07):0.15,Senecio_vulgaris:0.22);\n",
+                encoding="utf-8",
+            )
+            (geno_dir / "public_packera_PhyTop_MO.tre").write_text(
+                "(((Packera_2aurea:0.02,Packera_2obovata:0.02)N4:0.05,Packera_dubia:0.07)N3:0.15,Senecio_vulgaris:0.22);\n",
+                encoding="utf-8",
+            )
+            (geno_dir / "public_packera_PhyTop_MO.tsv").write_text(
+                "node\tILS_index\tIH_index\nN4\t0.92\t0.04\nN3\t0.85\t0.11\n",
+                encoding="utf-8",
+            )
+
+            r_script = tmp / "check_phytop_node_lookup.R"
+            r_script.write_text(
+                "\n".join([
+                    f"source({str(PROJECT_ROOT / 'scripts' / 'analysis' / 'step06_public_backbone.R')!r})",
+                    "df <- data.frame(",
+                    "  genetic_sample_id = c('S1', 'S2', 'S3', 'S4'),",
+                    "  species_standardized = c('Packera aurea', 'Packera obovata', 'Packera dubia', 'Senecio vulgaris'),",
+                    "  stringsAsFactors = FALSE",
+                    ")",
+                    f"res <- evaluate_public_backbone_and_organellar(df, {str(geno_dir)!r}, {str(out_dir)!r})",
+                    "cdf <- res$concordance_df",
+                    "stopifnot(all(cdf$in_mo_backbone))",
+                    "stopifnot(cdf$normalized_taxon[cdf$taxon == 'Senecio vulgaris'] == 'Senecio vulgaris')",
+                    "stopifnot(abs(cdf$public_phytop_ils_index[cdf$taxon == 'Packera aurea'] - 0.92) < 1e-4)",
+                    "stopifnot(abs(cdf$public_phytop_ih_index[cdf$taxon == 'Packera aurea'] - 0.04) < 1e-4)",
+                    "stopifnot(abs(cdf$public_phytop_ils_index[cdf$taxon == 'Packera obovata'] - 0.92) < 1e-4)",
+                    "stopifnot(abs(cdf$public_phytop_ils_index[cdf$taxon == 'Packera dubia'] - 0.85) < 1e-4)",
+                    "stopifnot(abs(cdf$public_phytop_ih_index[cdf$taxon == 'Packera dubia'] - 0.11) < 1e-4)",
+                    "cat('PHYTOP_NODE_LOOKUP_OK\\n')",
+                ]) + "\n",
+                encoding="utf-8",
+            )
+            proc = run_warm_r_cmd(["Rscript", str(r_script)], env={"PYTHONPATH": str(PROJECT_ROOT)})
+            self.assertEqual(proc.returncode, 0, f"R PhyTop node lookup test failed:\n{proc.stdout}\n{proc.stderr}")
+            self.assertIn("PHYTOP_NODE_LOOKUP_OK", proc.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
