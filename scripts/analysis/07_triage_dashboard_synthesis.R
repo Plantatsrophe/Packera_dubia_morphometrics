@@ -62,6 +62,9 @@ for (.gt_p in c("scripts/analysis/genomic_triage_utils.R", file.path(dirname(c(s
 for (.gp_p in c("scripts/analysis/step07_genomic_propagation.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "step07_genomic_propagation.R"))) {
   if (!exists("run_step07_genomic_propagation", mode = "function") && !is.na(.gp_p) && nzchar(.gp_p) && file.exists(.gp_p)) { source(.gp_p); break }
 }
+for (.cy_p in c("scripts/analysis/step07_cytology_integration.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "step07_cytology_integration.R"))) {
+  if (!exists("run_step07_cytology_integration", mode = "function") && !is.na(.cy_p) && nzchar(.cy_p) && file.exists(.cy_p)) { source(.cy_p); break }
+}
 
 .step07_safe_bool <- function(x) {
   if (exists(".safe_bool_vec_r", mode = "function")) return(.safe_bool_vec_r(x))
@@ -987,6 +990,146 @@ compute_probabilistic_consensus_scores <- function(df) {
   round(out_z, 4)
 }
 
+.parse_cytotype_x_vals <- function(s) {
+  if (is.null(s) || length(s) == 0L) return(integer(0))
+  txt <- as.character(s)
+  txt <- txt[!is.na(txt) & nzchar(trimws(txt)) & !(toupper(trimws(txt)) %in% c("NA", "NAN", "NONE", "NULL"))]
+  if (length(txt) == 0L) return(integer(0))
+  out <- integer(0)
+  for (item in txt) {
+    m <- regmatches(item, gregexpr("([0-9]+)\\s*x\\b", item, ignore.case = TRUE))[[1L]]
+    if (length(m) > 0L) {
+      vals <- suppressWarnings(as.integer(sub("\\s*x$", "", tolower(m))))
+      out <- c(out, vals[!is.na(vals) & vals >= 2L & vals <= 16L])
+    }
+  }
+  sort(unique(out))
+}
+
+.infer_taxon_ploidy_levels <- function(tx, sp_vec, vp_vec, tx_cyto_vec) {
+  if (is.null(tx) || is.na(tx) || !nzchar(trimws(tx))) return(integer(0))
+  idx <- which(sp_vec == tx)
+  if (length(idx) == 0L) return(integer(0))
+  vp <- vp_vec[idx]
+  vp <- vp[!is.na(vp) & is.finite(vp) & vp >= 2L]
+  if (length(vp) > 0L) return(as.integer(round(stats::median(vp))))
+  .parse_cytotype_x_vals(tx_cyto_vec[idx])
+}
+
+.hybrid_cytotype_annotation <- function(vp_i, tax_cyto_i, p_a, p_b, sp_vec, vp_vec, tx_cyto_vec) {
+  is_odd_vp <- !is.na(vp_i) && (vp_i >= 3L) && ((vp_i %% 2L) == 1L)
+  has_odd_str <- !is.na(tax_cyto_i) && nzchar(trimws(tax_cyto_i)) &&
+    grepl("(^|[^0-9])[3579]\\s*x\\b", tax_cyto_i, ignore.case = TRUE)
+  pa_lvls <- .infer_taxon_ploidy_levels(p_a, sp_vec, vp_vec, tx_cyto_vec)
+  pb_lvls <- .infer_taxon_ploidy_levels(p_b, sp_vec, vp_vec, tx_cyto_vec)
+  both_known <- (length(pa_lvls) > 0L) && (length(pb_lvls) > 0L)
+  both_2x <- both_known && all(pa_lvls == 2L) && all(pb_lvls == 2L)
+  parents_differ <- both_known && !identical(sort(unique(pa_lvls)), sort(unique(pb_lvls)))
+  voucher_diverges_2x <- both_2x && !is.na(vp_i) && (vp_i != 2L)
+  if (is_odd_vp || has_odd_str || parents_differ || voucher_diverges_2x) {
+    return(" [Heteroploid / Odd-Ploidy (3x/5x) or Allopolyploid Candidate]")
+  }
+  if (both_2x && (is.na(vp_i) || vp_i == 2L)) {
+    return(" [Homoploid Hybrid Candidate: shared 2x]")
+  }
+  ""
+}
+
+.resolve_cytotype_barrier_pair <- function(i, sp_i, g_cl_i, cat_i, pid_i, barrier_attr, sp_vec, g_cl_vec, vp_vec, tx_cyto_vec, is_type_vec, is_typ_morph_vec) {
+  raw_lbl <- NA_character_
+  if (!is.null(barrier_attr)) {
+    if (is.data.frame(barrier_attr) && nrow(barrier_attr) > 0L) {
+      hit <- integer(0)
+      if (all(c("catalogNumber", "plant_individual_id") %in% names(barrier_attr))) {
+        hit <- which(as.character(barrier_attr$catalogNumber) == cat_i & as.integer(barrier_attr$plant_individual_id) == pid_i)
+      }
+      if (length(hit) == 0L && all(c("species_standardized", "gmm_cluster") %in% names(barrier_attr))) {
+        hit <- which(as.character(barrier_attr$species_standardized) == sp_i & as.integer(barrier_attr$gmm_cluster) == g_cl_i)
+      }
+      if (length(hit) > 0L) {
+        lcol <- intersect(c("barrier_label", "label", "cytotype_barrier_label"), names(barrier_attr))
+        if (length(lcol) > 0L) raw_lbl <- as.character(barrier_attr[[lcol[1L]]][hit[1L]])
+      }
+    } else if (is.character(barrier_attr) || is.list(barrier_attr)) {
+      nm_b <- names(barrier_attr)
+      keys <- c(
+        paste0(sp_i, "||", g_cl_i), paste0(cat_i, "__", pid_i), cat_i,
+        paste0(sp_i, "__K", g_cl_i), paste0(sp_i, "__", g_cl_i), sp_i
+      )
+      if (!is.null(nm_b) && any(keys %in% nm_b)) {
+        k_hit <- keys[keys %in% nm_b][1L]
+        val <- barrier_attr[[k_hit]]
+        if (is.list(val) && !is.null(val$cl_lbl) && !is.null(val$type_lbl)) {
+          return(list(cl_lbl = as.character(val$cl_lbl), type_lbl = as.character(val$type_lbl)))
+        }
+        raw_lbl <- as.character(val)[1L]
+      } else if (is.character(barrier_attr) && length(barrier_attr) >= i) {
+        cand_v <- trimws(as.character(barrier_attr[i]))
+        if (!is.na(cand_v) && nzchar(cand_v)) raw_lbl <- cand_v
+      }
+    }
+  }
+  if (!is.na(raw_lbl) && grepl("\\s+vs\\s+", raw_lbl)) {
+    pts <- trimws(strsplit(raw_lbl, "\\s+vs\\s+")[[1L]])
+    if (length(pts) >= 2L && nzchar(pts[1L]) && nzchar(pts[2L])) {
+      cl_tok <- sub("^cluster ploidy\\s+", "", pts[1L], ignore.case = TRUE)
+      ty_tok <- sub("^type-cluster\\s+", "", pts[2L], ignore.case = TRUE)
+      return(list(cl_lbl = cl_tok, type_lbl = ty_tok))
+    }
+  }
+  cl_vp <- vp_vec[sp_vec == sp_i & g_cl_vec == g_cl_i]
+  cl_vp <- cl_vp[!is.na(cl_vp) & is.finite(cl_vp)]
+  cl_p <- if (length(cl_vp) > 0L) {
+    as.integer(round(stats::median(cl_vp)))
+  } else if (!is.na(vp_vec[i]) && is.finite(vp_vec[i])) {
+    as.integer(round(vp_vec[i]))
+  } else {
+    NA_integer_
+  }
+  type_vp <- vp_vec[sp_vec == sp_i & is_type_vec & !is.na(vp_vec) & is.finite(vp_vec)]
+  if (length(type_vp) == 0L) {
+    type_vp <- vp_vec[sp_vec == sp_i & (g_cl_vec == 1L | (!is.na(is_typ_morph_vec) & is_typ_morph_vec)) & !is.na(vp_vec) & is.finite(vp_vec)]
+  }
+  if (length(type_vp) == 0L) {
+    type_vp <- vp_vec[sp_vec == sp_i & (g_cl_vec != g_cl_i) & !is.na(vp_vec) & is.finite(vp_vec)]
+  }
+  type_p <- if (length(type_vp) > 0L) {
+    as.integer(round(stats::median(type_vp)))
+  } else if (!is.na(cl_p) && !is.na(tx_cyto_vec[i])) {
+    others <- setdiff(.parse_cytotype_x_vals(tx_cyto_vec[i]), cl_p)
+    if (length(others) == 1L) others[1L] else NA_integer_
+  } else {
+    NA_integer_
+  }
+  list(
+    cl_lbl = if (!is.na(cl_p)) sprintf("%dx", cl_p) else "heteroploid",
+    type_lbl = if (!is.na(type_p)) sprintf("%dx", type_p) else "type-cluster"
+  )
+}
+
+.format_infra_cytotype_lbl <- function(raw_sp, given_sp, g_cl) {
+  has_infra <- grepl("\\b(var\\.|subsp\\.|ssp\\.)\\s+[a-z-]+", raw_sp, ignore.case = TRUE)
+  if (has_infra) {
+    m_inf <- regmatches(raw_sp, regexpr("\\b(var\\.|subsp\\.|ssp\\.)\\s+[A-Za-z-]+", raw_sp, ignore.case = TRUE))
+    if (length(m_inf) > 0L && nzchar(m_inf[1L])) return(paste(given_sp, tolower(m_inf[1L])))
+  }
+  sprintf("%s var. cytotype_K%d", given_sp, max(1L, as.integer(g_cl)))
+}
+
+.build_stage4_cytotype_decision <- function(given_sp, raw_sp, g_cl, base_rationale) {
+  suffix <- " [Intraspecific Cytotype Series: FCM/squash verification recommended]"
+  rat_out <- if (grepl("Intraspecific Cytotype Series:", base_rationale, fixed = TRUE)) base_rationale else paste0(base_rationale, suffix)
+  list(
+    status = "Subspecies_Ecotype",
+    broad = "Variety / Ecotype",
+    sub = "Subspecies_Ecotype",
+    prio = "MEDIUM",
+    act = "Accept_Subspecific_Treatment",
+    rec = .format_infra_cytotype_lbl(raw_sp, given_sp, g_cl),
+    rat = rat_out
+  )
+}
+
 apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_two_delta_bic = 12.0, opts = list()) {
   message("Evaluating vouchers across Five-Stage Hierarchical Integrative Decision Matrix...")
   if (!("morphometric_outlier_flag" %in% names(df))) df$morphometric_outlier_flag <- FALSE
@@ -995,6 +1138,33 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
   is_intra <- isTRUE(intraspecific_mode)
   n <- nrow(df)
   if (n == 0L) return(df)
+
+  opts_cyto <- opts
+  if (is.null(opts_cyto$db_path)) {
+    db_env_cy <- .env_plantmatics_or_packera("PLANTMATICS_DB_PATH", "PACKERA_DB_PATH")
+    if (nzchar(db_env_cy)) opts_cyto$db_path <- db_env_cy
+  }
+  if (is.null(opts_cyto$report_out) && !is.null(opts_cyto$output_report) && nzchar(opts_cyto$output_report)) {
+    opts_cyto$report_out <- opts_cyto$output_report
+  }
+  cyto_dir_arg <- if (!is.null(opts_cyto$cytology_dir) && nzchar(opts_cyto$cytology_dir)) {
+    opts_cyto$cytology_dir
+  } else {
+    env_cdir <- .env_plantmatics_or_packera("PLANTMATICS_CYTOLOGY_DIR", "PACKERA_CYTOLOGY_DIR")
+    if (nzchar(env_cdir)) env_cdir else "data/cytology"
+  }
+  has_prepop_cyto <- is.null(opts$cytological_records_df) && is.null(opts$taxon_cytology_summary_df) && (
+    isTRUE(attr(df, "step07_cytology_executed")) ||
+    (("cytotype_reproductive_barrier_pass" %in% names(df)) && any(!is.na(df$cytotype_reproductive_barrier_pass))) ||
+    (("cytology_linkage_tier" %in% names(df)) && any(!is.na(df$cytology_linkage_tier) & nzchar(trimws(as.character(df$cytology_linkage_tier)))))
+  )
+  if (!has_prepop_cyto && exists("run_step07_cytology_integration", mode = "function")) {
+    df <- run_step07_cytology_integration(df, cytology_dir = cyto_dir_arg, opts = opts_cyto)
+    attr(df, "step07_cytology_executed") <- TRUE
+  }
+  cyto_md_attr <- attr(df, "cytology_markdown_lines")
+  cyto_bar_lbl_attr <- attr(df, "cytotype_barrier_labels")
+  gigas_df_attr <- attr(df, "gigas_concordance_df")
 
   if (!("genomic_propagation_tier" %in% names(df)) &&
       any(.has_step07_geno_row_mask(df)) &&
@@ -1731,6 +1901,17 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
   geno_gdi_oversplit_v <- is.finite(eff_gdi_dv) & (eff_gdi_dv < 0.20)
   geno_gdi_cryptic_support_v <- (has_geno_dv & ((is.finite(geno_gdi_dv) & geno_gdi_dv > 0.70) | (!is.na(geno_hyb_cls_dv) & geno_hyb_cls_dv == "Divergent_NonHybrid_Lineage"))) |
                                 (is_cluster_prop_gdi_only & (cluster_prop_gdi_dv > 0.70) & !tier0_abstain_dv)
+  cyto_barrier_raw_d <- if ("cytotype_reproductive_barrier_pass" %in% df_nms_d) df$cytotype_reproductive_barrier_pass else rep(NA_integer_, n)
+  cyto_barrier_int_v <- if (is.logical(cyto_barrier_raw_d)) ifelse(is.na(cyto_barrier_raw_d), NA_integer_, as.integer(cyto_barrier_raw_d)) else suppressWarnings(as.integer(cyto_barrier_raw_d))
+  cyto_barrier_pass_v <- !is.na(cyto_barrier_int_v) & (cyto_barrier_int_v == 1L)
+  voucher_ploidy_v <- if ("voucher_ploidy_level" %in% df_nms_d) suppressWarnings(as.integer(df$voucher_ploidy_level)) else rep(NA_integer_, n)
+  voucher_2n_v <- if ("voucher_sporophytic_2n" %in% df_nms_d) suppressWarnings(as.integer(df$voucher_sporophytic_2n)) else rep(NA_integer_, n)
+  taxon_cyto_str_v <- .chr_col(df, "taxon_reported_cytotypes", n, default = NA_character_)
+  is_multi_cyto_raw_d <- if ("is_multi_cytotype_taxon" %in% df_nms_d) df$is_multi_cytotype_taxon else rep(NA_integer_, n)
+  is_multi_cyto_int_v <- if (is.logical(is_multi_cyto_raw_d)) ifelse(is.na(is_multi_cyto_raw_d), NA_integer_, as.integer(is_multi_cyto_raw_d)) else suppressWarnings(as.integer(is_multi_cyto_raw_d))
+  is_multi_cyto_v <- !is.na(is_multi_cyto_int_v) & (is_multi_cyto_int_v == 1L)
+  cyto_tier_v <- .chr_col(df, "cytology_linkage_tier", n, default = NA_character_)
+  pid_cyto_dv <- if ("plant_individual_id" %in% df_nms_d) suppressWarnings(as.integer(df$plant_individual_id)) else rep(0L, n)
 
   type_info_d <- if (exists(".identify_type_specimen_vec", mode = "function")) {
     .identify_type_specimen_vec(df)
@@ -1924,11 +2105,14 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
     pass_osr_p <- if (length(fin_p) > 0L) (stats::median(osr_p_dv[fin_p], na.rm = TRUE) < 0.05) else TRUE
     pass_osr <- isTRUE(pass_osr_d2 && pass_osr_p)
 
+    cyto_cl_pass <- cyto_barrier_pass_v[idx_cl]
     div_vec <- (is.finite(d_edaph_all[idx_cl]) & d_edaph_all[idx_cl] < 0.30) |
                (is.finite(edaph_z_all[idx_cl]) & edaph_z_all[idx_cl] > 2.5) |
-               (is_anth_dv[idx_cl] & is.finite(ddoy_all[idx_cl]) & abs(ddoy_all[idx_cl]) >= tau_cryptic_vec[idx_cl])
+               (is_anth_dv[idx_cl] & is.finite(ddoy_all[idx_cl]) & abs(ddoy_all[idx_cl]) >= tau_cryptic_vec[idx_cl]) |
+               cyto_cl_pass
     eval_m <- is.finite(edaph_z_all[idx_cl]) | !is.na(d_ed1_dv[idx_cl]) | !is.na(d_ed2_dv[idx_cl]) | !is.na(d_ed3_dv[idx_cl]) |
-              (is_anth_dv[idx_cl] & is.finite(ddoy_all[idx_cl]))
+              (is_anth_dv[idx_cl] & is.finite(ddoy_all[idx_cl])) |
+              cyto_cl_pass
     div_frac <- if (any(eval_m)) mean(div_vec[eval_m], na.rm = TRUE) else mean(div_vec, na.rm = TRUE)
     bf_req <- if (n < 50L) 6.0 else 10.0
     bf_med <- stats::median(bf_all[idx_cl], na.rm = TRUE)
@@ -2422,16 +2606,37 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
     is_intermodal_mosaic <- FALSE
     non_assigned_known <- (is.na(cda_prob) || cda_prob < 0.70) && !both_alt_agree && !morph_edaph_alt_agree &&
                           !type_control_reassign && !congener_osr_reassign
+    has_cytotype_barrier_i <- isTRUE(cyto_barrier_pass_v[i])
     has_morph_or_gmm_outlier <- is_mo_flag || (g_cl > max(2L, n_known_taxa) && bf_val >= 6.0)
     has_allochronic_barrier <- is_anth && (abs(ddoy) >= tau_cryptic_i)
     has_edaphic_barrier <- (is.finite(d_edaph) && d_edaph < 0.30) || (is.finite(edaph_z) && edaph_z > 2.5)
-    mod_morph <- is_tier1_pure_i && has_morph_or_gmm_outlier
+    has_eco_pheno_barrier_ms <- has_allochronic_barrier || has_edaphic_barrier || geno_gdi_cryptic_support_i
+    morph_exceeds_chisq95_i <- if (is.finite(self_d2_eff)) {
+      (self_d2_eff > stats::qchisq(0.95, df = self_df_i))
+    } else if (is.finite(tm_d2_i)) {
+      (tm_d2_i > tm_chisq95_i)
+    } else if (is.finite(min_cong_d2_dv[i])) {
+      (min_cong_d2_dv[i] > osr_chisq95_i)
+    } else {
+      is_mo_flag && outside_self_morph_95
+    }
+    cyto_barrier_valid_ms <- has_cytotype_barrier_i && (
+      has_eco_pheno_barrier_ms ||
+      (morph_exceeds_chisq95_i && outside_self_morph_95 && osr_cryptic_ok_i && cryptic_cluster_cohesion_pass[i])
+    )
+    mod_morph <- is_tier1_pure_i && (
+      (has_morph_or_gmm_outlier && (!has_cytotype_barrier_i || (outside_self_morph_95 && morph_exceeds_chisq95_i))) ||
+      (has_cytotype_barrier_i && morph_exceeds_chisq95_i && outside_self_morph_95 && (is_mo_flag || (g_cl > 1L && bf_val >= 6.0) || is.finite(self_d2_eff)))
+    )
     mod_non_assign <- non_assigned_known
-    mod_barrier <- has_allochronic_barrier || has_edaphic_barrier || geno_gdi_cryptic_support_i
-    n_cryptic_modalities <- as.integer(mod_morph) + as.integer(mod_non_assign) + as.integer(has_allochronic_barrier) + as.integer(has_edaphic_barrier) + as.integer(geno_gdi_cryptic_support_i)
+    mod_barrier <- has_eco_pheno_barrier_ms || cyto_barrier_valid_ms
+    n_cryptic_modalities <- as.integer(mod_morph) + as.integer(mod_non_assign) +
+                            as.integer(has_allochronic_barrier) + as.integer(has_edaphic_barrier) +
+                            as.integer(geno_gdi_cryptic_support_i) + as.integer(cyto_barrier_valid_ms)
     raw_is_crypt_pre_gdi <- !is_sensu_stricto_locked_i && !is_taphonomic_plasticity &&
                             (cryptic_cluster_cohesion_pass[i] || geno_gdi_cryptic_support_i) &&
                             (osr_cryptic_ok_i || (geno_gdi_cryptic_support_i && !is.finite(min_cong_d2_dv[i]))) &&
+                            (!has_cytotype_barrier_i || (outside_self_morph_95 && morph_exceeds_chisq95_i)) &&
                             is_tier1_pure_i &&
                             (mod_morph || (geno_gdi_cryptic_support_i && (geno_qry_dv[i] || outside_self_morph_95))) &&
                             (mod_non_assign || geno_gdi_cryptic_support_i) &&
@@ -2604,15 +2809,32 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
     }
 
     if (is_intra) {
-      n_intra_modalities <- as.integer(is_tier1_pure_morph && (is_mo_flag || (g_cl > 1L && bf_val >= 6.0))) +
-                            as.integer(is_anth && abs(ddoy) >= tau_cryptic_i) + as.integer((is.finite(d_edaph) && d_edaph < 0.30) || (is.finite(edaph_z) && edaph_z > 2.5)) +
-                            as.integer(geno_gdi_cryptic_support_i)
+      has_eco_pheno_intra <- (is_anth && abs(ddoy) >= tau_cryptic_i) ||
+                             (is.finite(d_edaph) && d_edaph < 0.30) ||
+                             (is.finite(edaph_z) && edaph_z > 2.5) ||
+                             geno_gdi_cryptic_support_i
+      cyto_barrier_valid_intra <- has_cytotype_barrier_i && (
+        has_eco_pheno_intra ||
+        (outside_self_morph_95 && morph_exceeds_chisq95_i && osr_cryptic_ok_i && cryptic_cluster_cohesion_pass[i])
+      )
+      intra_morph_ok <- is_tier1_pure_morph && (
+        (is_mo_flag && (!has_cytotype_barrier_i || (outside_self_morph_95 && morph_exceeds_chisq95_i))) ||
+        ((g_cl > 1L && bf_val >= 6.0) && (!has_cytotype_barrier_i || (outside_self_morph_95 && morph_exceeds_chisq95_i))) ||
+        (geno_gdi_cryptic_support_i && outside_self_morph_95) ||
+        (cyto_barrier_valid_intra && outside_self_morph_95 && morph_exceeds_chisq95_i)
+      )
+      n_intra_modalities <- as.integer(intra_morph_ok) +
+                            as.integer(is_anth && abs(ddoy) >= tau_cryptic_i) +
+                            as.integer((is.finite(d_edaph) && d_edaph < 0.30) || (is.finite(edaph_z) && edaph_z > 2.5)) +
+                            as.integer(geno_gdi_cryptic_support_i) +
+                            as.integer(cyto_barrier_valid_intra)
       raw_intra_crypt_pre_gdi <- !is_sensu_stricto_locked_i && !is_taphonomic_plasticity &&
                                  (cryptic_cluster_cohesion_pass[i] || geno_gdi_cryptic_support_i) &&
                                  (osr_cryptic_ok_i || (geno_gdi_cryptic_support_i && !is.finite(min_cong_d2_dv[i]))) &&
-                                 is_tier1_pure_morph && (is_mo_flag || (g_cl > 1L && bf_val >= 6.0) || (geno_gdi_cryptic_support_i && outside_self_morph_95)) &&
+                                 (!has_cytotype_barrier_i || (outside_self_morph_95 && morph_exceeds_chisq95_i)) &&
+                                 intra_morph_ok &&
                                  (is.na(cda_prob) || cda_prob < 0.70 || geno_gdi_cryptic_support_i) &&
-                                 ((is_anth && abs(ddoy) >= tau_cryptic_i) || (is.finite(d_edaph) && d_edaph < 0.30) || (is.finite(edaph_z) && edaph_z > 2.5) || geno_gdi_cryptic_support_i) &&
+                                 (has_eco_pheno_intra || cyto_barrier_valid_intra) &&
                                  (n_intra_modalities >= 2L)
       is_cryptic_intra <- raw_intra_crypt_pre_gdi && !geno_gdi_oversplit_i && !tier0_abstain_i
       has_edaph_pheno_div <- (is_anth && abs(ddoy) >= tau_ecotype_i) || (d_edaph < 0.45) ||
@@ -2621,6 +2843,10 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
       if (is_cryptic_intra) {
         prop_cand_note_intra <- if (is_cluster_prop_gdi_only_i && is.finite(eff_gdi_i) && (eff_gdi_i > 0.70) && !tier0_abstain_i) {
           sprintf(" [Candidate Member via Cluster-Propagated gdi=%.2f; confirm by targeted sequencing]", eff_gdi_i)
+        } else ""
+        cyto_bar_note_intra <- if (has_cytotype_barrier_i) {
+          bp_in <- .resolve_cytotype_barrier_pair(i, given_sp, g_cl, cat_sheet_vec[i], pid_cyto_dv[i], cyto_bar_lbl_attr, sp_all_vec, gmm_cl_dv, voucher_ploidy_v, taxon_cyto_str_v, is_type_dv, is_typ_morph_dv)
+          sprintf(" [Postzygotic Heteroploid Barrier: cluster ploidy %s vs type-cluster %s]", bp_in$cl_lbl, bp_in$type_lbl)
         } else ""
         if (!is.na(res_bas_i) && nzchar(res_bas_i)) {
           resurrection_basionym[i] <- res_bas_i
@@ -2632,13 +2858,13 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
             "Stage 3 Basionym Resurrection Candidate: Congruent Basal_Rosette outlier lineage (K%d) matches heterotypic type %s with evolutionary barrier (delta_DOY=%.1fd, tau=%.1fd, D_edaph=%.2f%s)",
             g_cl, res_bas_i, ddoy, tau_cryptic_i, d_edaph,
             if (is.finite(geno_gdi_i)) sprintf(", gdi=%.2f", geno_gdi_i) else ""
-          ), prop_cand_note_intra)
+          ), cyto_bar_note_intra, prop_cand_note_intra)
         } else {
           status_calls[i] <- "Putative_Cryptic_Species"
           rec_taxa[i] <- sprintf("%s (Putative Cryptic Lineage K%d)", given_sp, g_cl)
           triage_prios[i] <- if (tier == "Tier_1_Gold") "CRITICAL" else "HIGH"
           triage_acts[i] <- "Flag_Putative_Cryptic_Species"
-          rationales[i] <- paste0(sprintf("Congruent Basal_Rosette morphometric outlier + evolutionary barrier (delta_DOY=%.1fd, tau=%.1fd, D_edaph=%.2f%s)", ddoy, tau_cryptic_i, d_edaph, if (is.finite(geno_gdi_i)) sprintf(", gdi=%.2f", geno_gdi_i) else ""), prop_cand_note_intra)
+          rationales[i] <- paste0(sprintf("Congruent Basal_Rosette morphometric outlier + evolutionary barrier (delta_DOY=%.1fd, tau=%.1fd, D_edaph=%.2f%s)", ddoy, tau_cryptic_i, d_edaph, if (is.finite(geno_gdi_i)) sprintf(", gdi=%.2f", geno_gdi_i) else ""), cyto_bar_note_intra, prop_cand_note_intra)
         }
         treat_broad[i] <- "Misidentification / Cryptic Species"; treat_sub[i] <- "Putative_Cryptic_Species"; next
       } else if (geno_gdi_oversplit_i && raw_intra_crypt_pre_gdi) {
@@ -2647,7 +2873,12 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
         } else {
           sprintf("[Coalescent Oversplit Block: gdi=%.2f < 0.20]", eff_gdi_i)
         }
-        if (is_taphonomic_plasticity || is_mo_flag || g_cl > 1L) {
+        if (has_cytotype_barrier_i) {
+          st4_c <- .build_stage4_cytotype_decision(given_sp, raw_sp, g_cl, sprintf("Stage 4 Intraspecific Cytotype %s: Conspecific coalescent support retains %s at subspecific rank", ovs_tag_intra, given_sp))
+          status_calls[i] <- st4_c$status; rec_taxa[i] <- st4_c$rec
+          triage_prios[i] <- st4_c$prio; triage_acts[i] <- st4_c$act
+          rationales[i] <- st4_c$rat; treat_broad[i] <- st4_c$broad; treat_sub[i] <- st4_c$sub; next
+        } else if (is_taphonomic_plasticity || is_mo_flag || g_cl > 1L) {
           status_calls[i] <- "Ecophenotypic_Plasticity"; rec_taxa[i] <- given_sp
           triage_prios[i] <- "MEDIUM"; triage_acts[i] <- "Annotate_Taphonomic_Ecophenotype"
           rationales[i] <- sprintf("Stage 4 Plasticity %s: Conspecific coalescent support retains %s within intraspecific envelope", ovs_tag_intra, given_sp)
@@ -2663,6 +2894,18 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
         triage_prios[i] <- "HIGH"; triage_acts[i] <- "Reassign_Determination"
         rationales[i] <- "Cauline_Only_Fallback morphology with severe multimodal discordance routed to Misidentification_Reassign"
         treat_broad[i] <- "Misidentification / Cryptic Species"; treat_sub[i] <- "Misidentification_Reassign"; next
+      } else if (has_cytotype_barrier_i && !is_sensu_stricto_locked_i) {
+        base_rat_c <- if (g_cl > 1L && has_edaph_pheno_div) {
+          bas_note_eco <- if (is_heterotypic_bas_match_i) sprintf(" [Available Heterotypic Basionym: %s]", bas_i) else ""
+          cline_note_eco <- if (!cryptic_non_clinal_pass[i] && is.finite(clinal_r2_i) && clinal_r2_i >= 0.60) sprintf(" [Allopatric Spatial Cline R2=%.2f; Chambers & Hillis 2020]", clinal_r2_i) else ""
+          paste0(sprintf("Secondary GMM morphotype (K%d) with cytotype barrier and edaphic/phenological divergence (delta_DOY=%.1fd, pH=%s, Sand=%s)", g_cl, ddoy, ph_str, sand_str), bas_note_eco, cline_note_eco)
+        } else {
+          sprintf("Stage 4 Intraspecific Cytotype Differentiation: Morphologically overlapping or non-disjunct heteroploid cluster (GMM K%d, edaphic_z=%s) retained at subspecific rank", max(1L, g_cl), ifelse(is.finite(edaph_z), sprintf("%.2f", edaph_z), "NA"))
+        }
+        st4_c <- .build_stage4_cytotype_decision(given_sp, raw_sp, g_cl, base_rat_c)
+        status_calls[i] <- st4_c$status; rec_taxa[i] <- st4_c$rec
+        triage_prios[i] <- st4_c$prio; triage_acts[i] <- st4_c$act
+        rationales[i] <- st4_c$rat; treat_broad[i] <- st4_c$broad; treat_sub[i] <- st4_c$sub; next
       } else if (!is_sensu_stricto_locked_i && (g_cl > 1L) && !tier0_abstain_i) {
         if (has_edaph_pheno_div) {
           bas_note_eco <- if (is_heterotypic_bas_match_i) sprintf(" [Available Heterotypic Basionym: %s]", bas_i) else ""
@@ -2772,6 +3015,10 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
       prop_cand_note_ms <- if (is_cluster_prop_gdi_only_i && is.finite(eff_gdi_i) && (eff_gdi_i > 0.70) && !tier0_abstain_i) {
         sprintf(" [Candidate Member via Cluster-Propagated gdi=%.2f; confirm by targeted sequencing]", eff_gdi_i)
       } else ""
+      cyto_bar_note_ms <- if (has_cytotype_barrier_i) {
+        bp_ms <- .resolve_cytotype_barrier_pair(i, given_sp, g_cl, cat_sheet_vec[i], pid_cyto_dv[i], cyto_bar_lbl_attr, sp_all_vec, gmm_cl_dv, voucher_ploidy_v, taxon_cyto_str_v, is_type_dv, is_typ_morph_dv)
+        sprintf(" [Postzygotic Heteroploid Barrier: cluster ploidy %s vs type-cluster %s]", bp_ms$cl_lbl, bp_ms$type_lbl)
+      } else ""
       if (!is.na(res_bas_i) && nzchar(res_bas_i)) {
         resurrection_basionym[i] <- res_bas_i
         status_calls[i] <- "Taxonomic_Resurrection_Candidate"
@@ -2782,15 +3029,26 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
           "Stage 3 Basionym Resurrection Candidate (Padial et al. 2010): Basal_Rosette outlier lineage (K%d) matches heterotypic type %s (CDA_p=%.2f) + barrier (|delta_DOY|=%.1fd >= %.1fd, D_edaph=%.2f%s)",
           g_cl, res_bas_i, ifelse(is.na(cda_prob), 0.45, cda_prob), abs(ddoy), tau_cryptic_i, d_edaph,
           if (is.finite(geno_gdi_i)) sprintf(", gdi=%.2f", geno_gdi_i) else ""
-        ), prop_cand_note_ms)
+        ), cyto_bar_note_ms, prop_cand_note_ms)
       } else {
         status_calls[i] <- "Putative_Cryptic_Species"
         rec_taxa[i] <- sprintf("%s (Putative Cryptic Lineage K%d)", given_sp, g_cl)
         triage_prios[i] <- if (tier == "Tier_1_Gold") "CRITICAL" else "HIGH"
         triage_acts[i] <- "Flag_Putative_Cryptic_Species"
-        rationales[i] <- paste0(sprintf("Stage 3 Cryptic Congruence (Padial et al. 2010): Basal_Rosette outlier unassigned to known taxa (CDA_p=%.2f) + barrier (|delta_DOY|=%.1fd >= %.1fd, D_edaph=%.2f%s)", ifelse(is.na(cda_prob), 0.45, cda_prob), abs(ddoy), tau_cryptic_i, d_edaph, if (is.finite(geno_gdi_i)) sprintf(", gdi=%.2f", geno_gdi_i) else ""), prop_cand_note_ms)
+        rationales[i] <- paste0(sprintf("Stage 3 Cryptic Congruence (Padial et al. 2010): Basal_Rosette outlier unassigned to known taxa (CDA_p=%.2f) + barrier (|delta_DOY|=%.1fd >= %.1fd, D_edaph=%.2f%s)", ifelse(is.na(cda_prob), 0.45, cda_prob), abs(ddoy), tau_cryptic_i, d_edaph, if (is.finite(geno_gdi_i)) sprintf(", gdi=%.2f", geno_gdi_i) else ""), cyto_bar_note_ms, prop_cand_note_ms)
       }
       treat_broad[i] <- "Misidentification / Cryptic Species"; treat_sub[i] <- "Putative_Cryptic_Species"
+    } else if (has_cytotype_barrier_i && !is_sensu_stricto_locked_i && !is_severe_misid && !hyb_cand_pass[i]) {
+      base_rat_ms_c <- if (cryptic_oversplit_blocked_i) {
+        ovs_tag_c <- if (is_cluster_prop_gdi_only_i) sprintf("[Cluster Coalescent Oversplit Block: propagated gdi=%.2f]", eff_gdi_i) else sprintf("[Coalescent Oversplit Block: gdi=%.2f < 0.20]", eff_gdi_i)
+        sprintf("Stage 4 Intraspecific Cytotype %s: Conspecific coalescent support retains %s at subspecific rank", ovs_tag_c, given_sp)
+      } else {
+        sprintf("Stage 4 Intraspecific Cytotype Differentiation: Morphologically overlapping or non-disjunct heteroploid cluster (GMM K%d, D_edaph=%.2f, delta_DOY=%.1fd)", max(1L, g_cl), d_edaph, ddoy)
+      }
+      st4_ms <- .build_stage4_cytotype_decision(given_sp, raw_sp, g_cl, base_rat_ms_c)
+      status_calls[i] <- st4_ms$status; rec_taxa[i] <- st4_ms$rec
+      triage_prios[i] <- st4_ms$prio; triage_acts[i] <- st4_ms$act
+      rationales[i] <- st4_ms$rat; treat_broad[i] <- st4_ms$broad; treat_sub[i] <- st4_ms$sub
     } else if (cryptic_oversplit_blocked_i && !hyb_cand_pass[i]) {
       ovs_tag_ms <- if (is_cluster_prop_gdi_only_i) {
         sprintf("[Cluster Coalescent Oversplit Block: propagated gdi=%.2f]", eff_gdi_i)
@@ -2874,7 +3132,10 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
         rec_taxa[ci] <- sprintf("%s x %s", p_a, p_b)
         triage_prios[ci] <- if (tier_ci == "Tier_1_Gold") "HIGH" else "MEDIUM"
         triage_acts[ci] <- "Flag_Hybrid_Swarm_Intergrade"
-        rationales[ci] <- sprintf(
+        hyb_cyto_note <- .hybrid_cytotype_annotation(
+          voucher_ploidy_v[ci], taxon_cyto_str_v[ci], p_a, p_b, sp_all_vec, voucher_ploidy_v, taxon_cyto_str_v
+        )
+        rationales[ci] <- paste0(sprintf(
           "Stage 2 Confirmed Hybrid Swarm (%s x %s): Syntopic parents verified within %.1f km and %.1f km (co-flowering |dDOY|=%.1fd), parental chord t_AB=%.2f (d2_perp=%.2f), corroborated across n=%d contact-zone vouchers",
           p_a, p_b,
           ifelse(is.finite(hyb_cand_d1_km[ci]), hyb_cand_d1_km[ci], 0.0),
@@ -2883,9 +3144,22 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
           hyb_cand_t_ab[ci],
           ifelse(is.finite(hyb_cand_d2_perp[ci]), hyb_cand_d2_perp[ci], 0.0),
           n_deme_vouchers
-        )
+        ), hyb_cyto_note)
         treat_broad[ci] <- "Hybrid / Introgressant"
         treat_sub[ci] <- "Hybrid_Introgressant"
+      } else if (isTRUE(cyto_barrier_pass_v[ci])) {
+        raw_ci_sp <- if (!is.na(raw_sp_dv[ci])) raw_sp_dv[ci] else hyb_cand_p1[ci]
+        g_cl_ci <- if (!is.na(gmm_cl_dv[ci]) && gmm_cl_dv[ci] >= 1L) gmm_cl_dv[ci] else 1L
+        st4_ci <- .build_stage4_cytotype_decision(
+          hyb_cand_p1[ci], raw_ci_sp, g_cl_ci,
+          sprintf(
+            "Stage 4 Intraspecific Cytotype Differentiation: Unreplicated sympatric intermediate toward %s (t_AB=%.2f, n_deme=1) retained as subspecific cytotype series",
+            hyb_cand_p2[ci], hyb_cand_t_ab[ci]
+          )
+        )
+        status_calls[ci] <- st4_ci$status; rec_taxa[ci] <- st4_ci$rec
+        triage_prios[ci] <- st4_ci$prio; triage_acts[ci] <- st4_ci$act
+        rationales[ci] <- st4_ci$rat; treat_broad[ci] <- st4_ci$broad; treat_sub[ci] <- st4_ci$sub
       } else {
         # Singleton sympatric intermediate fails Gate 5 deme cohesion -> retain conservatively under parental species
         if (!isTRUE(mo_flag_dv[ci])) {
@@ -2952,6 +3226,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
       for (k_pos in seq_along(s_idx)) {
         r <- s_idx[k_pos]
         if (is_conf_s[k_pos] && rec_taxa[r] == sp_clean_vec[r]) next
+        if (isTRUE(cyto_barrier_pass_v[r])) next
         if (!(treat_sub[r] %in% c("Hybrid_Introgressant", "Misidentification_Reassign", "Ecophenotypic_Plasticity") ||
               status_calls[r] %in% c("Hybrid_Intergrade_Swarm", "Putative_Hybrid_Introgression", "Ambiguous_Needs_Expert_Review", "Misidentification_Severe"))) {
           next
@@ -2979,7 +3254,8 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
         r <- s_idx[k_pos]
         if (r == best_r) next
         if ((geno_gdi_oversplit_v[r] && treat_sub[best_r] == "Putative_Cryptic_Species") ||
-            (tier0_abstain_dv[r] && (treat_sub[best_r] %in% c("Putative_Cryptic_Species", "Subspecies_Ecotype")))) {
+            (tier0_abstain_dv[r] && (treat_sub[best_r] %in% c("Putative_Cryptic_Species", "Subspecies_Ecotype"))) ||
+            (isTRUE(cyto_barrier_pass_v[r]) && (treat_sub[best_r] %in% c("Ecophenotypic_Plasticity", "Confirmed_Species")))) {
           next
         }
         if (!is_genuine_mixed_ramet(r, best_r)) {
@@ -3056,8 +3332,17 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
   if (!("tier0_abstention_flag" %in% names(df))) df$tier0_abstention_flag <- rep(NA_integer_, n) else df$tier0_abstention_flag <- suppressWarnings(as.integer(df$tier0_abstention_flag))
   if (!("deme_mahal_d2" %in% names(df))) df$deme_mahal_d2 <- rep(NA_real_, n) else df$deme_mahal_d2 <- suppressWarnings(as.numeric(df$deme_mahal_d2))
   if (!("cluster_propagated_gdi" %in% names(df))) df$cluster_propagated_gdi <- rep(NA_real_, n) else df$cluster_propagated_gdi <- suppressWarnings(as.numeric(df$cluster_propagated_gdi))
+  if (!("cytology_linkage_tier" %in% names(df))) df$cytology_linkage_tier <- rep(NA_character_, n) else df$cytology_linkage_tier <- as.character(df$cytology_linkage_tier)
+  if (!("voucher_sporophytic_2n" %in% names(df))) df$voucher_sporophytic_2n <- rep(NA_integer_, n) else df$voucher_sporophytic_2n <- suppressWarnings(as.integer(df$voucher_sporophytic_2n))
+  if (!("voucher_ploidy_level" %in% names(df))) df$voucher_ploidy_level <- rep(NA_integer_, n) else df$voucher_ploidy_level <- suppressWarnings(as.integer(df$voucher_ploidy_level))
+  if (!("taxon_reported_cytotypes" %in% names(df))) df$taxon_reported_cytotypes <- rep(NA_character_, n) else df$taxon_reported_cytotypes <- as.character(df$taxon_reported_cytotypes)
+  if (!("is_multi_cytotype_taxon" %in% names(df))) df$is_multi_cytotype_taxon <- rep(NA_integer_, n) else df$is_multi_cytotype_taxon <- suppressWarnings(as.integer(df$is_multi_cytotype_taxon))
+  if (!("cytotype_reproductive_barrier_pass" %in% names(df))) df$cytotype_reproductive_barrier_pass <- rep(NA_integer_, n) else df$cytotype_reproductive_barrier_pass <- suppressWarnings(as.integer(df$cytotype_reproductive_barrier_pass))
   attr(df, "can_evaluate_hybrids") <- can_evaluate_hybrids
   if (!is.null(prop_sum_attr)) attr(df, "genomic_propagation_summary") <- prop_sum_attr
+  if (!is.null(cyto_md_attr)) attr(df, "cytology_markdown_lines") <- cyto_md_attr
+  if (!is.null(cyto_bar_lbl_attr)) attr(df, "cytotype_barrier_labels") <- cyto_bar_lbl_attr
+  if (!is.null(gigas_df_attr)) attr(df, "gigas_concordance_df") <- gigas_df_attr
   return(df)
 }
 
@@ -3475,7 +3760,7 @@ build_triage_queue <- function(opts) {
       mo_key <- paste0(mo_df$catalogNumber, "__", mo_df$plant_individual_id)
       agg_key <- paste0(mo_agg$catalogNumber, "__", mo_agg$plant_individual_id)
       lgl_known <- c("is_dissected", "is_contour_outlier", "is_confident_label_noise", "is_passive", "is_calibrated_mm", "cryptic_cluster_cohesion_pass", "cryptic_non_clinal_pass")
-      int_known <- c("efd_harmonic_opt", "efd_k95_pcs", "self_morph_df", "open_set_df")
+      int_known <- c("efd_harmonic_opt", "efd_k95_pcs", "self_morph_df", "open_set_df", "voucher_sporophytic_2n", "voucher_ploidy_level", "is_multi_cytotype_taxon", "cytotype_reproductive_barrier_pass")
       for (rmc in rem_mo_cols) {
         col_v <- mo_df[[rmc]]
         if (is.logical(col_v) || rmc %in% lgl_known) {
@@ -3549,6 +3834,27 @@ build_triage_queue <- function(opts) {
   if (exists("load_step07_genomic_metrics", mode = "function")) {
     vouchers <- load_step07_genomic_metrics(opts, vouchers)
   }
+  opts_cyto_q <- opts
+  if (is.null(opts_cyto_q$db_path)) {
+    db_env_q <- .env_plantmatics_or_packera("PLANTMATICS_DB_PATH", "PACKERA_DB_PATH")
+    if (nzchar(db_env_q)) opts_cyto_q$db_path <- db_env_q
+  }
+  if (is.null(opts_cyto_q$report_out) && !is.null(opts_cyto_q$output_report) && nzchar(opts_cyto_q$output_report)) {
+    opts_cyto_q$report_out <- opts_cyto_q$output_report
+  }
+  cyto_dir_q <- if (!is.null(opts_cyto_q$cytology_dir) && nzchar(opts_cyto_q$cytology_dir)) {
+    opts_cyto_q$cytology_dir
+  } else {
+    env_cdir_q <- .env_plantmatics_or_packera("PLANTMATICS_CYTOLOGY_DIR", "PACKERA_CYTOLOGY_DIR")
+    if (nzchar(env_cdir_q)) env_cdir_q else "data/cytology"
+  }
+  if (exists("run_step07_cytology_integration", mode = "function")) {
+    vouchers <- run_step07_cytology_integration(vouchers, cytology_dir = cyto_dir_q, opts = opts_cyto_q)
+    attr(vouchers, "step07_cytology_executed") <- TRUE
+  }
+  cyto_md_q <- attr(vouchers, "cytology_markdown_lines")
+  cyto_bar_lbl_q <- attr(vouchers, "cytotype_barrier_labels")
+  gigas_df_q <- attr(vouchers, "gigas_concordance_df")
   if (exists("run_step07_genomic_propagation", mode = "function")) {
     vouchers <- run_step07_genomic_propagation(vouchers, opts)
   }
@@ -3558,6 +3864,9 @@ build_triage_queue <- function(opts) {
   vouchers <- apply_taxonomic_decision_matrix(vouchers, intraspecific_mode = isTRUE(opts$intraspecific_mode), gmm_two_delta_bic = gmm_stats$two_delta_bic, opts = opts)
   if (!is.null(attr(vouchers, "genomic_propagation_summary"))) prop_sum <- attr(vouchers, "genomic_propagation_summary")
   if (!is.null(prop_sum)) attr(vouchers, "genomic_propagation_summary") <- prop_sum
+  if (!is.null(attr(vouchers, "cytology_markdown_lines"))) cyto_md_q <- attr(vouchers, "cytology_markdown_lines")
+  if (!is.null(attr(vouchers, "cytotype_barrier_labels"))) cyto_bar_lbl_q <- attr(vouchers, "cytotype_barrier_labels")
+  if (!is.null(attr(vouchers, "gigas_concordance_df"))) gigas_df_q <- attr(vouchers, "gigas_concordance_df")
 
   # Persist full evaluated cohort (including outgroup anchors and incoming reassignments) to SQLite BEFORE --focal-taxon filtering
   if (!isTRUE(opts$demo) && exists("persist_step07_to_sqlite", mode = "function")) {
@@ -3594,6 +3903,9 @@ build_triage_queue <- function(opts) {
   if (!is.null(comp_res)) attr(vouchers, "complex_discovery") <- comp_res
   if (!is.null(can_eval_hyb_attr)) attr(vouchers, "can_evaluate_hybrids") <- can_eval_hyb_attr
   if (!is.null(prop_sum)) attr(vouchers, "genomic_propagation_summary") <- prop_sum
+  if (!is.null(cyto_md_q)) attr(vouchers, "cytology_markdown_lines") <- cyto_md_q
+  if (!is.null(cyto_bar_lbl_q)) attr(vouchers, "cytotype_barrier_labels") <- cyto_bar_lbl_q
+  if (!is.null(gigas_df_q)) attr(vouchers, "gigas_concordance_df") <- gigas_df_q
   if (!is.null(full_complex_df) && length(unique(stats::na.omit(as.character(full_complex_df$species_standardized)))) >= 2L) {
     attr(vouchers, "full_complex_df") <- full_complex_df
   }
@@ -3917,6 +4229,14 @@ generate_taxonomic_revision_report <- function(df, opts) {
     geno_md <- tryCatch(build_genomic_markdown_summary(opts, df), error = function(e) character(0))
     if (length(geno_md) > 0L) md_lines <- c(md_lines, geno_md)
   }
+  cyto_md_rep <- attr(df, "cytology_markdown_lines")
+  if (!is.null(cyto_md_rep) && length(cyto_md_rep) > 0L) {
+    cyto_md_rep <- as.character(cyto_md_rep)
+    cyto_md_rep <- cyto_md_rep[!is.na(cyto_md_rep)]
+    if (length(cyto_md_rep) > 0L) {
+      if (nzchar(trimws(cyto_md_rep[1L]))) md_lines <- c(md_lines, "", cyto_md_rep) else md_lines <- c(md_lines, cyto_md_rep)
+    }
+  }
   tmp_rep <- paste0(opts$output_report, ".tmp"); writeLines(md_lines, tmp_rep); file.rename(tmp_rep, opts$output_report)
 
   if (nzchar(f_info$taxon) && nzchar(f_info$slug)) {
@@ -4022,6 +4342,10 @@ generate_interactive_triage_html <- function(df, html_path, focal_taxon = "", op
   t0_abst_h <- if ("tier0_abstention_flag" %in% names(df)) (!is.na(df$tier0_abstention_flag) & suppressWarnings(as.integer(df$tier0_abstention_flag)) == 1L) else rep(FALSE, n)
   t0_ok_h <- if ("tier0_abstention_flag" %in% names(df)) (!is.na(df$tier0_abstention_flag) & suppressWarnings(as.integer(df$tier0_abstention_flag)) == 0L) else rep(FALSE, n)
   cl_gdi_h <- get_f("cluster_propagated_gdi", 2)
+  vp_2n_h <- if ("voucher_sporophytic_2n" %in% names(df)) suppressWarnings(as.integer(df$voucher_sporophytic_2n)) else rep(NA_integer_, n)
+  vp_x_h <- if ("voucher_ploidy_level" %in% names(df)) suppressWarnings(as.integer(df$voucher_ploidy_level)) else rep(NA_integer_, n)
+  tax_cyto_h <- get_c("taxon_reported_cytotypes", "")
+  is_mc_h <- if ("is_multi_cytotype_taxon" %in% names(df)) (!is.na(df$is_multi_cytotype_taxon) & suppressWarnings(as.integer(df$is_multi_cytotype_taxon)) == 1L) else rep(FALSE, n)
   geno_sum_h <- vapply(seq_len(n), function(ii) {
     base_str <- if (nzchar(geno_pred_h[ii])) {
       bits <- character(0)
@@ -4038,6 +4362,19 @@ generate_interactive_triage_html <- function(df, html_path, focal_taxon = "", op
     }
     if (t0_abst_h[ii]) prop_badges <- c(prop_badges, "[DNA-Abstain]")
     if (geno_gdi_h[ii] == "NA" && cl_gdi_h[ii] != "NA") prop_badges <- c(prop_badges, sprintf("[Cluster-gdi=%s]", cl_gdi_h[ii]))
+    has_2n_ii <- !is.na(vp_2n_h[ii]) && is.finite(vp_2n_h[ii]) && vp_2n_h[ii] > 0L
+    has_x_ii <- !is.na(vp_x_h[ii]) && is.finite(vp_x_h[ii]) && vp_x_h[ii] > 0L
+    if (has_2n_ii && has_x_ii) {
+      prop_badges <- c(prop_badges, sprintf("[2n=%d | %dx]", vp_2n_h[ii], vp_x_h[ii]))
+    } else if (has_2n_ii) {
+      prop_badges <- c(prop_badges, sprintf("[2n=%d]", vp_2n_h[ii]))
+    } else if (has_x_ii) {
+      prop_badges <- c(prop_badges, sprintf("[%dx]", vp_x_h[ii]))
+    }
+    tc_ii <- trimws(tax_cyto_h[ii])
+    if (is_mc_h[ii] && nzchar(tc_ii) && !(toupper(tc_ii) %in% c("NA", "NAN", "NONE", "NULL"))) {
+      prop_badges <- c(prop_badges, sprintf("[Multi-Cytotype: %s]", tc_ii))
+    }
     if (length(prop_badges) == 0L) return(base_str)
     if (nzchar(base_str)) paste(c(base_str, prop_badges), collapse = " ") else paste(prop_badges, collapse = " ")
   }, character(1))

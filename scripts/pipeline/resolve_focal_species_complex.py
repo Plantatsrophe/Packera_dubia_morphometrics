@@ -372,6 +372,8 @@ def _extract_stage_metrics(
     gdi_vals: List[float] = []
     backbone_clades: List[str] = []
     n_tier0_abstained = 0
+    reported_cytotypes_set: set[str] = set()
+    n_cytovouchers_linked = 0
     for r in eval_rows:
         gv = _safe_float(r.get("coalescent_gdi"))
         if gv is None:
@@ -389,6 +391,15 @@ def _extract_stage_metrics(
             ab_str = str(ab_raw).strip()
             if ab_str in {"1", "1.0"} or _safe_float(ab_str) == 1.0:
                 n_tier0_abstained += 1
+        cy_raw = str(r.get("taxon_reported_cytotypes") or "").strip()
+        if cy_raw and cy_raw.upper() not in {"NA", "NAN", "NONE", "NULL"}:
+            for tok in re.split(r"[;,]+", cy_raw):
+                t_clean = tok.strip()
+                if t_clean and t_clean.upper() not in {"NA", "NAN", "NONE", "NULL"}:
+                    reported_cytotypes_set.add(t_clean)
+        cy_tier = str(r.get("cytology_linkage_tier") or "").strip()
+        if cy_tier in {"C1_Direct_Cytovoucher", "C2_Exsiccatae_Cytoduplicate"}:
+            n_cytovouchers_linked += 1
 
     median_coalescent_gdi: Optional[float] = (
         float(statistics.median(gdi_vals)) if gdi_vals else None
@@ -398,6 +409,7 @@ def _extract_stage_metrics(
         if backbone_clades
         else ""
     )
+    reported_cytotypes = "; ".join(sorted(reported_cytotypes_set))
 
     metrics = {
         "stage": stage_name,
@@ -473,6 +485,8 @@ def _extract_stage_metrics(
         "median_coalescent_gdi": median_coalescent_gdi,
         "public_backbone_clade": public_backbone_clade,
         "n_tier0_abstained": n_tier0_abstained,
+        "reported_cytotypes": reported_cytotypes,
+        "n_cytovouchers_linked": n_cytovouchers_linked,
         "complex_neighbors": "; ".join(neighbors),
     }
     return metrics, eval_rows
@@ -597,6 +611,20 @@ def compile_complex_resolution_summary(
             f"(Stages 3 and 4 run in single-taxon intraspecific mode where interspecific hybridity is disabled)"
         ),
         f"* **Spatial-Thinning Sensitivity Check (Stage 4):** {thin_note}",
+        *(
+            [
+                f"* **Cytological Linkage & Reported Cytotypes:** "
+                f"{(s3['reported_cytotypes'] or s2['reported_cytotypes'] or s1['reported_cytotypes'] or 'Unassigned')} "
+                f"(linked cytovouchers in purified cohort: {s3['n_cytovouchers_linked']})"
+            ]
+            if (
+                s3.get("reported_cytotypes")
+                or s2.get("reported_cytotypes")
+                or s1.get("reported_cytotypes")
+                or max(int(s.get("n_cytovouchers_linked") or 0) for s in (s1, s2, s3, s4)) > 0
+            )
+            else []
+        ),
         "",
         "## 2. Cross-Stage Quantitative Summary",
         "",

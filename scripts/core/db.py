@@ -2748,16 +2748,30 @@ def ingest_existing_run_tables_into_db(
                 "hybrid_parent_2",
                 "genomic_propagation_tier",
                 "tier0_calibrated_taxon",
+                "cytology_linkage_tier",
+                "taxon_reported_cytotypes",
             ):
                 if sc in r:
                     d_tri[sc] = _to_str(r.get(sc))
-            for ic in ("n_available_modalities", "tier0_abstention_flag"):
+            for ic in (
+                "n_available_modalities",
+                "tier0_abstention_flag",
+                "voucher_sporophytic_2n",
+                "voucher_ploidy_level",
+            ):
                 if ic in r:
                     iv = _to_int(r.get(ic))
                     if iv is None and ic == "tier0_abstention_flag":
                         iv = _to_bool_int(r.get(ic))
                     d_tri[ic] = iv
-            for bc in ("cryptic_cluster_cohesion_pass", "cryptic_non_clinal_pass", "hybrid_zone_cohesion_pass", "is_completed_voucher"):
+            for bc in (
+                "cryptic_cluster_cohesion_pass",
+                "cryptic_non_clinal_pass",
+                "hybrid_zone_cohesion_pass",
+                "is_completed_voucher",
+                "is_multi_cytotype_taxon",
+                "cytotype_reproductive_barrier_pass",
+            ):
                 if bc in r:
                     d_tri[bc] = _to_bool_int(r.get(bc))
             for fc in (
@@ -2832,6 +2846,112 @@ def upsert_genomic_samples(
         "genomic_samples",
         norm_rows,
         ("genetic_sample_id",),
+        preserve_existing_on_null=preserve_existing_on_null,
+    )
+
+
+def upsert_cytological_records(
+    conn: sqlite3.Connection,
+    rows: Sequence[Mapping[str, Any]],
+    demo: bool = False,
+    *,
+    preserve_existing_on_null: bool = False,
+) -> int:
+    """Upsert Tier A cytological voucher and literature records into `cytological_records`."""
+    if demo or not rows:
+        return 0
+    str_cols = (
+        "source_record_id",
+        "basionym_name",
+        "catalogNumber",
+        "exsiccatae_key",
+        "cytology_linkage_tier",
+        "raw_count_str",
+        "cytotype_label",
+        "breeding_system",
+        "genbank_accession",
+        "collector_surname",
+        "record_number_clean",
+        "institution_code",
+        "voucher_citation",
+        "locality_text",
+        "reference_citation",
+    )
+    int_cols = ("gametophytic_n", "sporophytic_2n", "base_x", "ploidy_level")
+    float_cols = ("c_value_1c_pg", "c_value_2c_pg")
+
+    norm_rows: List[Dict[str, Any]] = []
+    for raw in rows:
+        cid = _to_str(raw.get("cytology_id"))
+        sp_std = _to_str(raw.get("species_standardized"))
+        if not cid or not sp_std:
+            continue
+        item: Dict[str, Any] = {
+            "cytology_id": cid,
+            "source_db": _to_str(raw.get("source_db")) or "local",
+            "original_taxon_name": _to_str(raw.get("original_taxon_name")) or sp_std,
+            "species_standardized": sp_std,
+            "b_chromosomes": _to_int(raw.get("b_chromosomes"), default=0) or 0,
+            "is_aneuploid_or_odd_ploid": _to_bool_int(raw.get("is_aneuploid_or_odd_ploid")) or 0,
+            "is_approximate": _to_bool_int(raw.get("is_approximate")) or 0,
+        }
+        for col in str_cols:
+            item[col] = _to_str(raw.get(col))
+        for col in int_cols:
+            item[col] = _to_int(raw.get(col))
+        for col in float_cols:
+            item[col] = _to_float(raw.get(col))
+        norm_rows.append(item)
+
+    if not norm_rows:
+        return 0
+    return upsert_rows_generic(
+        conn,
+        "cytological_records",
+        norm_rows,
+        ("cytology_id",),
+        preserve_existing_on_null=preserve_existing_on_null,
+    )
+
+
+def upsert_taxon_cytology_summary(
+    conn: sqlite3.Connection,
+    rows: Sequence[Mapping[str, Any]],
+    demo: bool = False,
+    *,
+    preserve_existing_on_null: bool = False,
+) -> int:
+    """Upsert Tier A taxon-level cytological summaries into `taxon_cytology_summary`."""
+    if demo or not rows:
+        return 0
+    norm_rows: List[Dict[str, Any]] = []
+    for raw in rows:
+        sp_std = _to_str(raw.get("species_standardized"))
+        if not sp_std:
+            continue
+        item: Dict[str, Any] = {
+            "species_standardized": sp_std,
+            "n_cytology_records": _to_int(raw.get("n_cytology_records"), default=0) or 0,
+            "n_direct_cytovouchers": _to_int(raw.get("n_direct_cytovouchers"), default=0) or 0,
+            "modal_sporophytic_2n": _to_int(raw.get("modal_sporophytic_2n")),
+            "modal_base_x": _to_int(raw.get("modal_base_x")),
+            "modal_ploidy_level": _to_int(raw.get("modal_ploidy_level")),
+            "reported_cytotypes": _to_str(raw.get("reported_cytotypes")),
+            "is_multi_cytotype_taxon": _to_bool_int(raw.get("is_multi_cytotype_taxon")) or 0,
+            "has_dysploid_series": _to_bool_int(raw.get("has_dysploid_series")) or 0,
+            "has_odd_polyploid_or_apomixis": _to_bool_int(raw.get("has_odd_polyploid_or_apomixis")) or 0,
+            "mean_2c_pg": _to_float(raw.get("mean_2c_pg")),
+            "breeding_system_summary": _to_str(raw.get("breeding_system_summary")),
+        }
+        norm_rows.append(item)
+
+    if not norm_rows:
+        return 0
+    return upsert_rows_generic(
+        conn,
+        "taxon_cytology_summary",
+        norm_rows,
+        ("species_standardized",),
         preserve_existing_on_null=preserve_existing_on_null,
     )
 
@@ -3108,7 +3228,8 @@ def purge_segments_and_runs(
     Purges all Step 02 to 06 segmentation artifacts (masks, contours, ECT matrices,
     cropped patches, non-Step-01 tables, figures, reports, and run directories) and
     clears Step 02 to 06 SQLite tables while preserving Step 01 harvested vouchers,
-    raw voucher imagery, taxon synonyms, and the environmental cache.
+    raw voucher imagery, taxon synonyms, `cytological_records`,
+    `taxon_cytology_summary`, `data/cytology/`, and the environmental cache.
     """
     import shutil as _shutil
 
@@ -3225,8 +3346,9 @@ def purge_runs_only(
     Step 01 harvested vouchers, raw voucher images, and Step 02 segmentation assets
     (`data/masks`, `data/contours`, `data/ect`, `data/cropped_patches`,
     `extracted_leaf_manifest.csv`, `voucher_reproductive_metrics.csv`,
-    `voucher_phenological_states.csv`, `failed_qc_vouchers.csv`, and SQLite
-    `vouchers`, `plant_individuals`, `extracted_leaves`, `voucher_reproductive_phenology`).
+    `voucher_phenological_states.csv`, `failed_qc_vouchers.csv`, `data/cytology/`,
+    and SQLite `vouchers`, `plant_individuals`, `extracted_leaves`,
+    `voucher_reproductive_phenology`, `cytological_records`, and `taxon_cytology_summary`).
 
     When `refresh_env_buffers=True`, resets cached `min_bedrock_depth_buffer_cm` to NULL/NA
     in `environmental_cache` and `fine_grain_edaphic_cache.csv` so Step 05 recomputes true

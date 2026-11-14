@@ -60,7 +60,7 @@
 }
 
 .compute_morph_pool_prop <- function(df, pc_cols = NULL, ridge = 1e-4) {
-  if (is.null(pc_cols)) pc_cols <- intersect(paste0("PC", 1:6), names(df)); if (length(pc_cols) < 2L || nrow(df) == 0L) return(NULL)
+  if (is.null(pc_cols)) { pc_cols <- intersect(paste0("PC", 1:6), names(df)); if (length(pc_cols) < 2L) pc_cols <- intersect(paste0("morph_PC", 1:6), names(df)) }; if (length(pc_cols) < 2L || nrow(df) == 0L) return(NULL)
   X <- matrix(NA_real_, nrow = nrow(df), ncol = length(pc_cols), dimnames = list(NULL, pc_cols))
   for (k in seq_along(pc_cols)) X[, k] <- suppressWarnings(as.numeric(df[[pc_cols[k]]]))
   is_basal <- .is_basal_mask_prop(df); cc <- stats::complete.cases(X); idx <- which(is_basal & cc); if (length(idx) < max(3L, length(pc_cols) + 1L)) idx <- which(cc)
@@ -172,6 +172,16 @@ get_tier0_rectified_species_and_evictions <- function(df) resolve_tier0_anchor_o
 }
 
 # Step C: Conditional spatial deme priors (4-gate transfer)
+.extract_known_ploidy_vec <- function(tbl) {
+  n <- nrow(tbl); out <- rep(NA_integer_, n); if (n == 0L) return(out)
+  for (col in c("voucher_ploidy_level", "geno_ploidy_level", "ploidy_level", "inferred_cytotype")) {
+    if (!col %in% names(tbl)) next
+    v <- suppressWarnings(as.integer(round(as.numeric(sub("x$", "", tolower(trimws(as.character(tbl[[col]]))))))))
+    v[is.na(v) | v < 2L | v > 16L] <- NA_integer_; m <- is.na(out) & !is.na(v); if (any(m)) out[m] <- v[m]
+  }
+  out
+}
+
 propagate_conditional_deme_priors <- function(df, ga_df = NULL, morph_X = NULL, morph_S_inv = NULL) {
   df <- .init_propagation_cols(df, reset = FALSE); n <- nrow(df); if (n == 0L) return(df)
   extract_anc <- function(tbl, allow_g3, track_row) {
@@ -183,6 +193,7 @@ propagate_conditional_deme_priors <- function(df, ga_df = NULL, morph_X = NULL, 
       qcf & is.finite(la) & is.finite(lo) & !ad & ((is.finite(pr) & pr >= 0.80) | (hg == "Divergent_NonHybrid_Lineage"))
     tx <- ifelse(nzchar(pd) & pd != "Unknown", pd, ifelse(hg == "Divergent_NonHybrid_Lineage", spv, "")); ok <- ok & nzchar(tx) & (tx != "Unknown")
     data.frame(lat = la[ok], lon = lo[ok], taxon = tx[ok], prob = ifelse(is.finite(pr[ok]), pr[ok], 0.85), azonal = .pick_num_prop(tbl, "is_azonal_lithology")[ok],
+               ploidy = .extract_known_ploidy_vec(tbl)[ok],
                cat = .pick_chr_prop(tbl, "catalogNumber", "")[ok], sid = .pick_chr_prop(tbl, "genetic_sample_id", "")[ok], df_row = if (track_row) which(ok) else rep(NA_integer_, sum(ok)), stringsAsFactors = FALSE)
   }
   anc_df <- extract_anc(df, FALSE, TRUE)
@@ -223,6 +234,14 @@ propagate_conditional_deme_priors <- function(df, ga_df = NULL, morph_X = NULL, 
   df_geo <- which(is.finite(lat) & is.finite(lon) & nzchar(t0$rectified_taxon) & (t0$rectified_taxon != "Unknown") & !pure_ev)
   crit_d2 <- stats::qchisq(0.95, df = p); qc_num <- is.numeric(df$geno_quality_pass) || is.integer(df$geno_quality_pass); adm_num <- is.numeric(df$is_geno_admixed) || is.integer(df$is_geno_admixed)
 
+  rec_ploidy <- .extract_known_ploidy_vec(df); is_multi_tx <- .pick_num_prop(df, "is_multi_cytotype_taxon")
+  df_sp <- trimws(.pick_chr_prop(df, "species_standardized", "")); df_cl <- .pick_num_prop(df, "gmm_cluster")
+  sp_cl_key <- ifelse(nzchar(df_sp) & df_sp != "Unknown" & is.finite(df_cl), paste(df_sp, as.integer(df_cl), sep = "||"), "")
+  multi_sp_set <- unique(df_sp[!is.na(is_multi_tx) & is_multi_tx == 1L & nzchar(df_sp)])
+  row_typed_pl <- rec_ploidy; has_dr <- !is.na(anc_df$df_row) & !is.na(anc_df$ploidy)
+  if (any(has_dr)) { dr <- anc_df$df_row[has_dr]; m <- is.na(row_typed_pl[dr]); if (any(m)) row_typed_pl[dr[m]] <- anc_df$ploidy[has_dr][m] }
+  df_typed_ll <- which(!is.na(row_typed_pl) & is.finite(lat) & is.finite(lon))
+  cl_pl_map <- lapply(split(row_typed_pl[nzchar(sp_cl_key) & !is.na(row_typed_pl)], sp_cl_key[nzchar(sp_cl_key) & !is.na(row_typed_pl)]), unique)
   for (i in cands) {
     dists <- .haversine_km_vec(lat[i], lon[i], anc_df$lat, anc_df$lon); in_2km <- which(dists <= 2.0); if (length(in_2km) == 0L) next
     min_d <- min(dists[in_2km]); if (!((is.finite(unc[i]) && unc[i] <= 1000.0) || (is.na(unc[i]) && min_d <= 1.0))) next
@@ -233,6 +252,13 @@ propagate_conditional_deme_priors <- function(df, ga_df = NULL, morph_X = NULL, 
     }
     cand_sp <- anc_df$taxon[near_a]
     if (is.finite(az[i]) && is.finite(anc_df$azonal[near_a]) && as.integer(az[i]) != as.integer(anc_df$azonal[near_a])) next
+    if (!is.na(anc_df$ploidy[near_a]) && !is.na(rec_ploidy[i]) && anc_df$ploidy[near_a] != rec_ploidy[i]) next
+    if ((!is.na(is_multi_tx[i]) && is_multi_tx[i] == 1L) || (cand_sp %in% multi_sp_set)) {
+      df_2km <- if (length(df_typed_ll) > 0L) df_typed_ll[.haversine_km_vec(lat[i], lon[i], lat[df_typed_ll], lon[df_typed_ll]) <= 2.0] else integer(0)
+      deme_pls <- unique(c(anc_df$ploidy[in_2km], row_typed_pl[df_2km])); deme_pls <- deme_pls[!is.na(deme_pls)]
+      if (length(deme_pls) != 1L) next
+      if (nzchar(sp_cl_key[i]) && !is.null(cl_pl_map[[sp_cl_key[i]]]) && (length(cl_pl_map[[sp_cl_key[i]]]) != 1L || cl_pl_map[[sp_cl_key[i]]][1L] != deme_pls[1L])) next
+    }
     if (cand_sp == sp[i] && is.finite(ed_z[i]) && ed_z[i] > 1.75) next
     if (cand_sp != sp[i] && is.finite(ph[i]) && !is.null(ph_ref[[cand_sp]]) && abs(ph[i] - ph_ref[[cand_sp]][1L]) / ph_ref[[cand_sp]][2L] > 2.5) next
     if (!is_basal[i] || !all(is.finite(morph_X[i, ])) || is.null(mu_taxon[[cand_sp]])) next
@@ -355,11 +381,17 @@ propagate_cluster_gdi_governance <- function(df, gdi_df = NULL, morph_X = NULL, 
   g_col <- .pick_num_prop(df, "coalescent_gdi"); cl_col <- trimws(.pick_chr_prop(df, c("coancestry_cluster_id", "coancestry_cluster"), ""))
   gmm_v <- .pick_num_prop(df, "gmm_cluster"); eco_v <- trimws(.pick_chr_prop(df, "ecotype_regime", ""))
   sp <- trimws(.pick_chr_prop(df, "species_standardized", ""))
+  rec_ploidy <- .extract_known_ploidy_vec(df); is_multi_tx <- .pick_num_prop(df, "is_multi_cytotype_taxon")
+  multi_sp_set <- unique(sp[!is.na(is_multi_tx) & is_multi_tx == 1L & nzchar(sp)])
   mcl_col <- ifelse(is.finite(gmm_v) & nzchar(sp) & sp != "Unknown", paste(sp, as.integer(gmm_v), eco_v, sep = "||"), "")
+  mcl_anchor_pl <- list(); for (mk in unique(mcl_col[nzchar(mcl_col)])) { pls <- unique(rec_ploidy[mcl_col == mk & !is.na(rec_ploidy)]); if (length(pls) == 1L) mcl_anchor_pl[[mk]] <- pls[1L] }
+  cl_anchor_pl <- list(); tx_anchor_pls <- list()
   src_ok <- (tier %in% c("G1_Direct_Voucher", "G1_Exsiccatae_Isoduplicate", "G2_Population_Voucher_Proxy")) & qc & !adm & is.finite(g_col) & nzchar(pred) & (pred != "Unknown")
-  for (i in which(src_ok)) { tx_gdi[[pred[i]]] <- c(tx_gdi[[pred[i]]], g_col[i]); if (nzchar(cl_col[i])) cl_gdi[[cl_col[i]]] <- c(cl_gdi[[cl_col[i]]], g_col[i]) }
+  for (i in which(src_ok)) { tx_gdi[[pred[i]]] <- c(tx_gdi[[pred[i]]], g_col[i]); if (nzchar(cl_col[i])) cl_gdi[[cl_col[i]]] <- c(cl_gdi[[cl_col[i]]], g_col[i]); if (!is.na(rec_ploidy[i])) tx_anchor_pls[[pred[i]]] <- unique(c(tx_anchor_pls[[pred[i]]], rec_ploidy[i])) }
+  for (ck in unique(cl_col[src_ok & nzchar(cl_col)])) { pls <- unique(rec_ploidy[cl_col == ck & !is.na(rec_ploidy)]); if (length(pls) == 1L) cl_anchor_pl[[ck]] <- pls[1L] else if (length(pls) > 1L) cl_gdi[[ck]] <- NULL }
   for (mk in unique(mcl_col[src_ok & nzchar(mcl_col)])) {
     a_idx <- which(src_ok & mcl_col == mk); if (length(a_idx) < 2L) next
+    mk_pls <- unique(rec_ploidy[mcl_col == mk & !is.na(rec_ploidy)]); if (length(mk_pls) > 1L || ((sub("\\|\\|.*$", "", mk) %in% multi_sp_set) && length(mk_pls) != 1L)) next
     tb <- sort(table(pred[a_idx]), decreasing = TRUE)
     if (length(tb) > 0L && (as.numeric(tb[1L]) / length(a_idx)) >= 0.75) mcl_med[[mk]] <- stats::median(g_col[a_idx[pred[a_idx] == names(tb)[1L]]])
   }
@@ -381,7 +413,10 @@ propagate_cluster_gdi_governance <- function(df, gdi_df = NULL, morph_X = NULL, 
   pure_ev <- t0$evict_from_given_anchor & !t0$is_tier0_dna_anchor
   for (i in seq_len(n)) {
     if (adm[i] || pure_ev[i] || (!is.na(abst[i]) && abst[i] == 1L)) next
-    gval <- if (nzchar(cl_col[i]) && !is.null(cl_med[[cl_col[i]]])) cl_med[[cl_col[i]]] else if (nzchar(mcl_col[i]) && !is.null(mcl_med[[mcl_col[i]]])) mcl_med[[mcl_col[i]]] else {
+    rec_multi <- (!is.na(is_multi_tx[i]) && is_multi_tx[i] == 1L) || (sp[i] %in% multi_sp_set)
+    cl_ok <- nzchar(cl_col[i]) && !is.null(cl_med[[cl_col[i]]]) && (!rec_multi || !is.null(cl_anchor_pl[[cl_col[i]]])) && (is.na(rec_ploidy[i]) || is.null(cl_anchor_pl[[cl_col[i]]]) || rec_ploidy[i] == cl_anchor_pl[[cl_col[i]]])
+    mcl_ok <- nzchar(mcl_col[i]) && !is.null(mcl_med[[mcl_col[i]]]) && (!rec_multi || !is.null(mcl_anchor_pl[[mcl_col[i]]])) && (is.na(rec_ploidy[i]) || is.null(mcl_anchor_pl[[mcl_col[i]]]) || rec_ploidy[i] == mcl_anchor_pl[[mcl_col[i]]])
+    gval <- if (cl_ok) cl_med[[cl_col[i]]] else if (mcl_ok) mcl_med[[mcl_col[i]]] else {
       cand <- ""
       if ((df$genomic_propagation_tier[i] %in% c("G1_Exsiccatae_Isoduplicate", "G2_Conditional_Deme_Hull") ||
            tier[i] %in% c("G1_Direct_Voucher", "G2_Population_Voucher_Proxy")) && nzchar(pred[i]) && pred[i] != "Unknown") {
@@ -391,7 +426,10 @@ propagate_cluster_gdi_governance <- function(df, gdi_df = NULL, morph_X = NULL, 
       } else if (nzchar(sp[i]) && !is.null(tx_med[[sp[i]]]) && is_basal[i] && !is.null(morph_X) && all(is.finite(morph_X[i, ])) && !is.null(mu_taxon[[sp[i]]])) {
         dv <- morph_X[i, ] - mu_taxon[[sp[i]]]; if (is.finite(d2 <- as.numeric(crossprod(dv, morph_S_inv %*% dv))) && d2 <= crit_d2) cand <- sp[i]
       }
-      if (nzchar(cand) && !is.null(tx_med[[cand]])) tx_med[[cand]] else NA_real_
+      if (nzchar(cand) && !is.null(tx_med[[cand]])) {
+        c_pl <- if (nzchar(mcl_col[i])) mcl_anchor_pl[[mcl_col[i]]] else NULL; c_multi <- rec_multi || (cand %in% multi_sp_set); t_pls <- tx_anchor_pls[[cand]]
+        if ((c_multi && is.null(c_pl)) || (!is.na(rec_ploidy[i]) && !is.null(c_pl) && rec_ploidy[i] != c_pl) || (!is.na(rec_ploidy[i]) && length(t_pls) == 1L && rec_ploidy[i] != t_pls[1L]) || (c_multi && length(t_pls) > 0L && !(c_pl %in% t_pls))) NA_real_ else tx_med[[cand]]
+      } else NA_real_
     }
     if (is.finite(gval)) {
       df$cluster_propagated_gdi[i] <- round(gval, 4L)

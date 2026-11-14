@@ -222,6 +222,46 @@ export_genomic_field_triage_csv <- function(opts, triage_df) {
   invisible(out_p)
 }
 
+.build_cytology_summary_lines_r <- function(df) {
+  out <- character(0)
+  if (!is.data.frame(df) || nrow(df) == 0L) return(out)
+  cy_lines <- attr(df, "cytology_markdown_lines")
+  if (length(cy_lines) > 0L) {
+    out <- c(out, cy_lines)
+  } else if ("cytology_linkage_tier" %in% names(df)) {
+    ct_v <- as.character(df$cytology_linkage_tier)
+    n_c1 <- sum(!is.na(ct_v) & ct_v == "C1_Direct_Cytovoucher"); n_c2 <- sum(!is.na(ct_v) & ct_v == "C2_Exsiccatae_Cytoduplicate")
+    mc_v <- if ("is_multi_cytotype_taxon" %in% names(df)) suppressWarnings(as.integer(df$is_multi_cytotype_taxon)) else rep(NA_integer_, nrow(df))
+    sp_v <- if ("species_standardized" %in% names(df)) trimws(as.character(df$species_standardized)) else rep("", nrow(df))
+    n_mc <- length(unique(sp_v[!is.na(mc_v) & mc_v == 1L & nzchar(sp_v)]))
+    if (any(!is.na(ct_v)) || n_mc > 0L) out <- c(out, sprintf("- **Step 07 Cytology Coverage:** %d `C1` direct cytovouchers, %d `C2` exsiccatae cytoduplicates across %d multi-cytotype taxa.", n_c1, n_c2, n_mc))
+  }
+  if ("inferred_cytotype" %in% names(df)) {
+    nq_pl <- suppressWarnings(as.integer(sub("x$", "", tolower(trimws(as.character(df$inferred_cytotype))))))
+    nq_pl[is.na(nq_pl) | nq_pl < 2L | nq_pl > 16L] <- NA_integer_
+    qc_v <- if ("geno_quality_pass" %in% names(df)) .safe_bool_vec_r(df$geno_quality_pass) else rep(TRUE, nrow(df))
+    v_pl <- if ("voucher_ploidy_level" %in% names(df)) suppressWarnings(as.integer(df$voucher_ploidy_level)) else rep(NA_integer_, nrow(df))
+    rep_v <- if ("taxon_reported_cytotypes" %in% names(df)) as.character(df$taxon_reported_cytotypes) else rep(NA_character_, nrow(df))
+    sp_v <- if ("species_standardized" %in% names(df)) trimws(as.character(df$species_standardized)) else rep("", nrow(df))
+    cat_v <- if ("catalogNumber" %in% names(df)) trimws(as.character(df$catalogNumber)) else as.character(seq_len(nrow(df)))
+    disc_lbls <- character(0); n_chk <- 0L
+    for (r_i in which(!is.na(nq_pl) & qc_v)) {
+      lit_pl <- suppressWarnings(as.integer(sub("x$", "", unlist(strsplit(tolower(as.character(rep_v[r_i])), "[,;/ ]+"))))); lit_pl <- lit_pl[!is.na(lit_pl)]
+      if (!is.na(v_pl[r_i]) || length(lit_pl) > 0L) n_chk <- n_chk + 1L
+      if ((!is.na(v_pl[r_i]) && (nq_pl[r_i] != v_pl[r_i])) || (length(lit_pl) > 0L && !(nq_pl[r_i] %in% lit_pl))) {
+        exp_s <- if (!is.na(v_pl[r_i])) paste0(v_pl[r_i], "x") else as.character(rep_v[r_i])
+        disc_lbls <- c(disc_lbls, sprintf("%s %s (nQuire %dx vs %s)", sp_v[r_i], cat_v[r_i], nq_pl[r_i], exp_s))
+      }
+    }
+    if (length(disc_lbls) > 0L) {
+      out <- c(out, sprintf("- **Cytology vs. nQuire Discordance Audit:** %d discordant sample(s) out of %d checked (%s).", length(disc_lbls), n_chk, paste(utils::head(unique(disc_lbls), 5L), collapse = "; ")))
+    } else if (n_chk > 0L) {
+      out <- c(out, sprintf("- **Cytology vs. nQuire Discordance Audit:** 0 discordances across %d cytologically cross-checked sample(s).", n_chk))
+    }
+  }
+  out
+}
+
 build_genomic_markdown_summary <- function(opts, df) {
   t_dir <- .resolve_step07_genomic_tables_dir(opts)
   r_dir <- .resolve_step07_genomic_reports_dir(opts)
@@ -252,7 +292,7 @@ build_genomic_markdown_summary <- function(opts, df) {
   pbc_path <- resolve_csv("public_backbone_concordance.csv")
   pop_path <- resolve_csv("public_organellar_placement.csv")
   tc_path <- resolve_csv("taxon_complexes.csv")
-  if (!nzchar(ga_path) && !any(has_active_genomic_row_mask(df))) return(character(0))
+  if (!nzchar(ga_path) && !any(has_active_genomic_row_mask(df))) return(.build_cytology_summary_lines_r(df))
 
   ga_df <- if (nzchar(ga_path)) tryCatch(utils::read.csv(ga_path, stringsAsFactors = FALSE), error = function(e) NULL) else NULL
   gm_df <- if (nzchar(gm_path)) tryCatch(utils::read.csv(gm_path, stringsAsFactors = FALSE), error = function(e) NULL) else NULL
@@ -427,6 +467,6 @@ build_genomic_markdown_summary <- function(opts, df) {
     k_str <- if (!is.null(prop_sum) && is.finite(prop_sum$lopo_cv_kappa)) sprintf(", LOPO-CV kappa = %.3f", prop_sum$lopo_cv_kappa) else ""
     lines <- c(lines, sprintf("- **Step 07 Genomic Propagation & Tier_0 Calibration:** %d exsiccatae isoduplicates (`G1`), %d conditional deme priors (`G2`), %d `Tier_0` DNA anchors, %d `Tier_0`-calibrated projections (%d abstained as `Sensu_Lato_DNA_Required`), %d cluster-level `gdi` transfers%s.", n_ex, n_dh, n_t0a, n_t0c, n_t0s, n_cg, k_str))
   }
-  lines
+  c(lines, .build_cytology_summary_lines_r(df))
 }
 

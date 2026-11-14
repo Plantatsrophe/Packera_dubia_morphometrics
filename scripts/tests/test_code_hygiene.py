@@ -311,7 +311,7 @@ class TestCodeHygiene(unittest.TestCase):
         )
 
     def test_new_public_genomics_modules_respect_500_line_ceiling(self):
-        """Verify public Packera genomics modules and organellar skimmer exist and stay under 500 lines."""
+        """Verify public Packera genomics, cytology, and monograph modules stay within line ceilings."""
         bounded_paths = (
             PROJECT_ROOT / "scripts" / "data_prep" / "download_public_packera_sequences.py",
             PROJECT_ROOT / "scripts" / "analysis" / "step06_public_backbone.R",
@@ -320,15 +320,37 @@ class TestCodeHygiene(unittest.TestCase):
             PROJECT_ROOT / "scripts" / "analysis" / "genomic_triage_utils.R",
             PROJECT_ROOT / "scripts" / "pipeline" / "resolve_eastern_na_packera.py",
             PROJECT_ROOT / "scripts" / "tests" / "test_eastern_na_monograph_cli.py",
+            PROJECT_ROOT / "scripts" / "data_prep" / "download_public_cytology.py",
+            PROJECT_ROOT / "scripts" / "analysis" / "step07_cytology_integration.R",
+            PROJECT_ROOT / "scripts" / "tests" / "test_public_cytology_integration.py",
         )
+        strict_ceilings = {
+            PROJECT_ROOT / "scripts" / "data_prep" / "download_public_cytology.py": 450,
+            PROJECT_ROOT / "scripts" / "analysis" / "step07_cytology_integration.R": 380,
+            PROJECT_ROOT / "scripts" / "tests" / "test_public_cytology_integration.py": 380,
+        }
         for mod_path in bounded_paths:
-            self.assertTrue(mod_path.exists(), f"Missing expected public genomics module: {mod_path}")
+            self.assertTrue(mod_path.exists(), f"Missing expected bounded module: {mod_path}")
             line_count = len(mod_path.read_text(encoding="utf-8").splitlines())
             self.assertLess(
                 line_count,
                 500,
                 f"{mod_path.relative_to(PROJECT_ROOT)} exceeds 500-line ceiling ({line_count} lines)",
             )
+            if mod_path in strict_ceilings:
+                ceiling = strict_ceilings[mod_path]
+                self.assertLess(
+                    line_count,
+                    ceiling,
+                    f"{mod_path.relative_to(PROJECT_ROOT)} exceeds {ceiling}-line ceiling ({line_count} lines)",
+                )
+
+    def test_data_cytology_directory_stays_flat(self):
+        """Verify `data/cytology/` exists and contains zero nested subdirectories."""
+        cytology_dir = PROJECT_ROOT / "data" / "cytology"
+        self.assertTrue(cytology_dir.is_dir(), f"Missing expected cytology directory: {cytology_dir}")
+        subdirs = [p.name for p in cytology_dir.iterdir() if p.is_dir()]
+        self.assertEqual(subdirs, [], f"data/cytology/ must remain flat with zero subdirectories: {subdirs}")
 
     def test_no_hardcoded_workstation_legacy_repo_path(self):
         """Scan all active .py, .R, and .sh files and assert zero hardcoded workstation legacy repo paths."""

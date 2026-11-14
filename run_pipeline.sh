@@ -57,6 +57,9 @@ USDA_EXEMPT_GOLD=""
 SKIP_ENV_DOWNLOAD=false
 FORCE_ENV_DOWNLOAD=false
 DOWNLOAD_PUBLIC_GENOMICS=0
+SKIP_CYTOLOGY_DOWNLOAD=false
+FORCE_CYTOLOGY_DOWNLOAD=false
+DOWNLOAD_PUBLIC_CYTOLOGY=0
 LIMIT_ARG=()
 DEMO_FLAG=()
 FOCAL_ARGS=()
@@ -125,6 +128,9 @@ Geographic Scope & Spatial Sampling:
   --skip-env-download                Skip automatic preflight verification/download of SOLUS100, SGMC, and 3DEP layers
   --force-env-download               Force re-download of SOLUS100, SGMC, and 3DEP environmental layers
   --download-public-genomics         Download public Packera sequences and trees into data/genomics/ before Step 06
+  --skip-cytology-download           Skip automatic preflight download/sync of public Packera cytology records
+  --force-cytology-download          Force fresh download of public Packera cytology records into data/cytology/
+  --download-public-cytology         Download public Packera cytology records into data/cytology/ during preflight
 EOF
 }
 
@@ -424,6 +430,18 @@ while [[ $# -gt 0 ]]; do
       ;;
     --download-public-genomics)
       DOWNLOAD_PUBLIC_GENOMICS=1
+      shift
+      ;;
+    --skip-cytology-download)
+      SKIP_CYTOLOGY_DOWNLOAD=true
+      shift
+      ;;
+    --force-cytology-download)
+      FORCE_CYTOLOGY_DOWNLOAD=true
+      shift
+      ;;
+    --download-public-cytology)
+      DOWNLOAD_PUBLIC_CYTOLOGY=1
       shift
       ;;
     *)
@@ -1459,10 +1477,47 @@ run_preflight_env_layers() {
   if [[ "${FORCE_ENV_DOWNLOAD}" == "true" ]]; then
     env_extra_args+=("--force")
   fi
-  "${PYTHON_MAIN}" scripts/data_prep/download_environmental_layers.py     --env-dir "${PROJECT_ROOT}/data/environmental"     "${env_extra_args[@]}"
+  "${PYTHON_MAIN}" scripts/data_prep/download_environmental_layers.py \
+    --env-dir "${PROJECT_ROOT}/data/environmental" \
+    "${env_extra_args[@]}"
 }
 
 run_preflight_env_layers
+
+# ------------------------------------------------------------------------------
+# Preflight Public Cytology Provisioning (CCDB, ICNA, FNA, Herbarium Labels)
+# Automatically syncs existing flat CSVs/labels to SQLite or downloads missing data.
+# ------------------------------------------------------------------------------
+run_preflight_public_cytology() {
+  if [[ "${#DEMO_FLAG[@]}" -gt 0 || "${SKIP_CYTOLOGY_DOWNLOAD}" == "true" ]]; then
+    return 0
+  fi
+  local cyto_dir="${PLANTMATICS_CYTOLOGY_DIR:-${PACKERA_CYTOLOGY_DIR:-${PROJECT_ROOT}/data/cytology}}"
+  local cyto_rec_csv="${cyto_dir}/public_packera_cytology_records.csv"
+  local cyto_extra_args=()
+  if [[ -n "${CUSTOM_DB_PATH}" ]]; then
+    cyto_extra_args+=("--db" "${CUSTOM_DB_PATH}")
+  fi
+  if [[ "${FORCE_CYTOLOGY_DOWNLOAD}" == "true" || "${DOWNLOAD_PUBLIC_CYTOLOGY}" -eq 1 ]]; then
+    echo "[Preflight] Downloading public Packera cytological records into ${cyto_dir}..."
+    "${PYTHON_MAIN}" scripts/data_prep/download_public_cytology.py \
+      --cytology-dir "${cyto_dir}" \
+      --force \
+      "${cyto_extra_args[@]}" || echo "[Preflight] Public cytology download skipped cleanly after network warning."
+  elif [[ ! -s "${cyto_rec_csv}" ]]; then
+    echo "[Preflight] Staging initial public Packera cytological records into ${cyto_dir}..."
+    "${PYTHON_MAIN}" scripts/data_prep/download_public_cytology.py \
+      --cytology-dir "${cyto_dir}" \
+      "${cyto_extra_args[@]}" || echo "[Preflight] Initial public cytology download skipped cleanly after network warning."
+  else
+    "${PYTHON_MAIN}" scripts/data_prep/download_public_cytology.py \
+      --cytology-dir "${cyto_dir}" \
+      --sync-db-only \
+      "${cyto_extra_args[@]}" || echo "[Preflight] Public cytology SQLite sync warning (continuing)."
+  fi
+}
+
+run_preflight_public_cytology
 
 # ------------------------------------------------------------------------------
 # Step 02: LeafMachine3 (YOLO26x / UNet++ v9 / ONNX Runtime) Segmentation, Geometric Gatekeeper & 2-Tier Leaf Extraction

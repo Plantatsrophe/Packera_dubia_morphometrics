@@ -1042,6 +1042,42 @@ def _maybe_ensure_environmental_layers(
         logger.warning(f"Environmental layer preflight check could not complete: {exc}")
 
 
+def _maybe_ensure_cytology_records(args: argparse.Namespace) -> None:
+    """Ensure flat data/cytology/ records exist and are synced to SQLite unless skipped or in demo/test mode."""
+    if (
+        getattr(args, "demo", False)
+        or getattr(args, "skip_cytology_download", False)
+        or os.environ.get("PLANTMATICS_DEMO_MODE") == "1"
+        or os.environ.get("PACKERA_DEMO_MODE") == "1"
+        or os.environ.get("PLANTMATICS_SKIP_CYTOLOGY_DOWNLOAD") == "1"
+        or os.environ.get("PACKERA_SKIP_CYTOLOGY_DOWNLOAD") == "1"
+        or "PYTEST_CURRENT_TEST" in os.environ
+        or getattr(subprocess.run, "__module__", "") != "subprocess"
+    ):
+        return
+    dl_script = PROJECT_ROOT / "scripts" / "data_prep" / "download_public_cytology.py"
+    if not dl_script.is_file():
+        return
+    try:
+        cyto_dir = Path(
+            os.environ.get("PLANTMATICS_CYTOLOGY_DIR")
+            or os.environ.get("PACKERA_CYTOLOGY_DIR")
+            or (PROJECT_ROOT / "data" / "cytology")
+        )
+        rec_csv = cyto_dir / "public_packera_cytology_records.csv"
+        force_dl = bool(getattr(args, "force_cytology_download", False))
+        cmd = [sys.executable, str(dl_script), "--cytology-dir", str(cyto_dir)]
+        if getattr(args, "db", None):
+            cmd.extend(["--db", str(args.db)])
+        if force_dl:
+            cmd.append("--force")
+        elif rec_csv.is_file() and rec_csv.stat().st_size > 0:
+            cmd.append("--sync-db-only")
+        subprocess.run(cmd, check=False)
+    except Exception as exc:
+        logger.warning(f"Cytology preflight check could not complete: {exc}")
+
+
 def run_download_env(args: argparse.Namespace, cfg: Optional[PipelineConfig] = None) -> None:
     """Verify or download SOLUS100, USGS SGMC, and 3DEP 30 m DEM layers."""
     _ = cfg
@@ -1215,6 +1251,29 @@ def run_download_public_genomics_cli(args: argparse.Namespace, cfg: PipelineConf
     subprocess.run(cmd, check=True)
 
 
+def run_download_public_cytology_cli(args: argparse.Namespace, cfg: PipelineConfig) -> None:
+    """CLI entrypoint for downloading and cross-linking public Packera cytological records into data/cytology/."""
+    _ = cfg
+    dl_script = PROJECT_ROOT / "scripts" / "data_prep" / "download_public_cytology.py"
+    verify_file_exists(dl_script, "Public Packera Cytology Downloader Python script")
+    cmd = [sys.executable, str(dl_script)]
+    if getattr(args, "cytology_dir", None):
+        cmd.extend(["--cytology-dir", str(args.cytology_dir)])
+    if getattr(args, "sources", None):
+        cmd.extend(["--sources", *[str(s) for s in args.sources]])
+    if getattr(args, "local_cytology_csv", None):
+        cmd.extend(["--local-cytology-csv", str(args.local_cytology_csv)])
+    if getattr(args, "sync_db_only", False):
+        cmd.append("--sync-db-only")
+    if getattr(args, "db", None):
+        cmd.extend(["--db", str(args.db)])
+    if getattr(args, "no_db", False):
+        cmd.append("--no-db")
+    if getattr(args, "force", False):
+        cmd.append("--force")
+    subprocess.run(cmd, check=True)
+
+
 def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     """Executes Phases 5 and 6: Spatial Macroecology and Synthesis Triage."""
     logger.info("=== Starting Synthesis Workflow (Phases 5, 6) ===")
@@ -1265,6 +1324,7 @@ def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
 
     env_dir = Path(getattr(args, "env_dir", None) or "data/environmental")
     _maybe_ensure_environmental_layers(args, env_dir=env_dir, vouchers_csv=vouchers_csv)
+    _maybe_ensure_cytology_records(args)
     reports_dir_s05 = (
         run_dir / "outputs" / "reports"
         if run_dir is not None
@@ -1877,6 +1937,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_dl_pub.add_argument("--skim-sra-accessions", nargs="+", default=None, help="SRA/ENA run accessions to stream-skim via skim_offtarget_organellar")
     p_dl_pub.add_argument("--force", action="store_true", default=False, help="Overwrite existing non-empty public_packera_* files")
 
+    # Subcommand: download-public-cytology (public CCDB/ICNA/FNA/label staging into flat data/cytology/)
+    p_dl_cyto = subparsers.add_parser("download-public-cytology", help="Download and cross-link public Packera cytological records into flat data/cytology/")
+    p_dl_cyto.add_argument("--cytology-dir", type=Path, default=None, help="Flat destination data/cytology/ directory")
+    p_dl_cyto.add_argument("--sources", nargs="+", default=None, help="Public sources to query (ccdb, icna, fna, labels)")
+    p_dl_cyto.add_argument("--local-cytology-csv", type=Path, default=None, help="Optional local CSV/TSV file with curated chromosome counts or C-values")
+    p_dl_cyto.add_argument("--sync-db-only", action="store_true", default=False, help="Skip network downloads and re-sync existing flat CSVs and label remarks into SQLite")
+    p_dl_cyto.add_argument("--no-db", action="store_true", default=False, help="Write flat CSV/JSON artifacts without updating SQLite")
+    p_dl_cyto.add_argument("--force", action="store_true", default=False, help="Overwrite existing non-empty public_packera_cytology_* files")
+
     # Subcommand: synthesis
     p_synth = subparsers.add_parser("synthesis", aliases=["analyze"], help="Steps 05-07: Spatial RF, Phylogenomics, & Triage Dashboard")
     _add_common_subparser_args(p_synth, include_gpu=True)
@@ -1891,6 +1960,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_synth.add_argument("--env-dir", type=Path, default=None, help="Directory containing environmental rasters")
     p_synth.add_argument("--skip-env-download", action="store_true", default=False, help="Skip preflight environmental layer download check")
     p_synth.add_argument("--force-env-download", action="store_true", default=False, help="Force re-download of SOLUS100, SGMC, and 3DEP layers")
+    p_synth.add_argument("--skip-cytology-download", action="store_true", default=False, help="Skip preflight public cytology download and sync check")
+    p_synth.add_argument("--force-cytology-download", action="store_true", default=False, help="Force fresh public cytology download before Steps 06-07")
     p_synth.add_argument("--ssurgo-batch-size", type=int, default=None, help="Batch size for USDA SDA SSURGO queries")
     p_synth.add_argument("--ssurgo-table", type=Path, default=None, help=argparse.SUPPRESS)
     p_synth.add_argument("--contingency-table", type=Path, default=None, help=argparse.SUPPRESS)
@@ -2037,6 +2108,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_all.add_argument("--ssurgo-batch-size", type=int, default=None, help="Batch size for USDA SDA SSURGO queries")
     p_all.add_argument("--skip-env-download", action="store_true", default=False, help="Skip preflight environmental layer download check")
     p_all.add_argument("--force-env-download", action="store_true", default=False, help="Force re-download of SOLUS100, SGMC, and 3DEP layers")
+    p_all.add_argument("--skip-cytology-download", action="store_true", default=False, help="Skip preflight public cytology download and sync check")
+    p_all.add_argument("--force-cytology-download", action="store_true", default=False, help="Force fresh public cytology download before Steps 06-07")
     p_all.add_argument("--export-figures", action="store_true", default=True, help="Export diagnostic figures")
     p_all.add_argument("--no-export-figures", dest="export_figures", action="store_false", help="Disable figure export")
     p_all.add_argument("--focal-taxon", type=str, default=None, help="Optional focal Packera taxon for targeted revision synthesis")
@@ -2141,6 +2214,7 @@ def main() -> None:
         "genomics": run_genomics_cli,
         "skim-organellar": run_skim_organellar_cli,
         "download-public-genomics": run_download_public_genomics_cli,
+        "download-public-cytology": run_download_public_cytology_cli,
         "synthesis": run_synthesis,
         "analyze": run_synthesis,
         "run-all": run_all,

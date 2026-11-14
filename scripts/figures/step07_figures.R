@@ -28,6 +28,27 @@ PACKERA_TREATMENT_HOLLOW_SHAPES <- c(
   "Misidentification_Reassign" = 3L
 )
 
+.build_cytology_fig_subtitle <- function(df) {
+  if (is.null(df) || !is.data.frame(df) || nrow(df) == 0L) return("")
+  vp_x <- if ("voucher_ploidy_level" %in% names(df)) suppressWarnings(as.integer(df$voucher_ploidy_level)) else rep(NA_integer_, nrow(df))
+  vp_2n <- if ("voucher_sporophytic_2n" %in% names(df)) suppressWarnings(as.integer(df$voucher_sporophytic_2n)) else rep(NA_integer_, nrow(df))
+  tx_cy <- if ("taxon_reported_cytotypes" %in% names(df)) trimws(as.character(df$taxon_reported_cytotypes)) else rep("", nrow(df))
+  tx_cy[is.na(tx_cy) | tx_cy %in% c("NA", "NULL", "None")] <- ""
+  has_x <- is.finite(vp_x) & vp_x > 0L
+  has_2n <- is.finite(vp_2n) & vp_2n > 0L
+  has_tx <- nzchar(tx_cy)
+  if (!any(has_x) && !any(has_tx)) return("")
+  n_cyto_v <- sum(has_x | has_2n)
+  n_bar <- if ("cytotype_reproductive_barrier_pass" %in% names(df)) {
+    sum(!is.na(df$cytotype_reproductive_barrier_pass) & suppressWarnings(as.integer(df$cytotype_reproductive_barrier_pass)) == 1L)
+  } else 0L
+  u_2n <- sort(unique(vp_2n[has_2n]))
+  u_x <- sort(unique(vp_x[has_x]))
+  lbl_2n <- if (length(u_2n) > 0L) paste(utils::head(u_2n, 3L), collapse = "/") else "NA"
+  lbl_x <- if (length(u_x) > 0L) paste0(paste(utils::head(u_x, 3L), collapse = "/"), "x") else paste(utils::head(unique(tx_cy[has_tx]), 2L), collapse = "; ")
+  sprintf("[2n=%s | %s; %d cytovoucher(s), %d barrier(s)]", lbl_2n, lbl_x, n_cyto_v, n_bar)
+}
+
 render_step07a_integrative_synthesis_png <- function(
   df,
   out_plot_path = "outputs/figures/fig07a_integrative_taxonomic_synthesis.png",
@@ -240,12 +261,19 @@ render_step07a_integrative_synthesis_png <- function(
   n_cl_gdi <- sum(is.finite(cl_gdi_v))
   n_dna_abst <- sum(!is.na(t0_abs_v) & t0_abs_v == 1L)
   has_prop_fig <- (n_exs_dup + n_deme_hull + n_t0_cal + n_cl_gdi + n_dna_abst) > 0L
+  cyto_sub_07a <- .build_cytology_fig_subtitle(df)
+  has_sub_07a <- has_prop_fig || nzchar(cyto_sub_07a)
 
-  plate_06a <- if (has_prop_fig) {
-    prop_sub <- sprintf(
-      "[Exs-Dup: %d | Deme-Hull: %d | Tier0-Cal: %d | Cluster-gdi: %d | DNA-Abstain: %d]",
-      n_exs_dup, n_deme_hull, n_t0_cal, n_cl_gdi, n_dna_abst
-    )
+  plate_06a <- if (has_sub_07a) {
+    sub_parts <- character(0)
+    if (has_prop_fig) {
+      sub_parts <- c(sub_parts, sprintf(
+        "[Exs-Dup: %d | Deme-Hull: %d | Tier0-Cal: %d | Cluster-gdi: %d | DNA-Abstain: %d]",
+        n_exs_dup, n_deme_hull, n_t0_cal, n_cl_gdi, n_dna_abst
+      ))
+    }
+    if (nzchar(cyto_sub_07a)) sub_parts <- c(sub_parts, cyto_sub_07a)
+    prop_sub <- paste(sub_parts, collapse = " ")
     ((p_morph | p_map) / (p_treat | p_wett)) +
       patchwork::plot_layout(heights = c(1.12, 1.05)) +
       patchwork::plot_annotation(
@@ -520,12 +548,25 @@ render_step07b_complex_network_png <- function(
 
   dyn_h_06b <- max(6.6, 4.4 + 0.24 * n_t)
   canon_07b <- file.path(fdir, "fig07b_taxon_complex_delimitation_network.png")
-  plate_06b <- (p_heat | build_net_panel(TRUE)) +
-    patchwork::plot_layout(widths = c(1.08, 1.0)) +
+  cyto_sub_07b <- .build_cytology_fig_subtitle(if (!is.null(voucher_df) && is.data.frame(voucher_df) && nrow(voucher_df) > 0L) voucher_df else cdf)
+  anno_07b <- if (nzchar(cyto_sub_07b)) {
+    patchwork::plot_annotation(
+      title = "Step 07: Unsupervised Quantitative Taxon-Complex Delimitation",
+      subtitle = cyto_sub_07b,
+      theme = ggplot2::theme(
+        plot.title = ggplot2::element_text(face = "bold", size = 12.4),
+        plot.subtitle = ggplot2::element_text(size = 9.0, color = "#374151")
+      )
+    )
+  } else {
     patchwork::plot_annotation(
       title = "Step 07: Unsupervised Quantitative Taxon-Complex Delimitation",
       theme = ggplot2::theme(plot.title = ggplot2::element_text(face = "bold", size = 12.4))
     )
+  }
+  plate_06b <- (p_heat | build_net_panel(TRUE)) +
+    patchwork::plot_layout(widths = c(1.08, 1.0)) +
+    anno_07b
   out_saved <- save_packera_png_300(plate_06b, canon_07b, width = 14.2, height = dyn_h_06b, also_copy_to = out_complex_path)
   if (!file.exists(canon_07b) || isTRUE(file.info(canon_07b)$size == 0)) {
     p_heat_fb <- p_heat +
@@ -533,10 +574,7 @@ render_step07b_complex_network_png <- function(
       ggplot2::theme(axis.text.y = ggplot2::element_text(face = "italic"))
     plate_06b_fb <- (p_heat_fb | build_net_panel(FALSE)) +
       patchwork::plot_layout(widths = c(1.08, 1.0)) +
-      patchwork::plot_annotation(
-        title = "Step 07: Unsupervised Quantitative Taxon-Complex Delimitation",
-        theme = ggplot2::theme(plot.title = ggplot2::element_text(face = "bold", size = 12.4))
-      )
+      anno_07b
     out_saved <- save_packera_png_300(plate_06b_fb, canon_07b, width = 14.2, height = dyn_h_06b, also_copy_to = out_complex_path)
   }
   out_saved

@@ -16,7 +16,7 @@
 #       with seamless CSV fallback merging.
 # ==============================================================================
 
-PLANTMATICS_SCHEMA_USER_VERSION <- 20261125L
+PLANTMATICS_SCHEMA_USER_VERSION <- 20261126L
 PACKERA_SCHEMA_USER_VERSION <- PLANTMATICS_SCHEMA_USER_VERSION
 
 resolve_packera_workers <- function(max_workers = 32L, n_tasks = NULL) {
@@ -125,7 +125,8 @@ PACKERA_DB_LOGICAL_COLS <- c(
   "is_typical_morphotype", "matches_type_lithology",
   "is_confident_label_noise", "cryptic_cluster_cohesion_pass",
   "cryptic_non_clinal_pass", "hybrid_zone_cohesion_pass",
-  "geno_quality_pass", "is_putative_novel_or_hybrid_query", "is_geno_admixed", "cytonuclear_discordant"
+  "geno_quality_pass", "is_putative_novel_or_hybrid_query", "is_geno_admixed", "cytonuclear_discordant",
+  "is_multi_cytotype_taxon", "cytotype_reproductive_barrier_pass"
 )
 
 PACKERA_DB_HARMONIC_COLS <- as.vector(vapply(
@@ -326,7 +327,59 @@ PACKERA_DB_WC_BIO_COLS <- c(
       tier0_calibrated_prob = "REAL",
       tier0_abstention_flag = "INTEGER",
       deme_mahal_d2 = "REAL",
-      cluster_propagated_gdi = "REAL"
+      cluster_propagated_gdi = "REAL",
+      cytology_linkage_tier = "TEXT",
+      voucher_sporophytic_2n = "INTEGER",
+      voucher_ploidy_level = "INTEGER",
+      taxon_reported_cytotypes = "TEXT",
+      is_multi_cytotype_taxon = "INTEGER",
+      cytotype_reproductive_barrier_pass = "INTEGER"
+    ))
+  }
+  if (identical(table_name, "cytological_records")) {
+    return(c(
+      source_db = "TEXT",
+      source_record_id = "TEXT",
+      original_taxon_name = "TEXT",
+      basionym_name = "TEXT",
+      species_standardized = "TEXT",
+      catalogNumber = "TEXT",
+      exsiccatae_key = "TEXT",
+      cytology_linkage_tier = "TEXT",
+      raw_count_str = "TEXT",
+      gametophytic_n = "INTEGER",
+      sporophytic_2n = "INTEGER",
+      base_x = "INTEGER",
+      ploidy_level = "INTEGER",
+      cytotype_label = "TEXT",
+      b_chromosomes = "INTEGER",
+      is_aneuploid_or_odd_ploid = "INTEGER",
+      is_approximate = "INTEGER",
+      c_value_1c_pg = "REAL",
+      c_value_2c_pg = "REAL",
+      breeding_system = "TEXT",
+      genbank_accession = "TEXT",
+      collector_surname = "TEXT",
+      record_number_clean = "TEXT",
+      institution_code = "TEXT",
+      voucher_citation = "TEXT",
+      locality_text = "TEXT",
+      reference_citation = "TEXT"
+    ))
+  }
+  if (identical(table_name, "taxon_cytology_summary")) {
+    return(c(
+      n_cytology_records = "INTEGER",
+      n_direct_cytovouchers = "INTEGER",
+      modal_sporophytic_2n = "INTEGER",
+      modal_base_x = "INTEGER",
+      modal_ploidy_level = "INTEGER",
+      reported_cytotypes = "TEXT",
+      is_multi_cytotype_taxon = "INTEGER",
+      has_dysploid_series = "INTEGER",
+      has_odd_polyploid_or_apomixis = "INTEGER",
+      mean_2c_pg = "REAL",
+      breeding_system_summary = "TEXT"
     ))
   }
   if (identical(table_name, "spatial_rf_predictions")) {
@@ -449,7 +502,7 @@ PACKERA_DB_WC_BIO_COLS <- c(
     return(FALSE)
   }
   changed <- FALSE
-  for (tbl in c("extracted_leaves", "run_active_cohort", "leaf_efa_harmonics", "otu_morphometrics", "spatial_rf_predictions", "curation_triage", "environmental_cache", "genomic_samples", "genetic_lineage_assignments")) {
+  for (tbl in c("extracted_leaves", "run_active_cohort", "leaf_efa_harmonics", "otu_morphometrics", "spatial_rf_predictions", "curation_triage", "environmental_cache", "genomic_samples", "genetic_lineage_assignments", "cytological_records", "taxon_cytology_summary")) {
     if (isTRUE(.migrate_dynamic_sqlite_table_r(conn, tbl))) {
       changed <- TRUE
     }
@@ -694,14 +747,18 @@ connect_packera_db <- function(
     "coalescent_gdi", "hybrid_generation_class", "cytonuclear_discordant",
     "public_plastome_match", "public_its_match", "waxy_lineage_match",
     "public_backbone_clade", "public_phytop_ils_index", "public_phytop_ih_index",
-    "genomic_propagation_tier", "cluster_propagated_gdi"
+    "genomic_propagation_tier", "cluster_propagated_gdi",
+    "cytology_linkage_tier", "voucher_sporophytic_2n", "voucher_ploidy_level",
+    "taxon_reported_cytotypes", "is_multi_cytotype_taxon", "cytotype_reproductive_barrier_pass"
   ) %in% mv_fields_chk)
   if (cur_ver >= PLANTMATICS_SCHEMA_USER_VERSION &&
     el_has_zone && om_has_cauline && mv_has_latest &&
     (identical(eff_path, ":memory:") || (
       db_table_exists_safe(conn, "v_integrative_triage_master") &&
         db_table_exists_safe(conn, "genomic_samples") &&
-        db_table_exists_safe(conn, "genetic_lineage_assignments")
+        db_table_exists_safe(conn, "genetic_lineage_assignments") &&
+        db_table_exists_safe(conn, "cytological_records") &&
+        db_table_exists_safe(conn, "taxon_cytology_summary")
     ))) {
     return(conn)
   }
@@ -710,7 +767,9 @@ connect_packera_db <- function(
   if (!identical(eff_path, ":memory:")) {
     view_needs_refresh <- schema_migrated || (cur_ver < PLANTMATICS_SCHEMA_USER_VERSION) ||
       !db_table_exists_safe(conn, "genomic_samples") ||
-      !db_table_exists_safe(conn, "genetic_lineage_assignments")
+      !db_table_exists_safe(conn, "genetic_lineage_assignments") ||
+      !db_table_exists_safe(conn, "cytological_records") ||
+      !db_table_exists_safe(conn, "taxon_cytology_summary")
     if (!view_needs_refresh && db_table_exists_safe(conn, "v_integrative_triage_master")) {
       v_cols <- tryCatch(DBI::dbListFields(conn, "v_integrative_triage_master"), error = function(e) character(0))
       req_v_cols <- c(
@@ -732,7 +791,9 @@ connect_packera_db <- function(
         "coalescent_gdi", "hybrid_generation_class", "cytonuclear_discordant",
         "public_plastome_match", "public_its_match", "waxy_lineage_match",
         "public_backbone_clade", "public_phytop_ils_index", "public_phytop_ih_index",
-        "genomic_propagation_tier", "cluster_propagated_gdi"
+        "genomic_propagation_tier", "cluster_propagated_gdi",
+        "cytology_linkage_tier", "voucher_sporophytic_2n", "voucher_ploidy_level",
+        "taxon_reported_cytotypes", "is_multi_cytotype_taxon", "cytotype_reproductive_barrier_pass"
       )
       if (length(v_cols) > 0L && !all(req_v_cols %in% v_cols)) {
         view_needs_refresh <- TRUE
@@ -2104,7 +2165,9 @@ try_fetch_master_view_for_cohort <- function(
       "hybrid_zone_cohesion_pass", "hybrid_parent_1", "hybrid_parent_2",
       "is_completed_voucher",
       "genomic_propagation_tier", "tier0_calibrated_taxon", "tier0_calibrated_prob",
-      "tier0_abstention_flag", "deme_mahal_d2", "cluster_propagated_gdi"
+      "tier0_abstention_flag", "deme_mahal_d2", "cluster_propagated_gdi",
+      "cytology_linkage_tier", "voucher_sporophytic_2n", "voucher_ploidy_level",
+      "taxon_reported_cytotypes", "is_multi_cytotype_taxon", "cytotype_reproductive_barrier_pass"
     )
     master_df <- master_df[, setdiff(names(master_df), stale_ct_cols), drop = FALSE]
   }
@@ -2154,30 +2217,38 @@ persist_step07_to_sqlite <- function(
   for (.bcol in intersect(c("cryptic_cluster_cohesion_pass", "cryptic_non_clinal_pass", "hybrid_zone_cohesion_pass", "is_completed_voucher"), names(ct_df))) {
     ct_df[[.bcol]] <- ifelse(is.na(ct_df[[.bcol]]), NA_integer_, as.integer(as.logical(ct_df[[.bcol]])))
   }
-  if ("tier0_abstention_flag" %in% names(ct_df)) {
-    v_abs <- ct_df$tier0_abstention_flag
+  for (.fcol in intersect(c("tier0_abstention_flag", "is_multi_cytotype_taxon", "cytotype_reproductive_barrier_pass"), names(ct_df))) {
+    v_abs <- ct_df[[.fcol]]
     if (is.logical(v_abs)) {
-      ct_df$tier0_abstention_flag <- as.integer(v_abs)
+      ct_df[[.fcol]] <- as.integer(v_abs)
     } else if (is.character(v_abs) || is.factor(v_abs)) {
       s_abs <- trimws(as.character(v_abs))
       out_abs <- suppressWarnings(as.integer(s_abs))
       u_abs <- toupper(s_abs)
       out_abs[is.na(out_abs) & u_abs %in% c("TRUE", "T", "YES", "Y")] <- 1L
       out_abs[is.na(out_abs) & u_abs %in% c("FALSE", "F", "NO", "N")] <- 0L
-      ct_df$tier0_abstention_flag <- out_abs
+      ct_df[[.fcol]] <- out_abs
     } else {
       v_num <- suppressWarnings(as.numeric(v_abs))
       out_abs <- rep(NA_integer_, length(v_num))
       ok_abs <- !is.na(v_num) & is.finite(v_num)
       out_abs[ok_abs] <- as.integer(round(v_num[ok_abs]))
-      ct_df$tier0_abstention_flag <- out_abs
+      ct_df[[.fcol]] <- out_abs
     }
+  }
+  for (.icol in intersect(c("voucher_sporophytic_2n", "voucher_ploidy_level"), names(ct_df))) {
+    v_i <- ct_df[[.icol]]
+    v_num <- if (is.factor(v_i)) suppressWarnings(as.numeric(as.character(v_i))) else suppressWarnings(as.numeric(v_i))
+    out_i <- rep(NA_integer_, length(v_num))
+    ok_i <- !is.na(v_num) & is.finite(v_num)
+    out_i[ok_i] <- as.integer(round(v_num[ok_i]))
+    ct_df[[.icol]] <- out_i
   }
   for (.fcol in intersect(c("tier0_calibrated_prob", "deme_mahal_d2", "cluster_propagated_gdi"), names(ct_df))) {
     v_f <- ct_df[[.fcol]]
     ct_df[[.fcol]] <- if (is.factor(v_f)) suppressWarnings(as.numeric(as.character(v_f))) else suppressWarnings(as.numeric(v_f))
   }
-  for (.scol in intersect(c("genomic_propagation_tier", "tier0_calibrated_taxon"), names(ct_df))) {
+  for (.scol in intersect(c("genomic_propagation_tier", "tier0_calibrated_taxon", "cytology_linkage_tier", "taxon_reported_cytotypes"), names(ct_df))) {
     ct_df[[.scol]] <- as.character(ct_df[[.scol]])
   }
 

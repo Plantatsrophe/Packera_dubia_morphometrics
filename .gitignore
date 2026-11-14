@@ -498,3 +498,9 @@ data/genomics/**
 *.loci
 *.mcmc.txt
 *.out
+
+# 16. Staged public cytological records and flat CSV caches
+data/cytology/*
+data/cytology/**
+!data/cytology/.gitkeep
+

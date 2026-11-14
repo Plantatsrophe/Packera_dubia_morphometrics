@@ -1301,7 +1301,7 @@ class TestSQLPipelineHandshake(unittest.TestCase):
             "cluster_propagated_gdi",
         }
 
-        # 1. Python db.py atomic migration + WAL replay + 20261125 schema upgrade
+        # 1. Python db.py atomic migration + WAL replay + 20261126 schema upgrade
         with tempfile.TemporaryDirectory() as td_py:
             ws_py = Path(td_py)
             legacy_db, target_db = _seed_legacy_wal_workspace(
@@ -1318,7 +1318,7 @@ class TestSQLPipelineHandshake(unittest.TestCase):
                     self.assertFalse(Path(f"{legacy_db}-shm").exists())
                     self.assertTrue(target_db.is_file())
                     uv = int(conn.execute("PRAGMA user_version;").fetchone()[0])
-                    self.assertEqual(uv, 20261125)
+                    self.assertEqual(uv, 20261126)
 
                     gs_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(genomic_samples);").fetchall()}
                     gla_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(genetic_lineage_assignments);").fetchall()}
@@ -1354,7 +1354,7 @@ local({{
   on.exit(disconnect_packera_db(conn), add = TRUE)
   stopifnot(!is.null(conn))
   uv <- as.integer(DBI::dbGetQuery(conn, "PRAGMA user_version;")[[1L]][1L])
-  stopifnot(uv == 20261125L)
+  stopifnot(uv == 20261126L)
   gs_cols <- DBI::dbListFields(conn, "genomic_samples")
   gla_cols <- DBI::dbListFields(conn, "genetic_lineage_assignments")
   ct_cols <- DBI::dbListFields(conn, "curation_triage")
@@ -1389,12 +1389,12 @@ local({{
                 self.assertTrue(target_r.is_file())
 
     def test_curation_triage_genomic_propagation_columns_and_migration(self) -> None:
-        """Verify schema 20261125 migrates from previous schema version and exposes the 6 genomic propagation columns."""
+        """Verify schema 20261126 migrates from previous schema version and exposes the 6 genomic propagation columns."""
         from scripts.core.db import ensure_pipeline_run, populate_run_active_cohort
         from scripts.core.db_schema import PACKERA_SCHEMA_USER_VERSION, PLANTMATICS_SCHEMA_USER_VERSION
 
-        self.assertEqual(PLANTMATICS_SCHEMA_USER_VERSION, 20261125)
-        self.assertEqual(PACKERA_SCHEMA_USER_VERSION, 20261125)
+        self.assertEqual(PLANTMATICS_SCHEMA_USER_VERSION, 20261126)
+        self.assertEqual(PACKERA_SCHEMA_USER_VERSION, 20261126)
         prev_ver = PLANTMATICS_SCHEMA_USER_VERSION - 1
         prop_cols = (
             "genomic_propagation_tier",
@@ -1508,6 +1508,175 @@ local({{
                 self.assertAlmostEqual(float(mv_row[5]), 0.84, places=4)
             finally:
                 conn.close()
+
+    def test_cytology_schema_migration_and_purge_runs_only_preservation(self) -> None:
+        """Verify schema 20261125 -> 20261126 creates cytology tables/columns and purge_runs_only preserves them."""
+        from scripts.core.db import (
+            ensure_pipeline_run,
+            populate_run_active_cohort,
+            purge_runs_only,
+            upsert_rows_generic,
+            upsert_vouchers_records,
+        )
+        from scripts.core.db_schema import PLANTMATICS_SCHEMA_USER_VERSION
+
+        self.assertEqual(PLANTMATICS_SCHEMA_USER_VERSION, 20261126)
+        cyto_ct_cols = (
+            "cytology_linkage_tier",
+            "voucher_sporophytic_2n",
+            "voucher_ploidy_level",
+            "taxon_reported_cytotypes",
+            "is_multi_cytotype_taxon",
+            "cytotype_reproductive_barrier_pass",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Path(tmp)
+            db_p = ws / "data" / "plantmatics.sqlite"
+            db_p.parent.mkdir(parents=True, exist_ok=True)
+            raw_conn = sqlite3.connect(db_p)
+            raw_conn.executescript(
+                """
+                PRAGMA user_version = 20261125;
+                CREATE TABLE pipeline_runs (
+                    run_id TEXT PRIMARY KEY,
+                    run_dir TEXT,
+                    start_timestamp TEXT,
+                    end_timestamp TEXT,
+                    git_commit_sha TEXT,
+                    cli_arguments_json TEXT,
+                    focal_taxon TEXT,
+                    intraspecific_mode INTEGER DEFAULT 0
+                );
+                INSERT INTO pipeline_runs (run_id, start_timestamp) VALUES ('r_cyto', '2026-11-14T00:00:00Z');
+                CREATE TABLE curation_triage (
+                    run_id TEXT NOT NULL,
+                    catalogNumber TEXT NOT NULL,
+                    plant_individual_id INTEGER NOT NULL DEFAULT 0,
+                    taxonomic_status_call TEXT,
+                    recommended_determination TEXT,
+                    genomic_propagation_tier TEXT,
+                    tier0_calibrated_taxon TEXT,
+                    tier0_calibrated_prob REAL,
+                    tier0_abstention_flag INTEGER,
+                    deme_mahal_d2 REAL,
+                    cluster_propagated_gdi REAL,
+                    PRIMARY KEY (run_id, catalogNumber, plant_individual_id)
+                );
+                INSERT INTO curation_triage (
+                    run_id, catalogNumber, plant_individual_id, taxonomic_status_call, recommended_determination
+                ) VALUES ('r_cyto', 'NCU-CYTO-OLD', 0, 'Species_Confirmed', 'Packera aurea');
+                """
+            )
+            raw_conn.commit()
+            raw_conn.close()
+
+            conn = get_db_connection(db_p, init_schema=True)
+            try:
+                self.assertEqual(int(conn.execute("PRAGMA user_version;").fetchone()[0]), 20261126)
+                tables = {str(r[0]) for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table';").fetchall()}
+                self.assertIn("cytological_records", tables)
+                self.assertIn("taxon_cytology_summary", tables)
+
+                ct_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(curation_triage);").fetchall()}
+                mv_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(v_integrative_triage_master);").fetchall()}
+                for col in cyto_ct_cols:
+                    self.assertIn(col, ct_cols, f"curation_triage missing {col}")
+                    self.assertIn(col, mv_cols, f"v_integrative_triage_master missing {col}")
+
+                old_row = conn.execute(
+                    "SELECT recommended_determination FROM curation_triage WHERE run_id='r_cyto' AND catalogNumber='NCU-CYTO-OLD';"
+                ).fetchone()
+                self.assertEqual(old_row[0], "Packera aurea")
+
+                upsert_rows_generic(
+                    conn,
+                    table_name="cytological_records",
+                    rows=[
+                        {
+                            "cytology_id": "CYTO-001",
+                            "source_db": "CCDB",
+                            "original_taxon_name": "Senecio aureus",
+                            "basionym_name": "Senecio aureus",
+                            "species_standardized": "Packera aurea",
+                            "catalogNumber": "NCU-CYTO-V1",
+                            "cytology_linkage_tier": "C1_Direct_Cytovoucher",
+                            "sporophytic_2n": 44,
+                            "base_x": 22,
+                            "ploidy_level": 2,
+                        }
+                    ],
+                    pk_cols=("cytology_id",),
+                )
+                upsert_rows_generic(
+                    conn,
+                    table_name="taxon_cytology_summary",
+                    rows=[
+                        {
+                            "species_standardized": "Packera aurea",
+                            "n_cytology_records": 1,
+                            "n_direct_cytovouchers": 1,
+                            "modal_sporophytic_2n": 44,
+                            "modal_base_x": 22,
+                            "modal_ploidy_level": 2,
+                            "reported_cytotypes": "2x",
+                            "is_multi_cytotype_taxon": 0,
+                        }
+                    ],
+                    pk_cols=("species_standardized",),
+                )
+                cyto_vrows = [
+                    {
+                        "catalogNumber": "NCU-CYTO-V1",
+                        "institutionCode": "NCU",
+                        "scientificName": "Packera aurea",
+                        "species_standardized": "Packera aurea",
+                        "determiner_tier": "Tier_1_Gold",
+                        "qc_status": "PASS",
+                    }
+                ]
+                upsert_vouchers_records(conn, cyto_vrows)
+                ensure_pipeline_run(conn, run_id="r_cyto")
+                populate_run_active_cohort(conn, run_id="r_cyto", voucher_rows=cyto_vrows, clear_existing=False)
+                upsert_rows_generic(
+                    conn,
+                    table_name="curation_triage",
+                    rows=[
+                        {
+                            "run_id": "r_cyto",
+                            "catalogNumber": "NCU-CYTO-V1",
+                            "plant_individual_id": 0,
+                            "taxonomic_status_call": "Species_Confirmed",
+                            "recommended_determination": "Packera aurea",
+                            "cytology_linkage_tier": "C1_Direct_Cytovoucher",
+                            "voucher_sporophytic_2n": 44,
+                            "voucher_ploidy_level": 2,
+                            "taxon_reported_cytotypes": "2x, 4x",
+                            "is_multi_cytotype_taxon": 1,
+                            "cytotype_reproductive_barrier_pass": 1,
+                        }
+                    ],
+                    pk_cols=("run_id", "catalogNumber", "plant_individual_id"),
+                )
+                mv_cyto = conn.execute(
+                    """
+                    SELECT cytology_linkage_tier, voucher_sporophytic_2n, voucher_ploidy_level,
+                           taxon_reported_cytotypes, is_multi_cytotype_taxon, cytotype_reproductive_barrier_pass
+                    FROM v_integrative_triage_master
+                    WHERE run_id = 'r_cyto' AND catalogNumber = 'NCU-CYTO-V1';
+                    """
+                ).fetchone()
+                self.assertEqual(tuple(mv_cyto), ("C1_Direct_Cytovoucher", 44, 2, "2x, 4x", 1, 1))
+            finally:
+                conn.close()
+
+            purge_runs_only(workspace_root=ws, db_path=db_p, vacuum=False)
+            conn2 = get_db_connection(db_p, init_schema=False)
+            try:
+                self.assertEqual(conn2.execute("SELECT COUNT(*) FROM cytological_records;").fetchone()[0], 1)
+                self.assertEqual(conn2.execute("SELECT COUNT(*) FROM taxon_cytology_summary;").fetchone()[0], 1)
+                self.assertEqual(conn2.execute("SELECT COUNT(*) FROM curation_triage;").fetchone()[0], 0)
+            finally:
+                conn2.close()
 
 
 if __name__ == "__main__":

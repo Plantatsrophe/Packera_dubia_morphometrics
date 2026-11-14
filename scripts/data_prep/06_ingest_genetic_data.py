@@ -779,6 +779,218 @@ def _load_db_vouchers(conn: Optional[sqlite3.Connection]) -> List[Dict[str, Any]
     return out
 
 
+def _normalize_exsiccatae_lookup_key(raw: Any) -> str:
+    return " ".join(str(raw or "").strip().split())
+
+
+def _parse_int_ploidy(val: Any) -> Optional[int]:
+    if val is None or isinstance(val, bool):
+        return None
+    txt = str(val).strip()
+    if not txt or txt.upper() in ("NA", "NAN", "NONE", "NULL"):
+        return None
+    if txt.lower().endswith("x"):
+        txt = txt[:-1].strip()
+    try:
+        iv = int(round(float(txt)))
+    except ValueError:
+        return None
+    return iv if 2 <= iv <= 16 else None
+
+
+def _load_db_cytology_priors(
+    conn_or_db_path: Optional[Any],
+) -> Dict[str, Dict[str, Any]]:
+    """Safely load Step 06 empirical Bayes cytology priors from SQLite tables."""
+    empty: Dict[str, Dict[str, Any]] = {
+        "by_catalog": {},
+        "by_exsiccatae": {},
+        "by_genbank": {},
+        "by_taxon": {},
+    }
+    if conn_or_db_path is None:
+        return empty
+
+    conn: Optional[sqlite3.Connection] = None
+    owns_conn = False
+    if isinstance(conn_or_db_path, (str, Path)):
+        db_p = Path(conn_or_db_path)
+        if not db_p.exists():
+            return empty
+        try:
+            conn = sqlite3.connect(f"file:{db_p}?mode=ro", uri=True)
+            owns_conn = True
+        except sqlite3.Error:
+            return empty
+    else:
+        conn = conn_or_db_path
+
+    try:
+        by_catalog: Dict[str, int] = {}
+        by_exsiccatae: Dict[str, int] = {}
+        by_genbank: Dict[str, int] = {}
+        by_taxon: Dict[str, Dict[str, Any]] = {}
+
+        try:
+            cyto_cols = {
+                str(r[1])
+                for r in conn.execute("PRAGMA table_info(cytological_records);").fetchall()
+            }
+        except sqlite3.Error:
+            cyto_cols = set()
+
+        ploidy_col = (
+            "ploidy_level"
+            if "ploidy_level" in cyto_cols
+            else ("voucher_ploidy_level" if "voucher_ploidy_level" in cyto_cols else None)
+        )
+        if ploidy_col:
+            tier_col = (
+                "cytology_linkage_tier"
+                if "cytology_linkage_tier" in cyto_cols
+                else ("linkage_tier" if "linkage_tier" in cyto_cols else None)
+            )
+            wanted = [
+                c
+                for c in (
+                    "catalogNumber",
+                    "exsiccatae_key",
+                    "recordedBy",
+                    "recordNumber",
+                    "eventDate",
+                    "genbank_accession",
+                    ploidy_col,
+                    tier_col,
+                )
+                if c and c in cyto_cols
+            ]
+            rows = conn.execute(
+                f"SELECT {', '.join(wanted)} FROM cytological_records;"
+            ).fetchall()
+            col_pos = {c: idx for idx, c in enumerate(wanted)}
+            cat_buckets: Dict[str, Tuple[int, set]] = {}
+            ex_buckets: Dict[str, Tuple[str, set]] = {}
+            gb_buckets: Dict[str, set] = {}
+
+            for row in rows:
+                pl = _parse_int_ploidy(row[col_pos[ploidy_col]])
+                if pl is None:
+                    continue
+                tier_raw = (
+                    str(row[col_pos[tier_col]] or "").strip()
+                    if tier_col and tier_col in col_pos
+                    else ""
+                )
+                tier_up = tier_raw.upper()
+                is_direct_voucher_tier = (
+                    not tier_up
+                    or tier_up.startswith("C1_DIRECT")
+                    or tier_up.startswith("C2_EXSICCATAE")
+                )
+
+                if is_direct_voucher_tier and "catalogNumber" in col_pos:
+                    cat = str(row[col_pos["catalogNumber"]] or "").strip()
+                    if cat:
+                        rank = 0 if tier_up.startswith("C1_") else (1 if tier_up.startswith("C2_") else 2)
+                        cur_rank, cur_set = cat_buckets.get(cat, (99, set()))
+                        if rank < cur_rank:
+                            cat_buckets[cat] = (rank, {pl})
+                        elif rank == cur_rank:
+                            cur_set.add(pl)
+                            cat_buckets[cat] = (cur_rank, cur_set)
+
+                ex_raw = row[col_pos["exsiccatae_key"]] if "exsiccatae_key" in col_pos else ""
+                ex_norm = _normalize_exsiccatae_lookup_key(ex_raw)
+                if not ex_norm and "recordedBy" in col_pos and "recordNumber" in col_pos:
+                    try:
+                        ex_norm = _normalize_exsiccatae_lookup_key(
+                            _normalize_exsiccatae_key(
+                                row[col_pos["recordedBy"]],
+                                row[col_pos["recordNumber"]],
+                                row[col_pos["eventDate"]] if "eventDate" in col_pos else None,
+                            )
+                        )
+                    except Exception:
+                        ex_norm = ""
+                if ex_norm:
+                    lk = ex_norm.lower()
+                    canon, pl_set = ex_buckets.get(lk, (ex_norm, set()))
+                    pl_set.add(pl)
+                    ex_buckets[lk] = (canon, pl_set)
+
+                if "genbank_accession" in col_pos:
+                    gb = str(row[col_pos["genbank_accession"]] or "").strip()
+                    if gb:
+                        gb_buckets.setdefault(gb, set()).add(pl)
+
+            for cat, (_, pl_set) in cat_buckets.items():
+                if len(pl_set) == 1:
+                    by_catalog[cat] = next(iter(pl_set))
+            for canon, pl_set in ex_buckets.values():
+                if len(pl_set) == 1:
+                    by_exsiccatae[canon] = next(iter(pl_set))
+            for gb, pl_set in gb_buckets.items():
+                if len(pl_set) == 1:
+                    by_genbank[gb] = next(iter(pl_set))
+
+        try:
+            tax_cols = {
+                str(r[1])
+                for r in conn.execute("PRAGMA table_info(taxon_cytology_summary);").fetchall()
+            }
+        except sqlite3.Error:
+            tax_cols = set()
+
+        if "species_standardized" in tax_cols:
+            t_wanted = [
+                c
+                for c in (
+                    "species_standardized",
+                    "modal_ploidy_level",
+                    "is_multi_cytotype_taxon",
+                )
+                if c in tax_cols
+            ]
+            t_rows = conn.execute(
+                f"SELECT {', '.join(t_wanted)} FROM taxon_cytology_summary;"
+            ).fetchall()
+            t_pos = {c: idx for idx, c in enumerate(t_wanted)}
+            for row in t_rows:
+                sp = str(row[t_pos["species_standardized"]] or "").strip()
+                if not sp:
+                    continue
+                modal = (
+                    _parse_int_ploidy(row[t_pos["modal_ploidy_level"]])
+                    if "modal_ploidy_level" in t_pos
+                    else None
+                )
+                multi_raw = (
+                    row[t_pos["is_multi_cytotype_taxon"]]
+                    if "is_multi_cytotype_taxon" in t_pos
+                    else 0
+                )
+                if isinstance(multi_raw, str):
+                    is_multi = 1 if multi_raw.strip().lower() in ("1", "true", "yes") else 0
+                else:
+                    is_multi = 1 if bool(multi_raw) else 0
+                by_taxon[sp] = {
+                    "modal_ploidy_level": modal,
+                    "is_multi_cytotype_taxon": is_multi,
+                }
+
+        return {
+            "by_catalog": by_catalog,
+            "by_exsiccatae": by_exsiccatae,
+            "by_genbank": by_genbank,
+            "by_taxon": by_taxon,
+        }
+    except sqlite3.Error:
+        return empty
+    finally:
+        if owns_conn and conn is not None:
+            conn.close()
+
+
 def _match_field_record(
     sample_id: str,
     parsed: Dict[str, Optional[str]],
@@ -1199,6 +1411,8 @@ def _infer_sample_cytotype(
     alt_vec: np.ndarray,
     dosage_vec: np.ndarray,
     user_ploidy: Optional[int],
+    species_modal_ploidy: Optional[int] = None,
+    is_multi_cytotype: bool = False,
 ) -> Tuple[str, Optional[float]]:
     """Infer cytotype (`2x`/`4x`/`6x`/`mixed/uncertain`) and delta-logLik from het allele balance."""
     valid = np.isfinite(ref_vec) & np.isfinite(alt_vec) & np.isfinite(dosage_vec)
@@ -1207,8 +1421,10 @@ def _infer_sample_cytotype(
     ratios = (alt_vec[het_mask] / np.maximum(1.0, dp[het_mask])).astype(np.float64)
     ratios = ratios[(ratios >= 0.10) & (ratios <= 0.90)]
     if ratios.size < 15:
-        if user_ploidy in (2, 4, 6):
+        if user_ploidy in (2, 3, 4, 6, 8):
             return f"{user_ploidy}x", 0.0
+        if species_modal_ploidy in (2, 4, 6, 8) and not is_multi_cytotype:
+            return f"{species_modal_ploidy}x", 0.0
         return "mixed/uncertain", None
 
     sigma = 0.08
@@ -1225,7 +1441,12 @@ def _infer_sample_cytotype(
     ll_4x = _mix_ll([0.25, 0.50, 0.75]) - 1.5 * float(np.log(max(2, ratios.size)))
     ll_6x = _mix_ll([1.0 / 6.0, 2.0 / 6.0, 0.50, 4.0 / 6.0, 5.0 / 6.0]) - 3.0 * float(np.log(max(2, ratios.size)))
     delta = float(max(ll_4x, ll_6x) - ll_2x)
+    diploid_prior = (user_ploidy == 2) or (
+        user_ploidy is None and species_modal_ploidy == 2 and not is_multi_cytotype
+    )
     if delta <= 2.0:
+        return "2x", round(delta, 4)
+    if 2.0 < delta < 4.0 and diploid_prior:
         return "2x", round(delta, 4)
     if (ll_6x - ll_4x) > 3.0:
         return "6x", round(delta, 4)
@@ -1302,11 +1523,15 @@ def _evaluate_hdplot_loci(
     return keep_mask, pd.DataFrame(diag_rows)
 
 
+_CYTO_TO_PLOIDY = {"2x": 2, "3x": 3, "4x": 4, "6x": 6, "8x": 8}
+
+
 def _compute_eb_polyrad_dosage(
     dosage_sub: np.ndarray,
     ref_sub: np.ndarray,
     alt_sub: np.ndarray,
     cytotypes: Sequence[str],
+    fallback_ploidies: Optional[Sequence[Optional[int]]] = None,
     eps: float = 0.005,
 ) -> np.ndarray:
     """Estimate Empirical Bayes discrete polyploid posterior dosage in `[0, 1]` from allele read counts."""
@@ -1320,7 +1545,14 @@ def _compute_eb_polyrad_dosage(
     p_hat = np.where(np.isfinite(p_hat), np.clip(p_hat, 0.01, 0.99), 0.5).astype(np.float64)
 
     for i, cy in enumerate(cytotypes):
-        ploidy_p = 2 if cy == "2x" else (6 if cy == "6x" else 4)
+        cy_key = str(cy or "").strip().lower()
+        ploidy_p = _CYTO_TO_PLOIDY.get(cy_key)
+        if ploidy_p is None and fallback_ploidies is not None and i < len(fallback_ploidies):
+            fb = _parse_int_ploidy(fallback_ploidies[i])
+            if fb in (2, 3, 4, 6, 8):
+                ploidy_p = int(fb)
+        if ploidy_p is None:
+            ploidy_p = 4
         ks = np.arange(ploidy_p + 1, dtype=np.float64)
         ratios_k = ks / float(ploidy_p)
         ek = (1.0 - eps) * ratios_k + eps * (1.0 - ratios_k)
@@ -1480,6 +1712,7 @@ def run_genomic_ingestion(
 
     conn: Optional[sqlite3.Connection] = None
     vouchers: List[Dict[str, Any]] = []
+    db_priors = _load_db_cytology_priors(None)
     try:
         conn = get_db_connection(
             db_path=str(db_path) if db_path else None,
@@ -1489,13 +1722,20 @@ def run_genomic_ingestion(
             workspace_root=PROJECT_ROOT,
         )
         vouchers = _load_db_vouchers(conn)
+        db_priors = _load_db_cytology_priors(conn)
     except Exception as exc:
         logger.warning("SQLite voucher lookup unavailable (%s); continuing with standalone linking.", exc)
         vouchers = []
+        db_priors = _load_db_cytology_priors(None)
 
     sample_idx_map = {sid: i for i, sid in enumerate(dosage_samples)}
     n_loci_raw = int(dosage_mat.shape[1]) if dosage_mat.ndim == 2 else 0
     exsiccatae_index = _build_exsiccatae_index(vouchers)
+    ex_prior_lc = {
+        _normalize_exsiccatae_lookup_key(k).lower(): v
+        for k, v in db_priors["by_exsiccatae"].items()
+    }
+    fallback_ploidy_by_sid: Dict[str, Optional[int]] = {}
 
     records: List[Dict[str, Any]] = []
     for sid in all_sample_ids:
@@ -1543,32 +1783,6 @@ def run_genomic_ingestion(
         miss_rate = st.get("missing_genotype_rate")
         obs_het = st.get("observed_het")
 
-        ploidy = None
-        if u_meta and u_meta.get("ploidy_level"):
-            try:
-                ploidy = int(float(u_meta["ploidy_level"]))
-            except ValueError:
-                ploidy = None
-
-        inf_cyto = "mixed/uncertain" if ploidy not in (2, 4, 6) else f"{ploidy}x"
-        nq_delta: Optional[float] = None
-        if sid in sample_idx_map and n_loci_raw > 0:
-            sidx = sample_idx_map[sid]
-            vec = dosage_mat[sidx, :]
-            called_mask = np.isfinite(vec)
-            n_called = int(np.sum(called_mask))
-            miss_rate = float(1.0 - (n_called / float(n_loci_raw)))
-            obs_het = float(np.mean((vec[called_mask] > 0.05) & (vec[called_mask] < 0.95))) if n_called > 0 else None
-            if ref_depth_mat.size > 0 and alt_depth_mat.size > 0:
-                inf_cyto, nq_delta = _infer_sample_cytotype(ref_depth_mat[sidx, :], alt_depth_mat[sidx, :], vec, ploidy)
-
-        if hq_reads is not None:
-            qc_pass = (hq_reads >= int(min_hq_reads)) and (miss_rate is None or miss_rate <= float(max_missing_rate))
-        elif n_loci_raw > 0:
-            qc_pass = (miss_rate is not None and miss_rate <= float(max_missing_rate)) and ((n_called or 0) > 0)
-        else:
-            qc_pass = True
-
         link = _link_sample_to_voucher(
             sid,
             parsed,
@@ -1578,6 +1792,72 @@ def run_genomic_ingestion(
             exsiccatae_index=exsiccatae_index,
         )
         v_rec = link.get("voucher") or {}
+
+        ploidy = _parse_int_ploidy(u_meta.get("ploidy_level")) if u_meta else None
+        if ploidy is None:
+            cat_link = str(link.get("catalogNumber") or "").strip()
+            if cat_link:
+                ploidy = db_priors["by_catalog"].get(cat_link)
+        if ploidy is None:
+            ex_link = _normalize_exsiccatae_lookup_key(link.get("exsiccatae_key")).lower()
+            if ex_link:
+                ploidy = ex_prior_lc.get(ex_link)
+        if ploidy is None:
+            gb_acc = str(
+                (u_meta or {}).get("genbank_accession")
+                or parsed.get("genbank_accession")
+                or (f_row or {}).get("genbank_accession")
+                or ""
+            ).strip()
+            if gb_acc:
+                ploidy = db_priors["by_genbank"].get(gb_acc)
+
+        tax_sp = str(sp_std or v_rec.get("species_standardized") or "").strip()
+        tax_info = (
+            db_priors["by_taxon"].get(tax_sp)
+            if (not is_query and tax_sp)
+            else None
+        )
+        sp_modal = tax_info.get("modal_ploidy_level") if tax_info else None
+        sp_multi = bool(tax_info.get("is_multi_cytotype_taxon", 0)) if tax_info else False
+
+        if ploidy in (2, 3, 4, 6, 8):
+            inf_cyto = f"{ploidy}x"
+        elif sp_modal in (2, 4, 6, 8) and not sp_multi:
+            inf_cyto = f"{sp_modal}x"
+        else:
+            inf_cyto = "mixed/uncertain"
+
+        nq_delta: Optional[float] = None
+        if sid in sample_idx_map and n_loci_raw > 0:
+            sidx = sample_idx_map[sid]
+            vec = dosage_mat[sidx, :]
+            called_mask = np.isfinite(vec)
+            n_called = int(np.sum(called_mask))
+            miss_rate = float(1.0 - (n_called / float(n_loci_raw)))
+            obs_het = float(np.mean((vec[called_mask] > 0.05) & (vec[called_mask] < 0.95))) if n_called > 0 else None
+            if ref_depth_mat.size > 0 and alt_depth_mat.size > 0:
+                inf_cyto, nq_delta = _infer_sample_cytotype(
+                    ref_depth_mat[sidx, :],
+                    alt_depth_mat[sidx, :],
+                    vec,
+                    ploidy,
+                    species_modal_ploidy=sp_modal,
+                    is_multi_cytotype=sp_multi,
+                )
+
+        fallback_ploidy_by_sid[sid] = (
+            ploidy
+            if ploidy in (2, 3, 4, 6, 8)
+            else (sp_modal if sp_modal in (2, 3, 4, 6, 8) else None)
+        )
+
+        if hq_reads is not None:
+            qc_pass = (hq_reads >= int(min_hq_reads)) and (miss_rate is None or miss_rate <= float(max_missing_rate))
+        elif n_loci_raw > 0:
+            qc_pass = (miss_rate is not None and miss_rate <= float(max_missing_rate)) and ((n_called or 0) > 0)
+        else:
+            qc_pass = True
 
         lat = lon = state = county = ev_date = None
         if u_meta and u_meta.get("decimalLatitude") and u_meta.get("decimalLongitude"):
@@ -1673,7 +1953,14 @@ def run_genomic_ingestion(
                 rd_pass = ref_depth_mat[pass_rows, :][:, kept_indices]
                 ad_pass = alt_depth_mat[pass_rows, :][:, kept_indices]
                 cytos = [str(r["inferred_cytotype"]) for r in pass_recs]
-                kept_dosage = _compute_eb_polyrad_dosage(kept_dosage, rd_pass, ad_pass, cytos)
+                fb_ploidies = [fallback_ploidy_by_sid.get(r["genetic_sample_id"]) for r in pass_recs]
+                kept_dosage = _compute_eb_polyrad_dosage(
+                    kept_dosage,
+                    rd_pass,
+                    ad_pass,
+                    cytos,
+                    fallback_ploidies=fb_ploidies,
+                )
 
             for pos_i, r in enumerate(pass_recs):
                 r["hdplot_retained_loci"] = int(np.sum(np.isfinite(kept_dosage[pos_i, :]))) if n_loci_retained > 0 else 0

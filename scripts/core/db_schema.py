@@ -407,6 +407,12 @@ def _build_master_view_ddl() -> str:
         ct.tier0_abstention_flag AS tier0_abstention_flag,
         ct.deme_mahal_d2 AS deme_mahal_d2,
         ct.cluster_propagated_gdi AS cluster_propagated_gdi,
+        ct.cytology_linkage_tier AS cytology_linkage_tier,
+        ct.voucher_sporophytic_2n AS voucher_sporophytic_2n,
+        ct.voucher_ploidy_level AS voucher_ploidy_level,
+        ct.taxon_reported_cytotypes AS taxon_reported_cytotypes,
+        ct.is_multi_cytotype_taxon AS is_multi_cytotype_taxon,
+        ct.cytotype_reproductive_barrier_pass AS cytotype_reproductive_barrier_pass,
         -- Step 06 Genomic Phylogenomics (1-to-1 per run_id, catalogNumber)
         geno_v.genetic_sample_id AS genetic_sample_id,
         geno_v.geno_population_id AS geno_population_id,
@@ -903,6 +909,57 @@ def _build_schema_ddl() -> str:
     CREATE INDEX IF NOT EXISTS idx_genomic_samples_pop ON genomic_samples(population_id);
     CREATE INDEX IF NOT EXISTS idx_genomic_samples_taxon ON genomic_samples(species_standardized);
 
+    -- 8. Cytological records (canonical chromosome counts, C-values, breeding systems, voucher links)
+    CREATE TABLE IF NOT EXISTS cytological_records (
+        cytology_id TEXT PRIMARY KEY,
+        source_db TEXT NOT NULL,
+        source_record_id TEXT,
+        original_taxon_name TEXT NOT NULL,
+        basionym_name TEXT,
+        species_standardized TEXT NOT NULL,
+        catalogNumber TEXT,
+        exsiccatae_key TEXT,
+        cytology_linkage_tier TEXT,
+        raw_count_str TEXT,
+        gametophytic_n INTEGER,
+        sporophytic_2n INTEGER,
+        base_x INTEGER,
+        ploidy_level INTEGER,
+        cytotype_label TEXT,
+        b_chromosomes INTEGER DEFAULT 0,
+        is_aneuploid_or_odd_ploid INTEGER DEFAULT 0,
+        is_approximate INTEGER DEFAULT 0,
+        c_value_1c_pg REAL,
+        c_value_2c_pg REAL,
+        breeding_system TEXT,
+        genbank_accession TEXT,
+        collector_surname TEXT,
+        record_number_clean TEXT,
+        institution_code TEXT,
+        voucher_citation TEXT,
+        locality_text TEXT,
+        reference_citation TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_cytological_records_taxon ON cytological_records(species_standardized);
+    CREATE INDEX IF NOT EXISTS idx_cytological_records_catalog ON cytological_records(catalogNumber);
+    CREATE INDEX IF NOT EXISTS idx_cytological_records_exsiccatae ON cytological_records(exsiccatae_key);
+
+    -- 9. Taxon-level cytological summary (aggregated modal ploidy, series, and C-value statistics)
+    CREATE TABLE IF NOT EXISTS taxon_cytology_summary (
+        species_standardized TEXT PRIMARY KEY,
+        n_cytology_records INTEGER DEFAULT 0,
+        n_direct_cytovouchers INTEGER DEFAULT 0,
+        modal_sporophytic_2n INTEGER,
+        modal_base_x INTEGER,
+        modal_ploidy_level INTEGER,
+        reported_cytotypes TEXT,
+        is_multi_cytotype_taxon INTEGER DEFAULT 0,
+        has_dysploid_series INTEGER DEFAULT 0,
+        has_odd_polyploid_or_apomixis INTEGER DEFAULT 0,
+        mean_2c_pg REAL,
+        breeding_system_summary TEXT
+    );
+
     -- =========================================================================
     -- TIER B: RUN-SCOPED ANALYTICAL TABLES & MASTER VIEW
     -- =========================================================================
@@ -1176,6 +1233,12 @@ def _build_schema_ddl() -> str:
         tier0_abstention_flag INTEGER,
         deme_mahal_d2 REAL,
         cluster_propagated_gdi REAL,
+        cytology_linkage_tier TEXT,
+        voucher_sporophytic_2n INTEGER,
+        voucher_ploidy_level INTEGER,
+        taxon_reported_cytotypes TEXT,
+        is_multi_cytotype_taxon INTEGER,
+        cytotype_reproductive_barrier_pass INTEGER,
         PRIMARY KEY (run_id, catalogNumber, plant_individual_id),
         FOREIGN KEY (run_id) REFERENCES pipeline_runs(run_id) ON DELETE CASCADE
     );
@@ -1422,6 +1485,12 @@ _DYNAMIC_TABLE_MIGRATION_SPECS: Dict[str, Tuple[Tuple[str, str], ...]] = {
         ("tier0_abstention_flag", "INTEGER"),
         ("deme_mahal_d2", "REAL"),
         ("cluster_propagated_gdi", "REAL"),
+        ("cytology_linkage_tier", "TEXT"),
+        ("voucher_sporophytic_2n", "INTEGER"),
+        ("voucher_ploidy_level", "INTEGER"),
+        ("taxon_reported_cytotypes", "TEXT"),
+        ("is_multi_cytotype_taxon", "INTEGER"),
+        ("cytotype_reproductive_barrier_pass", "INTEGER"),
     ),
     "genomic_samples": (
         ("catalogNumber", "TEXT NULL"),
@@ -1526,7 +1595,7 @@ def _migrate_vouchers_schema_columns(conn: sqlite3.Connection) -> None:
             existing_cols.add(col_name)
 
 
-PLANTMATICS_SCHEMA_USER_VERSION: int = 20261125
+PLANTMATICS_SCHEMA_USER_VERSION: int = 20261126
 PACKERA_SCHEMA_USER_VERSION: int = PLANTMATICS_SCHEMA_USER_VERSION
 
 
@@ -1883,11 +1952,23 @@ def _migrate_dynamic_schema_columns(
 
     _rebuild_tier_a_step02_tables_if_needed(conn, existing_tables)
 
-    if "genomic_samples" not in existing_tables or "genetic_lineage_assignments" not in existing_tables:
+    if (
+        "genomic_samples" not in existing_tables
+        or "genetic_lineage_assignments" not in existing_tables
+        or "cytological_records" not in existing_tables
+        or "taxon_cytology_summary" not in existing_tables
+    ):
         conn.executescript(SCHEMA_DDL)
         # Ensure master view stays dropped until subsequent table rebuilds finish.
         conn.execute("DROP VIEW IF EXISTS v_integrative_triage_master;")
-        existing_tables.update({"genomic_samples", "genetic_lineage_assignments"})
+        existing_tables.update(
+            {
+                "genomic_samples",
+                "genetic_lineage_assignments",
+                "cytological_records",
+                "taxon_cytology_summary",
+            }
+        )
 
     if "curation_triage" in existing_tables:
         ct_cols_now = {
@@ -1897,6 +1978,8 @@ def _migrate_dynamic_schema_columns(
             if ct_cols_now and _ct_col not in ct_cols_now:
                 conn.execute(f"ALTER TABLE curation_triage ADD COLUMN {_ct_col} {_ct_type};")
                 ct_cols_now.add(_ct_col)
+        cur_uv_row = conn.execute("PRAGMA user_version;").fetchone()
+        cur_uv = int(cur_uv_row[0]) if (cur_uv_row and cur_uv_row[0] is not None) else 0
         canon_ct_cols = (
             "run_id", "catalogNumber", "plant_individual_id",
             "w_morph_kappa", "w_edaphic_kappa", "w_pheno_kappa", "w_geno_kappa",
@@ -1911,13 +1994,21 @@ def _migrate_dynamic_schema_columns(
             "is_completed_voucher", "genomic_propagation_tier",
             "tier0_calibrated_taxon", "tier0_calibrated_prob",
             "tier0_abstention_flag", "deme_mahal_d2", "cluster_propagated_gdi",
+            "cytology_linkage_tier", "voucher_sporophytic_2n",
+            "voucher_ploidy_level", "taxon_reported_cytotypes",
+            "is_multi_cytotype_taxon", "cytotype_reproductive_barrier_pass",
         )
-        if ct_cols_now and ct_cols_now != set(canon_ct_cols):
-            shared_ct = [c for c in canon_ct_cols if c in ct_cols_now]
+        if ct_cols_now and (
+            ct_cols_now != set(canon_ct_cols) or cur_uv < PLANTMATICS_SCHEMA_USER_VERSION
+        ):
+            ct_pre_rebuild_cols = {
+                str(r[1]) for r in conn.execute("PRAGMA table_info(curation_triage);").fetchall()
+            }
+            shared_ct = [c for c in canon_ct_cols if c in ct_pre_rebuild_cols]
             conn.executescript(
                 """
-                DROP TABLE IF EXISTS _curation_triage_v20261125;
-                CREATE TABLE _curation_triage_v20261125 (
+                DROP TABLE IF EXISTS _curation_triage_v20261126;
+                CREATE TABLE _curation_triage_v20261126 (
                     run_id TEXT NOT NULL,
                     catalogNumber TEXT NOT NULL,
                     plant_individual_id INTEGER NOT NULL DEFAULT 0,
@@ -1950,6 +2041,12 @@ def _migrate_dynamic_schema_columns(
                     tier0_abstention_flag INTEGER,
                     deme_mahal_d2 REAL,
                     cluster_propagated_gdi REAL,
+                    cytology_linkage_tier TEXT,
+                    voucher_sporophytic_2n INTEGER,
+                    voucher_ploidy_level INTEGER,
+                    taxon_reported_cytotypes TEXT,
+                    is_multi_cytotype_taxon INTEGER,
+                    cytotype_reproductive_barrier_pass INTEGER,
                     PRIMARY KEY (run_id, catalogNumber, plant_individual_id),
                     FOREIGN KEY (run_id) REFERENCES pipeline_runs(run_id) ON DELETE CASCADE
                 );
@@ -1958,12 +2055,12 @@ def _migrate_dynamic_schema_columns(
             if shared_ct:
                 cols_csv = ", ".join(shared_ct)
                 conn.execute(
-                    f"INSERT OR REPLACE INTO _curation_triage_v20261125 ({cols_csv}) SELECT {cols_csv} FROM curation_triage;"
+                    f"INSERT OR REPLACE INTO _curation_triage_v20261126 ({cols_csv}) SELECT {cols_csv} FROM curation_triage;"
                 )
             conn.executescript(
                 """
                 DROP TABLE curation_triage;
-                ALTER TABLE _curation_triage_v20261125 RENAME TO curation_triage;
+                ALTER TABLE _curation_triage_v20261126 RENAME TO curation_triage;
                 """
             )
 
@@ -1996,6 +2093,8 @@ def init_db_schema(conn: sqlite3.Connection) -> None:
             "taxon_synonyms",
             "usda_county_ranges",
             "extracted_leaves",
+            "cytological_records",
+            "taxon_cytology_summary",
             "pipeline_runs",
             "leaf_efa_harmonics",
             "taxon_complexes",
@@ -2008,7 +2107,7 @@ def init_db_schema(conn: sqlite3.Connection) -> None:
             el_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(extracted_leaves);").fetchall()}
             om_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(otu_morphometrics);").fetchall()}
             mv_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(v_integrative_triage_master);").fetchall()}
-            req_mv_cols = {"is_passive", "scale_source", "AR_inv_std", "log1p_capitulum_count", "blade_cie_l_norm", "nearest_type_basionym", "reproductive_trait_status", "ecoregion_can1", "ecoregion_can2", "hybrid_zone_cohesion_pass", "hybrid_parent_1", "hybrid_parent_2", "cda_oof_posterior_prob", "self_morph_mahal_d2", "open_set_df", "cryptic_non_clinal_pass", "resurrection_basionym", "w_geno_kappa", "geno_predicted_taxon", "geno_linkage_tier", "is_geno_admixed", "coalescent_gdi", "hybrid_generation_class", "cytonuclear_discordant", "public_plastome_match", "public_its_match", "waxy_lineage_match", "public_backbone_clade", "public_phytop_ils_index", "public_phytop_ih_index", "genomic_propagation_tier", "cluster_propagated_gdi"}
+            req_mv_cols = {"is_passive", "scale_source", "AR_inv_std", "log1p_capitulum_count", "blade_cie_l_norm", "nearest_type_basionym", "reproductive_trait_status", "ecoregion_can1", "ecoregion_can2", "hybrid_zone_cohesion_pass", "hybrid_parent_1", "hybrid_parent_2", "cda_oof_posterior_prob", "self_morph_mahal_d2", "open_set_df", "cryptic_non_clinal_pass", "resurrection_basionym", "w_geno_kappa", "geno_predicted_taxon", "geno_linkage_tier", "is_geno_admixed", "coalescent_gdi", "hybrid_generation_class", "cytonuclear_discordant", "public_plastome_match", "public_its_match", "waxy_lineage_match", "public_backbone_clade", "public_phytop_ils_index", "public_phytop_ih_index", "genomic_propagation_tier", "cluster_propagated_gdi", "cytology_linkage_tier", "voucher_sporophytic_2n", "voucher_ploidy_level", "taxon_reported_cytotypes", "is_multi_cytotype_taxon", "cytotype_reproductive_barrier_pass"}
             if (
                 "leaf_zone" not in el_cols
                 or "area_mm2" not in el_cols
