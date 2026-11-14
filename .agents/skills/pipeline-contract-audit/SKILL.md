@@ -94,8 +94,8 @@ scripts = [
     "scripts/core/db.py", "scripts/core/db_utils.R", "scripts/core/harvester.py",
     "scripts/pipeline/02_segment_and_extract.py", "scripts/morphometrics/03_fourier_extractor.R",
     "scripts/morphometrics/04_gmm_morphotools.R", "scripts/morphometrics/authority_weighting_utils.R",
-    "scripts/analysis/05_multimodal_spatial_rf.R", "scripts/analysis/06_triage_dashboard_synthesis.R",
-    "scripts/analysis/taxon_complex_discovery_utils.R",
+    "scripts/analysis/05_multimodal_spatial_rf.R", "scripts/analysis/06_genomic_phylogenomics.R",
+    "scripts/analysis/07_triage_dashboard_synthesis.R", "scripts/analysis/taxon_complex_discovery_utils.R",
 ]
 
 missing = [s for s in scripts if not Path(s).exists()]
@@ -111,8 +111,9 @@ s03 = Path("scripts/morphometrics/03_fourier_extractor.R").read_text() + Path("s
 s04 = Path("scripts/morphometrics/04_gmm_morphotools.R").read_text()
 s_auth = Path("scripts/morphometrics/authority_weighting_utils.R").read_text()
 s05 = Path("scripts/analysis/05_multimodal_spatial_rf.R").read_text() + Path("scripts/analysis/edaphic_fine_grain_utils.R").read_text() + Path("scripts/analysis/step05_phenology_ecotypes.R").read_text()
-s06 = Path("scripts/analysis/06_triage_dashboard_synthesis.R").read_text()
-s07 = Path("scripts/analysis/taxon_complex_discovery_utils.R").read_text()
+s06 = Path("scripts/analysis/06_genomic_phylogenomics.R").read_text()
+s07 = Path("scripts/analysis/07_triage_dashboard_synthesis.R").read_text()
+s_comp = Path("scripts/analysis/taxon_complex_discovery_utils.R").read_text()
 
 checks = [
     ("db.py defines schema, WAL mode, tables, and master view", "v_integrative_triage_master" in s_db and "PRAGMA journal_mode = WAL" in s_db),

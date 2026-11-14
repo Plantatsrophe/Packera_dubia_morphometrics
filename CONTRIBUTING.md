@@ -24,14 +24,14 @@ Three core R analytical scripts enforce hard line-count ceilings verified automa
 | :--- | :---: | :--- |
 | `scripts/morphometrics/03_fourier_extractor.R` | `<= 800` lines | `dissected_leaf_utils.R`, `fourier_parallel_utils.R`, `scripts/figures/step03_figures.R` |
 | `scripts/morphometrics/04_gmm_morphotools.R` | `<= 650` lines | `authority_weighting_utils.R`, `plasticity_mitigation_utils.R`, `pub_ecoregion_manova_utils.R`, `scripts/figures/step04_figures.R` |
-| `scripts/analysis/taxon_complex_discovery_utils.R` | `<= 800` lines | `06_triage_dashboard_synthesis.R`, `scripts/figures/step06_figures.R` |
+| `scripts/analysis/taxon_complex_discovery_utils.R` | `<= 800` lines | `07_triage_dashboard_synthesis.R`, `genomic_triage_utils.R`, `scripts/figures/step07_figures.R` |
 
 When adding new morphometric diagnostics or plots, place shared plotting logic in `scripts/figures/theme_packera_pub.R` or `scripts/figures/step0X_figures.R` rather than expanding the core modeling entrypoints past their line budgets.
 
-## 3. SQLite Schema (`20261121`), Composite Keys, and Demo Isolation
+## 3. SQLite Schema (`20261123`), Composite Keys, and Demo Isolation
 
 1. **Synchronized DDL Across Python and R:** Whenever you add or rename a table column or modify `v_integrative_triage_master`, update `scripts/core/db_schema.py`, `scripts/core/db_utils.R`, and [`docs/DATA_DICTIONARY.md`](docs/DATA_DICTIONARY.md) in the same commit, and increment `PACKERA_SCHEMA_USER_VERSION` if breaking migrations are required.
-2. **Composite Individual Keys:** Group and join all specimen-level data on `(catalogNumber, plant_individual_id)` (plus `run_id` in Tier B tables). Never deduplicate by `catalogNumber` alone in Steps 02 through 06, as multi-plant herbarium sheets carry distinct DBSCAN individuals (`plant_individual_id = 1, 2, ...`).
+2. **Composite Individual Keys:** Group and join all specimen-level data on `(catalogNumber, plant_individual_id)` (plus `run_id` in Tier B tables). Never deduplicate by `catalogNumber` alone in Steps 02 through 07, as multi-plant herbarium sheets carry distinct DBSCAN individuals (`plant_individual_id = 1, 2, ...`).
 3. **Atomic Writes and Honest Missingness:** Write CSV, HTML, Markdown, and GeoTIFF deliverables to process-unique `.tmp` or `.part` files first and `rename()` atomically upon completion. Outside explicit `--demo` runs (`PACKERA_DEMO_MODE=1`, which isolates writes inside `demo_ephemeral.sqlite`), never synthesize mock coordinates, random embeddings, or fabricated raster values when external layers are absent; return `NA` / `NULL` cleanly.
 4. **RNG State Hygiene in R:** Any stochastic call inside helper routines (`igraph::cluster_leiden`, `kmeans`, bootstrap/permutation loops) must preserve and restore the caller's `.Random.seed` via `on.exit` (see `.with_preserved_rng_seed()` in `taxon_complex_discovery_utils.R`).
 

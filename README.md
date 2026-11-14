@@ -4,7 +4,7 @@
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg)](https://www.python.org/)
 [![R 4.3+](https://img.shields.io/badge/R-4.3%2B-276DC3.svg)](https://www.r-project.org/)
 [![Vision: LeafMachine3 ONNX](https://img.shields.io/badge/Vision-LeafMachine3_ONNX-2E7D32.svg)](https://github.com/Gene-Weaver/LeafMachine3)
-[![SQLite Schema: 20261121](https://img.shields.io/badge/SQLite_WAL-20261121-003B57.svg)](docs/DATA_DICTIONARY.md)
+[![SQLite Schema: 20261123](https://img.shields.io/badge/SQLite_WAL-20261123-003B57.svg)](docs/DATA_DICTIONARY.md)
 
 **Principal Investigator:** J. Brandon Fuller (Department of Biology, University of North Carolina at Chapel Hill)
 **Faculty Advisor:** Dr. Alan S. Weakley (Director, University of North Carolina Herbarium [NCU])

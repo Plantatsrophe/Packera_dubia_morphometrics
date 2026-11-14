@@ -77,9 +77,9 @@ class TestMainPipelineCLI(unittest.TestCase):
         self.assertEqual(args_gen.genomics_dir, Path("data/genomics"))
 
         # skim-organellar
-        args_skim = parser.parse_args(["skim-organellar", "--reads", "raw_reads.zip"])
+        args_skim = parser.parse_args(["skim-organellar", "--fastq-source", "raw_reads.zip"])
         self.assertEqual(args_skim.subcommand, "skim-organellar")
-        self.assertEqual(args_skim.reads, "raw_reads.zip")
+        self.assertEqual(args_skim.fastq_source, Path("raw_reads.zip"))
 
         # force / overwrite flags across subparsers
         self.assertTrue(parser.parse_args(["harvest", "--force"]).force)

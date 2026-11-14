@@ -4,6 +4,16 @@ All notable methodological, statistical, figure, and SQLite relational schema ch
 
 The structure follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [5.1.0] - 2026-11-14 (`UNC-BOT-SOP-2026-04-REV5` | SQLite Schema `20261123`)
+
+### Added
+* **Standalone Step 06 Genomic and Phylogenomic Evidence Stream (`06_ingest_genetic_data.py`, `06_genomic_phylogenomics.R`, `step06_figures.R`):** Added a standalone fourth evidence stream operating independently of morphometrics and ecological niche modeling (`0` cross-stream prior leakage), executing automatically when genetic files sit flat inside `data/genomics/` and skipping as a clean zero-overhead no-op when empty.
+* **Polyploid NextRAD QC, Reticulation, and Invariant-Site Coalescent Delimitation:** Implemented McKinney `HDplot` paralog screening without minor-allele-frequency pruning, allele-balance cytotype classification (`2x`/`4x`/`6x`), empirical-Bayes `polyRAD` posterior allele dosages, `(h, Q_12)` hybrid-class inference, microhaplotype coancestry alongside Patterson's $D$/$f_b$ and quartet concordance (`step06_reticulation_coancestry.R`), 122 bp invariant-site `SVDquartets`, `BPP` `MSci`, and empirical $\widehat{gdi}$ coalescent delimitation (`step06_coalescent_delimitation.py`), small-$n$ landscape genomics (`step06_spatial_landscape_genomics.R`), and offline off-target organellar/ITS FASTQ skimming (`skim_offtarget_organellar.py`).
+* **300-DPI Genomic Plates (`fig06a`, `fig06b`) and Tier A/B Genomic SQLite Tables:** Added `genomic_samples` (Tier A preserved across `--purge-runs-only`) and `genetic_lineage_assignments` (Tier B) integrated into `v_integrative_triage_master` under schema version `20261123`.
+
+### Changed
+* **Seven-Stage Pipeline Numbering and Step 07 Integrative Synthesis (`07_triage_dashboard_synthesis.R`, `step07_figures.R`):** Promoted integrative synthesis and complex delimitation from Step 06 to Step 07 (`fig07a`, `fig07b`), added Stage 3 $\widehat{gdi} < 0.20$ coalescent oversplit blocking plus `Divergent_NonHybrid_Lineage` hybrid-swamp protection in `07_triage_dashboard_synthesis.R`, and updated `--start-step <1..7>` orchestration across `main.py` and `run_pipeline.sh`.
+
 ## [5.0.0] - 2026-11-11 (`UNC-BOT-SOP-2026-04-REV5` | SQLite Schema `20261121`)
 
 ### Added

@@ -138,7 +138,14 @@ compute_microhaplotype_coancestry <- function(pass_ids, dos_mat, raw_genomics_di
   }
   C_sym <- 0.5 * (C_norm + t(C_norm))
   max_c <- max(C_sym, na.rm = TRUE)
-  d_coanc <- if (is.finite(max_c) && max_c > 0) stats::as.dist(pmax(0.0, 1.0 - C_sym / max_c)) else stats::dist(dos_mat)
+  d_coanc <- if (is.finite(max_c) && max_c > 0) {
+    d_mat_c <- 1.0 - C_sym / max_c
+    d_mat_c[d_mat_c < 0.0] <- 0.0
+    diag(d_mat_c) <- 0.0
+    stats::as.dist(d_mat_c)
+  } else {
+    stats::dist(dos_mat)
+  }
   hc <- stats::hclust(d_coanc, method = "ward.D2")
   k_cl <- max(2L, min(6L, n - 1L))
   cl_vec <- sprintf("Coanc_Cluster_%d", as.integer(stats::cutree(hc, k = k_cl)))
