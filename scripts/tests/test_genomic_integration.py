@@ -268,13 +268,18 @@ class TestGenomicIntegration(unittest.TestCase):
                     "INSERT INTO pipeline_runs (run_id, run_dir, intraspecific_mode) VALUES ('run_alpha', ?, 0);",
                     (str(runs_dir),),
                 )
-                conn.execute(
+                conn.executemany(
                     """
                     INSERT INTO run_active_cohort (
                         run_id, catalogNumber, plant_individual_id,
                         species_standardized, determiner_tier, authority_weight
-                    ) VALUES ('run_alpha', 'NCU001', 0, 'Packera dubia', 'Tier_1_Gold', 2.0);
-                    """
+                    ) VALUES (?, ?, ?, ?, ?, ?);
+                    """,
+                    [
+                        ("run_alpha", "NCU001", 0, "Packera dubia", "Tier_1_Gold", 2.0),
+                        ("run_alpha", "NCU001", 1, "Packera dubia", "Tier_1_Gold", 2.0),
+                        ("run_alpha", "NCU002", 0, "Packera schweinitziana", "Tier_1_Gold", 2.0),
+                    ],
                 )
                 conn.executemany(
                     """
@@ -486,8 +491,8 @@ class TestGenomicIntegration(unittest.TestCase):
             locus_specs = [
                 # Excess heterozygosity H = 1.0 > 0.60 across 6 samples -> HDplot_H>0.60 filtered
                 ("L_PARALOG_HET", [("0/1", 40, 20, 20) for _ in samples]),
-                # Strong read-ratio bias |D| > 4.0 across 5 hets (ref=36, alt=4) -> HDplot_|D|>4.0 filtered
-                ("L_PARALOG_DBIAS", [("0/1", 40, 36, 4)] * 5 + [("0/0", 40, 40, 0)]),
+                # Strong read-ratio bias |D| > 4.0 across 3/6 hets (H = 0.50 <= 0.60, ref=36, alt=4) -> HDplot_|D|>4.0 filtered
+                ("L_PARALOG_DBIAS", [("0/1", 40, 36, 4)] * 3 + [("0/0", 40, 40, 0)] * 3),
                 # Monomorphic (all 0/0) -> monomorphic_or_sparse filtered
                 ("L_LOWMAF", [("0/0", 30, 30, 0) for _ in samples]),
             ]
@@ -962,54 +967,106 @@ stopifnot(grepl("## 5\\\\. Independent Step 06 Genomic & Phylogenomic Evidence S
 stopifnot(length(list.files({json.dumps(str(figs_dir))}, pattern = "\\\\.pdf$", ignore.case = TRUE)) == 0L)
 
 # 4. Direct Phase 2 apply_taxonomic_decision_matrix tests
-make_intra_probe <- function(cat_id, gdi_val, hyb_cls, q12_val) {{
-  data.frame(
-    catalogNumber = cat_id,
+make_intra_probe <- function(prefix, gdi_val, hyb_cls, q12_val) {{
+  df_k2 <- data.frame(
+    catalogNumber = paste0(prefix, "_", 1:5),
     plant_individual_id = 0L,
-    species_standardized = "Packera dubia",
-    species_raw = "Packera dubia",
-    recordedBy = "Fuller",
-    institutionCode = "NCU",
-    determiner_tier = "Tier_1_Gold",
-    decimalLatitude = 35.2,
-    decimalLongitude = -79.3,
-    stateProvince = "NC",
-    county = "Moore",
-    leaf_zone = "Basal_Rosette",
-    basal_leaf_count = 6L,
-    is_basal_morph = TRUE,
-    is_passive = FALSE,
-    morph_tier_source = "Basal_Rosette",
-    is_morph_outlier = TRUE,
-    gmm_cluster = 2L,
-    gmm_bayes_factor = 12.0,
-    cda_predicted_taxon = "Packera dubia",
-    cda_posterior_prob = 0.45,
-    edaphic_best_fit_taxon = "Packera dubia",
-    edaphic_prob = 0.20,
-    type_edaphic_z_score = 3.2,
-    hopkins_adjusted_doy = 155.0,
-    delta_doy = 35.0,
-    reproductive_trait_status = "Measured",
-    is_anthesis = TRUE,
-    open_set_novelty_p = 0.01,
-    min_congener_mahal_d2 = 28.0,
-    cryptic_cluster_cohesion_pass = TRUE,
-    PC1 = 2.4, PC2 = -1.1, PC3 = 0.4,
-    geno_predicted_taxon = "Packera dubia",
-    geno_linkage_tier = "G1_Direct_Voucher",
-    geno_quality_pass = TRUE,
-    geno_posterior_prob = 0.96,
-    coalescent_gdi = gdi_val,
-    hybrid_generation_class = hyb_cls,
-    interspecific_ancestry_q12 = q12_val,
-    is_geno_admixed = FALSE,
+    species_standardized = rep("Packera dubia", 5L),
+    species_raw = rep("Packera dubia", 5L),
+    recordedBy = c("Fuller", "Weakley", "Sorrie", "Poindexter", "Krings"),
+    institutionCode = c("NCU", "DUKE", "US", "NY", "GH"),
+    determiner_tier = rep("Tier_1_Gold", 5L),
+    decimalLatitude = c(35.10, 35.45, 35.80, 36.15, 36.50),
+    decimalLongitude = c(-79.10, -79.55, -80.05, -80.55, -81.05),
+    stateProvince = rep("NC", 5L),
+    county = c("Moore", "Chatham", "Orange", "Ashe", "Watauga"),
+    eventDate = c("2020-04-15", "2021-04-18", "2022-04-20", "2023-04-22", "2024-04-25"),
+    leaf_zone = rep("Basal_Rosette", 5L),
+    basal_leaf_count = rep(6L, 5L),
+    is_basal_morph = rep(TRUE, 5L),
+    is_passive = rep(FALSE, 5L),
+    morph_tier_source = rep("Basal_Rosette", 5L),
+    is_morph_outlier = rep(TRUE, 5L),
+    gmm_cluster = rep(2L, 5L),
+    gmm_bayes_factor = rep(12.0, 5L),
+    cda_predicted_taxon = rep("Packera dubia", 5L),
+    cda_posterior_prob = rep(0.45, 5L),
+    edaphic_best_fit_taxon = rep("Packera dubia", 5L),
+    edaphic_prob = rep(0.20, 5L),
+    type_edaphic_z_score = rep(3.2, 5L),
+    hopkins_adjusted_doy = rep(155.0, 5L),
+    delta_doy = rep(35.0, 5L),
+    reproductive_trait_status = rep("Measured", 5L),
+    is_anthesis = rep(TRUE, 5L),
+    open_set_novelty_p = rep(0.01, 5L),
+    open_set_df = rep(5L, 5L),
+    min_congener_mahal_d2 = rep(28.0, 5L),
+    cryptic_cluster_cohesion_pass = rep(TRUE, 5L),
+    PC1 = c(2.4, 2.5, 2.3, 2.6, 2.4),
+    PC2 = c(-1.1, -1.0, -1.2, -1.1, -0.9),
+    PC3 = c(0.4, 0.3, 0.5, 0.4, 0.4),
+    geno_predicted_taxon = rep("Packera dubia", 5L),
+    geno_linkage_tier = rep("G1_Direct_Voucher", 5L),
+    geno_quality_pass = rep(TRUE, 5L),
+    geno_posterior_prob = rep(0.96, 5L),
+    coalescent_gdi = rep(gdi_val, 5L),
+    hybrid_generation_class = rep(hyb_cls, 5L),
+    interspecific_ancestry_q12 = rep(q12_val, 5L),
+    is_geno_admixed = rep(FALSE, 5L),
     stringsAsFactors = FALSE
   )
+  df_k1 <- data.frame(
+    catalogNumber = paste0(prefix, "_BASE_", 1:3),
+    plant_individual_id = 0L,
+    species_standardized = rep("Packera dubia", 3L),
+    species_raw = rep("Packera dubia", 3L),
+    recordedBy = c("Radford", "Bozeman", "Leonard"),
+    institutionCode = c("NCU", "NCU", "DUKE"),
+    determiner_tier = rep("Tier_1_Gold", 3L),
+    decimalLatitude = c(35.05, 35.12, 35.18),
+    decimalLongitude = c(-79.05, -79.12, -79.18),
+    stateProvince = rep("NC", 3L),
+    county = c("Moore", "Hoke", "Richmond"),
+    eventDate = c("1960-04-10", "1968-04-12", "1972-04-14"),
+    leaf_zone = rep("Basal_Rosette", 3L),
+    basal_leaf_count = rep(6L, 3L),
+    is_basal_morph = rep(TRUE, 3L),
+    is_passive = rep(FALSE, 3L),
+    morph_tier_source = rep("Basal_Rosette", 3L),
+    is_morph_outlier = rep(FALSE, 3L),
+    gmm_cluster = rep(1L, 3L),
+    gmm_bayes_factor = rep(0.2, 3L),
+    cda_predicted_taxon = rep("Packera dubia", 3L),
+    cda_posterior_prob = rep(0.92, 3L),
+    edaphic_best_fit_taxon = rep("Packera dubia", 3L),
+    edaphic_prob = rep(0.88, 3L),
+    type_edaphic_z_score = rep(0.4, 3L),
+    hopkins_adjusted_doy = rep(115.0, 3L),
+    delta_doy = rep(0.0, 3L),
+    reproductive_trait_status = rep("Measured", 3L),
+    is_anthesis = rep(TRUE, 3L),
+    open_set_novelty_p = rep(0.85, 3L),
+    open_set_df = rep(5L, 3L),
+    min_congener_mahal_d2 = rep(16.0, 3L),
+    cryptic_cluster_cohesion_pass = rep(FALSE, 3L),
+    PC1 = c(-0.5, -0.4, -0.6),
+    PC2 = c(0.1, 0.0, 0.2),
+    PC3 = c(0.0, 0.1, -0.1),
+    geno_predicted_taxon = rep("Packera dubia", 3L),
+    geno_linkage_tier = rep("G1_Direct_Voucher", 3L),
+    geno_quality_pass = rep(TRUE, 3L),
+    geno_posterior_prob = rep(0.96, 3L),
+    coalescent_gdi = rep(gdi_val, 3L),
+    hybrid_generation_class = rep("Pure_Parent_1", 3L),
+    interspecific_ancestry_q12 = rep(0.02, 3L),
+    is_geno_admixed = rep(FALSE, 3L),
+    stringsAsFactors = FALSE
+  )
+  rbind(df_k2, df_k1)
 }}
 
 intra_oversplit <- apply_taxonomic_decision_matrix(
-  make_intra_probe("OVERSPLIT_01", 0.12, "Pure_Parent_1", 0.02),
+  make_intra_probe("OVERSPLIT", 0.12, "Pure_Parent_1", 0.02),
   intraspecific_mode = TRUE,
   gmm_two_delta_bic = 18.0
 )
@@ -1017,7 +1074,7 @@ stopifnot(grepl("Coalescent Oversplit Block", intra_oversplit$synthesis_rational
 stopifnot(intra_oversplit$taxonomic_treatment_subtype[1L] %in% c("Ecophenotypic_Plasticity", "Confirmed_Species"))
 
 intra_cryptic <- apply_taxonomic_decision_matrix(
-  make_intra_probe("CRYPTIC_01", 0.88, "Divergent_NonHybrid_Lineage", 0.04),
+  make_intra_probe("CRYPTIC", 0.88, "Divergent_NonHybrid_Lineage", 0.04),
   intraspecific_mode = TRUE,
   gmm_two_delta_bic = 18.0
 )

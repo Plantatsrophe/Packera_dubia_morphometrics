@@ -47,7 +47,7 @@ All pipeline visualizations export strictly as **300-DPI PNG** files (`0` `.pdf`
 All Markdown documentation (`README.md`, `AGENTS.md`, `CONTRIBUTING.md`, `CHANGELOG.md`, and `docs/*.md`) follows the prose rules in [`.agents/skills/write-in-my-voice/SKILL.md`](.agents/skills/write-in-my-voice/SKILL.md):
 
 * Write in clear, active first-person or direct imperative sentences with varied paragraph lengths and explicit causal or contrastive connectors (`, as ...`, `, whereas ...`, `, so ...`).
-* Enforce **zero em dashes**, **zero en dashes**, and **zero prose double-hyphens** (write numerical ranges as `"0 to 15 cm"` or `"Steps 01 to 06"`). CLI flags inside code spans (`--focal-taxon`) are fine.
+* Enforce **zero em dashes**, **zero en dashes**, and **zero prose double-hyphens** (write numerical ranges as `"0 to 15 cm"` or `"Steps 01 to 07"`). CLI flags inside code spans (`--focal-taxon`) are fine.
 * Cite academic literature using clean `doi: 10.xxxx/...` identifiers rather than raw publisher URLs, and describe active pipeline architecture in positive present-state terms.
 
 ## 6. Running the Pre-Commit Verification Suite (`222` Tests)
