@@ -405,10 +405,10 @@ Packera_dubia_morphometrics/
 
 Developer workflow conventions, R script line-count budgets, and pre-commit QA rules are documented in [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
-### Running the Automated Audit Suite (`238` Tests)
+### Running the Automated Audit Suite (`244` Tests)
 
 ```bash
-# Run the centralized 238-test Python + warm-R integration and code-hygiene runner
+# Run the centralized 244-test Python + warm-R integration and code-hygiene runner
 .venv/bin/python scripts/tests/run_audit.py
 
 # Run rapid Python-only preflight checks (~25s, skips Rscript workers cleanly)

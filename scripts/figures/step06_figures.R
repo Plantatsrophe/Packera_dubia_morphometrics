@@ -23,6 +23,72 @@
   sprintf("paste(italic('%s'), ' [', '%s', ']')", gsub("'", "", short_tx), sid)
 }
 
+.midpoint_root_phylo_safe <- function(tr) {
+  if (is.null(tr) || length(tr$tip.label) < 3L) return(tr)
+  if (requireNamespace("phangorn", quietly = TRUE)) {
+    res <- tryCatch(phangorn::midpoint(tr), error = function(e) NULL)
+    if (!is.null(res) && inherits(res, "phylo")) return(res)
+  }
+  if (isTRUE(ape::is.rooted(tr)) || is.null(tr$edge.length)) return(tr)
+  tryCatch({
+    n_t <- length(tr$tip.label)
+    dmat <- ape::cophenetic.phylo(tr)
+    idx_mx <- which.max(dmat)
+    ij <- arrayInd(idx_mx, dim(dmat))
+    i_tip <- match(rownames(dmat)[ij[1L]], tr$tip.label)
+    j_tip <- match(colnames(dmat)[ij[2L]], tr$tip.label)
+    if (!is.finite(i_tip) || !is.finite(j_tip) || i_tip == j_tip) return(tr)
+    half_d <- 0.5 * dmat[ij[1L], ij[2L]]
+    if (!is.finite(half_d) || half_d <= 0.0) return(tr)
+    np <- ape::nodepath(tr, from = i_tip, to = j_tip)
+    if (length(np) < 2L) return(tr)
+    cum <- 0.0
+    split_edge <- NA_integer_
+    for (k in seq_len(length(np) - 1L)) {
+      a <- np[k]; b <- np[k + 1L]
+      e_row <- which((tr$edge[, 1L] == a & tr$edge[, 2L] == b) | (tr$edge[, 1L] == b & tr$edge[, 2L] == a))
+      if (length(e_row) < 1L) next
+      el <- max(0.0, tr$edge.length[e_row[1L]])
+      if (cum + el >= half_d) {
+        split_edge <- e_row[1L]
+        break
+      }
+      cum <- cum + el
+    }
+    if (is.na(split_edge)) return(tr)
+    ch_node <- tr$edge[split_edge, 2L]
+    rt <- if (ch_node <= n_t) {
+      ape::root(tr, outgroup = ch_node, resolve.root = TRUE)
+    } else {
+      ape::root(tr, node = ch_node, resolve.root = TRUE)
+    }
+    if (!is.null(rt$edge.length) && length(rt$tip.label) >= 3L) {
+      n_rt_tips <- length(rt$tip.label)
+      root_id <- n_rt_tips + 1L
+      r_rows <- which(rt$edge[, 1L] == root_id)
+      if (length(r_rows) == 2L) {
+        tot_r <- sum(pmax(0.0, rt$edge.length[r_rows]))
+        nd_depths <- ape::node.depth.edgelength(rt)
+        sub_tips <- function(nd) {
+          queue <- nd; res_t <- integer(0)
+          while (length(queue) > 0L) {
+            cur <- queue[1L]; queue <- queue[-1L]
+            if (cur <= n_rt_tips) res_t <- c(res_t, cur)
+            else queue <- c(queue, rt$edge[rt$edge[, 1L] == cur, 2L])
+          }
+          res_t
+        }
+        d1 <- max(nd_depths[sub_tips(rt$edge[r_rows[1L], 2L])] - nd_depths[rt$edge[r_rows[1L], 2L]])
+        d2 <- max(nd_depths[sub_tips(rt$edge[r_rows[2L], 2L])] - nd_depths[rt$edge[r_rows[2L], 2L]])
+        new_e1 <- max(0.0, min(tot_r, 0.5 * (tot_r + d2 - d1)))
+        rt$edge.length[r_rows[1L]] <- new_e1
+        rt$edge.length[r_rows[2L]] <- max(0.0, tot_r - new_e1)
+      }
+    }
+    rt
+  }, error = function(e) tr)
+}
+
 .build_phylo_panel_gg <- function(tr, plot_df, pal_vec, sh_vec) {
   if (is.null(tr) || length(tr$tip.label) < 3L || !requireNamespace("ape", quietly = TRUE)) {
     return(
@@ -36,34 +102,38 @@
 
   tr_work <- tr
   tr_work$tip.label <- gsub("_sorted$", "", trimws(tr_work$tip.label))
+  tr_work <- .midpoint_root_phylo_safe(tr_work)
   tr_u <- ape::ladderize(tr_work, right = FALSE)
   n_tips <- length(tr_u$tip.label)
   tot_n <- n_tips + tr_u$Nnode
 
-  depth_x <- numeric(tot_n)
   ord <- ape::reorder.phylo(tr_u, order = "cladewise")
-  for (e_i in seq_len(nrow(ord$edge))) {
-    pa <- ord$edge[e_i, 1L]; ch <- ord$edge[e_i, 2L]
-    len_i <- if (!is.null(ord$edge.length)) ord$edge.length[e_i] else 1.0
-    depth_x[ch] <- depth_x[pa] + max(0.0, len_i)
+  depth_x <- if (!is.null(tr_u$edge.length)) {
+    ape::node.depth.edgelength(tr_u)
+  } else {
+    dx <- numeric(tot_n)
+    for (e_i in seq_len(nrow(ord$edge))) {
+      dx[ord$edge[e_i, 2L]] <- dx[ord$edge[e_i, 1L]] + 1.0
+    }
+    dx
   }
 
   y_pos <- numeric(tot_n)
   tip_ord <- ord$edge[ord$edge[, 2L] <= n_tips, 2L]
   y_pos[tip_ord] <- seq_len(n_tips)
   post_ord <- ape::reorder.phylo(tr_u, order = "postorder")
-  children_by_node <- split(post_ord$edge[, 2L], post_ord$edge[, 1L])
-  for (nd_chr in names(children_by_node)) {
-    nd <- as.integer(nd_chr)
-    y_pos[nd] <- mean(y_pos[children_by_node[[nd_chr]]])
+  post_parents <- unique(post_ord$edge[, 1L])
+  for (nd in post_parents) {
+    chs <- post_ord$edge[post_ord$edge[, 1L] == nd, 2L]
+    y_pos[nd] <- mean(y_pos[chs])
   }
 
   h_segs <- data.frame(
     x = depth_x[ord$edge[, 1L]], xend = depth_x[ord$edge[, 2L]],
     y = y_pos[ord$edge[, 2L]], yend = y_pos[ord$edge[, 2L]], stringsAsFactors = FALSE
   )
-  v_segs <- do.call(rbind, lapply(names(children_by_node), function(nd_chr) {
-    nd <- as.integer(nd_chr); chs <- children_by_node[[nd_chr]]
+  v_segs <- do.call(rbind, lapply(post_parents, function(nd) {
+    chs <- post_ord$edge[post_ord$edge[, 1L] == nd, 2L]
     data.frame(x = depth_x[nd], xend = depth_x[nd], y = min(y_pos[chs]), yend = max(y_pos[chs]), stringsAsFactors = FALSE)
   }))
 
@@ -128,7 +198,7 @@
   t_levels <- sort(unique(tile_df$taxon))
   t_pal <- c(get_combinatorial_palette_r(setdiff(t_levels, "Unlinked")), Unlinked = "#e2e8f0")
   fin_conc <- concordance_df[is.finite(concordance_df$mantel_r), , drop = FALSE]
-  mantel_sub <- if (nrow(fin_conc) > 0L) paste(sprintf("%s: r=%.2f (p=%.3f)", fin_conc$comparison, fin_conc$mantel_r, fin_conc$mantel_p), collapse = " | ") else "Strict upstream independence preserved"
+  mantel_sub <- if (nrow(fin_conc) > 0L) paste(sprintf("%s: r=%.2f (p=%.3f)", gsub("_", " ", fin_conc$comparison), fin_conc$mantel_r, fin_conc$mantel_p), collapse = " | ") else "Strict upstream independence preserved"
   lab_fn <- if (exists("icn_discrete_labeller", mode = "function")) icn_discrete_labeller() else ggplot2::waiver()
 
   ggplot2::ggplot(tile_df, ggplot2::aes(x = .data$stream, y = .data$sample, fill = .data$taxon)) +
@@ -169,7 +239,7 @@ render_fig06a_genomic_pcoa_tree_png <- function(out_png, pass_df, assign_df, q_m
     ggplot2::theme(legend.position = "right")
 
   if (requireNamespace("ggrepel", quietly = TRUE)) {
-    p_a <- p_a + ggrepel::geom_text_repel(data = plot_df, ggplot2::aes(label = .data$rep_label, color = .data$display_taxon), size = 2.55, force = 4.0, max.overlaps = Inf, seed = 42, show.legend = FALSE)
+    p_a <- p_a + ggrepel::geom_text_repel(data = plot_df, ggplot2::aes(label = .data$rep_label, color = .data$display_taxon), size = 2.55, box.padding = 0.42, point.padding = 0.28, min.segment.length = 0.15, force = 5.0, max.overlaps = Inf, seed = 42, show.legend = FALSE)
   }
 
   p_b <- .build_phylo_panel_gg(tr, plot_df, pal_vec, sh_vec)
@@ -238,11 +308,13 @@ render_fig06b_reticulation_gdi_png <- function(out_png, tri_df, fbranch_df, gdi_
     gd$taxon <- factor(gd$taxon, levels = gd$taxon[order(gd$coalescent_gdi)])
     cls_gdi <- sort(unique(gd$gdi_classification))
     sh_g <- stats::setNames(rep(c(1L, 2L, 5L, 0L), length.out = length(cls_gdi)), cls_gdi)
+    pal_g <- get_combinatorial_palette_r(cls_gdi)
     ggplot2::ggplot(gd, ggplot2::aes(x = .data$coalescent_gdi, y = .data$taxon, color = .data$gdi_classification, shape = .data$gdi_classification)) +
       ggplot2::geom_vline(xintercept = 0.20, linetype = "dashed", color = "#DC2626") +
       ggplot2::geom_vline(xintercept = 0.70, linetype = "dashed", color = "#059669") +
       ggplot2::geom_segment(ggplot2::aes(x = .data$gdi_ci_low, xend = .data$gdi_ci_high, y = .data$taxon, yend = .data$taxon), linewidth = 0.65) +
       ggplot2::geom_point(size = 3.0, stroke = 1.15, fill = NA) +
+      ggplot2::scale_color_manual(values = pal_g, name = "MSC Gate") +
       ggplot2::scale_shape_manual(values = sh_g, name = "MSC Gate") +
       ggplot2::scale_x_continuous(limits = c(0, 1.02)) +
       ggplot2::labs(title = "C. Invariant-Site Coalescent Delimitation (gdi)", subtitle = "Oversplit < 0.20 | Distinct Species > 0.70", x = "Genealogical Divergence Index (gdi +/- 95% CI)", y = NULL) +
@@ -259,12 +331,31 @@ render_fig06b_reticulation_gdi_png <- function(out_png, tri_df, fbranch_df, gdi_
   }
   p_feems <- if (!is.null(feems_edges_df) && nrow(feems_edges_df) > 0L) {
     pts <- unique(rbind(data.frame(lon = feems_edges_df$lon_a, lat = feems_edges_df$lat_a), data.frame(lon = feems_edges_df$lon_b, lat = feems_edges_df$lat_b)))
-    ggplot2::ggplot() +
-      ggplot2::geom_segment(data = feems_edges_df, ggplot2::aes(x = .data$lon_a, y = .data$lat_a, xend = .data$lon_b, yend = .data$lat_b, color = .data$feems_log_migration), linewidth = 1.0) +
-      ggplot2::geom_point(data = pts, ggplot2::aes(x = .data$lon, y = .data$lat), shape = 1L, size = 2.6, stroke = 1.1, fill = NA, color = "#111827") +
-      ggplot2::scale_color_gradient2(low = "#B91C1C", mid = "#E5E7EB", high = "#1D4ED8", midpoint = 0.0, name = "log(m)") +
-      ggplot2::labs(title = "D. Effective Migration Surface (FEEMS) & MMRR", subtitle = mm_sub, x = "Longitude", y = "Latitude") +
-      theme_packera_pub(base_size = 9.5)
+    feems_plot <- NULL
+    if (exists("build_na_projected_basemap_gg", mode = "function") && exists("project_lonlat_points_r", mode = "function")) {
+      map_ctx <- build_na_projected_basemap_gg(pts$lon, pts$lat, target_crs = 5070L)
+      pts_p <- project_lonlat_points_r(pts, map_ctx, lon_col = "lon", lat_col = "lat")
+      ea_p <- project_lonlat_points_r(feems_edges_df, map_ctx, lon_col = "lon_a", lat_col = "lat_a")
+      eb_p <- project_lonlat_points_r(feems_edges_df, map_ctx, lon_col = "lon_b", lat_col = "lat_b")
+      if (nrow(ea_p) == nrow(feems_edges_df) && nrow(eb_p) == nrow(feems_edges_df)) {
+        seg_p <- data.frame(x = ea_p$map_x, y = ea_p$map_y, xend = eb_p$map_x, yend = eb_p$map_y, feems_log_migration = feems_edges_df$feems_log_migration)
+        feems_plot <- map_ctx$plot +
+          ggplot2::geom_segment(data = seg_p, ggplot2::aes(x = .data$x, y = .data$y, xend = .data$xend, yend = .data$yend, color = .data$feems_log_migration), linewidth = 1.0, inherit.aes = FALSE) +
+          ggplot2::geom_point(data = pts_p, ggplot2::aes(x = .data$map_x, y = .data$map_y), shape = 1L, size = 2.8, stroke = 1.15, fill = NA, color = "#111827", inherit.aes = FALSE) +
+          ggplot2::scale_color_gradient2(low = "#B91C1C", mid = "#E5E7EB", high = "#1D4ED8", midpoint = 0.0, name = "log(m)") +
+          ggplot2::labs(title = "D. Effective Migration Surface (FEEMS) & MMRR", subtitle = mm_sub) +
+          theme_packera_pub(base_size = 9.5)
+      }
+    }
+    if (is.null(feems_plot)) {
+      feems_plot <- ggplot2::ggplot() +
+        ggplot2::geom_segment(data = feems_edges_df, ggplot2::aes(x = .data$lon_a, y = .data$lat_a, xend = .data$lon_b, yend = .data$lat_b, color = .data$feems_log_migration), linewidth = 1.0) +
+        ggplot2::geom_point(data = pts, ggplot2::aes(x = .data$lon, y = .data$lat), shape = 1L, size = 2.6, stroke = 1.1, fill = NA, color = "#111827") +
+        ggplot2::scale_color_gradient2(low = "#B91C1C", mid = "#E5E7EB", high = "#1D4ED8", midpoint = 0.0, name = "log(m)") +
+        ggplot2::labs(title = "D. Effective Migration Surface (FEEMS) & MMRR", subtitle = mm_sub, x = "Longitude", y = "Latitude") +
+        theme_packera_pub(base_size = 9.5)
+    }
+    feems_plot
   } else {
     ggplot2::ggplot() + ggplot2::annotate("text", x = 0.5, y = 0.5, label = mm_sub, size = 3.5) + ggplot2::theme_void() + ggplot2::labs(title = "D. Landscape Genomics (FEEMS / MMRR)")
   }
