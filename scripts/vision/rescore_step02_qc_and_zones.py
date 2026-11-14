@@ -746,7 +746,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Re-score Step 02 leaf QC gates and anatomical basal/cauline zones in SQLite + CSV without GPU inference."
     )
-    parser.add_argument("--db", type=Path, default=None, help="Optional SQLite database path (default: data/packera_pipeline.sqlite).")
+    parser.add_argument("--db", type=Path, default=None, help="Optional SQLite database path (default: data/plantmatics.sqlite).")
     parser.add_argument("--data-dir", type=Path, default=PROJECT_ROOT / "data", help="Tier A data directory containing masks/, contours/, and tables/.")
     parser.add_argument("--manifest", type=Path, default=None, help="Optional extracted_leaf_manifest.csv path override.")
     parser.add_argument("--allow-partial-leaves", action="store_true", default=False, help="Allow detector_class_id == 1 (Leaf_PARTIAL) to pass QC.")

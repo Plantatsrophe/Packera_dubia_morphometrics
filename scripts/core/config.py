@@ -46,8 +46,8 @@ def get_active_run_dir(
     workspace_root: Path = PROJECT_ROOT,
 ) -> Optional[Path]:
     """
-    Return the resolved run directory if `run_id` is supplied or `PACKERA_RUN_DIR`
-    is set in the environment; otherwise return None (default legacy/test mode).
+    Return the resolved run directory if `run_id` is supplied or `PLANTMATICS_RUN_DIR`
+    (or `PACKERA_RUN_DIR`) is set in the environment; otherwise return None (default legacy/test mode).
     """
     if run_id is not None and str(run_id).strip():
         clean_id = str(run_id).strip()
@@ -58,7 +58,10 @@ def get_active_run_dir(
             return (workspace_root / p).resolve()
         return (workspace_root / "runs" / clean_id).resolve()
 
-    env_run_dir = os.environ.get("PACKERA_RUN_DIR", "").strip()
+    env_run_dir = (
+        os.environ.get("PLANTMATICS_RUN_DIR", "").strip()
+        or os.environ.get("PACKERA_RUN_DIR", "").strip()
+    )
     if env_run_dir:
         p = Path(env_run_dir)
         return p.resolve() if p.is_absolute() else (workspace_root / p).resolve()
@@ -114,6 +117,7 @@ def initialize_run_directory(
             pass
 
     if export_env:
+        os.environ["PLANTMATICS_RUN_DIR"] = str(run_dir)
         os.environ["PACKERA_RUN_DIR"] = str(run_dir)
         os.environ["RUN_ID"] = run_dir.name
 
@@ -241,7 +245,7 @@ def write_run_metadata(
 class PathsConfig:
     """Strongly-typed, project-root anchored filesystem paths."""
     workspace_root: Path = PROJECT_ROOT
-    db_path: Path = PROJECT_ROOT / "data" / "packera_pipeline.sqlite"
+    db_path: Path = PROJECT_ROOT / "data" / "plantmatics.sqlite"
     raw_vouchers_dir: Path = PROJECT_ROOT / "data" / "raw_vouchers"
     curated_vouchers_csv: Path = PROJECT_ROOT / "data" / "tables" / "curated_vouchers.csv"
     failed_qc_vouchers_csv: Path = PROJECT_ROOT / "data" / "tables" / "failed_qc_vouchers.csv"

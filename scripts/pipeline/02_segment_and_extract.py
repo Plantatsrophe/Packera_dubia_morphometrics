@@ -3582,7 +3582,10 @@ class SegmentAndExtractPipeline:
 
         if len(extracted_df) > 0:
             try:
-                env_run_dir = os.environ.get("PACKERA_RUN_DIR", "").strip()
+                env_run_dir = (
+                    os.environ.get("PLANTMATICS_RUN_DIR", "").strip()
+                    or os.environ.get("PACKERA_RUN_DIR", "").strip()
+                )
                 if env_run_dir:
                     figures_dir = Path(env_run_dir).resolve() / "outputs" / "figures"
                 elif self.output_dir.name == "data":
@@ -3747,7 +3750,7 @@ def parse_args() -> argparse.Namespace:
         "--db",
         type=Path,
         default=None,
-        help="Optional SQLite database path override (default: data/packera_pipeline.sqlite).",
+        help="Optional SQLite database path override (default: data/plantmatics.sqlite).",
     )
     parser.add_argument(
         "--regenerate-figures-only",

@@ -21,7 +21,7 @@
     full.names = TRUE,
     ignore.case = TRUE
   )
-  cand <- cand[!grepl("^(vcfref_|ref_packera)", basename(cand), ignore.case = TRUE)]
+  cand <- cand[!grepl("^(vcfref_|ref_packera|public_packera_)", basename(cand), ignore.case = TRUE)]
   if (length(cand) > 0L) cand[1L] else ""
 }
 
@@ -310,7 +310,7 @@ compute_hybrid_index_q12 <- function(pass_df, dos_mat, q_mat, p1_vec, p2_vec, d_
   list(triangle_df = tri_df, hybrid_index_h = h_out, q12 = q12_out, hybrid_class = cls_out)
 }
 
-compute_tree_guided_fbranch <- function(pass_df, dos_mat, raw_genomics_dir) {
+compute_tree_guided_fbranch <- function(pass_df, dos_mat, raw_genomics_dir, backbone = NULL) {
   dsuite_bin <- Sys.which("Dsuite")
   if (nzchar(dsuite_bin)) {
     message("[Step 06 Introgression] Detected Dsuite binary at: ", dsuite_bin)
@@ -330,13 +330,14 @@ compute_tree_guided_fbranch <- function(pass_df, dos_mat, raw_genomics_dir) {
     empty_df <- data.frame(
       recipient_taxon = character(0), donor_taxon = character(0), sister_p1 = character(0),
       outgroup_o = character(0), d_stat = numeric(0), jackknife_z = numeric(0),
-      f_branch_fb = numeric(0), stringsAsFactors = FALSE
+      f_branch_fb = numeric(0), polarization_source = character(0), stringsAsFactors = FALSE
     )
     n <- nrow(pass_df)
     return(list(
       fbranch_df = empty_df,
       f_branch_max = rep(0.0, n),
-      f_branch_donor_taxon = rep(NA_character_, n)
+      f_branch_donor_taxon = rep(NA_character_, n),
+      polarization_source = "insufficient_taxa"
     ))
   }
 
@@ -348,11 +349,23 @@ compute_tree_guided_fbranch <- function(pass_df, dos_mat, raw_genomics_dir) {
   }
   # Polarize by global minor allele vs overall outgroup baseline
   p_dist <- as.matrix(stats::dist(ifelse(is.finite(p_mat), p_mat, 0.5)))
-  # Select global outgroup maximizing mean distance to all other taxa
-  outgroup <- uniq_taxa[which.max(rowMeans(p_dist))]
-  ingroups <- setdiff(uniq_taxa, outgroup)
-  hc_sp <- stats::hclust(stats::as.dist(p_dist[ingroups, ingroups, drop = FALSE]), method = "average")
-  tree_order <- hc_sp$labels[hc_sp$order]
+  bb_guide <- if (exists("select_backbone_guided_outgroup", mode = "function")) {
+    select_backbone_guided_outgroup(uniq_taxa, p_dist, backbone = backbone)
+  } else NULL
+  if (!is.null(bb_guide) && !is.null(bb_guide$outgroup) && (bb_guide$outgroup %in% uniq_taxa) &&
+      length(bb_guide$tree_order) >= 3L && setequal(bb_guide$tree_order, setdiff(uniq_taxa, bb_guide$outgroup))) {
+    outgroup <- bb_guide$outgroup
+    ingroups <- setdiff(uniq_taxa, outgroup)
+    tree_order <- bb_guide$tree_order
+    pol_src <- if (!is.null(bb_guide$source) && nzchar(bb_guide$source)) bb_guide$source else "public_nuclear_backbone"
+  } else {
+    # Select global outgroup maximizing mean distance to all other taxa
+    outgroup <- uniq_taxa[which.max(rowMeans(p_dist))]
+    ingroups <- setdiff(uniq_taxa, outgroup)
+    hc_sp <- stats::hclust(stats::as.dist(p_dist[ingroups, ingroups, drop = FALSE]), method = "average")
+    tree_order <- hc_sp$labels[hc_sp$order]
+    pol_src <- "dosage_upgma_fallback"
+  }
 
   # 200-block contiguous locus jackknife for Patterson's D and f4-ratio
   n_loci <- ncol(dos_mat)
@@ -404,6 +417,7 @@ compute_tree_guided_fbranch <- function(pass_df, dos_mat, raw_genomics_dir) {
           d_stat = round(abs(d_full), 4),
           jackknife_z = round(abs(z_sc), 3),
           f_branch_fb = round(if (abs(z_sc) >= 2.0) fb_val else fb_val * 0.25, 4),
+          polarization_source = pol_src,
           stringsAsFactors = FALSE
         )
       }
@@ -413,7 +427,7 @@ compute_tree_guided_fbranch <- function(pass_df, dos_mat, raw_genomics_dir) {
   fbranch_df <- if (length(fb_rows) > 0L) do.call(rbind, fb_rows) else data.frame(
     recipient_taxon = character(0), donor_taxon = character(0), sister_p1 = character(0),
     outgroup_o = character(0), d_stat = numeric(0), jackknife_z = numeric(0),
-    f_branch_fb = numeric(0), stringsAsFactors = FALSE
+    f_branch_fb = numeric(0), polarization_source = character(0), stringsAsFactors = FALSE
   )
 
   # Map max supported f_branch per sample cleanly
@@ -427,7 +441,7 @@ compute_tree_guided_fbranch <- function(pass_df, dos_mat, raw_genomics_dir) {
       f_don[i] <- hits$donor_taxon[top]
     }
   }
-  list(fbranch_df = fbranch_df, f_branch_max = round(f_max, 4), f_branch_donor_taxon = f_don)
+  list(fbranch_df = fbranch_df, f_branch_max = round(f_max, 4), f_branch_donor_taxon = f_don, polarization_source = pol_src)
 }
 
 compute_quartet_concordance_snps2cf <- function(pass_df, dos_mat) {

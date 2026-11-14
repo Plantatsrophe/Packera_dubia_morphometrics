@@ -109,9 +109,9 @@ class TestPipelineConfig(unittest.TestCase):
             self.assertEqual(custom_cfg.taxa.outgroups, ["Packera aurea"])
 
     def test_db_path_anchored_across_runs(self):
-        """Verify db_path resolves to data/packera_pipeline.sqlite and stays anchored across run_dir."""
+        """Verify db_path resolves to data/plantmatics.sqlite and stays anchored across run_dir."""
         cfg = PipelineConfig.from_yaml()
-        expected_db = (CONFIG_ROOT / "data" / "packera_pipeline.sqlite").resolve()
+        expected_db = (CONFIG_ROOT / "data" / "plantmatics.sqlite").resolve()
         self.assertEqual(cfg.paths.db_path, expected_db)
         with tempfile.TemporaryDirectory() as tmp_dir:
             scoped = cfg.with_run_dir(tmp_dir)

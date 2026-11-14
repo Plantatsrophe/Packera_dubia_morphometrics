@@ -17,20 +17,10 @@ Description:
 
 from __future__ import annotations
 
-import argparse
-import gzip
-import importlib
-import io
-import re
-import shutil
-import subprocess
-import sys
-import tarfile
-import tempfile
-import zipfile
+import argparse, gzip, importlib, io, re, shutil, subprocess, sys, tarfile, tempfile, zipfile
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 import pandas as pd
 
@@ -53,6 +43,23 @@ _SEED_ITS_ANCHORS: Dict[str, str] = {
     "Packera_ITS_58S_core": "CGTGAACCATCGAGTCTTTGAACGCAAGTTGCGCCCGAAGCCATTAGGTTGAGGGCACGTCTGCCTGGGCGTCACGCATCGCGTCGCCCCCCACCATCCATCCCCTTAGGGATGGGGTGTGTTGGGGGCGGGGGGATATTGGCCTCCCGTGCGCTCGGTGCGCGGTTGGCCTAAATAGGAGTCCTCGGCGACGGACGTCGCGACAAGTGGTGGTTGTAAAACCCTCGTTCTCGTCGTCGTGC",
 }
 
+_SEED_WAXY_ANCHORS: Dict[str, str] = {
+    # Conserved Asteraceae granule-bound starch synthase (GBSSI / waxy) core motif
+    "Packera_waxy_GBSSI_core": "ATGGTGGATTGTGTTCCATTTGTTGGTGGTGATGGAAAGGTTTTTGGTACTGCTGATGGACCTTTTGAAGGACTTAAGAAAGAGCTTCTCGTTGATGGTGTTGCTGATCCATCTAAGGTTTTCTTCGTTGCAACTCTTGAGGCTGCTAAGCGTGGTGGTATTGCACCAAAGATTGATCCAGCTCTTATGGGTTCTACTG",
+}
+
+_SEED_SYNONYM_TAXA: Dict[str, str] = {
+    "senecio tomentosus": "Packera dubia", "packera tomentosa": "Packera dubia", "senecio aureus": "Packera aurea",
+    "senecio anonymus": "Packera anonyma", "senecio pauperculus": "Packera paupercula",
+    "senecio schweinitzianus": "Packera schweinitziana", "senecio millefolium": "Packera millefolium",
+    "senecio obovatus": "Packera obovata", "senecio plattensis": "Packera plattensis",
+    "senecio antennariifolius": "Packera antennariifolia", "senecio glabellus": "Packera glabella",
+}
+_NON_EPITHET_TOKENS = frozenset({
+    "rbcl", "trnl", "its", "its1", "its2", "58s", "waxy", "gbssi", "core",
+    "plastid", "chloroplast", "plastome", "ribosomal", "nuclear", "sp", "unk", "unknown", "var", "subsp", "cf", "aff",
+})
+
 _IUPAC_PAIR = {
     ("A", "G"): "R", ("G", "A"): "R",
     ("C", "T"): "Y", ("T", "C"): "Y",
@@ -73,7 +80,7 @@ def _revcomp(seq: str) -> str:
     return seq.translate(comp)[::-1]
 
 
-def _read_fasta(path: Path) -> Dict[str, str]:
+def _read_fasta(path: Path, keep_label: bool = False) -> Dict[str, str]:
     out: Dict[str, str] = {}
     if not path.exists() or not path.is_file():
         return out
@@ -87,7 +94,7 @@ def _read_fasta(path: Path) -> Dict[str, str]:
             if s.startswith(">"):
                 if cur is not None:
                     out[cur] = "".join(buf).upper()
-                cur = s[1:].split()[0]
+                cur = re.sub(r"\s+", "|", s[1:].strip()) if keep_label else s[1:].split()[0]
                 buf = []
             else:
                 buf.append(s)
@@ -96,10 +103,11 @@ def _read_fasta(path: Path) -> Dict[str, str]:
     return out
 
 
-def _collect_organellar_seeds(genomics_dir: Path) -> Tuple[Dict[str, str], Dict[str, str]]:
-    """Gather plastid and ITS seed contigs from BLAST hits, staged ITS FASTA, and conserved anchors."""
+def _collect_organellar_seeds(genomics_dir: Path) -> Tuple[Dict[str, str], Dict[str, str], Dict[str, str]]:
+    """Gather plastid, ITS, and nuclear waxy seed contigs from BLAST hits, staged FASTAs, public Packera archives, and conserved anchors."""
     plastid_seeds = dict(_SEED_PLASTID_ANCHORS)
     its_seeds = dict(_SEED_ITS_ANCHORS)
+    waxy_seeds = dict(_SEED_WAXY_ANCHORS)
 
     ref_seqs: Dict[str, str] = {}
     for cand in (genomics_dir / "ref_packera.fasta", genomics_dir / "vcfref_packera_rm.txt.fasta"):
@@ -108,9 +116,34 @@ def _collect_organellar_seeds(genomics_dir: Path) -> Tuple[Dict[str, str], Dict[
 
     bain = genomics_dir / "bain_jansen_sequences.fasta"
     if bain.exists():
-        for k, v in _read_fasta(bain).items():
+        for k, v in _read_fasta(bain, keep_label=True).items():
             if len(v) >= 60:
                 its_seeds[f"bain_{k}"] = v
+
+    for fname, bucket in (
+        ("public_packera_18complete_plastomes.fasta", plastid_seeds),
+        ("public_packera_plastomes_and_cpdna.fasta", plastid_seeds),
+        ("public_packera_its_ets.fasta", its_seeds),
+        ("public_packera_waxy_nuclear.fasta", waxy_seeds),
+    ):
+        cand = genomics_dir / fname
+        if cand.is_file():
+            for k, v in _read_fasta(cand, keep_label=True).items():
+                if len(v) >= 60:
+                    bucket[k] = v
+
+    bold_fa = genomics_dir / "public_packera_bold_barcodes.fasta"
+    if bold_fa.is_file():
+        for k, v in _read_fasta(bold_fa, keep_label=True).items():
+            if len(v) < 60:
+                continue
+            low_k = k.lower()
+            if re.search(r"(?:^|[|_ \t])(its\d?|5\.8s|ets|ribosomal)", low_k):
+                its_seeds[k] = v
+            elif re.search(r"(waxy|gbssi)", low_k):
+                waxy_seeds[k] = v
+            else:
+                plastid_seeds[k] = v
 
     blast_txt = genomics_dir / "vcfref_packera_blast.txt"
     if blast_txt.exists() and ref_seqs:
@@ -125,8 +158,10 @@ def _collect_organellar_seeds(genomics_dir: Path) -> Tuple[Dict[str, str], Dict[
                     plastid_seeds[qid] = ref_seqs[qid]
                 elif any(tok in low for tok in ("internal transcribed spacer", "ribosomal", "18s", "26s", "its1", "its2")):
                     its_seeds[qid] = ref_seqs[qid]
+                elif any(tok in low for tok in ("waxy", "gbssi", "starch synthase")):
+                    waxy_seeds[qid] = ref_seqs[qid]
 
-    return plastid_seeds, its_seeds
+    return plastid_seeds, its_seeds, waxy_seeds
 
 
 def _infer_sample_from_fq_name(member_name: str) -> str:
@@ -205,7 +240,8 @@ def _build_kmer_index(seeds: Mapping[str, str], k: int = 17) -> Dict[str, List[T
     for name, seq in seeds.items():
         if len(seq) < k:
             continue
-        for pos in range(0, len(seq) - k + 1):
+        step = 4 if len(seq) > 12000 else 1
+        for pos in range(0, len(seq) - k + 1, step):
             kmer = seq[pos : pos + k]
             if "N" in kmer:
                 continue
@@ -223,12 +259,9 @@ def _assemble_baited_consensus(
     if not seeds or not reads_by_sample:
         return {}
     kidx = _build_kmer_index(seeds, k=k)
-    ref_len = max(len(s) for s in seeds.values())
     cons_out: Dict[str, str] = {}
 
     for sid, seqs in sorted(reads_by_sample.items()):
-        pileup: List[Counter[str]] = [Counter() for _ in range(ref_len)]
-        best_ref: Optional[str] = None
         hit_counts: Counter[str] = Counter()
         aligned_reads: List[Tuple[str, int, str]] = []
 
@@ -241,39 +274,35 @@ def _assemble_baited_consensus(
                 sname, spos, is_rc = hits[0]
                 oriented = _revcomp(raw_seq) if is_rc else raw_seq
                 anchor_r = (len(raw_seq) - r_start - k) if is_rc else r_start
-                offset = spos - anchor_r
                 hit_counts[sname] += 1
-                aligned_reads.append((sname, offset, oriented))
+                aligned_reads.append((sname, spos - anchor_r, oriented))
                 break
 
         if not hit_counts:
             continue
         best_ref = hit_counts.most_common(1)[0][0]
-        target_len = len(seeds[best_ref])
-        pileup = [Counter() for _ in range(target_len)]
-        for sname, offset, seq in aligned_reads:
-            if sname != best_ref:
-                continue
-            for idx_b, ch in enumerate(seq):
-                gpos = offset + idx_b
-                if 0 <= gpos < target_len and ch in "ACGT":
-                    pileup[gpos][ch] += 1
-
-        chars: List[str] = []
-        covered = 0
         seed_seq = seeds[best_ref]
-        for j, cnt in enumerate(pileup):
+        target_len = len(seed_seq)
+        sparse: Dict[int, Counter[str]] = defaultdict(Counter)
+        for sname, offset, seq in aligned_reads:
+            if sname == best_ref:
+                for idx_b, ch in enumerate(seq):
+                    gpos = offset + idx_b
+                    if 0 <= gpos < target_len and ch in "ACGT":
+                        sparse[gpos][ch] += 1
+        if len(sparse) < 20:
+            continue
+        lo, hi = min(sparse), max(sparse)
+        pos_iter = range(target_len) if target_len <= 5000 else (range(lo, hi + 1) if (hi - lo) <= 10000 else sorted(sparse))
+        chars: List[str] = []
+        for j in pos_iter:
+            cnt = sparse.get(j)
             if not cnt:
                 chars.append(seed_seq[j])
-                continue
-            covered += 1
-            top = cnt.most_common(2)
-            if len(top) >= 2 and top[1][1] >= 0.30 * (top[0][1] + top[1][1]):
-                chars.append(_IUPAC_PAIR.get((top[0][0], top[1][0]), top[0][0]))
             else:
-                chars.append(top[0][0])
-        if covered >= 20:
-            cons_out[sid] = "".join(chars)
+                top = cnt.most_common(2)
+                chars.append(_IUPAC_PAIR.get((top[0][0], top[1][0]), top[0][0]) if len(top) >= 2 and top[1][1] >= 0.30 * (top[0][1] + top[1][1]) else top[0][0])
+        cons_out[sid] = "".join(chars)
     return cons_out
 
 
@@ -308,30 +337,74 @@ def _cluster_haplotypes(seqs: Mapping[str, str], prefix: str, k: int = 11) -> Di
     return out
 
 
+def _extract_species_from_seed_key(seed_key: str) -> str:
+    norm = re.sub(r"[|_/\t]+", " ", seed_key).lower()
+    for syn, canon in _SEED_SYNONYM_TAXA.items():
+        if syn in norm:
+            return canon
+    if m := re.search(r"\bpackera\s+([a-z]+(?:-[a-z]+)?)(?=\s|$|[0-9])", norm):
+        ep = m.group(1).strip("-")
+        if ep and ep not in _NON_EPITHET_TOKENS:
+            return "Packera dubia" if ep == "tomentosa" else f"Packera {ep}"
+    return ""
+
+
+def _match_best_public_lineage(
+    seq: str,
+    ref_seeds: Mapping[str, str],
+    k: int = 13,
+    _kcache: Optional[Dict[str, Tuple[str, set[str]]]] = None,
+) -> str:
+    """Identify the closest public Packera taxon reference using 13-mer Jaccard similarity."""
+    if not seq or len(seq) < k or not ref_seeds:
+        return ""
+    q_kmers = {seq[i : i + k] for i in range(len(seq) - k + 1) if "N" not in seq[i : i + k]}
+    if not q_kmers:
+        return ""
+    best_sp, best_sim = "", 0.0
+    for rkey, rseq in ref_seeds.items():
+        if _kcache is not None and rkey in _kcache:
+            sp, r_kmers = _kcache[rkey]
+        else:
+            sp = _extract_species_from_seed_key(rkey)
+            step = 4 if len(rseq) > 20000 else 1
+            r_kmers = {rseq[i : i + k] for i in range(0, len(rseq) - k + 1, step) if "N" not in rseq[i : i + k]} if (sp and len(rseq) >= k) else set()
+            if _kcache is not None:
+                _kcache[rkey] = (sp, r_kmers)
+        if not sp or not r_kmers:
+            continue
+        inter = len(q_kmers & r_kmers)
+        if inter == 0:
+            continue
+        union = len(q_kmers | r_kmers)
+        if union > 0 and (sim := float(inter) / float(union)) > best_sim:
+            best_sim, best_sp = sim, sp
+    return best_sp
+
+
 def _detect_cytonuclear_discordance(
     plastid_clades: Mapping[str, str],
     its_ribotypes: Mapping[str, str],
     nuclear_tree_path: Optional[Path] = None,
+    public_plastome_matches: Optional[Mapping[str, str]] = None,
+    public_its_matches: Optional[Mapping[str, str]] = None,
+    waxy_lineage_matches: Optional[Mapping[str, str]] = None,
 ) -> List[Dict[str, Any]]:
     """Compare organellar clade vs. nuclear taxon/sister group to flag cytonuclear capture."""
     parse_code = importlib.import_module("scripts.data_prep.06_ingest_genetic_data").parse_sample_code
-    _ = nuclear_tree_path  # Optional hook preserved for future tip-neighborhood expansion
+    _ = nuclear_tree_path
 
-    samples = sorted(set(plastid_clades.keys()) | set(its_ribotypes.keys()))
+    samples = sorted(set(plastid_clades.keys()) | set(its_ribotypes.keys()) | set((waxy_lineage_matches or {}).keys()))
     taxon_of = {sid: (parse_code(sid).get("species_standardized") or "Unknown") for sid in samples}
-    clade_maj_taxon: Dict[str, str] = {}
     by_clade: Dict[str, Counter[str]] = defaultdict(Counter)
     for sid, pc in plastid_clades.items():
         if taxon_of[sid] != "Unknown":
             by_clade[pc][taxon_of[sid]] += 1
-    for pc, cnt in by_clade.items():
-        clade_maj_taxon[pc] = cnt.most_common(1)[0][0]
+    clade_maj_taxon: Dict[str, str] = {pc: cnt.most_common(1)[0][0] for pc, cnt in by_clade.items()}
 
     rows: List[Dict[str, Any]] = []
     for sid in samples:
-        pc = plastid_clades.get(sid)
-        its_r = its_ribotypes.get(sid)
-        sp = taxon_of[sid]
+        pc, its_r, sp = plastid_clades.get(sid), its_ribotypes.get(sid), taxon_of[sid]
         discordant = 0
         if pc and sp != "Unknown":
             maj_tx = clade_maj_taxon.get(pc, sp)
@@ -339,11 +412,11 @@ def _detect_cytonuclear_discordance(
             if maj_tx != sp and by_clade[pc][sp] < by_clade[pc][maj_tx]:
                 discordant = 1
         rows.append({
-            "genetic_sample_id": sid,
-            "nuclear_taxon": sp,
-            "plastid_clade": pc or "",
-            "its_ribotype": its_r or "",
+            "genetic_sample_id": sid, "nuclear_taxon": sp, "plastid_clade": pc or "", "its_ribotype": its_r or "",
             "cytonuclear_discordant": discordant,
+            "public_plastome_match": (public_plastome_matches or {}).get(sid, ""),
+            "public_its_match": (public_its_matches or {}).get(sid, ""),
+            "waxy_lineage_match": (waxy_lineage_matches or {}).get(sid, ""),
         })
     return rows
 
@@ -353,7 +426,7 @@ def run_offtarget_organellar_skim(
     genomics_dir: Path,
     nuclear_tree: Optional[Path] = None,
 ) -> Dict[str, Any]:
-    """Skim off-target plastid/ITS reads and emit flat organellar/cytonuclear files in `genomics_dir`."""
+    """Skim off-target plastid, ITS, and nuclear waxy reads and emit flat outputs in `genomics_dir`."""
     if fastq_source is None or not fastq_source.exists():
         msg = f"[skim-organellar] FASTQ source absent ({fastq_source}); skipping cleanly."
         logger.info(msg)
@@ -363,53 +436,49 @@ def run_offtarget_organellar_skim(
     getorg_bin = shutil.which("get_organelle_from_reads.py")
     if getorg_bin and fastq_source.is_dir():
         logger.info("Detected GetOrganelle binary at %s; running alongside pure-Python pileup audit.", getorg_bin)
-        # External GetOrganelle executes only inside an isolated temporary directory so data/genomics/ stays flat
         with tempfile.TemporaryDirectory(prefix="packera_getorg_") as tmpd:
             _ = (tmpd, subprocess)
 
-    plastid_seeds, its_seeds = _collect_organellar_seeds(genomics_dir)
+    plastid_seeds, its_seeds, waxy_seeds = _collect_organellar_seeds(genomics_dir)
     reads_by_sample: Dict[str, List[str]] = defaultdict(list)
     for sid, seq in _iter_staged_fastq_reads(fastq_source):
         reads_by_sample[sid].append(seq)
-
     if not reads_by_sample:
-        msg = f"[skim-organellar] No FASTQ reads discovered inside {fastq_source}; skipping."
-        logger.info(msg)
+        logger.info("[skim-organellar] No FASTQ reads discovered inside %s; skipping.", fastq_source)
         return {"status": "skipped_no_reads", "n_samples": 0}
 
     cp_cons = _assemble_baited_consensus(reads_by_sample, plastid_seeds)
     its_cons = _assemble_baited_consensus(reads_by_sample, its_seeds)
+    waxy_cons = _assemble_baited_consensus(reads_by_sample, waxy_seeds)
     cp_clades = _cluster_haplotypes(cp_cons, prefix="cp_Clade")
     its_ribo = _cluster_haplotypes(its_cons, prefix="ITS_Ribotype")
-    cyto_rows = _detect_cytonuclear_discordance(cp_clades, its_ribo, nuclear_tree_path=nuclear_tree)
+    waxy_clades = _cluster_haplotypes(waxy_cons, prefix="Waxy_Lineage")
+    cp_cache, its_cache, waxy_cache = {}, {}, {}
+    pub_cp_match = {sid: _match_best_public_lineage(seq, plastid_seeds, _kcache=cp_cache) for sid, seq in cp_cons.items()}
+    pub_its_match = {sid: _match_best_public_lineage(seq, its_seeds, _kcache=its_cache) for sid, seq in its_cons.items()}
+    waxy_match = {sid: _match_best_public_lineage(seq, waxy_seeds, _kcache=waxy_cache) or waxy_clades.get(sid, "") for sid, seq in waxy_cons.items()}
+    cyto_rows = _detect_cytonuclear_discordance(
+        cp_clades, its_ribo, nuclear_tree_path=nuclear_tree,
+        public_plastome_matches=pub_cp_match, public_its_matches=pub_its_match, waxy_lineage_matches=waxy_match,
+    )
 
     genomics_dir.mkdir(parents=True, exist_ok=True)
-    cp_fasta = genomics_dir / "skimmed_plastid_consensus.fasta"
-    its_fasta = genomics_dir / "skimmed_its_consensus.fasta"
+    cp_fasta, its_fasta, waxy_fasta = genomics_dir / "skimmed_plastid_consensus.fasta", genomics_dir / "skimmed_its_consensus.fasta", genomics_dir / "skimmed_waxy_consensus.fasta"
     cyto_csv = genomics_dir / "cytonuclear_discordance.csv"
-
     with open(cp_fasta, "wt", encoding="utf-8") as fh:
         for sid, seq in sorted(cp_cons.items()):
             fh.write(f">{sid}|clade={cp_clades.get(sid, 'cp_Unassigned')}\n{seq}\n")
     with open(its_fasta, "wt", encoding="utf-8") as fh:
         for sid, seq in sorted(its_cons.items()):
             fh.write(f">{sid}|ribotype={its_ribo.get(sid, 'ITS_Unassigned')}\n{seq}\n")
-    pd.DataFrame(cyto_rows).to_csv(cyto_csv, index=False)
+    with open(waxy_fasta, "wt", encoding="utf-8") as fh:
+        for sid, seq in sorted(waxy_cons.items()):
+            fh.write(f">{sid}|waxy={waxy_clades.get(sid, 'Waxy_Unassigned')}\n{seq}\n")
+    cols = ["genetic_sample_id", "nuclear_taxon", "plastid_clade", "its_ribotype", "cytonuclear_discordant", "public_plastome_match", "public_its_match", "waxy_lineage_match"]
+    (pd.DataFrame(cyto_rows) if cyto_rows else pd.DataFrame(columns=cols)).to_csv(cyto_csv, index=False)
 
-    logger.info(
-        "Skimmed %d plastid and %d ITS consensuses (%d cytonuclear records) into flat %s.",
-        len(cp_cons),
-        len(its_cons),
-        len(cyto_rows),
-        genomics_dir,
-    )
-    return {
-        "status": "skimmed",
-        "n_samples": len(reads_by_sample),
-        "n_plastid": len(cp_cons),
-        "n_its": len(its_cons),
-        "cytonuclear_csv": str(cyto_csv),
-    }
+    logger.info("Skimmed %d plastid, %d ITS, and %d waxy consensuses (%d cytonuclear records) into flat %s.", len(cp_cons), len(its_cons), len(waxy_cons), len(cyto_rows), genomics_dir)
+    return {"status": "skimmed", "n_samples": len(reads_by_sample), "n_plastid": len(cp_cons), "n_its": len(its_cons), "n_waxy": len(waxy_cons), "cytonuclear_csv": str(cyto_csv)}
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

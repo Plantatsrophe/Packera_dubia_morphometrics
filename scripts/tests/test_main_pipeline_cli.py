@@ -388,7 +388,7 @@ class TestMainPipelineCLI(unittest.TestCase):
             cfg = {
                 "models": {
                     "pcd_weights_path": str(target_pth),
-                    "pcd_weights_url": "https://github.com/Plantatsrophe/Packera_dubia_morphometrics/releases/download/v2.0-weights/lm3_leaf_segmenter__yolo26x_seg_1024.onnx",
+                    "pcd_weights_url": "https://github.com/Plantatsrophe/Plantmatics/releases/download/v2.0-weights/lm3_leaf_segmenter__yolo26x_seg_1024.onnx",
                     "pcd_weights_sha256": "",
                 }
             }
@@ -541,7 +541,7 @@ REUSE_CANONICAL_DATA="true"
                 self.assertEqual(link_p.resolve(), (root_data / "cropped_patches" / sub).resolve())
 
             import sqlite3
-            db_file = root_data / "packera_pipeline.sqlite"
+            db_file = root_data / "plantmatics.sqlite"
             self.assertTrue(db_file.is_file())
             with sqlite3.connect(db_file) as conn:
                 cohort_rows = conn.execute(
@@ -616,7 +616,11 @@ START_STEP=3
 """
             test_bash = test_bash.replace('"${PROJECT_ROOT}/data"', f'"{root_data}"')
             test_bash += "\nrun_preflight_subset_filter\n"
-            env = {k: v for k, v in __import__("os").environ.items() if k not in ("PACKERA_DB_PATH", "PACKERA_DEMO_MODE")}
+            env = {
+                k: v
+                for k, v in __import__("os").environ.items()
+                if k not in ("PLANTMATICS_DB_PATH", "PLANTMATICS_DEMO_MODE", "PACKERA_DB_PATH", "PACKERA_DEMO_MODE")
+            }
             return subprocess.run(["bash", "-c", test_bash], cwd=str(PROJECT_ROOT), capture_output=True, text=True, env=env)
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -638,7 +642,7 @@ START_STEP=3
             }).to_csv(tables_dir / "curated_vouchers.csv", index=False)
 
             # Canonical SQLite vouchers include Packera obovata (from a taxon-restricted harvest)
-            conn = get_db_connection(db_path=root_data / "packera_pipeline.sqlite", init_schema=True)
+            conn = get_db_connection(db_path=root_data / "plantmatics.sqlite", init_schema=True)
             try:
                 upsert_vouchers_records(conn, [
                     {"catalogNumber": "A1", "scientificName": "Packera anonyma", "determiner_tier": "Tier_1_Gold"},
@@ -784,7 +788,7 @@ REUSE_CANONICAL_DATA="true"
                     self.assertEqual(link_p.resolve(), (root_data / "cropped_patches" / sub).resolve())
 
                 import sqlite3
-                db_file = root_data / "packera_pipeline.sqlite"
+                db_file = root_data / "plantmatics.sqlite"
                 self.assertTrue(db_file.is_file())
                 with sqlite3.connect(db_file) as conn:
                     cohort_cats = {
@@ -807,7 +811,7 @@ REUSE_CANONICAL_DATA="true"
 
             from scripts.core.db import ensure_pipeline_run, get_db_connection, upsert_rows_generic, upsert_vouchers_records
 
-            conn_seed = get_db_connection(db_path=root_data_sql / "packera_pipeline.sqlite", init_schema=True)
+            conn_seed = get_db_connection(db_path=root_data_sql / "plantmatics.sqlite", init_schema=True)
             try:
                 upsert_vouchers_records(
                     conn_seed,
@@ -1028,7 +1032,7 @@ REUSE_CANONICAL_DATA="false"
             (ws / "runs" / "20260101_000000").mkdir(parents=True)
             (ws / "runs" / "20260101_000000" / "run.log").write_text("log", encoding="utf-8")
 
-            db_file = ws / "data" / "packera_pipeline.sqlite"
+            db_file = ws / "data" / "plantmatics.sqlite"
             conn = get_db_connection(db_file, init_schema=True)
             conn.execute(
                 "INSERT INTO vouchers (catalogNumber, scientificName, qc_status) VALUES ('NCU0001', 'Packera aurea', 'PASS')"
@@ -1133,7 +1137,7 @@ REUSE_CANONICAL_DATA="false"
             (ws / "outputs" / "reports").mkdir(parents=True)
             (ws / "outputs" / "reports" / "old_summary.md").write_text("old", encoding="utf-8")
 
-            db_file = ws / "data" / "packera_pipeline.sqlite"
+            db_file = ws / "data" / "plantmatics.sqlite"
             conn = get_db_connection(db_file, init_schema=True)
             conn.execute(
                 "INSERT INTO vouchers (catalogNumber, scientificName, qc_status, pixels_per_mm, is_calibrated_mm) VALUES ('NCU0001', 'Packera dubia', 'PASS', 24.5, 1);"

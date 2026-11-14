@@ -1,8 +1,19 @@
 # Changelog
 
-All notable methodological, statistical, figure, and SQLite relational schema changes to the North American *Packera* phenotyping and species delimitation pipeline are documented in this file. Versioning tracks the University of North Carolina at Chapel Hill Herbarium (`NCU`) Standard Operating Procedure (`UNC-BOT-SOP-2026-04-REV5`) and the integer SQLite `PRAGMA user_version` (`PACKERA_SCHEMA_USER_VERSION`) enforced in `scripts/core/db_schema.py` and `scripts/core/db_utils.R`.
+All notable methodological, statistical, figure, and SQLite relational schema changes to **Plantmatics** (the North American *Packera* phenotyping and species delimitation pipeline) are documented in this file. Versioning tracks the University of North Carolina at Chapel Hill Herbarium (`NCU`) Standard Operating Procedure (`UNC-BOT-SOP-2026-04-REV5`) and the integer SQLite `PRAGMA user_version` (`PLANTMATICS_SCHEMA_USER_VERSION`, aliased as `PACKERA_SCHEMA_USER_VERSION`) enforced in `scripts/core/db_schema.py` and `scripts/core/db_utils.R`.
 
 The structure follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+## [5.2.0] - 2026-11-14 (`UNC-BOT-SOP-2026-04-REV5` | SQLite Schema `20261124`)
+
+### Added
+* **Public *Packera* Sequence Harvester (`scripts/data_prep/download_public_packera_sequences.py`):** Added flat-directory public phylogenomic and barcode harvesting (`python main.py download-public-genomics` and `./run_pipeline.sh --download-public-genomics`) pulling Dryad phylogenomic trees and `PhyTop` conflict tables alongside 18 complete plastomes from Moore-Pollard, Ellestad, and Mandel (2026, *Systematic Biology*, `doi:10.1093/sysbio/syag041`; Dryad `doi:10.5061/dryad.bg79cnppn`), NCBI `nuccore` plastid, nrITS/ETS, and nuclear `waxy` sequences (Boufford et al. 2014; Bain and Golden 2000; Pelser et al. 2007), ENA/NCBI SRA run metadata, and BOLD barcodes directly into flat `data/genomics/public_packera_*` files (`0` subdirectories).
+* **Public Backbone Concordance and Cytonuclear/Waxy Placement (`scripts/analysis/step06_public_backbone.R`):** Integrated public *Packera* nuclear backbone outgroup polarization for `Dsuite`-$f_b$ calculations (`polarization_source = "public_nuclear_backbone"`), `PhyTop` ILS (`public_phytop_ils_index`) and introgression (`public_phytop_ih_index`) conflict metrics, `waxy`-aware organellar/ITS skimming (`scripts/data_prep/skim_offtarget_organellar.py`), and companion Step 06 exports (`public_backbone_concordance.csv` and `public_organellar_placement.csv`).
+* **SQLite Schema `20261124` and Six Public-Backbone Columns:** Added `public_plastome_match`, `public_its_match`, and `waxy_lineage_match` to `genomic_samples`, added `public_backbone_clade`, `public_phytop_ils_index`, and `public_phytop_ih_index` to `genetic_lineage_assignments`, and exposed all six columns inside `v_integrative_triage_master`.
+
+### Changed
+* **Plantmatics Rebranding and Zero-Loss SQLite Migration (`data/plantmatics.sqlite`):** Renamed the software project and canonical SQLite WAL path from `data/packera_pipeline.sqlite` to `data/plantmatics.sqlite`, promoted `PLANTMATICS_SCHEMA_USER_VERSION = 20261124` (`PLANTMATICS_DB_PATH`, `PLANTMATICS_RUN_DIR`, `PLANTMATICS_GENOMICS_DIR`, and `PLANTMATICS_DEMO_MODE` with `PACKERA_*` fallbacks), and added automatic zero-loss atomic rename migration (including `-wal` and `-shm` sidecars) across `scripts/core/db.py` and `scripts/core/db_utils.R`.
+* **No-Op Guardrails for Public Reference Assets:** Isolated `public_packera_*` reference files inside `discover_genomic_inputs()` so public references alone never trigger synthetic Step 06 runs (`status == "skipped_empty"`), whereas focal sample cohorts consume public backbones seamlessly in Step 06 and Step 07.
 
 ## [5.1.0] - 2026-11-14 (`UNC-BOT-SOP-2026-04-REV5` | SQLite Schema `20261123`)
 

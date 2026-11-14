@@ -6,7 +6,7 @@ Four-stage iterative species-complex discovery and intraspecific delimitation
 orchestrator for Packera dubia (and any focal North American Packera taxon).
 
 Executes four isolated, run-scoped passes through ./run_pipeline.sh backed by
-shared Tier A SQLite caches (data/packera_pipeline.sqlite), then compiles a
+shared Tier A SQLite caches (data/plantmatics.sqlite), then compiles a
 cross-stage quantitative comparison CSV and a structured taxonomic adjudication
 report in outputs/reports/:
 
@@ -441,7 +441,12 @@ def compile_complex_resolution_summary(
     out_dir = output_dir or (workspace_root / "outputs" / "reports")
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    resolved_db = db_path or (workspace_root / "data" / "packera_pipeline.sqlite")
+    if db_path is not None:
+        resolved_db = db_path
+    else:
+        cand_new = workspace_root / "data" / "plantmatics.sqlite"
+        cand_old = workspace_root / "data" / "packera_pipeline.sqlite"
+        resolved_db = cand_new if cand_new.is_file() else (cand_old if cand_old.is_file() else cand_new)
     conn: Optional[sqlite3.Connection] = None
     if resolved_db.is_file():
         try:

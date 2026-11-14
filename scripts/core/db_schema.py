@@ -445,7 +445,13 @@ def _build_master_view_ddl() -> str:
         geno_v.bpp_introgression_bf AS bpp_introgression_bf,
         geno_v.mmrr_beta_ibd AS mmrr_beta_ibd,
         geno_v.mmrr_beta_ibe AS mmrr_beta_ibe,
-        geno_v.mmrr_p_ibe AS mmrr_p_ibe
+        geno_v.mmrr_p_ibe AS mmrr_p_ibe,
+        geno_v.public_plastome_match AS public_plastome_match,
+        geno_v.public_its_match AS public_its_match,
+        geno_v.waxy_lineage_match AS waxy_lineage_match,
+        geno_v.public_backbone_clade AS public_backbone_clade,
+        geno_v.public_phytop_ils_index AS public_phytop_ils_index,
+        geno_v.public_phytop_ih_index AS public_phytop_ih_index
     FROM run_active_cohort rac
     LEFT JOIN vouchers v
         ON v.catalogNumber = rac.catalogNumber
@@ -528,7 +534,13 @@ def _build_master_view_ddl() -> str:
             bpp_introgression_bf,
             mmrr_beta_ibd,
             mmrr_beta_ibe,
-            mmrr_p_ibe
+            mmrr_p_ibe,
+            public_plastome_match,
+            public_its_match,
+            waxy_lineage_match,
+            public_backbone_clade,
+            public_phytop_ils_index,
+            public_phytop_ih_index
         FROM (
             SELECT
                 gla.run_id AS run_id,
@@ -576,6 +588,12 @@ def _build_master_view_ddl() -> str:
                 gla.mmrr_beta_ibd AS mmrr_beta_ibd,
                 gla.mmrr_beta_ibe AS mmrr_beta_ibe,
                 gla.mmrr_p_ibe AS mmrr_p_ibe,
+                gs.public_plastome_match AS public_plastome_match,
+                gs.public_its_match AS public_its_match,
+                gs.waxy_lineage_match AS waxy_lineage_match,
+                gla.public_backbone_clade AS public_backbone_clade,
+                gla.public_phytop_ils_index AS public_phytop_ils_index,
+                gla.public_phytop_ih_index AS public_phytop_ih_index,
                 COUNT(*) OVER (
                     PARTITION BY gla.run_id, COALESCE(gla.catalogNumber, gs.catalogNumber)
                 ) AS n_genomic_samples_linked,
@@ -868,7 +886,10 @@ def _build_schema_ddl() -> str:
         nquire_delta_logl REAL,
         plastid_clade TEXT,
         its_ribotype TEXT,
-        cytonuclear_discordant INTEGER
+        cytonuclear_discordant INTEGER,
+        public_plastome_match TEXT,
+        public_its_match TEXT,
+        waxy_lineage_match TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_genomic_samples_catalog ON genomic_samples(catalogNumber);
     CREATE INDEX IF NOT EXISTS idx_genomic_samples_pop ON genomic_samples(population_id);
@@ -1174,6 +1195,9 @@ def _build_schema_ddl() -> str:
         mmrr_beta_ibd REAL,
         mmrr_beta_ibe REAL,
         mmrr_p_ibe REAL,
+        public_backbone_clade TEXT,
+        public_phytop_ils_index REAL,
+        public_phytop_ih_index REAL,
         PRIMARY KEY (run_id, genetic_sample_id),
         FOREIGN KEY (run_id) REFERENCES pipeline_runs(run_id) ON DELETE CASCADE
     );
@@ -1408,6 +1432,9 @@ _DYNAMIC_TABLE_MIGRATION_SPECS: Dict[str, Tuple[Tuple[str, str], ...]] = {
         ("plastid_clade", "TEXT"),
         ("its_ribotype", "TEXT"),
         ("cytonuclear_discordant", "INTEGER"),
+        ("public_plastome_match", "TEXT"),
+        ("public_its_match", "TEXT"),
+        ("waxy_lineage_match", "TEXT"),
     ),
     "genetic_lineage_assignments": (
         ("catalogNumber", "TEXT NULL"),
@@ -1436,6 +1463,9 @@ _DYNAMIC_TABLE_MIGRATION_SPECS: Dict[str, Tuple[Tuple[str, str], ...]] = {
         ("mmrr_beta_ibd", "REAL"),
         ("mmrr_beta_ibe", "REAL"),
         ("mmrr_p_ibe", "REAL"),
+        ("public_backbone_clade", "TEXT"),
+        ("public_phytop_ils_index", "REAL"),
+        ("public_phytop_ih_index", "REAL"),
     ),
     "environmental_cache": tuple(
         (
@@ -1476,7 +1506,8 @@ def _migrate_vouchers_schema_columns(conn: sqlite3.Connection) -> None:
             existing_cols.add(col_name)
 
 
-PACKERA_SCHEMA_USER_VERSION: int = 20261123
+PLANTMATICS_SCHEMA_USER_VERSION: int = 20261124
+PACKERA_SCHEMA_USER_VERSION: int = PLANTMATICS_SCHEMA_USER_VERSION
 
 
 _CANONICAL_PLANT_INDIVIDUALS_COLS: Tuple[str, ...] = (
@@ -1933,11 +1964,11 @@ def _migrate_dynamic_schema_columns(
 
 
 def migrate_database_schema(conn: sqlite3.Connection) -> None:
-    """Idempotently migrate existing SQLite schemas to PACKERA_SCHEMA_USER_VERSION and refresh the master view."""
+    """Idempotently migrate existing SQLite schemas to PLANTMATICS_SCHEMA_USER_VERSION and refresh the master view."""
     _migrate_vouchers_schema_columns(conn)
     _migrate_dynamic_schema_columns(conn, recreate_view=False)
     conn.executescript(SCHEMA_DDL)
-    conn.execute(f"PRAGMA user_version = {PACKERA_SCHEMA_USER_VERSION};")
+    conn.execute(f"PRAGMA user_version = {PLANTMATICS_SCHEMA_USER_VERSION};")
     conn.execute("PRAGMA foreign_keys = ON;")
     conn.commit()
 
@@ -1946,7 +1977,7 @@ def init_db_schema(conn: sqlite3.Connection) -> None:
     """Create or idempotently migrate all Tier A and Tier B tables, indexes, triggers, R*Tree, and master view."""
     cur_ver_row = conn.execute("PRAGMA user_version;").fetchone()
     cur_ver = int(cur_ver_row[0]) if (cur_ver_row and cur_ver_row[0] is not None) else 0
-    if cur_ver == PACKERA_SCHEMA_USER_VERSION:
+    if cur_ver == PLANTMATICS_SCHEMA_USER_VERSION:
         existing_objs = {
             str(r[0])
             for r in conn.execute(
@@ -1969,7 +2000,7 @@ def init_db_schema(conn: sqlite3.Connection) -> None:
             el_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(extracted_leaves);").fetchall()}
             om_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(otu_morphometrics);").fetchall()}
             mv_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(v_integrative_triage_master);").fetchall()}
-            req_mv_cols = {"is_passive", "scale_source", "AR_inv_std", "log1p_capitulum_count", "blade_cie_l_norm", "nearest_type_basionym", "reproductive_trait_status", "ecoregion_can1", "ecoregion_can2", "hybrid_zone_cohesion_pass", "hybrid_parent_1", "hybrid_parent_2", "cda_oof_posterior_prob", "self_morph_mahal_d2", "open_set_df", "cryptic_non_clinal_pass", "resurrection_basionym", "w_geno_kappa", "geno_predicted_taxon", "geno_linkage_tier", "is_geno_admixed", "coalescent_gdi", "hybrid_generation_class", "cytonuclear_discordant"}
+            req_mv_cols = {"is_passive", "scale_source", "AR_inv_std", "log1p_capitulum_count", "blade_cie_l_norm", "nearest_type_basionym", "reproductive_trait_status", "ecoregion_can1", "ecoregion_can2", "hybrid_zone_cohesion_pass", "hybrid_parent_1", "hybrid_parent_2", "cda_oof_posterior_prob", "self_morph_mahal_d2", "open_set_df", "cryptic_non_clinal_pass", "resurrection_basionym", "w_geno_kappa", "geno_predicted_taxon", "geno_linkage_tier", "is_geno_admixed", "coalescent_gdi", "hybrid_generation_class", "cytonuclear_discordant", "public_plastome_match", "public_its_match", "waxy_lineage_match", "public_backbone_clade", "public_phytop_ils_index", "public_phytop_ih_index"}
             if (
                 "leaf_zone" not in el_cols
                 or "area_mm2" not in el_cols

@@ -2792,12 +2792,12 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
             for d in (masks_dir, contours_dir, tables_dir):
                 d.mkdir(parents=True, exist_ok=True)
 
-            db_file = data_dir / "packera_pipeline.sqlite"
+            db_file = data_dir / "plantmatics.sqlite"
             conn = get_db_connection(db_path=db_file, init_schema=True)
             try:
                 uv = int(conn.execute("PRAGMA user_version;").fetchone()[0])
                 self.assertEqual(uv, PACKERA_SCHEMA_USER_VERSION)
-                self.assertEqual(uv, 20261123)
+                self.assertEqual(uv, 20261124)
 
                 m1 = np.zeros((150, 110), dtype=np.uint8)
                 cv2.ellipse(m1, (55, 75), (30, 54), 0, 0, 360, 255, -1)

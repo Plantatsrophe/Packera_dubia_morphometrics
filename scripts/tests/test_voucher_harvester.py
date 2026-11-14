@@ -1843,7 +1843,7 @@ class TestDynamicAuthorityEngineAndSynonymExpansion(unittest.TestCase):
                 "--focal-taxon", "Packera aurea",
                 "--intraspecific-mode",
             ])
-            with patch.dict(os.environ, {"PACKERA_RUN_DIR": ""}, clear=False), \
+            with patch.dict(os.environ, {"PLANTMATICS_RUN_DIR": "", "PACKERA_RUN_DIR": ""}, clear=False), \
                  patch.object(root_main.shutil, "which", return_value="/usr/bin/Rscript"), \
                  patch.object(root_main, "verify_file_exists"), \
                  patch.object(root_main, "verify_dir_has_files"), \
@@ -1867,7 +1867,7 @@ class TestDynamicAuthorityEngineAndSynonymExpansion(unittest.TestCase):
                 "--focal-taxon", "Packera aurea",
                 "--intraspecific-mode",
             ])
-            with patch.dict(os.environ, {"PACKERA_RUN_DIR": ""}, clear=False), \
+            with patch.dict(os.environ, {"PLANTMATICS_RUN_DIR": "", "PACKERA_RUN_DIR": ""}, clear=False), \
                  patch.object(root_main.shutil, "which", return_value="/usr/bin/Rscript"), \
                  patch.object(root_main, "verify_file_exists"), \
                  patch.object(root_main.subprocess, "run") as mock_synth_sub:
@@ -3725,7 +3725,7 @@ class TestStep1SystematicsAndDownstreamAuthorityAudit(unittest.TestCase):
             ws = Path(tmp_d)
             tables_dir = ws / "data" / "tables"
             tables_dir.mkdir(parents=True, exist_ok=True)
-            db_p = ws / "data" / "packera_pipeline.sqlite"
+            db_p = ws / "data" / "plantmatics.sqlite"
 
             conn = get_db_connection(db_path=db_p, init_schema=True, workspace_root=ws)
             rows = [

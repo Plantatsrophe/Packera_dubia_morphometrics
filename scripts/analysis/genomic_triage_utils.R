@@ -87,7 +87,9 @@ load_step07_genomic_metrics <- function(opts, df) {
     "hybrid_index_h", "interspecific_ancestry_q12", "hybrid_generation_class",
     "coancestry_cluster", "f_branch_max", "f_branch_donor_taxon",
     "snaq_gamma_minor", "coalescent_gdi", "bpp_introgression_bf",
-    "mmrr_beta_ibd", "mmrr_beta_ibe", "mmrr_p_ibe"
+    "mmrr_beta_ibd", "mmrr_beta_ibe", "mmrr_p_ibe",
+    "public_plastome_match", "public_its_match", "waxy_lineage_match",
+    "public_backbone_clade", "public_phytop_ils_index", "public_phytop_ih_index"
   )
 
   has_geno_cols <- ("geno_predicted_taxon" %in% names(df)) && any(!is.na(df$geno_predicted_taxon) & nzchar(as.character(df$geno_predicted_taxon)))

@@ -101,6 +101,7 @@ wheels/
 .env
 .venv
 .venv*/
+.venv_LM3
 .venv_LM3/
 env/
 venv/
@@ -465,7 +466,11 @@ data/genomics/**
 *.fas
 *.fna
 *.fastq
+*.fastq.gz
+*.fastq.g
 *.fq
+*.fq.gz
+*.fq.g
 *.fastqsanger
 *.phylip
 *.phy

@@ -6,7 +6,8 @@ Affiliation: University of North Carolina at Chapel Hill Herbarium (NCU)
 
 Description:
     Central transactional SQLite (WAL mode) + optional DuckDB relational layer
-    (`data/packera_pipeline.sqlite`) implementing the Two-Tier Storage schema:
+    (`data/plantmatics.sqlite`, with automatic migration from legacy
+    `data/packera_pipeline.sqlite`) implementing the Two-Tier Storage schema:
       - Tier A (Canonical Shared Store):
           taxon_synonyms, vouchers, plant_individuals, extracted_leaves,
           voucher_reproductive_phenology,
@@ -43,7 +44,9 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, 
 logger = logging.getLogger("PackeraDB")
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_SQLITE_REL_PATH = Path("data") / "packera_pipeline.sqlite"
+DEFAULT_SQLITE_REL_PATH = Path("data") / "plantmatics.sqlite"
+LEGACY_SQLITE_REL_PATH = Path("data") / "packera_pipeline.sqlite"
+_MIGRATED_LEGACY_SQLITE_PATHS: Set[str] = set()
 
 DWC_VOUCHER_COLUMNS: Tuple[str, ...] = (
     "catalogNumber",
@@ -262,6 +265,36 @@ def format_lat_lon_key(lat: Any, lon: Any) -> Optional[str]:
     return f"{f_lat:.5f}_{f_lon:.5f}"
 
 
+def _migrate_legacy_sqlite_file(target_path: Path) -> Path:
+    """
+    Atomically migrate a legacy `packera_pipeline.sqlite` database (and its `-wal`/`-shm`
+    sidecars) to `plantmatics.sqlite` in the same parent directory when `target_path`
+    does not yet exist.
+    """
+    resolved_target = Path(target_path).resolve()
+    if resolved_target.name != "plantmatics.sqlite":
+        return resolved_target
+    legacy_path = resolved_target.parent / "packera_pipeline.sqlite"
+    if not resolved_target.exists() and legacy_path.exists():
+        resolved_target.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(legacy_path, resolved_target)
+        for sfx in ("-wal", "-shm"):
+            legacy_sidecar = resolved_target.parent / f"packera_pipeline.sqlite{sfx}"
+            if legacy_sidecar.exists():
+                os.replace(legacy_sidecar, Path(f"{resolved_target}{sfx}"))
+        key = str(resolved_target)
+        if key not in _MIGRATED_LEGACY_SQLITE_PATHS:
+            _MIGRATED_LEGACY_SQLITE_PATHS.add(key)
+            logger.info("Migrated legacy SQLite database %s -> %s", legacy_path, resolved_target)
+    return resolved_target
+
+
+def _migrate_legacy_sqlite_if_needed(workspace_root: Path = PROJECT_ROOT) -> Path:
+    """Resolve canonical `data/plantmatics.sqlite`, migrating legacy `data/packera_pipeline.sqlite` if needed."""
+    canonical = (Path(workspace_root).resolve() / DEFAULT_SQLITE_REL_PATH).resolve()
+    return _migrate_legacy_sqlite_file(canonical)
+
+
 def resolve_db_path(
     db_path: Optional[Union[str, Path]] = None,
     workspace_root: Path = PROJECT_ROOT,
@@ -270,18 +303,24 @@ def resolve_db_path(
 ) -> Union[str, Path]:
     """
     Resolve the SQLite database path while strictly isolating `--demo` runs from
-    the canonical `data/packera_pipeline.sqlite` database.
+    the canonical `data/plantmatics.sqlite` database (migrating legacy
+    `data/packera_pipeline.sqlite` when applicable in non-demo contexts).
     """
     canonical = (Path(workspace_root).resolve() / DEFAULT_SQLITE_REL_PATH).resolve()
+    legacy_canonical = (Path(workspace_root).resolve() / LEGACY_SQLITE_REL_PATH).resolve()
 
     if demo:
         if db_path is not None and str(db_path).strip() == ":memory:":
             return ":memory:"
         if db_path is not None and str(db_path).strip():
             cand = Path(str(db_path).strip()).resolve()
-            if cand != canonical:
+            if cand not in {canonical, legacy_canonical}:
                 return cand
-        eff_run = str(run_dir or os.environ.get("PACKERA_RUN_DIR", "")).strip()
+        eff_run = (
+            (str(run_dir).strip() if run_dir is not None else "")
+            or os.environ.get("PLANTMATICS_RUN_DIR", "").strip()
+            or os.environ.get("PACKERA_RUN_DIR", "").strip()
+        )
         if eff_run:
             rdir = Path(eff_run).resolve()
             if rdir.exists():
@@ -293,16 +332,25 @@ def resolve_db_path(
         if raw == ":memory:":
             return ":memory:"
         p = Path(raw)
-        return p.resolve() if p.is_absolute() else (Path(workspace_root).resolve() / p).resolve()
+        resolved = p.resolve() if p.is_absolute() else (Path(workspace_root).resolve() / p).resolve()
+        if resolved.name == "plantmatics.sqlite":
+            return _migrate_legacy_sqlite_file(resolved)
+        return resolved
 
-    env_db = os.environ.get("PACKERA_DB_PATH", "").strip()
+    env_db = (
+        os.environ.get("PLANTMATICS_DB_PATH", "").strip()
+        or os.environ.get("PACKERA_DB_PATH", "").strip()
+    )
     if env_db:
         if env_db == ":memory:":
             return ":memory:"
         p = Path(env_db)
-        return p.resolve() if p.is_absolute() else (Path(workspace_root).resolve() / p).resolve()
+        resolved = p.resolve() if p.is_absolute() else (Path(workspace_root).resolve() / p).resolve()
+        if resolved.name == "plantmatics.sqlite":
+            return _migrate_legacy_sqlite_file(resolved)
+        return resolved
 
-    return canonical
+    return _migrate_legacy_sqlite_if_needed(Path(workspace_root))
 
 
 def is_canonical_or_explicit_db_context(
@@ -310,12 +358,15 @@ def is_canonical_or_explicit_db_context(
     workspace_root: Path = PROJECT_ROOT,
 ) -> bool:
     """
-    Return True when `PACKERA_DB_PATH` is explicitly configured OR when `target_path`
-    lives inside `workspace_root` (either canonical `data/` or `runs/<run_id>/`),
-    and False when a standalone unit test writes into an isolated `/tmp` directory
-    without setting `PACKERA_DB_PATH`.
+    Return True when `PLANTMATICS_DB_PATH` or `PACKERA_DB_PATH` is explicitly configured
+    OR when `target_path` lives inside `workspace_root` (either canonical `data/` or
+    `runs/<run_id>/`), and False when a standalone unit test writes into an isolated
+    `/tmp` directory without setting either DB path environment variable.
     """
-    if os.environ.get("PACKERA_DB_PATH", "").strip():
+    if (
+        os.environ.get("PLANTMATICS_DB_PATH", "").strip()
+        or os.environ.get("PACKERA_DB_PATH", "").strip()
+    ):
         return True
     if target_path is None:
         return True
@@ -424,6 +475,7 @@ def get_duckdb_connection(
 from scripts.core.db_schema import (
     MASTER_VIEW_DDL,
     PACKERA_SCHEMA_USER_VERSION,
+    PLANTMATICS_SCHEMA_USER_VERSION,
     SCHEMA_DDL,
     _CANONICAL_EXTRACTED_LEAVES_COLS,
     _CANONICAL_PLANT_INDIVIDUALS_COLS,
@@ -2694,6 +2746,7 @@ def upsert_genomic_samples(
         "replicate_pair_id", "taxon_raw", "species_standardized", "marker_platform",
         "stateProvince", "county", "eventDate", "linkage_tier",
         "inferred_cytotype", "plastid_clade", "its_ribotype",
+        "public_plastome_match", "public_its_match", "waxy_lineage_match",
     )
     int_cols = ("ploidy_level", "hq_reads", "mapped_reads", "n_called_loci", "hdplot_retained_loci")
     bool_cols = ("is_putative_novel_or_hybrid_query", "geno_quality_pass", "cytonuclear_discordant")
@@ -2744,7 +2797,7 @@ def persist_genetic_lineage_assignments(
         "genetic_sample_id", "catalogNumber", "population_id", "geno_predicted_taxon",
         "genetic_cluster", "q_admixture_json", "geno_parent_1", "geno_parent_2",
         "nearest_tree_sister_taxon", "hybrid_generation_class", "coancestry_cluster",
-        "f_branch_donor_taxon",
+        "f_branch_donor_taxon", "public_backbone_clade",
     )
     float_cols = (
         "geno_posterior_prob", "geno_margin", "q_max",
@@ -2752,6 +2805,7 @@ def persist_genetic_lineage_assignments(
         "hybrid_index_h", "interspecific_ancestry_q12", "f_branch_max",
         "snaq_gamma_minor", "coalescent_gdi", "bpp_introgression_bf",
         "mmrr_beta_ibd", "mmrr_beta_ibe", "mmrr_p_ibe",
+        "public_phytop_ils_index", "public_phytop_ih_index",
     )
     norm_rows: List[Dict[str, Any]] = []
     kept_ids: List[str] = []
@@ -2796,7 +2850,8 @@ def ingest_existing_csvs_to_db(
     contours_dir: Optional[Union[str, Path]] = None,
 ) -> Dict[str, int]:
     """
-    Bootstrap or synchronize `data/packera_pipeline.sqlite` from existing CSV manifests,
+    Bootstrap or synchronize `data/plantmatics.sqlite` (migrating legacy
+    `data/packera_pipeline.sqlite` if present) from existing CSV manifests,
     120-vertex contour CSVs (`data/contours/*.csv`), and `fine_grain_edaphic_cache.csv`.
     """
     ws = Path(workspace_root).resolve()

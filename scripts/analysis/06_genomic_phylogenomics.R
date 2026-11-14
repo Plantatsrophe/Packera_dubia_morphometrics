@@ -1,7 +1,7 @@
 #!/usr/bin/env Rscript
 # ==============================================================================
 # Script: scripts/analysis/06_genomic_phylogenomics.R
-# Project: Packera Species Delimitation & Morphometrics Pipeline
+# Project: Plantmatics
 # Affiliation: University of North Carolina at Chapel Hill Herbarium (NCU)
 #
 # Description:
@@ -47,7 +47,16 @@ if (!exists("persist_step06_genomics_to_sqlite", mode = "function")) .src_step06
 if (!exists("save_packera_png_300", mode = "function")) .src_step06_rel("scripts/figures/theme_packera_pub.R")
 if (!exists("compute_microhaplotype_coancestry", mode = "function")) .src_step06_rel("scripts/analysis/step06_reticulation_coancestry.R")
 if (!exists("run_step06_landscape_genomics", mode = "function")) .src_step06_rel("scripts/analysis/step06_spatial_landscape_genomics.R")
+if (!exists("load_public_packera_backbone", mode = "function")) .src_step06_rel("scripts/analysis/step06_public_backbone.R")
 if (!exists("render_fig06a_genomic_pcoa_tree_png", mode = "function")) .src_step06_rel("scripts/figures/step06_figures.R")
+
+.resolve_step06_db_env <- function(default = "") {
+  for (k in c("PLANTMATICS_DB_PATH", "PACKERA_SQLITE_DB", "PACKERA_DB_PATH")) {
+    v <- Sys.getenv(k, unset = "")
+    if (nzchar(trimws(v))) return(trimws(v))
+  }
+  default
+}
 
 parse_step06_args <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
   parser <- optparse::OptionParser()
@@ -63,7 +72,7 @@ parse_step06_args <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
   parser <- optparse::add_option(parser, c("--figure-b"), type = "character", default = "")
   parser <- optparse::add_option(parser, c("--run-id"), type = "character", default = Sys.getenv("RUN_ID", unset = "canonical"))
   parser <- optparse::add_option(parser, c("--db"), type = "character", default = "")
-  parser <- optparse::add_option(parser, c("--db-path"), type = "character", default = Sys.getenv("PACKERA_DB_PATH", unset = Sys.getenv("PACKERA_SQLITE_DB", unset = "")))
+  parser <- optparse::add_option(parser, c("--db-path"), type = "character", default = .resolve_step06_db_env(""))
   parser <- optparse::add_option(parser, c("--demo"), action = "store_true", default = FALSE)
   optparse::parse_args(parser, args = cli_args)
 }
@@ -250,6 +259,9 @@ parse_step06_args <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
 }
 
 .extract_phylo_metrics <- function(tree_files, pass_df) {
+  if (length(tree_files) > 0L) {
+    tree_files <- tree_files[!grepl("^public_packera_", basename(as.character(tree_files)), ignore.case = TRUE)]
+  }
   out <- data.frame(
     genetic_sample_id = pass_df$genetic_sample_id,
     nearest_tree_sister_taxon = NA_character_,
@@ -603,8 +615,12 @@ run_step06_genomic_phylogenomics <- function(opts) {
     }
     tree_files <- ext_paths("tree_files"); q_files <- ext_paths("admixture_q_files")
   }
+  if (length(tree_files) > 0L) {
+    tree_files <- tree_files[!grepl("^public_packera_", basename(as.character(tree_files)), ignore.case = TRUE)]
+  }
   if (length(tree_files) == 0L && dir.exists(raw_geno_dir)) {
     tree_files <- list.files(raw_geno_dir, pattern = "^RAxML_bestTree|\\.(treefile|tre|nwk|tree)$", full.names = TRUE)
+    tree_files <- tree_files[!grepl("^public_packera_", basename(as.character(tree_files)), ignore.case = TRUE)]
   }
 
   q_ext <- .read_admixture_q_if_present(q_files, common_ids, keep_taxa, probs_mat)
@@ -622,10 +638,12 @@ run_step06_genomic_phylogenomics <- function(opts) {
 
   # Phase 2 Independent Modules: Co-ancestry, (h, Q12) Hybrid Classifier, f-branch, SNPs2CF/SNaQ
   dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+  pub_bb <- load_public_packera_backbone(raw_geno_dir)
   coanc_res <- compute_microhaplotype_coancestry(common_ids, dos_mat, raw_geno_dir)
   tri_res <- compute_hybrid_index_q12(pass_df, dos_mat, q_mat, p1, p2, d_mat)
-  fb_res <- compute_tree_guided_fbranch(pass_df, dos_mat, raw_geno_dir)
+  fb_res <- compute_tree_guided_fbranch(pass_df, dos_mat, raw_geno_dir, backbone = pub_bb)
   cf_res <- compute_quartet_concordance_snps2cf(pass_df, dos_mat)
+  pub_eval <- evaluate_public_backbone_and_organellar(pass_df, raw_geno_dir, out_dir)
   # Ensure divergent cryptic lineages are never falsely marked admixed when classified Divergent_NonHybrid_Lineage
   is_admixed[tri_res$hybrid_class == "Divergent_NonHybrid_Lineage"] <- 0L
 
@@ -683,6 +701,9 @@ run_step06_genomic_phylogenomics <- function(opts) {
     mmrr_beta_ibd = NA_real_,
     mmrr_beta_ibe = NA_real_,
     mmrr_p_ibe = NA_real_,
+    public_backbone_clade = pub_eval$public_backbone_clade,
+    public_phytop_ils_index = pub_eval$public_phytop_ils_index,
+    public_phytop_ih_index = pub_eval$public_phytop_ih_index,
     stringsAsFactors = FALSE
   )
 
@@ -694,10 +715,7 @@ run_step06_genomic_phylogenomics <- function(opts) {
     )
   }
 
-  eff_db_ro <- if (nzchar(eff_db_in)) eff_db_in else {
-    env_db <- Sys.getenv("PACKERA_SQLITE_DB", unset = Sys.getenv("PACKERA_DB_PATH", unset = ""))
-    if (nzchar(trimws(env_db))) env_db else "data/packera_pipeline.sqlite"
-  }
+  eff_db_ro <- if (nzchar(eff_db_in)) eff_db_in else .resolve_step06_db_env("data/plantmatics.sqlite")
 
   # Post-stream read-only landscape genomics (MMRR + FEEMS) & Mantel congruence
   land_res <- run_step06_landscape_genomics(pass_df, d_mat, db_path = eff_db_ro, run_id = opts[["run-id"]], demo = opts$demo)
@@ -712,6 +730,12 @@ run_step06_genomic_phylogenomics <- function(opts) {
   congr_df <- .compute_posthoc_congruence(pass_df, d_mat, pco_coords, eff_db_ro, opts[["run-id"]], opts$demo)
 
   full_audit <- dplyr::left_join(samples_df, assign_df[, setdiff(names(assign_df), c("catalogNumber", "population_id")), drop = FALSE], by = "genetic_sample_id")
+  m_pass <- match(full_audit$genetic_sample_id, pass_df$genetic_sample_id)
+  for (mcol in c("public_plastome_match", "public_its_match", "waxy_lineage_match")) {
+    if (!(mcol %in% names(full_audit))) full_audit[[mcol]] <- NA_character_
+    need_fill <- !is.na(m_pass) & (is.na(full_audit[[mcol]]) | !nzchar(as.character(full_audit[[mcol]])))
+    if (any(need_fill)) full_audit[[mcol]][need_fill] <- pub_eval[[mcol]][m_pass[need_fill]]
+  }
   metrics_df <- data.frame(
     n_samples_total = nrow(samples_df), n_samples_pass = nrow(pass_df),
     n_reference_anchors = length(ref_idx),
@@ -739,6 +763,8 @@ run_step06_genomic_phylogenomics <- function(opts) {
     readr::write_csv(phylo_res$clade_summary, file.path(tables_dir, "genomic_clade_cohesion_summary.csv"), na = "")
     readr::write_csv(metrics_df, file.path(tables_dir, "genomic_model_metrics.csv"), na = "")
     readr::write_csv(congr_df, file.path(tables_dir, "genomic_multimodal_congruence_summary.csv"), na = "")
+    readr::write_csv(pub_eval$concordance_df, file.path(tables_dir, "public_backbone_concordance.csv"), na = "")
+    readr::write_csv(pub_eval$placement_df, file.path(tables_dir, "public_organellar_placement.csv"), na = "")
   }
 
   dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
@@ -746,7 +772,7 @@ run_step06_genomic_phylogenomics <- function(opts) {
   fig_b <- .resolve_first_nonempty(opts[["figure-b"]], file.path(fig_dir, "fig06b_reticulation_gdi_landscape.png"))
   pass_df$coancestry_cluster <- coanc_res$cluster
   render_fig06a_genomic_pcoa_tree_png(fig_a, pass_df, assign_df, q_mat, eig_pct, phylo_res$tree, congr_df, eff_db_ro, opts[["run-id"]])
-  render_fig06b_reticulation_gdi_png(fig_b, tri_res$triangle_df, fb_res$fbranch_df, gdi_df, land_res$feems_edges_df, land_res$summary_df)
+  render_fig06b_reticulation_gdi_png(fig_b, tri_res$triangle_df, fb_res$fbranch_df, gdi_df, land_res$feems_edges_df, land_res$summary_df, organellar_placement_df = pub_eval$placement_df)
 
   message(sprintf(
     "[Step 06/07] Phylogenomics complete: %d/%d passing | LORO acc=%.3f kappa=%.3f | M/P conc=%.4f | median gdi=%.3f",

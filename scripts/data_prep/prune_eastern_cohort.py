@@ -7,7 +7,7 @@ Affiliation: University of North Carolina at Chapel Hill Herbarium (NCU)
 
 Description:
     Fast, transactional in-place cohort pruner that restricts an existing
-    SQLite database (`data/packera_pipeline.sqlite`), canonical CSV manifests
+    SQLite database (`data/plantmatics.sqlite`), canonical CSV manifests
     (`data/tables/*.csv`), and run tables (`runs/*/data/tables/*.csv`) strictly
     to Cis-Mississippi Eastern North American Packera species while retaining
     trans-Mississippi disjunct populations of predominantly Eastern species
@@ -121,11 +121,18 @@ def prune_workspace_cohort(
     if str(workspace_root) not in sys.path:
         sys.path.insert(0, str(workspace_root))
 
-    from scripts.core.db import load_taxon_synonyms
+    from scripts.core.db import load_taxon_synonyms, resolve_db_path
     from scripts.core.harvester import _DYNAMIC_SYNONYM_TO_CANONICAL, standardize_packera_taxon
     from scripts.core.taxonomy_authority import evaluate_eastern_na_cohort_filter
 
-    eff_db = (db_path or (workspace_root / "data" / "packera_pipeline.sqlite")).resolve()
+    if db_path is not None:
+        eff_db = Path(db_path).resolve()
+    elif dry_run:
+        cand_new = (workspace_root / "data" / "plantmatics.sqlite").resolve()
+        cand_old = (workspace_root / "data" / "packera_pipeline.sqlite").resolve()
+        eff_db = cand_new if cand_new.is_file() else (cand_old if cand_old.is_file() else cand_new)
+    else:
+        eff_db = Path(resolve_db_path(workspace_root=workspace_root)).resolve()
     tables_dir = workspace_root / "data" / "tables"
     curated_csv = tables_dir / "curated_vouchers.csv"
 
@@ -403,7 +410,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         )
     )
     p.add_argument("--workspace-root", type=str, default=None, help="Repository root directory (default: auto-detected).")
-    p.add_argument("--db", type=str, default=None, help="Path to SQLite database (default: data/packera_pipeline.sqlite).")
+    p.add_argument("--db", type=str, default=None, help="Path to SQLite database (default: data/plantmatics.sqlite).")
     p.add_argument(
         "--western-lon",
         type=float,

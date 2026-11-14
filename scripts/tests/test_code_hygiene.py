@@ -310,6 +310,42 @@ class TestCodeHygiene(unittest.TestCase):
             + "\n".join(violations),
         )
 
+    def test_new_public_genomics_modules_respect_500_line_ceiling(self):
+        """Verify public Packera genomics modules and organellar skimmer exist and stay under 500 lines."""
+        bounded_paths = (
+            PROJECT_ROOT / "scripts" / "data_prep" / "download_public_packera_sequences.py",
+            PROJECT_ROOT / "scripts" / "analysis" / "step06_public_backbone.R",
+            PROJECT_ROOT / "scripts" / "data_prep" / "skim_offtarget_organellar.py",
+        )
+        for mod_path in bounded_paths:
+            self.assertTrue(mod_path.exists(), f"Missing expected public genomics module: {mod_path}")
+            line_count = len(mod_path.read_text(encoding="utf-8").splitlines())
+            self.assertLess(
+                line_count,
+                500,
+                f"{mod_path.relative_to(PROJECT_ROOT)} exceeds 500-line ceiling ({line_count} lines)",
+            )
+
+    def test_no_hardcoded_workstation_legacy_repo_path(self):
+        """Scan all active .py, .R, and .sh files and assert zero hardcoded workstation legacy repo paths."""
+        legacy_abs_path = "/" + "home/brandon/" + "Packera_dubia_morphometrics"
+        violations: List[str] = []
+        for src_path in iter_active_source_files(include_shell=True):
+            if src_path == SELF_PATH:
+                continue
+            content = src_path.read_text(encoding="utf-8", errors="ignore")
+            rel = src_path.relative_to(PROJECT_ROOT)
+            for lineno, line in enumerate(content.splitlines(), start=1):
+                if legacy_abs_path in line:
+                    violations.append(f"{rel}:{lineno}: {line.strip()}")
+
+        self.assertEqual(
+            violations,
+            [],
+            "Active source files must not hardcode the legacy workstation repository path:\n"
+            + "\n".join(violations),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

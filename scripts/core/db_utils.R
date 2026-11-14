@@ -16,7 +16,8 @@
 #       with seamless CSV fallback merging.
 # ==============================================================================
 
-PACKERA_SCHEMA_USER_VERSION <- 20261123L
+PLANTMATICS_SCHEMA_USER_VERSION <- 20261124L
+PACKERA_SCHEMA_USER_VERSION <- PLANTMATICS_SCHEMA_USER_VERSION
 
 resolve_packera_workers <- function(max_workers = 32L, n_tasks = NULL) {
   if (!identical(.Platform$OS.type, "unix") || !requireNamespace("parallel", quietly = TRUE)) {
@@ -374,7 +375,10 @@ PACKERA_DB_WC_BIO_COLS <- c(
       nquire_delta_logl = "REAL",
       plastid_clade = "TEXT",
       its_ribotype = "TEXT",
-      cytonuclear_discordant = "INTEGER"
+      cytonuclear_discordant = "INTEGER",
+      public_plastome_match = "TEXT",
+      public_its_match = "TEXT",
+      waxy_lineage_match = "TEXT"
     ))
   }
   if (identical(table_name, "genetic_lineage_assignments")) {
@@ -390,7 +394,10 @@ PACKERA_DB_WC_BIO_COLS <- c(
       bpp_introgression_bf = "REAL",
       mmrr_beta_ibd = "REAL",
       mmrr_beta_ibe = "REAL",
-      mmrr_p_ibe = "REAL"
+      mmrr_p_ibe = "REAL",
+      public_backbone_clade = "TEXT",
+      public_phytop_ils_index = "REAL",
+      public_phytop_ih_index = "REAL"
     ))
   }
   character(0)
@@ -444,6 +451,49 @@ PACKERA_DB_WC_BIO_COLS <- c(
   changed
 }
 
+.get_env_run_dir_r <- function() {
+  r_new <- trimws(Sys.getenv("PLANTMATICS_RUN_DIR", unset = ""))
+  if (nzchar(r_new)) {
+    return(r_new)
+  }
+  trimws(Sys.getenv("PACKERA_RUN_DIR", unset = ""))
+}
+
+.get_env_db_path_r <- function() {
+  d_new <- trimws(Sys.getenv("PLANTMATICS_DB_PATH", unset = ""))
+  if (nzchar(d_new)) {
+    return(d_new)
+  }
+  trimws(Sys.getenv("PACKERA_DB_PATH", unset = ""))
+}
+
+.migrated_legacy_sqlite_env_r <- new.env(parent = emptyenv())
+
+.migrate_legacy_sqlite_file_r <- function(target_path) {
+  if (is.null(target_path) || identical(target_path, ":memory:")) {
+    return(target_path)
+  }
+  if (identical(basename(target_path), "plantmatics.sqlite") && !file.exists(target_path)) {
+    legacy_p <- file.path(dirname(target_path), "packera_pipeline.sqlite")
+    if (file.exists(legacy_p)) {
+      dir.create(dirname(target_path), recursive = TRUE, showWarnings = FALSE)
+      if (isTRUE(tryCatch(file.rename(legacy_p, target_path), error = function(e) FALSE))) {
+        for (sfx in c("-wal", "-shm")) {
+          leg_sc <- paste0(legacy_p, sfx)
+          if (file.exists(leg_sc)) {
+            tryCatch(file.rename(leg_sc, paste0(target_path, sfx)), error = function(e) FALSE)
+          }
+        }
+        if (!exists(target_path, envir = .migrated_legacy_sqlite_env_r, inherits = FALSE)) {
+          assign(target_path, TRUE, envir = .migrated_legacy_sqlite_env_r)
+          message(sprintf("Migrated legacy SQLite database %s -> %s", legacy_p, target_path))
+        }
+      }
+    }
+  }
+  target_path
+}
+
 resolve_packera_run_id <- function(run_id = NULL) {
   if (!is.null(run_id) && nzchar(trimws(as.character(run_id)[1]))) {
     return(trimws(as.character(run_id)[1]))
@@ -452,7 +502,7 @@ resolve_packera_run_id <- function(run_id = NULL) {
   if (nzchar(env_rid)) {
     return(env_rid)
   }
-  env_rdir <- trimws(Sys.getenv("PACKERA_RUN_DIR", unset = ""))
+  env_rdir <- .get_env_run_dir_r()
   if (nzchar(env_rdir)) {
     return(basename(normalizePath(env_rdir, mustWork = FALSE)))
   }
@@ -463,18 +513,19 @@ resolve_packera_db_path <- function(
   db_path = NULL,
   demo = FALSE
 ) {
-  canonical_abs <- normalizePath("data/packera_pipeline.sqlite", mustWork = FALSE)
+  canonical_abs <- normalizePath("data/plantmatics.sqlite", mustWork = FALSE)
+  legacy_abs <- normalizePath("data/packera_pipeline.sqlite", mustWork = FALSE)
   if (isTRUE(demo)) {
     if (!is.null(db_path) && nzchar(trimws(db_path))) {
       if (identical(trimws(db_path), ":memory:")) {
         return(":memory:")
       }
       cand_abs <- normalizePath(trimws(db_path), mustWork = FALSE)
-      if (!identical(cand_abs, canonical_abs)) {
+      if (!identical(cand_abs, canonical_abs) && !identical(cand_abs, legacy_abs)) {
         return(cand_abs)
       }
     }
-    env_rdir <- trimws(Sys.getenv("PACKERA_RUN_DIR", unset = ""))
+    env_rdir <- .get_env_run_dir_r()
     if (nzchar(env_rdir) && dir.exists(env_rdir)) {
       return(file.path(normalizePath(env_rdir, mustWork = FALSE), "demo_ephemeral.sqlite"))
     }
@@ -486,23 +537,25 @@ resolve_packera_db_path <- function(
     if (identical(raw, ":memory:")) {
       return(":memory:")
     }
-    return(normalizePath(raw, mustWork = FALSE))
+    return(.migrate_legacy_sqlite_file_r(normalizePath(raw, mustWork = FALSE)))
   }
-  env_db <- trimws(Sys.getenv("PACKERA_DB_PATH", unset = ""))
+  env_db <- .get_env_db_path_r()
   if (nzchar(env_db)) {
     if (identical(env_db, ":memory:")) {
       return(":memory:")
     }
-    return(normalizePath(env_db, mustWork = FALSE))
+    return(.migrate_legacy_sqlite_file_r(normalizePath(env_db, mustWork = FALSE)))
   }
-  canonical_abs
+  .migrate_legacy_sqlite_file_r(canonical_abs)
 }
+
+resolve_plantmatics_db_path <- resolve_packera_db_path
 
 is_sqlite_active_for_inputs <- function(input_paths = character(0), demo = FALSE) {
   if (isTRUE(demo)) {
     return(FALSE)
   }
-  env_db <- trimws(Sys.getenv("PACKERA_DB_PATH", unset = ""))
+  env_db <- .get_env_db_path_r()
   if (nzchar(env_db)) {
     return(TRUE)
   }
@@ -555,7 +608,7 @@ is_sqlite_active_for_inputs <- function(input_paths = character(0), demo = FALSE
 }
 
 connect_packera_db <- function(
-  db_path = Sys.getenv("PACKERA_DB_PATH", ""),
+  db_path = .get_env_db_path_r(),
   read_only = FALSE,
   demo = FALSE
 ) {
@@ -563,7 +616,7 @@ connect_packera_db <- function(
     return(NULL)
   }
   eff_path <- resolve_packera_db_path(
-    db_path = if (nzchar(trimws(db_path))) db_path else NULL,
+    db_path = if (!is.null(db_path) && length(db_path) == 1L && nzchar(trimws(db_path))) db_path else NULL,
     demo = demo
   )
 
@@ -609,9 +662,11 @@ connect_packera_db <- function(
     "is_passive", "scale_source", "AR_inv_std", "reproductive_trait_status",
     "ecoregion_can1", "ecoregion_can2", "w_geno_kappa",
     "geno_predicted_taxon", "geno_linkage_tier", "is_geno_admixed",
-    "coalescent_gdi", "hybrid_generation_class", "cytonuclear_discordant"
+    "coalescent_gdi", "hybrid_generation_class", "cytonuclear_discordant",
+    "public_plastome_match", "public_its_match", "waxy_lineage_match",
+    "public_backbone_clade", "public_phytop_ils_index", "public_phytop_ih_index"
   ) %in% mv_fields_chk)
-  if (cur_ver >= PACKERA_SCHEMA_USER_VERSION &&
+  if (cur_ver >= PLANTMATICS_SCHEMA_USER_VERSION &&
     el_has_zone && om_has_cauline && mv_has_latest &&
     (identical(eff_path, ":memory:") || (
       db_table_exists_safe(conn, "v_integrative_triage_master") &&
@@ -623,7 +678,7 @@ connect_packera_db <- function(
 
   schema_migrated <- .migrate_dynamic_sqlite_schema_r(conn)
   if (!identical(eff_path, ":memory:")) {
-    view_needs_refresh <- schema_migrated || (cur_ver < PACKERA_SCHEMA_USER_VERSION) ||
+    view_needs_refresh <- schema_migrated || (cur_ver < PLANTMATICS_SCHEMA_USER_VERSION) ||
       !db_table_exists_safe(conn, "genomic_samples") ||
       !db_table_exists_safe(conn, "genetic_lineage_assignments")
     if (!view_needs_refresh && db_table_exists_safe(conn, "v_integrative_triage_master")) {
@@ -644,7 +699,9 @@ connect_packera_db <- function(
         "is_passive", "scale_source",
         "AR_inv_std", "reproductive_trait_status", "ecoregion_can1", "ecoregion_can2",
         "w_geno_kappa", "geno_predicted_taxon", "geno_linkage_tier", "is_geno_admixed",
-        "coalescent_gdi", "hybrid_generation_class", "cytonuclear_discordant"
+        "coalescent_gdi", "hybrid_generation_class", "cytonuclear_discordant",
+        "public_plastome_match", "public_its_match", "waxy_lineage_match",
+        "public_backbone_clade", "public_phytop_ils_index", "public_phytop_ih_index"
       )
       if (length(v_cols) > 0L && !all(req_v_cols %in% v_cols)) {
         view_needs_refresh <- TRUE
@@ -662,7 +719,7 @@ connect_packera_db <- function(
       }
     } else if (!is.null(conn) && db_table_exists_safe(conn, "v_integrative_triage_master")) {
       tryCatch(
-        DBI::dbExecute(conn, sprintf("PRAGMA user_version = %d;", PACKERA_SCHEMA_USER_VERSION)),
+        DBI::dbExecute(conn, sprintf("PRAGMA user_version = %d;", PLANTMATICS_SCHEMA_USER_VERSION)),
         error = function(e) NULL
       )
     }
@@ -693,8 +750,8 @@ ensure_pipeline_run_r <- function(conn, run_id = resolve_packera_run_id(), focal
   }
   rid <- resolve_packera_run_id(run_id)
   now_iso <- format(Sys.time(), "%Y-%m-%dT%H:%M:%S%z")
-  rdir <- Sys.getenv("PACKERA_RUN_DIR", unset = NA_character_)
-  if (!is.na(rdir) && !nzchar(rdir)) rdir <- NA_character_
+  rdir <- .get_env_run_dir_r()
+  if (!nzchar(rdir)) rdir <- NA_character_
   ft <- if (!is.null(focal_taxon) && nzchar(trimws(focal_taxon))) trimws(focal_taxon) else NA_character_
   im <- if (is.null(intraspecific_mode) || is.na(intraspecific_mode)) NA_integer_ else if (isTRUE(intraspecific_mode)) 1L else 0L
 
@@ -2170,6 +2227,12 @@ persist_step06_genomics_to_sqlite <- function(
       NA_integer_,
       as.integer(as.logical(gla_df$is_geno_admixed))
     )
+  }
+  if ("public_backbone_clade" %in% names(gla_df)) {
+    gla_df$public_backbone_clade <- as.character(gla_df$public_backbone_clade)
+  }
+  for (.ncol in intersect(c("public_phytop_ils_index", "public_phytop_ih_index"), names(gla_df))) {
+    gla_df[[.ncol]] <- suppressWarnings(as.numeric(gla_df[[.ncol]]))
   }
 
   db_upsert_dataframe(

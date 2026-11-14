@@ -1,5 +1,5 @@
 # ==============================================================================
-# Configuration: Packera Species Delimitation & Morphometrics Pipeline
+# Configuration: Plantmatics Integrative Morphometrics and Phylogenomics Pipeline
 # Affiliation: University of North Carolina at Chapel Hill Herbarium (NCU)
 # ==============================================================================
 
@@ -10,7 +10,7 @@ paths:
   # extracted_leaves, voucher_reproductive_phenology, environmental_cache + R*Tree) and
   # Tier B run-scoped analyses (pipeline_runs, run_active_cohort, leaf_efa_harmonics, otu_morphometrics,
   # spatial_rf_predictions, curation_triage, v_integrative_triage_master).
-  db_path: "data/packera_pipeline.sqlite"
+  db_path: "data/plantmatics.sqlite"
   raw_vouchers_dir: "data/raw_vouchers"
   curated_vouchers_csv: "data/tables/curated_vouchers.csv"
   failed_qc_vouchers_csv: "data/tables/failed_qc_vouchers.csv"

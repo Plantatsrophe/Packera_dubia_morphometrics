@@ -747,7 +747,11 @@ def collect_voucher_dem_tiles(
             logger.debug(f"Could not read coordinates from {c_path}: {exc}")
 
     if not tiles:
-        sql_path = db_path or (workspace_root / "data" / "packera_pipeline.sqlite")
+        sql_path = db_path
+        if sql_path is None:
+            cand_new = workspace_root / "data" / "plantmatics.sqlite"
+            cand_old = workspace_root / "data" / "packera_pipeline.sqlite"
+            sql_path = cand_new if cand_new.is_file() else (cand_old if cand_old.is_file() else cand_new)
         if sql_path.is_file():
             try:
                 conn = sqlite3.connect(f"file:{sql_path}?mode=ro", uri=True, timeout=5.0)

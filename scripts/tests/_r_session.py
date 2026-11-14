@@ -22,8 +22,12 @@ from typing import Dict, List, Mapping, Optional, Sequence, Union
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 _MANAGED_ENV_KEYS = (
+    "PLANTMATICS_DB_PATH",
+    "PLANTMATICS_RUN_DIR",
+    "PLANTMATICS_GENOMICS_DIR",
     "PACKERA_DB_PATH",
     "PACKERA_RUN_DIR",
+    "PACKERA_GENOMICS_DIR",
     "PACKERA_SKIP_FIGURES",
 )
 

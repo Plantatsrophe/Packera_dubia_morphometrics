@@ -1,15 +1,15 @@
 cff-version: 1.2.0
-message: "If you use this pipeline, its SQLite relational schema, or its integrative species delimitation protocol (UNC-BOT-SOP-2026-04-REV5) in your research, please cite it using the metadata below."
+message: "If you use Plantmatics, its SQLite relational schema, or its integrative species delimitation protocol (UNC-BOT-SOP-2026-04-REV5) in your research, please cite it using the metadata below."
 type: software
-title: "Automated Vegetative Phenotyping and Integrative Species Delimitation Pipeline for North American Packera"
-version: "5.0.0"
+title: "Plantmatics: Automated Vegetative Phenotyping and Integrative Species Delimitation Pipeline for North American Packera"
+version: "5.2.0"
 identifiers:
   - type: other
     value: "UNC-BOT-SOP-2026-04-REV5"
-    description: "University of North Carolina at Chapel Hill Herbarium (NCU) Standard Operating Procedure Revision 5 (SQLite Schema 20261121)"
-date-released: "2026-11-11"
+    description: "University of North Carolina at Chapel Hill Herbarium (NCU) Standard Operating Procedure Revision 5 (SQLite Schema 20261124)"
+date-released: "2026-11-14"
 license: MIT
-repository-code: "https://github.com/Plantatsrophe/Packera_dubia_morphometrics"
+repository-code: "https://github.com/Plantatsrophe/Plantmatics"
 authors:
   - family-names: "Fuller"
     given-names: "J. Brandon"
@@ -28,13 +28,17 @@ keywords:
   - "herbarium computer vision"
   - "LeafMachine3"
   - "spatial random forest"
+  - "phylogenomics"
+  - "nextRAD"
+  - "coalescent species delimitation"
 abstract: >-
-  A six-stage Python and R computational pipeline developed at the University of
-  North Carolina at Chapel Hill Herbarium (NCU) for automated vegetative
-  phenotyping, nomenclatural type anchoring, determiner authority
-  stratification, fine-grain 0 to 15 cm rhizosphere niche modeling, circular
-  Hopkins flowering phenology, and five-stage integrative species delimitation
-  across North American Packera (Asteraceae: Senecioneae).
+  Plantmatics is a seven-stage Python and R computational pipeline developed at
+  the University of North Carolina at Chapel Hill Herbarium (NCU) for
+  automated vegetative phenotyping, nomenclatural type anchoring, determiner
+  authority stratification, fine-grain 0 to 15 cm rhizosphere niche modeling,
+  circular Hopkins flowering phenology, standalone polyploid nextRAD and
+  public backbone phylogenomics, and five-stage integrative species
+  delimitation across North American Packera (Asteraceae: Senecioneae).
 references:
   - type: software
     title: "LeafMachine3: Automated machine vision for herbarium trait phenotyping"

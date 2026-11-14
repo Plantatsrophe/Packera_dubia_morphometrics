@@ -233,15 +233,27 @@ adaptive_point_alpha <- function(n_pts) {
 
 .get_packera_synonym_map <- function() {
   cand_dbs <- character(0)
-  env_db <- trimws(Sys.getenv("PACKERA_DB_PATH", unset = ""))
+  env_db <- trimws(Sys.getenv("PLANTMATICS_DB_PATH", unset = ""))
+  if (!nzchar(env_db)) env_db <- trimws(Sys.getenv("PACKERA_DB_PATH", unset = ""))
   if (nzchar(env_db) && env_db != ":memory:") cand_dbs <- c(cand_dbs, env_db)
-  if (exists("resolve_packera_db_path", mode = "function")) {
+  if (exists("resolve_plantmatics_db_path", mode = "function")) {
+    rdb <- tryCatch(as.character(resolve_plantmatics_db_path()), error = function(e) "")
+    if (!is.na(rdb) && nzchar(rdb) && rdb != ":memory:") cand_dbs <- c(cand_dbs, rdb)
+  } else if (exists("resolve_packera_db_path", mode = "function")) {
     rdb <- tryCatch(as.character(resolve_packera_db_path()), error = function(e) "")
     if (!is.na(rdb) && nzchar(rdb) && rdb != ":memory:") cand_dbs <- c(cand_dbs, rdb)
   }
-  cand_dbs <- c(cand_dbs, "data/packera_pipeline.sqlite")
+  cand_dbs <- c(cand_dbs, "data/plantmatics.sqlite")
+  if (!file.exists("data/plantmatics.sqlite") && file.exists("data/packera_pipeline.sqlite")) {
+    cand_dbs <- c(cand_dbs, "data/packera_pipeline.sqlite")
+  }
   if (nzchar(.pub_figures_script_dir)) {
-    cand_dbs <- c(cand_dbs, file.path(.pub_figures_script_dir, "..", "..", "data", "packera_pipeline.sqlite"))
+    rel_new <- file.path(.pub_figures_script_dir, "..", "..", "data", "plantmatics.sqlite")
+    rel_old <- file.path(.pub_figures_script_dir, "..", "..", "data", "packera_pipeline.sqlite")
+    cand_dbs <- c(cand_dbs, rel_new)
+    if (!file.exists(rel_new) && file.exists(rel_old)) {
+      cand_dbs <- c(cand_dbs, rel_old)
+    }
   }
   cand_dbs <- unique(normalizePath(cand_dbs[file.exists(cand_dbs)], mustWork = FALSE))
   sig <- if (length(cand_dbs) == 0L) "none" else paste(cand_dbs, as.numeric(file.info(cand_dbs)$mtime), sep = "@", collapse = "|")
@@ -653,7 +665,8 @@ resolve_active_figures_dir <- function(explicit_dir = NULL, reference_path = NUL
     if (!dir.exists(fdir)) dir.create(fdir, recursive = TRUE, showWarnings = FALSE)
     return(fdir)
   }
-  env_run <- Sys.getenv("PACKERA_RUN_DIR", unset = "")
+  env_run <- trimws(Sys.getenv("PLANTMATICS_RUN_DIR", unset = ""))
+  if (!nzchar(env_run)) env_run <- trimws(Sys.getenv("PACKERA_RUN_DIR", unset = ""))
   if (nzchar(env_run)) {
     fdir <- file.path(env_run, "outputs", "figures")
     if (!dir.exists(fdir)) dir.create(fdir, recursive = TRUE, showWarnings = FALSE)

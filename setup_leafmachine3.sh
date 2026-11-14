@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # LeafMachine3 Environment & ONNX Model Setup Script
-# Project: Packera dubia Species Delimitation & Morphometrics Pipeline
+# Project: Plantmatics Integrative Morphometrics and Phylogenomics Pipeline
 # Affiliation: University of North Carolina at Chapel Hill Herbarium (NCU)
 # ==============================================================================
 
@@ -79,14 +79,14 @@ done
 if [ -d "${LM3_DIR}/.venv" ]; then
     uv pip install --python "${LM3_DIR}/.venv/bin/python" "pandas>=2.0.0"
     if [ -L "${PROJECT_ROOT}/.venv_LM3" ]; then
-        ln -sfn "${LM3_DIR}/.venv" "${PROJECT_ROOT}/.venv_LM3"
+        ln -sfn "LeafMachine3/.venv" "${PROJECT_ROOT}/.venv_LM3"
     elif [ -d "${PROJECT_ROOT}/.venv_LM3" ]; then
         if ! "${PROJECT_ROOT}/.venv_LM3/bin/python" -c "import onnxruntime" >/dev/null 2>&1; then
             rm -rf "${PROJECT_ROOT}/.venv_LM3"
-            ln -sfn "${LM3_DIR}/.venv" "${PROJECT_ROOT}/.venv_LM3"
+            ln -sfn "LeafMachine3/.venv" "${PROJECT_ROOT}/.venv_LM3"
         fi
     else
-        ln -sfn "${LM3_DIR}/.venv" "${PROJECT_ROOT}/.venv_LM3"
+        ln -sfn "LeafMachine3/.venv" "${PROJECT_ROOT}/.venv_LM3"
     fi
 fi
 

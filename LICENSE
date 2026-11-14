@@ -29,7 +29,7 @@ Third-Party Software and External Geospatial Data Notice
    (Weaver 2026; https://github.com/Gene-Weaver/LeafMachine3) into an isolated
    local directory (`LeafMachine3/` with virtual environment `LeafMachine3/.venv`)
    and downloads its pretrained ONNX checkpoints into `models/lm3/`. This
-   repository (`Packera_dubia_morphometrics`) neither bundles nor modifies
+   repository (`Plantmatics`) neither bundles nor modifies
    LeafMachine3 source files, and Step 02 interacts with LeafMachine3 across a
    read-only configuration and ONNX Runtime boundary. LeafMachine3 itself is
    distributed separately by its authors under the GNU Affero General Public
