@@ -558,8 +558,8 @@ def run_coalescent_delimitation(
                 if np.any(ok):
                     call_blk[0, i, j] = float(np.sum(ok))
                     diff_blk[0, i, j] = float(np.sum(np.abs(mat[i, ok] - mat[j, ok]) * 0.02))
-        w_het = np.nansum(mat * (1.0 - mat), axis=1, keepdims=True) * 0.02
-        w_call = np.sum(np.isfinite(mat), axis=1, keepdims=True).astype(np.float64)
+        w_het = (np.nansum(mat * (1.0 - mat), axis=1, keepdims=True) * 0.02).T
+        w_call = np.sum(np.isfinite(mat), axis=1, keepdims=True).astype(np.float64).T
         gdi_df, gdi_s_df = compute_coalescent_gdi_delimitation(sids, taxa_labels, diff_blk, call_blk, w_het, w_call, n_boot=50)
         gdi_df.to_csv(gdi_csv, index=False)
         gdi_s_df.to_csv(gdi_samp_csv, index=False)

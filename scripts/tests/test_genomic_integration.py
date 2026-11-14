@@ -795,10 +795,10 @@ class TestGenomicIntegration(unittest.TestCase):
                     "hdplot_retained_loci", "inferred_cytotype", "nquire_delta_logl",
                     "plastid_clade", "its_ribotype", "cytonuclear_discordant",
                 ])
-                for sid, cat, tier, sp, is_q, lat, lon, cyt, plast, its_r, cytonuc, _ in s_defs:
+                for idx, (sid, cat, tier, sp, is_q, lat, lon, cyt, plast, its_r, cytonuc, _) in enumerate(s_defs, start=1):
                     wr.writerow([
                         sid, sid, cat, tier,
-                        sid[3:6], sp, sp, "POP1",
+                        sid[3:6], sp, sp, f"POP_{idx:02d}" if not sid.endswith(("M", "P")) else f"POP_{sid[:-1]}",
                         sid[:-1] if sid[-1] in ("M", "P") else sid,
                         sid[-1] if sid[-1] in ("M", "P") else "",
                         str(is_q), str(lat), str(lon),

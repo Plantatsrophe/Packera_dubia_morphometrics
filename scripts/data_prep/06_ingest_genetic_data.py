@@ -866,15 +866,6 @@ def _evaluate_hdplot_loci(
     for j in range(n_loci):
         col_p = sub_pass[:, j]
         fin_p = col_p[np.isfinite(col_p)]
-        if fin_p.size < 2 or float(np.std(fin_p)) <= 1e-8:
-            keep_mask[j] = False
-            diag_rows.append({
-                "locus_id": locus_ids[j], "n_called_ref": int(np.sum(np.isfinite(sub_ref[:, j]))),
-                "n_hets_ref": 0, "H_obs": np.nan, "het_ref_reads": 0.0, "het_alt_reads": 0.0,
-                "het_total_reads": 0.0, "D_read_ratio": 0.0, "hdplot_keep": 0, "filter_reason": "monomorphic_or_sparse",
-            })
-            continue
-
         col_r = sub_ref[:, j]
         fin_mask_r = np.isfinite(col_r)
         fin_r = col_r[fin_mask_r]
@@ -898,18 +889,24 @@ def _evaluate_hdplot_loci(
                     d_stat = float((na_sum - 0.5 * n_tot) / np.sqrt(0.25 * n_tot))
 
         reason = "PASS"
-        if n_called_r >= 4 and h_obs > float(h_max):
+        if fin_p.size < 2:
+            keep_mask[j] = False
+            reason = "monomorphic_or_sparse"
+        elif n_called_r >= 4 and h_obs > float(h_max):
             keep_mask[j] = False
             reason = f"HDplot_H>{h_max:.2f}"
         elif (na_sum + nb_sum) >= 10.0 and abs(d_stat) > float(d_max):
             keep_mask[j] = False
             reason = f"HDplot_|D|>{d_max:.1f}"
+        elif float(np.std(fin_p)) <= 1e-8:
+            keep_mask[j] = False
+            reason = "monomorphic_or_sparse"
 
         diag_rows.append({
             "locus_id": locus_ids[j],
             "n_called_ref": n_called_r,
             "n_hets_ref": n_hets_r,
-            "H_obs": round(h_obs, 4),
+            "H_obs": round(h_obs, 4) if n_called_r > 0 else np.nan,
             "het_ref_reads": round(na_sum, 1),
             "het_alt_reads": round(nb_sum, 1),
             "het_total_reads": round(na_sum + nb_sum, 1),
