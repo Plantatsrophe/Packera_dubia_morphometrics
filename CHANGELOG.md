@@ -4,6 +4,18 @@ All notable methodological, statistical, figure, and SQLite relational schema ch
 
 The structure follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [5.4.0] - 2026-11-14 (`UNC-BOT-SOP-2026-04-REV5` | SQLite Schema `20261125`)
+
+### Added
+* **Eastern North American Monograph Launcher (`resolve_eastern_na_packera.sh`, `scripts/pipeline/resolve_eastern_na_packera.py`):** I built a hierarchical genus-wide and per-species monograph orchestrator (`< 450` lines) invoked via `./resolve_eastern_na_packera.sh` that executes the three-stage genus baseline (`00_genus_wide/{01_raw_discovery,02_purified_genus,03_gold_thin_audit}`) before sweeping every accepted *Packera* binomial meeting `--min-vouchers` across three per-species resolution stages (`<Species_Slug>/{02_complex_triage,03_intraspecific_clean,04_gold_thin_audit}`).
+* **Dated Unique Parent Hierarchy and Symlink (`runs/<PARENT_RUN_ID>/`, `runs/latest_eastern_na`):** Every new monograph campaign creates a dated and unique `<prefix>_<YYYYMMDD>_<uid6>` parent directory under `runs/` and updates the convenience symlink `runs/latest_eastern_na -> <PARENT_RUN_ID>` while keeping flat `runs/<RUN_ID>/` workflows and `runs/latest` intact.
+* **Dynamic Binomial Discovery and Shared Stage 1 Reuse:** I wired dynamic *Packera* binomial discovery from the Stage 1 baseline with `--min-vouchers` gating alongside `--only-taxa` and `--exclude-taxon` filters (`--geographic-scope` sets the discovery region); `--discovery-run-id` pairs with `--skip-discovery` and `--skip-intraspecific-sweep` so subsequent sweeps reuse a completed `01_raw_discovery` baseline without duplicating harvests or GPU segmentation.
+* **Manifest Checkpoint Resume and 25-Column Master Synthesis:** I added checkpoint state persistence (`monograph_run_manifest.json`) supporting `--resume` and `--parent-run-id` alongside `--force` re-execution overrides, plus `--dry-run` command inspection and `--summarize-only` compilation of the 25-column `Eastern_NA_Packera_Master_Synthesis.csv` table alongside `Eastern_NA_Packera_Monograph_Report.md`.
+* **Monograph CLI Contract Tests (`scripts/tests/test_eastern_na_monograph_cli.py`):** I added `test_eastern_na_monograph_cli.py` (`< 350` lines, which brings the active QA suite to 15 `test_*.py` modules) to test nested `run_id` path resolution alongside dated unique parent IDs and manifest checkpoint resume; the suite also verifies shared Stage 1 discovery reuse and 25-column master synthesis output.
+
+### Changed
+* **Lossless Nested `run_id` Resolution Across Python and R Plus Bash:** I aligned run-directory resolution across the Python and R entrypoints alongside Bash orchestration so multi-segment `run_id` keys (`<PARENT_RUN_ID>/00_genus_wide/<Stage>` and `<PARENT_RUN_ID>/<Species_Slug>/<Stage>`) map losslessly onto nested `runs/` subdirectories and isolate cleanly by `run_id` in SQLite Tier B tables without altering single-level `runs/<RUN_ID>/` behavior.
+
 ## [5.3.0] - 2026-11-14 (`UNC-BOT-SOP-2026-04-REV5` | SQLite Schema `20261125`)
 
 ### Added

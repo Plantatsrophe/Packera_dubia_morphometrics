@@ -573,6 +573,20 @@ if [[ -n "${CUSTOM_RUN_ID}" ]]; then
 else
   RUN_ID="${RUN_ID:-run_$(date +%Y%m%d_%H%M%S)}"
 fi
+RUN_ID="${RUN_ID//\\//}"
+while [[ "${RUN_ID}" == ./* ]]; do
+  RUN_ID="${RUN_ID#./}"
+done
+while [[ "${RUN_ID}" == /* ]]; do
+  RUN_ID="${RUN_ID#/}"
+done
+RUN_ID="${RUN_ID#runs/}"
+while [[ "${RUN_ID}" == */ ]]; do
+  RUN_ID="${RUN_ID%/}"
+done
+if [[ -z "${RUN_ID}" ]]; then
+  RUN_ID="run_$(date +%Y%m%d_%H%M%S)"
+fi
 
 RUN_DIR="runs/${RUN_ID}"
 export RUN_ID
@@ -589,12 +603,14 @@ fi
 
 # 1. Create standardized run-scoped directory hierarchy
 mkdir -p \
+  "$(dirname "${RUN_DIR}")" \
   "${RUN_DIR}/data/tables" \
   "${RUN_DIR}/outputs/figures" \
   "${RUN_DIR}/outputs/reports" \
   "${RUN_DIR}/logs"
 
 # Maintain runs/latest symlink pointing to the most recent RUN_DIR
+mkdir -p "runs"
 ln -sfn "${RUN_ID}" "runs/latest"
 
 export PYTHONUNBUFFERED=1
@@ -904,6 +920,7 @@ for _cand_root in ([Path('${PROJECT_ROOT}').resolve(), root_data.parent, Path.cw
     if (_cand_root / 'scripts').is_dir() and str(_cand_root) not in sys.path:
         sys.path.insert(0, str(_cand_root))
 
+from scripts.core.config import resolve_canonical_run_id
 from scripts.core.harvester import (
     select_cascading_outgroup_anchors,
     spatially_balance_and_thin_vouchers,
@@ -1055,8 +1072,13 @@ if exclude_misidentified:
                 db_flagged, db_run_count = query_misidentified_vouchers_from_db(
                     conn_mis,
                     triage_sources=tokens,
-                    exclude_run_id=os.environ.get('RUN_ID') or run_dir.name,
+                    exclude_run_id=resolve_canonical_run_id(
+                        run_dir=run_dir,
+                        explicit_run_id=os.environ.get('RUN_ID') or None,
+                        workspace_root=root_data.parent,
+                    ),
                     allowed_subtypes=ALLOWED_TREATMENT_SUBTYPES,
+                    workspace_root=root_data.parent,
                 )
                 misidentified_cats.update(db_flagged)
             finally:
@@ -1064,10 +1086,10 @@ if exclude_misidentified:
         except Exception:
             db_run_count = 0
 
-    runs_candidates = [run_dir.parent, root_data.parent / 'runs', Path.cwd() / 'runs']
+    runs_candidates = [root_data.parent / 'runs', Path.cwd() / 'runs', run_dir.parent]
     runs_base = next(
-        (rc for rc in runs_candidates if rc.is_dir() and any(rc.glob('*/data/tables/triage_queue.csv'))),
-        run_dir.parent,
+        (rc for rc in runs_candidates if rc.is_dir() and any(rc.glob('**/data/tables/triage_queue.csv'))),
+        next((rc for rc in runs_candidates if rc.is_dir()), run_dir.parent),
     )
     triage_files = []
     seen_resolved = set()
@@ -1075,12 +1097,16 @@ if exclude_misidentified:
 
     for tok in tokens:
         if tok.upper() in ('ALL', '*'):
-            for p in sorted(runs_base.glob('*/data/tables/triage_queue.csv')):
+            for p in sorted(runs_base.glob('**/data/tables/triage_queue.csv')):
                 rp = p.resolve()
                 if rp != self_triage and rp not in seen_resolved and p.is_file() and p.stat().st_size > 0:
                     seen_resolved.add(rp)
                     triage_files.append(p)
         else:
+            tok_norm = resolve_canonical_run_id(
+                explicit_run_id=tok,
+                workspace_root=root_data.parent,
+            )
             cand_paths = [
                 Path(tok),
                 Path(tok) / 'data' / 'tables' / 'triage_queue.csv',
@@ -1088,6 +1114,12 @@ if exclude_misidentified:
                 root_data.parent / 'runs' / tok / 'data' / 'tables' / 'triage_queue.csv',
                 Path.cwd() / 'runs' / tok / 'data' / 'tables' / 'triage_queue.csv',
             ]
+            if tok_norm and tok_norm != tok:
+                cand_paths.extend([
+                    runs_base / tok_norm / 'data' / 'tables' / 'triage_queue.csv',
+                    root_data.parent / 'runs' / tok_norm / 'data' / 'tables' / 'triage_queue.csv',
+                    Path.cwd() / 'runs' / tok_norm / 'data' / 'tables' / 'triage_queue.csv',
+                ])
             matched = next((cp for cp in cand_paths if cp.is_file() and cp.stat().st_size > 0), None)
             if matched is None and db_run_count == 0:
                 print(
@@ -1194,18 +1226,30 @@ if focal_raw:
 
         if auto_neighbors_flag:
             discovered_neighbors = []
+            runs_search_root = next(
+                (
+                    cand for cand in (root_data.parent / 'runs', Path.cwd() / 'runs')
+                    if cand.is_dir() and cand in run_dir.parents
+                ),
+                None,
+            )
+            if runs_search_root is None:
+                runs_search_root = next(
+                    (p for p in run_dir.parents if p.name == 'runs'),
+                    run_dir.parent,
+                )
             neigh_candidates = [
                 run_dir / 'outputs' / 'reports' / 'focal_auto_neighbors.txt',
-                run_dir.parent / 'latest' / 'outputs' / 'reports' / 'focal_auto_neighbors.txt',
-            ] + sorted(run_dir.parent.glob('*/outputs/reports/focal_auto_neighbors.txt'), reverse=True)
+                runs_search_root / 'latest' / 'outputs' / 'reports' / 'focal_auto_neighbors.txt',
+            ] + sorted(runs_search_root.glob('**/outputs/reports/focal_auto_neighbors.txt'), reverse=True)
             comp_candidates = [
                 run_dir / 'outputs' / 'reports' / 'empirical_taxon_complexes.csv',
-                run_dir.parent / 'latest' / 'outputs' / 'reports' / 'empirical_taxon_complexes.csv',
-            ] + sorted(run_dir.parent.glob('*/outputs/reports/empirical_taxon_complexes.csv'), reverse=True)
+                runs_search_root / 'latest' / 'outputs' / 'reports' / 'empirical_taxon_complexes.csv',
+            ] + sorted(runs_search_root.glob('**/outputs/reports/empirical_taxon_complexes.csv'), reverse=True)
             aff_candidates = [
                 run_dir / 'outputs' / 'reports' / 'pairwise_taxon_affinity_matrix.csv',
-                run_dir.parent / 'latest' / 'outputs' / 'reports' / 'pairwise_taxon_affinity_matrix.csv',
-            ] + sorted(run_dir.parent.glob('*/outputs/reports/pairwise_taxon_affinity_matrix.csv'), reverse=True)
+                runs_search_root / 'latest' / 'outputs' / 'reports' / 'pairwise_taxon_affinity_matrix.csv',
+            ] + sorted(runs_search_root.glob('**/outputs/reports/pairwise_taxon_affinity_matrix.csv'), reverse=True)
 
             comp_file = next((p for p in comp_candidates if p.is_file() and p.stat().st_size > 0), None)
             aff_file = next((p for p in aff_candidates if p.is_file() and p.stat().st_size > 0), None)
@@ -1344,7 +1388,11 @@ if has_subset_filter:
 
 # Register pipeline_runs and populate run_active_cohort in SQLite (skipping canonical DB under --demo)
 if os.environ.get('PACKERA_DEMO_MODE') != '1':
-    run_id_val = os.environ.get('RUN_ID') or run_dir.name
+    run_id_val = resolve_canonical_run_id(
+        run_dir=run_dir,
+        explicit_run_id=os.environ.get('RUN_ID') or None,
+        workspace_root=root_data.parent,
+    )
     conn_coh = get_db_connection(db_path=target_db_path, init_schema=True, workspace_root=root_data.parent)
     try:
         ensure_pipeline_run(

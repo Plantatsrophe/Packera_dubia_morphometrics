@@ -169,7 +169,19 @@ Rscript -e 'install.packages(c("remotes", "tidyverse", "optparse", "mclust", "cl
 # 14. Automated 4-stage focal species-complex resolution workflow from existing harvested sheets (Steps 03/04 morphometrics, Step 05 ENM, and Step 06 phylogenomics run independently before Step 07 synthesis)
 bash resolve_packera_dubia_complex.sh --skip-harvest --threads 32
 
-# 15. Standalone morphometric-independent Step 05 ENM, ecotype_regime discovery, and Hopkins phenology (invoked without --morphometrics)
+# 15. Automated Eastern North American genus-wide and per-species monograph workflow (runs/<PARENT_RUN_ID>/)
+# Preview nested run_id paths and stage commands without executing
+./resolve_eastern_na_packera.sh --dry-run --skip-harvest --threads 32
+# Launch a new dated and unique parent run (creates runs/<prefix>_<YYYYMMDD>_<uid6>/ and updates runs/latest_eastern_na)
+./resolve_eastern_na_packera.sh --skip-harvest --threads 32
+# Resume the active parent monograph run from saved manifest checkpoints
+./resolve_eastern_na_packera.sh --resume --threads 32
+# Resume or target a specific parent monograph run ID explicitly
+./resolve_eastern_na_packera.sh --parent-run-id eastern_na_20261114_a1b2c3 --resume --threads 32
+# Re-compile the 25-column master synthesis CSV and monograph report without running pipeline stages
+./resolve_eastern_na_packera.sh --parent-run-id eastern_na_20261114_a1b2c3 --summarize-only
+
+# 16. Standalone morphometric-independent Step 05 ENM, ecotype_regime discovery, and Hopkins phenology (invoked without --morphometrics)
 Rscript scripts/analysis/05_multimodal_spatial_rf.R \
   --vouchers runs/latest/data/tables/curated_vouchers.csv \
   --pheno-states runs/latest/data/tables/voucher_phenological_states.csv \
@@ -183,23 +195,23 @@ Rscript scripts/analysis/05_multimodal_spatial_rf.R \
   --output-summary runs/latest/outputs/reports/multimodal_spatial_rf_summary.csv \
   --output-plot runs/latest/outputs/figures/fig05a_ecological_niche_and_rf_importance.png
 
-# 16. Harvest flat public Packera trees, plastomes, nrITS/ETS, nuclear waxy, SRA runs, and BOLD barcodes into data/genomics/
+# 17. Harvest flat public Packera trees, plastomes, nrITS/ETS, nuclear waxy, SRA runs, and BOLD barcodes into data/genomics/
 .venv/bin/python main.py download-public-genomics --genomics-dir data/genomics
 ./run_pipeline.sh --download-public-genomics
 
-# 17. Standalone Step 06 phylogenomic stream (automatic no-op when data/genomics/ lacks sample payload)
+# 18. Standalone Step 06 phylogenomic stream (automatic no-op when data/genomics/ lacks sample payload)
 .venv/bin/python main.py genomics \
   --genomics-dir data/genomics \
   --parsed-dir runs/latest/outputs/genomics_parsed \
   --out-dir runs/latest/outputs/genomics
 
-# 18. Offline organellar, nrITS, and nuclear waxy skimming from raw paired-end/ZIP FASTQ reads into flat data/genomics/
+# 19. Offline organellar, nrITS, and nuclear waxy skimming from raw paired-end/ZIP FASTQ reads into flat data/genomics/
 .venv/bin/python main.py skim-organellar \
   --genomics-dir data/genomics \
   --fastq-source raw_reads.zip \
   --threads 16
 
-# 19. Standalone Step 07 taxonomic synthesis, HTML dashboard, and 300-DPI complex network plate
+# 20. Standalone Step 07 taxonomic synthesis, HTML dashboard, and 300-DPI complex network plate
 Rscript scripts/analysis/07_triage_dashboard_synthesis.R \
   --vouchers runs/latest/data/tables/curated_vouchers.csv \
   --harmonics runs/latest/data/tables/leaf_efa_harmonics.csv \
@@ -274,6 +286,26 @@ Central defaults live in [`config/config.yaml`](config/config.yaml) and load thr
 | `synthesis` (`analyze`) | `05_multimodal_spatial_rf.R` + `06_genomic_phylogenomics.R` + `07_triage_dashboard_synthesis.R` | Ensures cached environmental layers via `download_environmental_layers.py` (unless `--skip-env-download`), runs morphometric- and genomic-independent Step 05 Spatial RF, `ecotype_regime` discovery, MaxEnt SDMs, and Hopkins phenology (`fig05a` to `fig05c`), runs standalone Step 06 phylogenomics whenever `data/genomics/` holds genetic files (`fig06a`, `fig06b`), and executes Step 07 joint consensus synthesis (`fig07a`, `fig07b`). |
 | `run-all` | `main.py` | Executes `harvest` $\to$ `segment` $\to$ `morphometrics` $\to$ `genomics` (when staged) $\to$ `synthesis` end to end inside a run-scoped directory. |
 
+### Eastern North American Monograph and Complex Orchestrators (`./resolve_eastern_na_packera.sh` & `./resolve_packera_dubia_complex.sh`)
+
+For multi-stage curation campaigns backed by shared Tier A caches in `data/plantmatics.sqlite`, `./resolve_packera_dubia_complex.sh` invokes `scripts/pipeline/resolve_focal_species_complex.py` to execute four sequential stages for a single focal taxon, whereas `./resolve_eastern_na_packera.sh` invokes `scripts/pipeline/resolve_eastern_na_packera.py` to execute the three-stage genus-wide baseline (`00_genus_wide/`) paired with three-stage sweeps across every dynamically discovered *Packera* binomial under `runs/<PARENT_RUN_ID>/`. Compute flags such as `--threads` and `--gpu-batch-size` alongside cohort overrides including `--skip-harvest` and `--db` forward directly to `./run_pipeline.sh`.
+
+| Flag | Arguments | Description |
+| :--- | :--- | :--- |
+| `--prefix` | `<STR>` | Sets the run prefix used to construct `runs/<prefix>_<YYYYMMDD>_<uid6>/` and nested stage identifiers. |
+| `--parent-run-id` | `<PARENT_RUN_ID>` | Targets an explicit parent monograph folder under `runs/<PARENT_RUN_ID>/` instead of generating a new dated and unique ID. |
+| `--resume` | *(flag)* | Resumes an existing monograph run from `monograph_run_manifest.json` checkpoints and skips completed stages. |
+| `--discovery-run-id` | `<RUN_ID>` | Reuses an existing Stage 1 `01_raw_discovery` run identifier as the shared baseline instead of repeating initial discovery. |
+| `--geographic-scope` | `{eastern_na,north_america,global}` | Sets the Step 01 geographic filter applied during baseline discovery (`eastern_na` by default). |
+| `--min-vouchers` | `<INT>` | Sets the minimum voucher threshold required for an accepted binomial to enter the per-species sweep. |
+| `--only-taxa` | `"<Sp1>" ...` | Restricts the per-species sweep exclusively to the named accepted *Packera* binomials. |
+| `--exclude-taxon` | `"<Binomial>" ...` | Excludes one or more specified taxa from genus-wide discovery cohorts and per-species sweeps. |
+| `--skip-discovery` | *(flag)* | Skips the `00_genus_wide` discovery stages when genus-wide baseline runs already exist. |
+| `--skip-intraspecific-sweep` | *(flag)* | Executes only the `00_genus_wide` stages plus summary compilation without launching per-species sweeps. |
+| `--force` | *(flag)* | Forces re-execution of stages inside the parent monograph run even when checkpoint markers record completion. |
+| `--summarize-only` | *(flag)* | Skips stage execution and compiles `Eastern_NA_Packera_Master_Synthesis.csv` alongside `Eastern_NA_Packera_Monograph_Report.md` from existing stage outputs. |
+| `--dry-run` | *(flag)* | Prints the resolved nested stage `run_id` paths and `./run_pipeline.sh` commands without executing them. |
+
 ## External Data Sources and Geospatial Layers
 
 To prevent coarse historical locality centroids from contaminating fine-scale soil models, Step 05 enforces explicit coordinate-uncertainty gates before raster extraction. Direct point extractions for $0\text{ to }15\text{ cm}$ rhizosphere chemistry and $30\text{ m}$ topographic indices require `coordinateUncertaintyInMeters <= 2000` m, whereas uncertainty-buffered outcrop and soil extractions (`min_bedrock_depth_buffer_cm` computed via `min()` across finite pixels, `ph_q10_buffer`, `ph_q90_buffer`, and `max_cfvo_buffer_pct`) extend up to `<= 5000` m using a capped `100 to 1500` m buffer radius (`50` m default for pinpoint GPS coordinates) weighted continuously by `edaphic_coord_weight`. Macro-climatic rasters permit `<= 10000` m (paired with a $150\text{ km}$ / shared-ecoregion Gold neighbor fallback for historical *locus classicus* type sheets). Full raster filenames, integer scalar divisors, derived habitat index equations, and citations appear in [`docs/ENVIRONMENTAL_DATA_SOURCES.md`](docs/ENVIRONMENTAL_DATA_SOURCES.md).
@@ -301,6 +333,28 @@ Every run writes self-contained tables, reports, rasters, and **300-DPI PNG-only
 * **Native LeafMachine3 Visual Caches (`runs/<RUN_ID>/outputs/figures/`):**
   * `lm3_assets/` and `ect_overlays/`: Unlimited taxon-indexed native `LeafMachine3` leaf cutouts (`render_leaf_products`) and polar radial ECT badges (`render_radial_ect_overlay`) across basal and cauline tracks, reused inline across Step 03, Step 07, and `Triage_Dashboard_Interactive.html`.
   * `lm3_sheet_overlays/`: Capped (`max_sheets = 24`) 300-DPI whole-sheet diagnostic overlays highlighting Nomenclatural Types, multi-plant DBSCAN ramet sheets, heteroblastic basal-plus-cauline sheets, and ruler-calibrated exemplars.
+
+### Hierarchical Monograph Output Layout (`runs/<PARENT_RUN_ID>/`)
+
+When running `./resolve_eastern_na_packera.sh`, each campaign creates a dated and unique parent run directory (`runs/<PARENT_RUN_ID>/`, formatted as `<prefix>_<YYYYMMDD>_<uid6>`) and updates the convenience symlink `runs/latest_eastern_na -> <PARENT_RUN_ID>`. Nested `run_id` keys (`<PARENT_RUN_ID>/00_genus_wide/<Stage>` and `<PARENT_RUN_ID>/<Species_Slug>/<Stage>`) map losslessly across Python and R alongside Bash into three genus-wide stages (`00_genus_wide/{01_raw_discovery,02_purified_genus,03_gold_thin_audit}`) plus three per-species resolution stages (`<Species_Slug>/{02_complex_triage,03_intraspecific_clean,04_gold_thin_audit}`) while storing `monograph_run_manifest.json` alongside `Eastern_NA_Packera_Master_Synthesis.csv` and `Eastern_NA_Packera_Monograph_Report.md` at the parent root:
+
+```text
+runs/
+├── latest -> <RUN_ID>
+├── latest_eastern_na -> <PARENT_RUN_ID>
+└── <PARENT_RUN_ID>/                                 # Dated unique directory (<prefix>_<YYYYMMDD>_<uid6>)
+    ├── monograph_run_manifest.json                    # Checkpoint state alongside discovered taxa and parameters
+    ├── Eastern_NA_Packera_Master_Synthesis.csv        # 25-column cross-species and cross-stage synthesis table
+    ├── Eastern_NA_Packera_Monograph_Report.md         # Genus-wide and per-species Markdown revision monograph
+    ├── 00_genus_wide/
+    │   ├── 01_raw_discovery/                          # Initial genus-wide dynamic binomial discovery run
+    │   ├── 02_purified_genus/                         # Genus-wide run excluding Misidentification_Reassign sheets
+    │   └── 03_gold_thin_audit/                        # Spatially thinned Gold anchor stability audit across genus
+    └── <Species_Slug>/                                # Per-taxon sweep for each binomial meeting the voucher floor
+        ├── 02_complex_triage/                         # Focal taxon plus high-affinity neighbor triage stage
+        ├── 03_intraspecific_clean/                    # Purified intraspecific morphotype and ecotype stage
+        └── 04_gold_thin_audit/                        # Spatially thinned Gold anchor sensitivity stage
+```
 
 ### Canonical 14-Plate 300-DPI PNG Figure Inventory
 
@@ -347,6 +401,7 @@ Plantmatics/
 ├── requirements.txt                                 # Primary Python (.venv) orchestration dependencies
 ├── setup_leafmachine3.sh                            # Automated uv + LeafMachine3 ONNX installer and doctor check
 ├── run_pipeline.sh                                  # Master run-scoped shell orchestrator (Steps 01 to 07)
+├── resolve_eastern_na_packera.sh                    # Automated Eastern NA genus-wide and per-species monograph wrapper
 ├── resolve_packera_dubia_complex.sh                 # Automated 4-stage Packera dubia complex-resolution wrapper
 ├── main.py                                          # Unified Python CLI runner and preflight checker
 └── scripts/
@@ -380,6 +435,7 @@ Plantmatics/
     ├── pipeline/
     │   ├── 01_voucher_harvester.py                  # Step 01 pipeline module alias
     │   ├── 02_segment_and_extract.py                # Step 02 read-only LM3 adapter and 3-stage asynchronous wave engine
+    │   ├── resolve_eastern_na_packera.py            # Hierarchical Eastern NA monograph runner and 25-column synthesis compiler
     │   └── resolve_focal_species_complex.py         # 4-stage focal species-complex runner and cross-stage report compiler
     ├── morphometrics/
     │   ├── 03_fourier_extractor.R                   # Step 03 LM3 EFA QC, homologized Momocs EFA, 32x360 ECT SVD, and 3-way zone routing
@@ -412,7 +468,7 @@ Plantmatics/
     │   ├── step07_genomic_propagation.R             # Step 07 4-tier unsequenced genomic propagation paired with Tier_0 calibration and abstention guardrails
     │   ├── genomic_triage_utils.R                   # Step 07 genomic joiner, Stage 0 field QC triage, F1 hybrid/gdi helpers, and Phase 2 report renderer
     │   └── taxon_complex_discovery_utils.R          # Step 07 Leiden/Louvain modularity and Ward.D2 species-complex delimitation
-    └── tests/                                       # Automated Python, SQLite handshake, warm-R integration, genomic, and code-hygiene QA suite
+    └── tests/                                       # Automated QA suite (15 test_*.py modules including test_eastern_na_monograph_cli.py, plus run_audit.py and _r_session.py)
 ```
 
 ## Verification, Reproducibility, and Troubleshooting

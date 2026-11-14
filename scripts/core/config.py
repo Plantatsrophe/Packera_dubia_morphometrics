@@ -72,6 +72,44 @@ def generate_default_run_id() -> str:
     return f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
 
+def resolve_canonical_run_id(
+    run_dir: Optional[Path] = None,
+    explicit_run_id: Optional[str] = None,
+    workspace_root: Path = PROJECT_ROOT,
+) -> str:
+    """
+    Resolve a canonical POSIX run identifier, preserving nested subpaths under `runs/`
+    (e.g., `eastern_na_20261114_a7f3c2/Packera_dubia/03_intraspecific_clean`).
+    """
+    ws_root = Path(workspace_root)
+    runs_root = (ws_root / "runs").resolve()
+
+    if explicit_run_id is not None:
+        clean = str(explicit_run_id).strip().replace("\\", "/")
+        while clean.startswith("./"):
+            clean = clean[2:]
+        if clean.startswith("runs/"):
+            clean = clean[len("runs/"):]
+        clean = clean.rstrip("/")
+        if clean:
+            if Path(clean).is_absolute():
+                tp = Path(clean).resolve()
+                if runs_root in tp.parents:
+                    return tp.relative_to(runs_root).as_posix()
+                if run_dir is None:
+                    return os.environ.get("RUN_ID", "").strip() or tp.name
+            else:
+                return clean
+
+    if run_dir is not None:
+        rd = Path(run_dir).resolve()
+        if runs_root in rd.parents:
+            return rd.relative_to(runs_root).as_posix()
+        return os.environ.get("RUN_ID", "").strip() or rd.name
+
+    return os.environ.get("RUN_ID", "").strip() or "canonical"
+
+
 def get_active_run_dir(
     run_id: Optional[str] = None,
     workspace_root: Path = PROJECT_ROOT,
@@ -141,7 +179,13 @@ def initialize_run_directory(
             tmp_link = runs_parent / f".latest_{os.getpid()}.tmp"
             if tmp_link.exists() or tmp_link.is_symlink():
                 tmp_link.unlink()
-            target_rel = run_dir.name if run_dir.parent == runs_parent.resolve() else str(run_dir)
+            rd_resolved = run_dir.resolve()
+            runs_parent_resolved = runs_parent.resolve()
+            target_rel = (
+                rd_resolved.relative_to(runs_parent_resolved).as_posix()
+                if runs_parent_resolved in rd_resolved.parents
+                else str(run_dir)
+            )
             tmp_link.symlink_to(target_rel)
             tmp_link.replace(latest_link)
         except OSError:
@@ -150,7 +194,11 @@ def initialize_run_directory(
     if export_env:
         os.environ["PLANTMATICS_RUN_DIR"] = str(run_dir)
         os.environ["PACKERA_RUN_DIR"] = str(run_dir)
-        os.environ["RUN_ID"] = run_dir.name
+        os.environ["RUN_ID"] = resolve_canonical_run_id(
+            run_dir=run_dir,
+            explicit_run_id=run_id,
+            workspace_root=workspace_root,
+        )
 
     return run_dir
 
@@ -241,7 +289,22 @@ def write_run_metadata(
     now_iso = datetime.now().astimezone().isoformat()
     eff_start = start_time or existing.get("start_timestamp") or now_iso
     eff_end = end_time or now_iso
-    eff_run_id = run_id or existing.get("run_id") or run_dir.name
+    eff_run_id = (
+        resolve_canonical_run_id(
+            run_dir=run_dir,
+            explicit_run_id=run_id,
+            workspace_root=workspace_root,
+        )
+        if (run_id is not None and str(run_id).strip())
+        else (
+            existing.get("run_id")
+            or resolve_canonical_run_id(
+                run_dir=run_dir,
+                explicit_run_id=None,
+                workspace_root=workspace_root,
+            )
+        )
+    )
     eff_cli = cli_args if cli_args is not None else existing.get("cli_arguments", list(sys.argv))
 
     table_counts: Dict[str, int] = {}

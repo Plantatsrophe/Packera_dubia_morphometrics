@@ -54,6 +54,7 @@ from scripts.core.config import (
     generate_default_run_id,
     get_active_run_dir,
     initialize_run_directory,
+    resolve_canonical_run_id,
     write_run_metadata,
 )
 from scripts.core.db import (
@@ -136,12 +137,13 @@ def _sync_run_cohort_in_db(
         if args is not None
         else (None, None)
     )
+    run_id = resolve_canonical_run_id(run_dir=run_dir, workspace_root=PROJECT_ROOT)
     try:
         conn = get_db_connection(init_schema=True, workspace_root=PROJECT_ROOT)
         try:
             ensure_pipeline_run(
                 conn,
-                run_id=run_dir.name,
+                run_id=run_id,
                 run_dir=run_dir,
                 end_timestamp=end_timestamp,
                 focal_taxon=focal_taxon,
@@ -154,20 +156,20 @@ def _sync_run_cohort_in_db(
                     pi_row = conn.execute("SELECT COUNT(*), COALESCE(MAX(rowid), 0) FROM plant_individuals;").fetchone() or (0, 0)
                     has_cohort = conn.execute(
                         "SELECT 1 FROM run_active_cohort WHERE run_id = ? LIMIT 1;",
-                        (run_dir.name,),
+                        (run_id,),
                     ).fetchone() is not None
                     fp = (str(vouchers_csv.resolve()), int(vst.st_mtime_ns), int(vst.st_size), int(pi_row[0] or 0), int(pi_row[1] or 0))
-                    if has_cohort and _COHORT_SYNC_CACHE.get(run_dir.name) == fp:
+                    if has_cohort and _COHORT_SYNC_CACHE.get(run_id) == fp:
                         return
                     v_rows = _read_csv_dicts(vouchers_csv)
                     if v_rows:
                         populate_run_active_cohort(
                             conn,
-                            run_id=run_dir.name,
+                            run_id=run_id,
                             voucher_rows=v_rows,
                             clear_existing=True,
                         )
-                        _COHORT_SYNC_CACHE[run_dir.name] = fp
+                        _COHORT_SYNC_CACHE[run_id] = fp
         finally:
             conn.close()
     except Exception as exc:
@@ -1101,7 +1103,11 @@ def run_genomics_stream(
         or None
     )
     is_demo = bool(getattr(args, "demo", False))
-    eff_run_id = run_dir.name if run_dir is not None else (getattr(args, "run_id", None) or "canonical")
+    eff_run_id = (
+        resolve_canonical_run_id(run_dir=run_dir, workspace_root=PROJECT_ROOT)
+        if run_dir is not None
+        else (getattr(args, "run_id", None) or "canonical")
+    )
 
     ingest_script = PROJECT_ROOT / "scripts" / "data_prep" / "06_ingest_genetic_data.py"
     verify_file_exists(ingest_script, "Step 06 Genomic Ingestion Python script")
@@ -1421,11 +1427,16 @@ def run_all(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     run_id = getattr(args, "run_id", None) or os.environ.get("RUN_ID") or generate_default_run_id()
     setattr(args, "run_id", run_id)
     run_dir, cfg = _resolve_active_run_context(args, cfg)
+    eff_run_id = (
+        resolve_canonical_run_id(run_dir=run_dir, workspace_root=PROJECT_ROOT)
+        if run_dir is not None
+        else run_id
+    )
     if run_dir is not None:
-        write_run_metadata(run_dir, run_id=run_dir.name, start_time=start_ts)
+        write_run_metadata(run_dir, run_id=eff_run_id, start_time=start_ts)
 
     logger.info("==================================================================")
-    logger.info(f"Executing End-to-End Production Pipeline (Run: {run_dir.name if run_dir else run_id})")
+    logger.info(f"Executing End-to-End Production Pipeline (Run: {eff_run_id})")
     logger.info("  (harvest -> segment -> morphometrics -> synthesis)")
     logger.info("==================================================================")
     run_harvest(args, cfg)
@@ -1435,7 +1446,7 @@ def run_all(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     if run_dir is not None:
         end_ts = datetime.now().astimezone().isoformat()
         _sync_run_cohort_in_db(run_dir, args=args, cfg=cfg, end_timestamp=end_ts)
-        write_run_metadata(run_dir, run_id=run_dir.name, start_time=start_ts, end_time=end_ts)
+        write_run_metadata(run_dir, run_id=eff_run_id, start_time=start_ts, end_time=end_ts)
     logger.info("==================================================================")
     logger.info("End-to-End Pipeline Execution Completed Successfully!")
     logger.info("==================================================================")

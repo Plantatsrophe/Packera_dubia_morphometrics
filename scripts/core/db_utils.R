@@ -510,7 +510,27 @@ resolve_packera_run_id <- function(run_id = NULL) {
   }
   env_rdir <- .get_env_run_dir_r()
   if (nzchar(env_rdir)) {
-    return(basename(normalizePath(env_rdir, mustWork = FALSE)))
+    raw_rdir <- gsub("\\\\", "/", trimws(env_rdir))
+    raw_rdir <- sub("^\\./+", "", sub("/+$", "", raw_rdir))
+    wd_abs <- sub("/+$", "", normalizePath(getwd(), winslash = "/", mustWork = FALSE))
+    runs_cand <- if (file.exists("runs")) {
+      normalizePath("runs", winslash = "/", mustWork = FALSE)
+    } else {
+      file.path(wd_abs, "runs")
+    }
+    runs_abs <- sub("/+$", "", runs_cand)
+    cand_path <- if (grepl("^(/|~|[A-Za-z]:/)", raw_rdir)) raw_rdir else file.path(wd_abs, raw_rdir)
+    norm_rdir <- sub("/+$", "", normalizePath(cand_path, winslash = "/", mustWork = FALSE))
+    if (nzchar(runs_abs) && startsWith(norm_rdir, paste0(runs_abs, "/"))) {
+      return(substring(norm_rdir, nchar(runs_abs) + 2L))
+    }
+    if (!file.exists(cand_path) && startsWith(raw_rdir, "runs/")) {
+      return(sub("^runs/+", "", raw_rdir))
+    }
+    if (grepl("/runs/.+", norm_rdir)) {
+      return(sub("^.*/runs/", "", norm_rdir))
+    }
+    return(basename(norm_rdir))
   }
   "canonical"
 }

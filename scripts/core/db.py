@@ -2029,11 +2029,46 @@ def populate_run_active_cohort(
     return len(cohort_payload)
 
 
+def normalize_run_id_token(token: str, workspace_root: Path = PROJECT_ROOT) -> str:
+    """
+    Normalize a `--triage-source` token (flat ID, nested ID, `runs/`-prefixed path,
+    or path to a run dir / `triage_queue.csv`) to its canonical `run_id` string
+    while preserving internal `/` separators in nested run identifiers.
+    """
+    cleaned = str(token or "").strip().replace("\\", "/")
+    if not cleaned:
+        return ""
+    while cleaned.startswith("./"):
+        cleaned = cleaned[2:]
+    cleaned = cleaned.rstrip("/")
+    for suffix in ("/data/tables/triage_queue.csv", "/data"):
+        if cleaned.endswith(suffix):
+            cleaned = cleaned[: -len(suffix)]
+            break
+    cleaned = cleaned.rstrip("/")
+    if not cleaned:
+        return ""
+
+    if Path(cleaned).is_absolute():
+        tp = Path(cleaned).resolve()
+        runs_root = (Path(workspace_root) / "runs").resolve()
+        if runs_root in tp.parents:
+            return tp.relative_to(runs_root).as_posix()
+        return tp.name
+
+    while cleaned.startswith("./"):
+        cleaned = cleaned[2:]
+    if cleaned.startswith("runs/"):
+        return cleaned[len("runs/"):].strip("/")
+    return cleaned.strip("/")
+
+
 def query_misidentified_vouchers_from_db(
     conn: sqlite3.Connection,
     triage_sources: Optional[Sequence[str]] = None,
     exclude_run_id: Optional[str] = None,
     allowed_subtypes: Optional[Set[str]] = None,
+    workspace_root: Path = PROJECT_ROOT,
 ) -> Tuple[Set[str], int]:
     """
     Query `curation_triage` directly in SQLite to identify vouchers flagged as
@@ -2055,12 +2090,25 @@ def query_misidentified_vouchers_from_db(
 
     where_clauses: List[str] = []
     params: List[Any] = []
-    if exclude_run_id:
+    eff_exclude = (
+        normalize_run_id_token(exclude_run_id, workspace_root=workspace_root)
+        if exclude_run_id
+        else ""
+    )
+    if eff_exclude:
         where_clauses.append("run_id != ?")
-        params.append(str(exclude_run_id).strip())
+        params.append(eff_exclude)
 
     if not any(t.upper() in {"ALL", "*"} for t in tokens):
-        run_ids = [Path(t).name if "/" in t else t for t in tokens]
+        run_ids: List[str] = []
+        seen_run_ids: Set[str] = set()
+        for t in tokens:
+            norm_tok = normalize_run_id_token(t, workspace_root=workspace_root)
+            if norm_tok and norm_tok not in seen_run_ids:
+                seen_run_ids.add(norm_tok)
+                run_ids.append(norm_tok)
+        if not run_ids:
+            return set(), 0
         ph = ", ".join("?" for _ in run_ids)
         where_clauses.append(f"run_id IN ({ph})")
         params.extend(run_ids)

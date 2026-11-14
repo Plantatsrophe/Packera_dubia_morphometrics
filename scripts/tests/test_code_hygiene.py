@@ -318,6 +318,8 @@ class TestCodeHygiene(unittest.TestCase):
             PROJECT_ROOT / "scripts" / "data_prep" / "skim_offtarget_organellar.py",
             PROJECT_ROOT / "scripts" / "analysis" / "step07_genomic_propagation.R",
             PROJECT_ROOT / "scripts" / "analysis" / "genomic_triage_utils.R",
+            PROJECT_ROOT / "scripts" / "pipeline" / "resolve_eastern_na_packera.py",
+            PROJECT_ROOT / "scripts" / "tests" / "test_eastern_na_monograph_cli.py",
         )
         for mod_path in bounded_paths:
             self.assertTrue(mod_path.exists(), f"Missing expected public genomics module: {mod_path}")

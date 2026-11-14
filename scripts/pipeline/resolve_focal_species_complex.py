@@ -32,11 +32,14 @@ from __future__ import annotations
 
 import argparse
 import csv
+import math
 import os
 import re
 import sqlite3
+import statistics
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -59,11 +62,28 @@ def default_prefix_for_taxon(taxon_name: str) -> str:
     return slugify_taxon(taxon_name).lower()
 
 
+def _stage_run_ids(
+    prefix: str,
+    discovery_run_id: Optional[str] = None,
+) -> Tuple[str, str, str, str]:
+    """Return ordered (r1, r2, r3, r4) run IDs for flat ('dubia') or nested ('parent/slug/') prefixes."""
+    clean = prefix.strip()
+    sep = "" if clean.endswith("/") else "_"
+    r1 = f"{clean}{sep}01_eastern_discovery"
+    r2 = f"{clean}{sep}02_complex_triage"
+    r3 = f"{clean}{sep}03_intraspecific_clean"
+    r4 = f"{clean}{sep}04_gold_thin_audit"
+    if discovery_run_id is not None and str(discovery_run_id).strip():
+        r1 = str(discovery_run_id).strip()
+    return r1, r2, r3, r4
+
+
 def build_four_stage_commands(
     *,
     run_script: Path,
     focal_taxon: str,
     prefix: str,
+    discovery_run_id: Optional[str] = None,
     geographic_scope: str = "eastern_na",
     gold_anchors: int = 30,
     spatial_thin_km: float = 15.0,
@@ -80,10 +100,8 @@ def build_four_stage_commands(
     if threads is not None and threads > 0:
         common_tail.extend(["--threads", str(threads)])
 
-    r1 = f"{prefix}_01_eastern_discovery"
-    r2 = f"{prefix}_02_complex_triage"
-    r3 = f"{prefix}_03_intraspecific_clean"
-    r4 = f"{prefix}_04_gold_thin_audit"
+    r1, r2, r3, r4 = _stage_run_ids(prefix, discovery_run_id=discovery_run_id)
+    has_discovery_override = bool(discovery_run_id is not None and str(discovery_run_id).strip())
 
     stages: List[Tuple[str, str, List[str]]] = []
     if not skip_discovery:
@@ -110,6 +128,7 @@ def build_four_stage_commands(
         "--focal-taxon",
         focal_taxon,
         "--discover-complexes",
+        *(["--triage-source", r1] if has_discovery_override else []),
         "--gold-anchors",
         str(gold_anchors),
         *common_tail,
@@ -169,7 +188,7 @@ def _safe_float(val: Any) -> Optional[float]:
         return None
     try:
         out = float(s)
-        return out if out == out else None
+        return out if math.isfinite(out) else None
     except ValueError:
         return None
 
@@ -350,6 +369,36 @@ def _extract_stage_metrics(
             if sp and sp != focal_std and sp not in neighbors:
                 neighbors.append(sp)
 
+    gdi_vals: List[float] = []
+    backbone_clades: List[str] = []
+    n_tier0_abstained = 0
+    for r in eval_rows:
+        gv = _safe_float(r.get("coalescent_gdi"))
+        if gv is None:
+            gv = _safe_float(r.get("cluster_propagated_gdi"))
+        if gv is not None and math.isfinite(gv):
+            gdi_vals.append(gv)
+        bc = str(r.get("public_backbone_clade") or "").strip()
+        if bc and bc.upper() not in {"NA", "NAN", "NONE", "NULL"}:
+            backbone_clades.append(bc)
+        ab_raw = r.get("tier0_abstention_flag")
+        if isinstance(ab_raw, bool):
+            if ab_raw:
+                n_tier0_abstained += 1
+        elif ab_raw is not None:
+            ab_str = str(ab_raw).strip()
+            if ab_str in {"1", "1.0"} or _safe_float(ab_str) == 1.0:
+                n_tier0_abstained += 1
+
+    median_coalescent_gdi: Optional[float] = (
+        float(statistics.median(gdi_vals)) if gdi_vals else None
+    )
+    public_backbone_clade = (
+        sorted(Counter(backbone_clades).items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+        if backbone_clades
+        else ""
+    )
+
     metrics = {
         "stage": stage_name,
         "run_id": run_id,
@@ -421,6 +470,9 @@ def _extract_stage_metrics(
         "min_d_edaph": f"{min_d_edaph:.3f}" if min_d_edaph is not None else "",
         "max_abs_delta_doy_days": f"{max_abs_doy:.1f}" if max_abs_doy is not None else "",
         "max_batch_partial_eta_sq": f"{max_eta:.4f}" if max_eta is not None else "",
+        "median_coalescent_gdi": median_coalescent_gdi,
+        "public_backbone_clade": public_backbone_clade,
+        "n_tier0_abstained": n_tier0_abstained,
         "complex_neighbors": "; ".join(neighbors),
     }
     return metrics, eval_rows
@@ -430,6 +482,7 @@ def compile_complex_resolution_summary(
     *,
     focal_taxon: str,
     prefix: str,
+    discovery_run_id: Optional[str] = None,
     workspace_root: Path = PROJECT_ROOT,
     db_path: Optional[Path] = None,
     output_dir: Optional[Path] = None,
@@ -454,11 +507,12 @@ def compile_complex_resolution_summary(
         except sqlite3.Error:
             conn = None
 
+    r1, r2, r3, r4 = _stage_run_ids(prefix, discovery_run_id=discovery_run_id)
     stage_specs = [
-        ("Stage_1_Discovery", f"{prefix}_01_eastern_discovery"),
-        ("Stage_2_Complex_Triage", f"{prefix}_02_complex_triage"),
-        ("Stage_3_Intraspecific_Clean", f"{prefix}_03_intraspecific_clean"),
-        ("Stage_4_Spatially_Thinned", f"{prefix}_04_gold_thin_audit"),
+        ("Stage_1_Discovery", r1),
+        ("Stage_2_Complex_Triage", r2),
+        ("Stage_3_Intraspecific_Clean", r3),
+        ("Stage_4_Spatially_Thinned", r4),
     ]
 
     summary_rows: List[Dict[str, Any]] = []
@@ -612,6 +666,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run ID prefix for the four stages (default: derived from focal epithet, e.g. 'dubia').",
     )
     parser.add_argument(
+        "--discovery-run-id",
+        default=None,
+        help="Optional existing Stage 1 discovery run ID to reuse as Stage 2 triage source.",
+    )
+    parser.add_argument(
+        "--parent-run-id",
+        default=None,
+        help="Optional parent monograph run ID placing outputs under runs/<PARENT_RUN_ID>/<Species_Slug>/.",
+    )
+    parser.add_argument(
         "--geographic-scope",
         default="eastern_na",
         choices=("eastern_na", "north_america", "global"),
@@ -684,13 +748,24 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     focal_std = standardize_packera_taxon(args.focal_taxon) or args.focal_taxon.strip()
-    prefix = args.prefix.strip() or default_prefix_for_taxon(focal_std)
+    parent_raw = (args.parent_run_id or "").strip().strip("/")
+    if parent_raw.startswith("runs/"):
+        parent_raw = parent_raw[len("runs/"):].strip("/")
+    if parent_raw:
+        prefix = f"{parent_raw}/{slugify_taxon(focal_std)}/"
+        output_dir = args.output_dir if args.output_dir is not None else (
+            PROJECT_ROOT / "runs" / parent_raw / slugify_taxon(focal_std)
+        )
+    else:
+        prefix = args.prefix.strip() or default_prefix_for_taxon(focal_std)
+        output_dir = args.output_dir
     run_script = PROJECT_ROOT / "run_pipeline.sh"
 
     stages = build_four_stage_commands(
         run_script=run_script,
         focal_taxon=focal_std,
         prefix=prefix,
+        discovery_run_id=args.discovery_run_id,
         geographic_scope=args.geographic_scope,
         gold_anchors=args.gold_anchors,
         spatial_thin_km=args.spatial_thin_km,
@@ -720,9 +795,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     csv_out, md_out = compile_complex_resolution_summary(
         focal_taxon=focal_std,
         prefix=prefix,
+        discovery_run_id=args.discovery_run_id,
         workspace_root=PROJECT_ROOT,
         db_path=args.db,
-        output_dir=args.output_dir,
+        output_dir=output_dir,
     )
     print(f"[Complex Resolution Summary] Comparison CSV : {csv_out}")
     print(f"[Complex Resolution Summary] Synthesis Report: {md_out}")
