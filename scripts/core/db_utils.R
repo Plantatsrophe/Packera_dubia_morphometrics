@@ -12,11 +12,11 @@
 #     - Single-query 120-vertex LeafMachine3 contour ingestion for Step 03.
 #     - Step 04 OTU + plant_individuals + reproductive SQLite joins & updates.
 #     - Step 05 environmental_cache + environmental_rtree spatial bbox queries.
-#     - Step 06 `fetch_run_master_view()` (`v_integrative_triage_master`)
+#     - Step 07 `fetch_run_master_view()` (`v_integrative_triage_master`)
 #       with seamless CSV fallback merging.
 # ==============================================================================
 
-PACKERA_SCHEMA_USER_VERSION <- 20261121L
+PACKERA_SCHEMA_USER_VERSION <- 20261123L
 
 resolve_packera_workers <- function(max_workers = 32L, n_tasks = NULL) {
   if (!identical(.Platform$OS.type, "unix") || !requireNamespace("parallel", quietly = TRUE)) {
@@ -51,16 +51,19 @@ packera_mclapply <- function(X, FUN, mc.cores = 1L, mc.preschedule = TRUE) {
   }
   blas_vars <- c("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "VECLIB_MAXIMUM_THREADS")
   prev_vals <- Sys.getenv(blas_vars, unset = NA_character_)
-  on.exit({
-    for (vn in blas_vars) {
-      pv <- prev_vals[[vn]]
-      if (is.na(pv)) {
-        Sys.unsetenv(vn)
-      } else {
-        do.call(Sys.setenv, stats::setNames(list(pv), vn))
+  on.exit(
+    {
+      for (vn in blas_vars) {
+        pv <- prev_vals[[vn]]
+        if (is.na(pv)) {
+          Sys.unsetenv(vn)
+        } else {
+          do.call(Sys.setenv, stats::setNames(list(pv), vn))
+        }
       }
-    }
-  }, add = TRUE)
+    },
+    add = TRUE
+  )
   Sys.setenv(
     OMP_NUM_THREADS = "1",
     OPENBLAS_NUM_THREADS = "1",
@@ -76,27 +79,36 @@ packera_mclapply <- function(X, FUN, mc.cores = 1L, mc.preschedule = TRUE) {
 }
 
 .get_sqlite_user_version_r <- function(conn) {
-  if (is.null(conn)) return(0L)
+  if (is.null(conn)) {
+    return(0L)
+  }
   uv <- tryCatch(DBI::dbGetQuery(conn, "PRAGMA user_version;"), error = function(e) NULL)
-  if (is.null(uv) || nrow(uv) == 0L || ncol(uv) == 0L) return(0L)
+  if (is.null(uv) || nrow(uv) == 0L || ncol(uv) == 0L) {
+    return(0L)
+  }
   val <- suppressWarnings(as.integer(uv[[1]][1]))
   if (is.na(val)) 0L else val
 }
 
 .apply_packera_sqlite_pragmas_r <- function(conn, read_only = FALSE) {
-  if (is.null(conn)) return(invisible(NULL))
-  tryCatch({
-    DBI::dbExecute(conn, "PRAGMA busy_timeout = 30000;")
-    DBI::dbExecute(conn, "PRAGMA foreign_keys = ON;")
-    DBI::dbExecute(conn, "PRAGMA cache_size = -262144;")
-    DBI::dbExecute(conn, "PRAGMA temp_store = MEMORY;")
-    tryCatch(DBI::dbExecute(conn, "PRAGMA mmap_size = 2147483648;"), error = function(e) NULL)
-    if (!isTRUE(read_only)) {
-      DBI::dbExecute(conn, "PRAGMA journal_mode = WAL;")
-      DBI::dbExecute(conn, "PRAGMA synchronous = NORMAL;")
-      tryCatch(DBI::dbExecute(conn, "PRAGMA wal_autocheckpoint = 4000;"), error = function(e) NULL)
-    }
-  }, error = function(e) NULL)
+  if (is.null(conn)) {
+    return(invisible(NULL))
+  }
+  tryCatch(
+    {
+      DBI::dbExecute(conn, "PRAGMA busy_timeout = 30000;")
+      DBI::dbExecute(conn, "PRAGMA foreign_keys = ON;")
+      DBI::dbExecute(conn, "PRAGMA cache_size = -262144;")
+      DBI::dbExecute(conn, "PRAGMA temp_store = MEMORY;")
+      tryCatch(DBI::dbExecute(conn, "PRAGMA mmap_size = 2147483648;"), error = function(e) NULL)
+      if (!isTRUE(read_only)) {
+        DBI::dbExecute(conn, "PRAGMA journal_mode = WAL;")
+        DBI::dbExecute(conn, "PRAGMA synchronous = NORMAL;")
+        tryCatch(DBI::dbExecute(conn, "PRAGMA wal_autocheckpoint = 4000;"), error = function(e) NULL)
+      }
+    },
+    error = function(e) NULL
+  )
   invisible(NULL)
 }
 
@@ -111,7 +123,8 @@ PACKERA_DB_LOGICAL_COLS <- c(
   "is_completed_voucher", "is_type_specimen", "has_empirical_type_anchor",
   "is_typical_morphotype", "matches_type_lithology",
   "is_confident_label_noise", "cryptic_cluster_cohesion_pass",
-  "cryptic_non_clinal_pass", "hybrid_zone_cohesion_pass"
+  "cryptic_non_clinal_pass", "hybrid_zone_cohesion_pass",
+  "geno_quality_pass", "is_putative_novel_or_hybrid_query", "is_geno_admixed", "cytonuclear_discordant"
 )
 
 PACKERA_DB_HARMONIC_COLS <- as.vector(vapply(
@@ -148,10 +161,14 @@ PACKERA_DB_WC_BIO_COLS <- c(
 )
 
 .normalize_semicolon_col_r <- function(v) {
-  if (is.null(v)) return(NULL)
+  if (is.null(v)) {
+    return(NULL)
+  }
   if (is.list(v)) {
     return(vapply(v, function(el) {
-      if (is.null(el) || length(el) == 0L) return(NA_character_)
+      if (is.null(el) || length(el) == 0L) {
+        return(NA_character_)
+      }
       toks <- trimws(as.character(unlist(el)))
       toks <- toks[!is.na(toks) & nzchar(toks)]
       if (length(toks) == 0L) NA_character_ else paste(toks, collapse = ";")
@@ -296,6 +313,7 @@ PACKERA_DB_WC_BIO_COLS <- c(
   }
   if (identical(table_name, "curation_triage")) {
     return(c(
+      w_geno_kappa = "REAL",
       cryptic_cluster_cohesion_pass = "INTEGER",
       cryptic_non_clinal_pass = "INTEGER",
       resurrection_basionym = "TEXT",
@@ -349,27 +367,64 @@ PACKERA_DB_WC_BIO_COLS <- c(
       )
     ))
   }
+  if (identical(table_name, "genomic_samples")) {
+    return(c(
+      hdplot_retained_loci = "INTEGER",
+      inferred_cytotype = "TEXT",
+      nquire_delta_logl = "REAL",
+      plastid_clade = "TEXT",
+      its_ribotype = "TEXT",
+      cytonuclear_discordant = "INTEGER"
+    ))
+  }
+  if (identical(table_name, "genetic_lineage_assignments")) {
+    return(c(
+      hybrid_index_h = "REAL",
+      interspecific_ancestry_q12 = "REAL",
+      hybrid_generation_class = "TEXT",
+      coancestry_cluster = "TEXT",
+      f_branch_max = "REAL",
+      f_branch_donor_taxon = "TEXT",
+      snaq_gamma_minor = "REAL",
+      coalescent_gdi = "REAL",
+      bpp_introgression_bf = "REAL",
+      mmrr_beta_ibd = "REAL",
+      mmrr_beta_ibe = "REAL",
+      mmrr_p_ibe = "REAL"
+    ))
+  }
   character(0)
 }
 
 .migrate_dynamic_sqlite_table_r <- function(conn, table_name) {
-  if (is.null(conn) || !db_table_exists_safe(conn, table_name)) return(FALSE)
+  if (is.null(conn) || !db_table_exists_safe(conn, table_name)) {
+    return(FALSE)
+  }
   specs <- .dynamic_sqlite_table_specs_r(table_name)
-  if (length(specs) == 0L) return(FALSE)
+  if (length(specs) == 0L) {
+    return(FALSE)
+  }
   existing <- tryCatch(DBI::dbListFields(conn, table_name), error = function(e) character(0))
-  if (length(existing) == 0L) return(FALSE)
+  if (length(existing) == 0L) {
+    return(FALSE)
+  }
   missing_cols <- setdiff(names(specs), existing)
-  if (length(missing_cols) == 0L) return(FALSE)
+  if (length(missing_cols) == 0L) {
+    return(FALSE)
+  }
 
   q_tbl <- as.character(DBI::dbQuoteIdentifier(conn, table_name))
   added_any <- FALSE
   for (cn in missing_cols) {
     col_type <- specs[[cn]]
     q_col <- as.character(DBI::dbQuoteIdentifier(conn, cn))
-    ok <- tryCatch({
-      DBI::dbExecute(conn, sprintf("ALTER TABLE %s ADD COLUMN %s %s;", q_tbl, q_col, col_type))
-      TRUE
-    }, error = function(e) FALSE)
+    ok <- tryCatch(
+      {
+        DBI::dbExecute(conn, sprintf("ALTER TABLE %s ADD COLUMN %s %s;", q_tbl, q_col, col_type))
+        TRUE
+      },
+      error = function(e) FALSE
+    )
     if (isTRUE(ok)) added_any <- TRUE
   }
 
@@ -377,9 +432,11 @@ PACKERA_DB_WC_BIO_COLS <- c(
 }
 
 .migrate_dynamic_sqlite_schema_r <- function(conn) {
-  if (is.null(conn)) return(FALSE)
+  if (is.null(conn)) {
+    return(FALSE)
+  }
   changed <- FALSE
-  for (tbl in c("extracted_leaves", "run_active_cohort", "leaf_efa_harmonics", "otu_morphometrics", "spatial_rf_predictions", "curation_triage", "environmental_cache")) {
+  for (tbl in c("extracted_leaves", "run_active_cohort", "leaf_efa_harmonics", "otu_morphometrics", "spatial_rf_predictions", "curation_triage", "environmental_cache", "genomic_samples", "genetic_lineage_assignments")) {
     if (isTRUE(.migrate_dynamic_sqlite_table_r(conn, tbl))) {
       changed <- TRUE
     }
@@ -392,9 +449,13 @@ resolve_packera_run_id <- function(run_id = NULL) {
     return(trimws(as.character(run_id)[1]))
   }
   env_rid <- trimws(Sys.getenv("RUN_ID", unset = ""))
-  if (nzchar(env_rid)) return(env_rid)
+  if (nzchar(env_rid)) {
+    return(env_rid)
+  }
   env_rdir <- trimws(Sys.getenv("PACKERA_RUN_DIR", unset = ""))
-  if (nzchar(env_rdir)) return(basename(normalizePath(env_rdir, mustWork = FALSE)))
+  if (nzchar(env_rdir)) {
+    return(basename(normalizePath(env_rdir, mustWork = FALSE)))
+  }
   "canonical"
 }
 
@@ -405,9 +466,13 @@ resolve_packera_db_path <- function(
   canonical_abs <- normalizePath("data/packera_pipeline.sqlite", mustWork = FALSE)
   if (isTRUE(demo)) {
     if (!is.null(db_path) && nzchar(trimws(db_path))) {
-      if (identical(trimws(db_path), ":memory:")) return(":memory:")
+      if (identical(trimws(db_path), ":memory:")) {
+        return(":memory:")
+      }
       cand_abs <- normalizePath(trimws(db_path), mustWork = FALSE)
-      if (!identical(cand_abs, canonical_abs)) return(cand_abs)
+      if (!identical(cand_abs, canonical_abs)) {
+        return(cand_abs)
+      }
     }
     env_rdir <- trimws(Sys.getenv("PACKERA_RUN_DIR", unset = ""))
     if (nzchar(env_rdir) && dir.exists(env_rdir)) {
@@ -418,25 +483,35 @@ resolve_packera_db_path <- function(
 
   if (!is.null(db_path) && nzchar(trimws(db_path))) {
     raw <- trimws(db_path)
-    if (identical(raw, ":memory:")) return(":memory:")
+    if (identical(raw, ":memory:")) {
+      return(":memory:")
+    }
     return(normalizePath(raw, mustWork = FALSE))
   }
   env_db <- trimws(Sys.getenv("PACKERA_DB_PATH", unset = ""))
   if (nzchar(env_db)) {
-    if (identical(env_db, ":memory:")) return(":memory:")
+    if (identical(env_db, ":memory:")) {
+      return(":memory:")
+    }
     return(normalizePath(env_db, mustWork = FALSE))
   }
   canonical_abs
 }
 
 is_sqlite_active_for_inputs <- function(input_paths = character(0), demo = FALSE) {
-  if (isTRUE(demo)) return(FALSE)
+  if (isTRUE(demo)) {
+    return(FALSE)
+  }
   env_db <- trimws(Sys.getenv("PACKERA_DB_PATH", unset = ""))
-  if (nzchar(env_db)) return(TRUE)
+  if (nzchar(env_db)) {
+    return(TRUE)
+  }
 
   valid_paths <- as.character(input_paths)
   valid_paths <- valid_paths[!is.na(valid_paths) & nzchar(trimws(valid_paths))]
-  if (length(valid_paths) == 0L) return(TRUE)
+  if (length(valid_paths) == 0L) {
+    return(TRUE)
+  }
 
   ws_root <- normalizePath(getwd(), mustWork = FALSE)
   ws_prefix <- paste0(ws_root, .Platform$file.sep)
@@ -450,13 +525,17 @@ is_sqlite_active_for_inputs <- function(input_paths = character(0), demo = FALSE
 }
 
 .run_python_db_init_schema <- function(eff_path) {
-  if (identical(eff_path, ":memory:")) return(invisible(FALSE))
+  if (identical(eff_path, ":memory:")) {
+    return(invisible(FALSE))
+  }
   py_cands <- unique(c(
     if (file.exists(".venv/bin/python")) ".venv/bin/python" else character(0),
     Sys.which("python3")
   ))
   py_cands <- py_cands[nzchar(py_cands)]
-  if (length(py_cands) == 0L) return(invisible(FALSE))
+  if (length(py_cands) == 0L) {
+    return(invisible(FALSE))
+  }
   py_code <- "import sys; from scripts.core.db import get_db_connection; c = get_db_connection(sys.argv[1], init_schema=True); c.close()"
   for (py_bin in py_cands) {
     rc <- tryCatch(
@@ -468,7 +547,9 @@ is_sqlite_active_for_inputs <- function(input_paths = character(0), demo = FALSE
       ),
       error = function(e) 1L
     )
-    if (identical(as.integer(rc), 0L)) return(invisible(TRUE))
+    if (identical(as.integer(rc), 0L)) {
+      return(invisible(TRUE))
+    }
   }
   invisible(FALSE)
 }
@@ -487,12 +568,16 @@ connect_packera_db <- function(
   )
 
   if (isTRUE(read_only) && !identical(eff_path, ":memory:")) {
-    if (!file.exists(eff_path)) return(NULL)
+    if (!file.exists(eff_path)) {
+      return(NULL)
+    }
     conn <- tryCatch(
       DBI::dbConnect(RSQLite::SQLite(), dbname = eff_path, flags = RSQLite::SQLITE_RO),
       error = function(e) NULL
     )
-    if (is.null(conn)) return(NULL)
+    if (is.null(conn)) {
+      return(NULL)
+    }
     .apply_packera_sqlite_pragmas_r(conn, read_only = TRUE)
     return(conn)
   }
@@ -509,7 +594,9 @@ connect_packera_db <- function(
     DBI::dbConnect(RSQLite::SQLite(), dbname = eff_path),
     error = function(e) NULL
   )
-  if (is.null(conn)) return(NULL)
+  if (is.null(conn)) {
+    return(NULL)
+  }
   .apply_packera_sqlite_pragmas_r(conn, read_only = FALSE)
 
   cur_ver <- .get_sqlite_user_version_r(conn)
@@ -518,16 +605,27 @@ connect_packera_db <- function(
   mv_fields_chk <- if (db_table_exists_safe(conn, "v_integrative_triage_master")) tryCatch(DBI::dbListFields(conn, "v_integrative_triage_master"), error = function(e) character(0)) else character(0)
   el_has_zone <- all(c("leaf_zone", "ect_path") %in% el_fields_chk)
   om_has_cauline <- all(c("cauline_leaf_count", "ECT_PC1", "scale_source") %in% om_fields_chk)
-  mv_has_latest <- identical(eff_path, ":memory:") || all(c("is_passive", "scale_source", "AR_inv_std", "reproductive_trait_status", "ecoregion_can1", "ecoregion_can2") %in% mv_fields_chk)
+  mv_has_latest <- identical(eff_path, ":memory:") || all(c(
+    "is_passive", "scale_source", "AR_inv_std", "reproductive_trait_status",
+    "ecoregion_can1", "ecoregion_can2", "w_geno_kappa",
+    "geno_predicted_taxon", "geno_linkage_tier", "is_geno_admixed",
+    "coalescent_gdi", "hybrid_generation_class", "cytonuclear_discordant"
+  ) %in% mv_fields_chk)
   if (cur_ver >= PACKERA_SCHEMA_USER_VERSION &&
-      el_has_zone && om_has_cauline && mv_has_latest &&
-      (identical(eff_path, ":memory:") || db_table_exists_safe(conn, "v_integrative_triage_master"))) {
+    el_has_zone && om_has_cauline && mv_has_latest &&
+    (identical(eff_path, ":memory:") || (
+      db_table_exists_safe(conn, "v_integrative_triage_master") &&
+        db_table_exists_safe(conn, "genomic_samples") &&
+        db_table_exists_safe(conn, "genetic_lineage_assignments")
+    ))) {
     return(conn)
   }
 
   schema_migrated <- .migrate_dynamic_sqlite_schema_r(conn)
   if (!identical(eff_path, ":memory:")) {
-    view_needs_refresh <- schema_migrated || (cur_ver < PACKERA_SCHEMA_USER_VERSION)
+    view_needs_refresh <- schema_migrated || (cur_ver < PACKERA_SCHEMA_USER_VERSION) ||
+      !db_table_exists_safe(conn, "genomic_samples") ||
+      !db_table_exists_safe(conn, "genetic_lineage_assignments")
     if (!view_needs_refresh && db_table_exists_safe(conn, "v_integrative_triage_master")) {
       v_cols <- tryCatch(DBI::dbListFields(conn, "v_integrative_triage_master"), error = function(e) character(0))
       req_v_cols <- c(
@@ -544,7 +642,9 @@ connect_packera_db <- function(
         "hybrid_zone_cohesion_pass", "hybrid_parent_1", "hybrid_parent_2",
         "cda_oof_posterior_prob", "self_morph_mahal_d2", "open_set_df",
         "is_passive", "scale_source",
-        "AR_inv_std", "reproductive_trait_status", "ecoregion_can1", "ecoregion_can2"
+        "AR_inv_std", "reproductive_trait_status", "ecoregion_can1", "ecoregion_can2",
+        "w_geno_kappa", "geno_predicted_taxon", "geno_linkage_tier", "is_geno_admixed",
+        "coalescent_gdi", "hybrid_generation_class", "cytonuclear_discordant"
       )
       if (length(v_cols) > 0L && !all(req_v_cols %in% v_cols)) {
         view_needs_refresh <- TRUE
@@ -581,12 +681,16 @@ disconnect_packera_db <- function(conn) {
 }
 
 db_table_exists_safe <- function(conn, table_name) {
-  if (is.null(conn)) return(FALSE)
+  if (is.null(conn)) {
+    return(FALSE)
+  }
   isTRUE(tryCatch(DBI::dbExistsTable(conn, table_name), error = function(e) FALSE))
 }
 
 ensure_pipeline_run_r <- function(conn, run_id = resolve_packera_run_id(), focal_taxon = NULL, intraspecific_mode = NULL) {
-  if (is.null(conn) || !db_table_exists_safe(conn, "pipeline_runs")) return(invisible(FALSE))
+  if (is.null(conn) || !db_table_exists_safe(conn, "pipeline_runs")) {
+    return(invisible(FALSE))
+  }
   rid <- resolve_packera_run_id(run_id)
   now_iso <- format(Sys.time(), "%Y-%m-%dT%H:%M:%S%z")
   rdir <- Sys.getenv("PACKERA_RUN_DIR", unset = NA_character_)
@@ -613,7 +717,9 @@ ensure_pipeline_run_r <- function(conn, run_id = resolve_packera_run_id(), focal
 }
 
 coerce_sqlite_logical_cols <- function(df, cols = PACKERA_DB_LOGICAL_COLS) {
-  if (is.null(df) || nrow(df) == 0L) return(df)
+  if (is.null(df) || nrow(df) == 0L) {
+    return(df)
+  }
   hit_cols <- intersect(cols, names(df))
   for (cn in hit_cols) {
     v <- df[[cn]]
@@ -638,15 +744,21 @@ db_upsert_dataframe <- function(
   pk_cols,
   preserve_existing_on_null = TRUE
 ) {
-  if (is.null(conn) || is.null(df) || nrow(df) == 0L) return(0L)
-  if (!db_table_exists_safe(conn, table_name)) return(0L)
+  if (is.null(conn) || is.null(df) || nrow(df) == 0L) {
+    return(0L)
+  }
+  if (!db_table_exists_safe(conn, table_name)) {
+    return(0L)
+  }
 
   .migrate_dynamic_sqlite_table_r(conn, table_name)
   tbl_fields <- DBI::dbListFields(conn, table_name)
   keep_cols <- intersect(names(df), tbl_fields)
   if (!all(pk_cols %in% keep_cols)) {
-    stop(sprintf("db_upsert_dataframe: missing primary key columns (%s) for table '%s'",
-                 paste(setdiff(pk_cols, keep_cols), collapse = ", "), table_name))
+    stop(sprintf(
+      "db_upsert_dataframe: missing primary key columns (%s) for table '%s'",
+      paste(setdiff(pk_cols, keep_cols), collapse = ", "), table_name
+    ))
   }
 
   sub_df <- as.data.frame(df[, keep_cols, drop = FALSE], stringsAsFactors = FALSE)
@@ -734,7 +846,9 @@ db_upsert_dataframe <- function(
 #     while excluding fused overlapping clumps (`UNRESOLVED_CLUMP`) and unbridged multi-island pinnae
 #     (`n_lamina_components > 1`, which remain in SQLite for multi-component ECT).
 evaluate_step03_lm3_efa_qc <- function(df, allow_multi_component_ect = FALSE) {
-  if (is.null(df) || nrow(df) == 0L) return(logical(0))
+  if (is.null(df) || nrow(df) == 0L) {
+    return(logical(0))
+  }
   n <- nrow(df)
   keep <- rep(TRUE, n)
 
@@ -747,7 +861,9 @@ evaluate_step03_lm3_efa_qc <- function(df, allow_multi_component_ect = FALSE) {
   raw_qfr <- if ("qc_flag_reason" %in% names(df)) toupper(trimws(as.character(df$qc_flag_reason))) else rep("", n)
   raw_qfr[is.na(raw_qfr)] <- ""
   is_ect_only_flag <- vapply(raw_qfr, function(s) {
-    if (!nzchar(s) || s %in% c("PASS", "OK", "NONE", "NA")) return(FALSE)
+    if (!nzchar(s) || s %in% c("PASS", "OK", "NONE", "NA")) {
+      return(FALSE)
+    }
     toks <- trimws(unlist(strsplit(s, "[;,]")))
     toks <- toks[nzchar(toks) & !(toks %in% c("PASS", "OK", "NONE", "NA"))]
     length(toks) > 0L && all(toks %in% ect_only_codes)
@@ -774,7 +890,9 @@ evaluate_step03_lm3_efa_qc <- function(df, allow_multi_component_ect = FALSE) {
     dcid <- suppressWarnings(as.integer(df$detector_class_id))
     has_exp_pass <- if ("efa_qc_pass" %in% names(df)) {
       tolower(trimws(as.character(df$efa_qc_pass))) %in% c("1", "1.0", "true", "t", "yes")
-    } else rep(FALSE, n)
+    } else {
+      rep(FALSE, n)
+    }
     keep[!is.na(dcid) & (dcid == 1L) & !has_exp_pass] <- FALSE
   }
   if ("is_crop_clipped" %in% names(df)) {
@@ -832,12 +950,18 @@ fetch_step03_contours_from_db <- function(
   if (!is_sqlite_active_for_inputs(c(vouchers_path, manifest_path, contours_dir))) {
     return(NULL)
   }
-  if (!requireNamespace("jsonlite", quietly = TRUE)) return(NULL)
+  if (!requireNamespace("jsonlite", quietly = TRUE)) {
+    return(NULL)
+  }
 
   conn <- connect_packera_db(read_only = TRUE)
-  if (is.null(conn)) return(NULL)
+  if (is.null(conn)) {
+    return(NULL)
+  }
   on.exit(disconnect_packera_db(conn), add = TRUE)
-  if (!db_table_exists_safe(conn, "extracted_leaves")) return(NULL)
+  if (!db_table_exists_safe(conn, "extracted_leaves")) {
+    return(NULL)
+  }
 
   rid <- resolve_packera_run_id(run_id)
   has_cohort <- FALSE
@@ -916,7 +1040,9 @@ fetch_step03_contours_from_db <- function(
   if (!is.null(active_catalogs) && length(active_catalogs) > 0L) {
     cats <- unique(trimws(as.character(active_catalogs)))
     cats <- cats[!is.na(cats) & nzchar(cats)]
-    if (length(cats) == 0L) return(NULL)
+    if (length(cats) == 0L) {
+      return(NULL)
+    }
     q_cats <- paste(vapply(cats, function(x) as.character(DBI::dbQuoteString(conn, x)), character(1)), collapse = ", ")
     sql <- paste0(
       base_sql,
@@ -939,7 +1065,9 @@ fetch_step03_contours_from_db <- function(
   disconnect_packera_db(conn)
   conn <- NULL
 
-  if (is.null(rows) || nrow(rows) == 0L) return(NULL)
+  if (is.null(rows) || nrow(rows) == 0L) {
+    return(NULL)
+  }
 
   # If explicit manifest_path exists on disk with rows that are NOT yet in SQLite, defer to disk fallback;
   # otherwise build O(1) lookup tables for positional homology & cohort-adaptive blade area columns
@@ -950,7 +1078,9 @@ fetch_step03_contours_from_db <- function(
   } else {
     ""
   }
-  m_hdr <- NULL; m_idx_3k <- NULL; m_idx_2k <- NULL
+  m_hdr <- NULL
+  m_idx_3k <- NULL
+  m_idx_2k <- NULL
   if (nzchar(eff_mpath) && file.exists(eff_mpath)) {
     m_hdr <- if (requireNamespace("data.table", quietly = TRUE)) {
       tryCatch(data.table::fread(eff_mpath, showProgress = FALSE, data.table = FALSE), error = function(e) NULL)
@@ -974,8 +1104,12 @@ fetch_step03_contours_from_db <- function(
         mp_v[is.na(mp_v)] <- 0L
         k3 <- paste(mc_v, mp_v, ml_v, sep = "__")
         k2 <- paste(mc_v, ml_v, sep = "__")
-        u3 <- !duplicated(k3, fromLast = TRUE); m_idx_3k <- which(u3); names(m_idx_3k) <- k3[u3]
-        u2 <- !duplicated(k2, fromLast = TRUE); m_idx_2k <- which(u2); names(m_idx_2k) <- k2[u2]
+        u3 <- !duplicated(k3, fromLast = TRUE)
+        m_idx_3k <- which(u3)
+        names(m_idx_3k) <- k3[u3]
+        u2 <- !duplicated(k2, fromLast = TRUE)
+        m_idx_2k <- which(u2)
+        names(m_idx_2k) <- k2[u2]
       }
     }
   }
@@ -986,7 +1120,9 @@ fetch_step03_contours_from_db <- function(
   if (n_excl_qc > 0L) {
     message(sprintf("Step 03 SQLite EFA QC filter: excluded %d clump/multi-island contours (retained in SQLite extracted_leaves for audit/ECT).", n_excl_qc))
   }
-  if (!any(keep_qc)) return(NULL)
+  if (!any(keep_qc)) {
+    return(NULL)
+  }
   if (!all(keep_qc)) {
     rows <- rows[keep_qc, , drop = FALSE]
     n_rows <- nrow(rows)
@@ -1068,7 +1204,8 @@ fetch_step03_contours_from_db <- function(
         cs_val <- if (!is.null(centsize_fn)) {
           centsize_fn(coo)
         } else {
-          cx <- mean(coo[, 1L]); cy <- mean(coo[, 2L])
+          cx <- mean(coo[, 1L])
+          cy <- mean(coo[, 2L])
           sqrt(sum((coo[, 1L] - cx)^2 + (coo[, 2L] - cy)^2))
         }
       } else {
@@ -1143,7 +1280,9 @@ fetch_step03_contours_from_db <- function(
   }
 
   ok_idx <- which(merged$ok)
-  if (length(ok_idx) == 0L) return(NULL)
+  if (length(ok_idx) == 0L) {
+    return(NULL)
+  }
 
   sub_rows <- rows[ok_idx, , drop = FALSE]
   n_kept <- length(ok_idx)
@@ -1284,7 +1423,9 @@ fetch_step03_contours_from_db <- function(
 }
 
 .normalize_morph_dynamic_cols_r <- function(df) {
-  if (is.null(df) || !is.data.frame(df) || nrow(df) == 0L) return(df)
+  if (is.null(df) || !is.data.frame(df) || nrow(df) == 0L) {
+    return(df)
+  }
   for (ic in intersect(c("plant_individual_id", "leaf_id", "efd_harmonic_opt", "efd_k95_pcs", "basal_leaf_count", "cauline_leaf_count"), names(df))) {
     df[[ic]] <- suppressWarnings(as.integer(df[[ic]]))
   }
@@ -1292,7 +1433,8 @@ fetch_step03_contours_from_db <- function(
     df[["selected_morph_features"]] <- .normalize_semicolon_col_r(df[["selected_morph_features"]])
   }
   dyn_num_cols <- intersect(
-    c(PACKERA_DB_HARMONIC_COLS, PACKERA_DB_PC_COLS, "within_rosette_efa_dispersion",
+    c(
+      PACKERA_DB_HARMONIC_COLS, PACKERA_DB_PC_COLS, "within_rosette_efa_dispersion",
       "dissection_index", "q25_solidity", "dissected_leaf_fraction",
       "leaf_zone_confidence", "dist_from_crown_norm", "cy_rel_plant_bbox",
       "cauline_solidity_med", "cauline_dissection_index_med", "cauline_aspect_ratio_med",
@@ -1304,7 +1446,8 @@ fetch_step03_contours_from_db <- function(
       "ect_lobe_complexity", "cauline_ect_lobe_complexity",
       "ect_bilateral_asym", "heteroblasty_ect_distance",
       "area_mm2", "petiole_width_mm", "blade_width_mm", "blade_cie_l_norm", "blade_cie_l_sd",
-      "log1p_capitulum_count", "log1p_capitulum_count_std", "nearest_type_basionym_d2", "spatial_balance_weight"),
+      "log1p_capitulum_count", "log1p_capitulum_count_std", "nearest_type_basionym_d2", "spatial_balance_weight"
+    ),
     names(df)
   )
   for (nc in dyn_num_cols) {
@@ -1314,13 +1457,17 @@ fetch_step03_contours_from_db <- function(
 }
 
 .prune_stale_run_rows_r <- function(conn, table_name, rid, df) {
-  if (is.null(conn) || is.null(df) || nrow(df) == 0L || !("catalogNumber" %in% names(df))) return(invisible(0L))
+  if (is.null(conn) || is.null(df) || nrow(df) == 0L || !("catalogNumber" %in% names(df))) {
+    return(invisible(0L))
+  }
   cats <- trimws(as.character(df$catalogNumber))
   pids <- if ("plant_individual_id" %in% names(df)) ifelse(is.na(df$plant_individual_id), 0L, suppressWarnings(as.integer(df$plant_individual_id))) else rep(0L, nrow(df))
   pids[is.na(pids)] <- 0L
   keep_keys <- unique(paste(cats, pids, sep = "\r"))
   ex <- tryCatch(DBI::dbGetQuery(conn, sprintf("SELECT rowid AS _rid, catalogNumber, plant_individual_id FROM %s WHERE run_id = $1;", table_name), params = list(rid)), error = function(e) NULL)
-  if (is.null(ex) || nrow(ex) == 0L) return(invisible(0L))
+  if (is.null(ex) || nrow(ex) == 0L) {
+    return(invisible(0L))
+  }
   ex_pids <- ifelse(is.na(ex$plant_individual_id), 0L, suppressWarnings(as.integer(ex$plant_individual_id)))
   ex_pids[is.na(ex_pids)] <- 0L
   ex_keys <- paste(trimws(as.character(ex$catalogNumber)), ex_pids, sep = "\r")
@@ -1340,9 +1487,13 @@ persist_step03_to_sqlite <- function(
   vouchers_path = NULL,
   run_id = NULL
 ) {
-  if (!is_sqlite_active_for_inputs(vouchers_path)) return(invisible(FALSE))
+  if (!is_sqlite_active_for_inputs(vouchers_path)) {
+    return(invisible(FALSE))
+  }
   conn <- connect_packera_db(read_only = FALSE)
-  if (is.null(conn)) return(invisible(FALSE))
+  if (is.null(conn)) {
+    return(invisible(FALSE))
+  }
   on.exit(disconnect_packera_db(conn), add = TRUE)
 
   rid <- resolve_packera_run_id(run_id)
@@ -1394,18 +1545,26 @@ fetch_step04_morphometrics_from_db <- function(
   active_catalogs = NULL,
   run_id = NULL
 ) {
-  if (!is_sqlite_active_for_inputs(c(vouchers_path, harmonics_path))) return(NULL)
+  if (!is_sqlite_active_for_inputs(c(vouchers_path, harmonics_path))) {
+    return(NULL)
+  }
   conn <- connect_packera_db(read_only = TRUE)
-  if (is.null(conn)) return(NULL)
+  if (is.null(conn)) {
+    return(NULL)
+  }
   on.exit(disconnect_packera_db(conn), add = TRUE)
-  if (!db_table_exists_safe(conn, "otu_morphometrics")) return(NULL)
+  if (!db_table_exists_safe(conn, "otu_morphometrics")) {
+    return(NULL)
+  }
 
   rid <- resolve_packera_run_id(run_id)
   cnt <- tryCatch(
     DBI::dbGetQuery(conn, "SELECT COUNT(*) AS n FROM otu_morphometrics WHERE run_id = $1;", params = list(rid))$n[1],
     error = function(e) 0L
   )
-  if (is.na(cnt) || cnt == 0L) return(NULL)
+  if (is.na(cnt) || cnt == 0L) {
+    return(NULL)
+  }
 
   sql <- paste0(
     "SELECT ",
@@ -1427,12 +1586,16 @@ fetch_step04_morphometrics_from_db <- function(
     "ORDER BY om.catalogNumber, om.plant_individual_id;"
   )
   df <- tryCatch(DBI::dbGetQuery(conn, sql, params = list(rid)), error = function(e) NULL)
-  if (is.null(df) || nrow(df) == 0L) return(NULL)
+  if (is.null(df) || nrow(df) == 0L) {
+    return(NULL)
+  }
 
   if (!is.null(active_catalogs) && length(active_catalogs) > 0L) {
     cats <- unique(trimws(as.character(active_catalogs)))
     df <- df[trimws(as.character(df$catalogNumber)) %in% cats, , drop = FALSE]
-    if (nrow(df) == 0L) return(NULL)
+    if (nrow(df) == 0L) {
+      return(NULL)
+    }
   }
 
   for (pair in list(
@@ -1452,12 +1615,15 @@ fetch_step04_morphometrics_from_db <- function(
   df$run_id <- NULL
   df <- coerce_sqlite_logical_cols(df)
   has_prev_s04 <- ("cda_predicted_taxon" %in% names(df) && any(!is.na(df$cda_predicted_taxon))) ||
-                  ("gmm_cluster" %in% names(df) && any(!is.na(df$gmm_cluster)))
+    ("gmm_cluster" %in% names(df) && any(!is.na(df$gmm_cluster)))
   if (isTRUE(has_prev_s04)) {
     if (!is.null(harmonics_path) && nzchar(harmonics_path) && file.exists(harmonics_path)) {
       hm_raw <- tryCatch(
-        if (requireNamespace("data.table", quietly = TRUE)) as.data.frame(data.table::fread(harmonics_path, showProgress = FALSE))
-        else utils::read.csv(harmonics_path, stringsAsFactors = FALSE, check.names = FALSE),
+        if (requireNamespace("data.table", quietly = TRUE)) {
+          as.data.frame(data.table::fread(harmonics_path, showProgress = FALSE))
+        } else {
+          utils::read.csv(harmonics_path, stringsAsFactors = FALSE, check.names = FALSE)
+        },
         error = function(e) NULL
       )
       if (!is.null(hm_raw) && "catalogNumber" %in% names(hm_raw) && nrow(hm_raw) > 0L) {
@@ -1470,12 +1636,14 @@ fetch_step04_morphometrics_from_db <- function(
           ok_m <- which(!is.na(m_idx))
           if (length(ok_m) > 0L) {
             raw_s03_cols <- intersect(
-              c(PACKERA_DB_SYM_HARMONIC_COLS, PACKERA_DB_PC_COLS,
+              c(
+                PACKERA_DB_SYM_HARMONIC_COLS, PACKERA_DB_PC_COLS,
                 "ECT_PC1", "ECT_PC2", "ECT_PC3", "Cauline_PC1", "Cauline_PC2", "Cauline_PC3",
                 "Cauline_ECT_PC1", "Cauline_ECT_PC2", "aspect_ratio", "solidity", "q25_solidity",
                 "dissection_index", "dissected_leaf_fraction", "within_rosette_efa_dispersion",
                 "heteroblasty_efa_distance", "heteroblasty_ect_distance", "ect_lobe_complexity",
-                "cauline_ect_lobe_complexity", "blade_cie_l_norm", "blade_cie_l_sd", "centroid_size", "log_centsize", "scale_source"),
+                "cauline_ect_lobe_complexity", "blade_cie_l_norm", "blade_cie_l_sd", "centroid_size", "log_centsize", "scale_source"
+              ),
               names(hm_raw)
             )
             for (rc in raw_s03_cols) {
@@ -1514,7 +1682,9 @@ persist_step04_to_sqlite <- function(
     return(invisible(FALSE))
   }
   conn <- connect_packera_db(read_only = FALSE)
-  if (is.null(conn)) return(invisible(FALSE))
+  if (is.null(conn)) {
+    return(invisible(FALSE))
+  }
   on.exit(disconnect_packera_db(conn), add = TRUE)
 
   rid <- resolve_packera_run_id(run_id)
@@ -1540,9 +1710,11 @@ persist_step04_to_sqlite <- function(
     coh_sub <- df_db[df_db$catalogNumber %in% v_cats, , drop = FALSE]
     if (nrow(coh_sub) > 0L) {
       coh_cols <- intersect(
-        c("run_id", "catalogNumber", "plant_individual_id", "species_standardized",
+        c(
+          "run_id", "catalogNumber", "plant_individual_id", "species_standardized",
           "determiner_tier", "type_status", "is_type_specimen",
-          "is_promoted_bronze", "authority_weight"),
+          "is_promoted_bronze", "authority_weight"
+        ),
         names(coh_sub)
       )
       db_upsert_dataframe(
@@ -1570,14 +1742,20 @@ query_environmental_cache_sqlite <- function(
   demo = FALSE
 ) {
   has_explicit_db <- !is.null(db_path) && nzchar(trimws(as.character(db_path)))
-  if (isTRUE(demo) || (!has_explicit_db && !is_sqlite_active_for_inputs(cache_path, demo = demo))) return(NULL)
+  if (isTRUE(demo) || (!has_explicit_db && !is_sqlite_active_for_inputs(cache_path, demo = demo))) {
+    return(NULL)
+  }
   conn <- connect_packera_db(db_path = if (has_explicit_db) as.character(db_path) else "", read_only = TRUE, demo = FALSE)
-  if (is.null(conn)) return(NULL)
+  if (is.null(conn)) {
+    return(NULL)
+  }
   on.exit(disconnect_packera_db(conn), add = TRUE)
-  if (!db_table_exists_safe(conn, "environmental_cache")) return(NULL)
+  if (!db_table_exists_safe(conn, "environmental_cache")) {
+    return(NULL)
+  }
 
   if (!is.null(bbox) && length(bbox) == 4L && all(is.finite(as.numeric(bbox))) &&
-      db_table_exists_safe(conn, "environmental_rtree")) {
+    db_table_exists_safe(conn, "environmental_rtree")) {
     bb <- as.numeric(bbox)
     res <- tryCatch(
       DBI::dbGetQuery(
@@ -1591,7 +1769,9 @@ query_environmental_cache_sqlite <- function(
       ),
       error = function(e) NULL
     )
-    if (is.null(res) || nrow(res) == 0L) return(NULL)
+    if (is.null(res) || nrow(res) == 0L) {
+      return(NULL)
+    }
     return(coerce_sqlite_logical_cols(res))
   }
 
@@ -1619,7 +1799,9 @@ query_environmental_cache_sqlite <- function(
     "SELECT * FROM environmental_cache;"
   }
   res <- tryCatch(DBI::dbGetQuery(conn, sql), error = function(e) NULL)
-  if (is.null(res) || nrow(res) == 0L) return(NULL)
+  if (is.null(res) || nrow(res) == 0L) {
+    return(NULL)
+  }
   coerce_sqlite_logical_cols(res)
 }
 
@@ -1628,13 +1810,21 @@ upsert_environmental_cache_sqlite <- function(
   cache_path = NULL,
   demo = FALSE
 ) {
-  if (isTRUE(demo) || is.null(df) || nrow(df) == 0L) return(invisible(0L))
-  if (!is_sqlite_active_for_inputs(cache_path, demo = demo)) return(invisible(0L))
+  if (isTRUE(demo) || is.null(df) || nrow(df) == 0L) {
+    return(invisible(0L))
+  }
+  if (!is_sqlite_active_for_inputs(cache_path, demo = demo)) {
+    return(invisible(0L))
+  }
 
   conn <- connect_packera_db(read_only = FALSE, demo = FALSE)
-  if (is.null(conn)) return(invisible(0L))
+  if (is.null(conn)) {
+    return(invisible(0L))
+  }
   on.exit(disconnect_packera_db(conn), add = TRUE)
-  if (!db_table_exists_safe(conn, "environmental_cache")) return(invisible(0L))
+  if (!db_table_exists_safe(conn, "environmental_cache")) {
+    return(invisible(0L))
+  }
 
   env_df <- as.data.frame(df, stringsAsFactors = FALSE)
   for (bc in intersect(PACKERA_DB_WC_BIO_COLS, names(env_df))) {
@@ -1659,7 +1849,9 @@ upsert_environmental_cache_sqlite <- function(
     env_df$lat_lon_key[fill_idx] <- sprintf("%.5f_%.5f", lat_num[fill_idx], lon_num[fill_idx])
   }
   env_df <- env_df[!is.na(env_df$lat_lon_key) & nzchar(trimws(as.character(env_df$lat_lon_key))), , drop = FALSE]
-  if (nrow(env_df) == 0L) return(invisible(0L))
+  if (nrow(env_df) == 0L) {
+    return(invisible(0L))
+  }
 
   n_up <- db_upsert_dataframe(
     conn,
@@ -1677,14 +1869,20 @@ persist_step05_to_sqlite <- function(
   run_id = NULL,
   demo = FALSE
 ) {
-  if (isTRUE(demo) || is.null(vouchers_df) || nrow(vouchers_df) == 0L) return(invisible(FALSE))
-  if (!is_sqlite_active_for_inputs(vouchers_path, demo = demo)) return(invisible(FALSE))
+  if (isTRUE(demo) || is.null(vouchers_df) || nrow(vouchers_df) == 0L) {
+    return(invisible(FALSE))
+  }
+  if (!is_sqlite_active_for_inputs(vouchers_path, demo = demo)) {
+    return(invisible(FALSE))
+  }
 
   srf_df <- as.data.frame(vouchers_df, stringsAsFactors = FALSE)
   upsert_environmental_cache_sqlite(srf_df, cache_path = vouchers_path, demo = demo)
 
   conn <- connect_packera_db(read_only = FALSE, demo = FALSE)
-  if (is.null(conn)) return(invisible(FALSE))
+  if (is.null(conn)) {
+    return(invisible(FALSE))
+  }
   on.exit(disconnect_packera_db(conn), add = TRUE)
 
   rid <- resolve_packera_run_id(run_id)
@@ -1730,7 +1928,9 @@ persist_step05_to_sqlite <- function(
 # ==============================================================================
 
 fetch_run_master_view <- function(conn, run_id = resolve_packera_run_id()) {
-  if (is.null(conn)) return(NULL)
+  if (is.null(conn)) {
+    return(NULL)
+  }
   rid <- resolve_packera_run_id(run_id)
   res <- tryCatch(
     DBI::dbGetQuery(
@@ -1740,7 +1940,9 @@ fetch_run_master_view <- function(conn, run_id = resolve_packera_run_id()) {
     ),
     error = function(e) NULL
   )
-  if (is.null(res) || nrow(res) == 0L) return(NULL)
+  if (is.null(res) || nrow(res) == 0L) {
+    return(NULL)
+  }
   res$run_id <- NULL
   coerce_sqlite_logical_cols(res)
 }
@@ -1754,19 +1956,25 @@ try_fetch_master_view_for_cohort <- function(
   vouchers_path = NULL,
   require_step04 = FALSE,
   require_step05 = FALSE,
-  require_step06 = FALSE,
+  require_step07 = FALSE,
   ...
 ) {
   eff_paths <- unique(c(input_paths, vouchers_path))
   eff_paths <- eff_paths[!is.na(eff_paths) & nzchar(eff_paths)]
-  if (!is_sqlite_active_for_inputs(eff_paths, demo = demo)) return(NULL)
+  if (!is_sqlite_active_for_inputs(eff_paths, demo = demo)) {
+    return(NULL)
+  }
   conn <- connect_packera_db(read_only = TRUE, demo = demo)
-  if (is.null(conn)) return(NULL)
+  if (is.null(conn)) {
+    return(NULL)
+  }
   on.exit(disconnect_packera_db(conn), add = TRUE)
 
   rid <- resolve_packera_run_id(run_id)
   master_df <- fetch_run_master_view(conn, run_id = rid)
-  if (is.null(master_df) || nrow(master_df) == 0L) return(NULL)
+  if (is.null(master_df) || nrow(master_df) == 0L) {
+    return(NULL)
+  }
 
   if (is.null(active_catalogs) && !is.null(vouchers_df) && "catalogNumber" %in% names(vouchers_df)) {
     active_catalogs <- vouchers_df$catalogNumber
@@ -1781,19 +1989,25 @@ try_fetch_master_view_for_cohort <- function(
       master_df <- master_df[trimws(as.character(master_df$catalogNumber)) %in% cats, , drop = FALSE]
     }
   }
-  if (nrow(master_df) == 0L) return(NULL)
+  if (nrow(master_df) == 0L) {
+    return(NULL)
+  }
 
   has_m <- ("cda_predicted_taxon" %in% names(master_df) && any(!is.na(master_df$cda_predicted_taxon))) ||
-           ("PC1" %in% names(master_df) && any(!is.na(master_df$PC1)))
+    ("PC1" %in% names(master_df) && any(!is.na(master_df$PC1)))
   has_s <- ("rf_predicted_taxon" %in% names(master_df) && any(!is.na(master_df$rf_predicted_taxon))) ||
-           ("edaphic_best_fit_taxon" %in% names(master_df) && any(!is.na(master_df$edaphic_best_fit_taxon)))
+    ("edaphic_best_fit_taxon" %in% names(master_df) && any(!is.na(master_df$edaphic_best_fit_taxon)))
 
-  if (isTRUE(require_step04) && !has_m) return(NULL)
-  if ((isTRUE(require_step05) || isTRUE(require_step06)) && !has_s) return(NULL)
+  if (isTRUE(require_step04) && !has_m) {
+    return(NULL)
+  }
+  if ((isTRUE(require_step05) || isTRUE(require_step07)) && !has_s) {
+    return(NULL)
+  }
 
-  if (!isTRUE(require_step06)) {
+  if (!isTRUE(require_step07)) {
     stale_ct_cols <- c(
-      "w_morph_kappa", "w_edaphic_kappa", "w_pheno_kappa", "n_available_modalities",
+      "w_morph_kappa", "w_edaphic_kappa", "w_pheno_kappa", "w_geno_kappa", "n_available_modalities",
       "probabilistic_consensus_conflict", "probabilistic_consensus_score",
       "delta_doy_resid", "taxonomic_status_call", "recommended_determination",
       "taxonomic_treatment_broad", "taxonomic_treatment_subtype",
@@ -1804,7 +2018,7 @@ try_fetch_master_view_for_cohort <- function(
     )
     master_df <- master_df[, setdiff(names(master_df), stale_ct_cols), drop = FALSE]
   }
-  if (!isTRUE(require_step05) && !isTRUE(require_step06)) {
+  if (!isTRUE(require_step05) && !isTRUE(require_step07)) {
     stale_srf_cols <- c(
       "rf_predicted_taxon", "rf_predicted_prob", "rf_given_taxon_prob", "rf_prediction_source",
       "edaphic_best_fit_taxon", "spatial_block_cv_acc", "spatial_autocorr_range_km",
@@ -1821,17 +2035,23 @@ try_fetch_master_view_for_cohort <- function(
   master_df
 }
 
-persist_step06_to_sqlite <- function(
+persist_step07_to_sqlite <- function(
   triage_df,
   vouchers_path = NULL,
   run_id = NULL,
   demo = FALSE
 ) {
-  if (isTRUE(demo) || is.null(triage_df) || nrow(triage_df) == 0L) return(invisible(FALSE))
-  if (!is_sqlite_active_for_inputs(vouchers_path, demo = demo)) return(invisible(FALSE))
+  if (isTRUE(demo) || is.null(triage_df) || nrow(triage_df) == 0L) {
+    return(invisible(FALSE))
+  }
+  if (!is_sqlite_active_for_inputs(vouchers_path, demo = demo)) {
+    return(invisible(FALSE))
+  }
 
   conn <- connect_packera_db(read_only = FALSE, demo = FALSE)
-  if (is.null(conn)) return(invisible(FALSE))
+  if (is.null(conn)) {
+    return(invisible(FALSE))
+  }
   on.exit(disconnect_packera_db(conn), add = TRUE)
 
   rid <- resolve_packera_run_id(run_id)
@@ -1856,17 +2076,23 @@ persist_step06_to_sqlite <- function(
   invisible(TRUE)
 }
 
-persist_step06_complexes_to_sqlite <- function(
+persist_step07_complexes_to_sqlite <- function(
   complexes_df,
   vouchers_path = NULL,
   run_id = NULL,
   demo = FALSE
 ) {
-  if (isTRUE(demo) || is.null(complexes_df) || nrow(complexes_df) == 0L) return(invisible(FALSE))
-  if (!is_sqlite_active_for_inputs(vouchers_path, demo = demo)) return(invisible(FALSE))
+  if (isTRUE(demo) || is.null(complexes_df) || nrow(complexes_df) == 0L) {
+    return(invisible(FALSE))
+  }
+  if (!is_sqlite_active_for_inputs(vouchers_path, demo = demo)) {
+    return(invisible(FALSE))
+  }
 
   conn <- connect_packera_db(read_only = FALSE, demo = FALSE)
-  if (is.null(conn)) return(invisible(FALSE))
+  if (is.null(conn)) {
+    return(invisible(FALSE))
+  }
   on.exit(disconnect_packera_db(conn), add = TRUE)
 
   rid <- resolve_packera_run_id(run_id)
@@ -1896,8 +2122,10 @@ persist_step06_complexes_to_sqlite <- function(
   invisible(TRUE)
 }
 
-.discover_step06_eco_cols <- function(col_names) {
-  if (is.null(col_names) || length(col_names) == 0L) return(character(0))
+.discover_step07_eco_cols <- function(col_names) {
+  if (is.null(col_names) || length(col_names) == 0L) {
+    return(character(0))
+  }
   eco_pattern <- paste0(
     "^(bio[0-9]+_|fine_|ssurgo_|soil_|topo_|polaris_|solus_|sgmc_|ilr_texture_|elevation_m$|primary_.*_predictors$)",
     "|(^|_)(schoener_d|edaphic_z_score|climatic_z_score|type_edaphic_z_score|nearest_type_niche_taxon|matches_type_lithology|delta_doy|hopkins_|substrate_specialist_flag|rf_prediction_source|n_observed_modalities)"
@@ -1908,8 +2136,59 @@ persist_step06_complexes_to_sqlite <- function(
   )
 }
 
-.discover_step06_dynamic_morph_cols <- function(col_names) {
-  if (is.null(col_names) || length(col_names) == 0L) return(character(0))
+.discover_step07_dynamic_morph_cols <- function(col_names) {
+  if (is.null(col_names) || length(col_names) == 0L) {
+    return(character(0))
+  }
   morph_pattern <- "^(PC[0-9]+|Cauline_PC[0-9]+|ECT_PC[0-9]+|Cauline_ECT_PC[0-9]+|[AD][0-9]+|within_rosette_efa_dispersion|efd_harmonic_opt|efd_k95_pcs|selected_morph_features|ect_lobe_complexity|cauline_ect_lobe_complexity|heteroblasty_ect_distance)$"
   grep(morph_pattern, col_names, value = TRUE)
+}
+
+persist_step06_genomics_to_sqlite <- function(
+  assignments_df,
+  run_id = NULL,
+  db_path = NULL,
+  demo = FALSE
+) {
+  if (isTRUE(demo) || is.null(assignments_df) || nrow(assignments_df) == 0L) {
+    return(invisible(FALSE))
+  }
+  conn <- connect_packera_db(db_path = db_path, read_only = FALSE, demo = FALSE)
+  if (is.null(conn)) {
+    return(invisible(FALSE))
+  }
+  on.exit(disconnect_packera_db(conn), add = TRUE)
+
+  rid <- resolve_packera_run_id(run_id)
+  ensure_pipeline_run_r(conn, run_id = rid)
+
+  gla_df <- as.data.frame(assignments_df, stringsAsFactors = FALSE)
+  gla_df$run_id <- rid
+  if ("is_geno_admixed" %in% names(gla_df)) {
+    gla_df$is_geno_admixed <- ifelse(
+      is.na(gla_df$is_geno_admixed),
+      NA_integer_,
+      as.integer(as.logical(gla_df$is_geno_admixed))
+    )
+  }
+
+  db_upsert_dataframe(
+    conn,
+    table_name = "genetic_lineage_assignments",
+    df = gla_df,
+    pk_cols = c("run_id", "genetic_sample_id"),
+    preserve_existing_on_null = FALSE
+  )
+  kept_ids <- as.character(gla_df$genetic_sample_id[!is.na(gla_df$genetic_sample_id) & nzchar(trimws(as.character(gla_df$genetic_sample_id)))])
+  if (length(kept_ids) > 0L) {
+    DBI::dbExecute(
+      conn,
+      sprintf(
+        "DELETE FROM genetic_lineage_assignments WHERE run_id = %s AND genetic_sample_id NOT IN (%s);",
+        as.character(DBI::dbQuoteString(conn, rid)),
+        paste(vapply(kept_ids, function(s) as.character(DBI::dbQuoteString(conn, s)), character(1)), collapse = ", ")
+      )
+    )
+  }
+  invisible(TRUE)
 }

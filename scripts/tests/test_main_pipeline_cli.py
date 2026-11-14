@@ -71,6 +71,16 @@ class TestMainPipelineCLI(unittest.TestCase):
         self.assertEqual(args_dl.subcommand, "download-weights")
         self.assertTrue(args_dl.force)
 
+        # genomics (Step 06 standalone phylogenomics)
+        args_gen = parser.parse_args(["genomics", "--genomics-dir", "data/genomics"])
+        self.assertEqual(args_gen.subcommand, "genomics")
+        self.assertEqual(args_gen.genomics_dir, "data/genomics")
+
+        # skim-organellar
+        args_skim = parser.parse_args(["skim-organellar", "--reads", "raw_reads.zip"])
+        self.assertEqual(args_skim.subcommand, "skim-organellar")
+        self.assertEqual(args_skim.reads, "raw_reads.zip")
+
         # force / overwrite flags across subparsers
         self.assertTrue(parser.parse_args(["harvest", "--force"]).force)
         self.assertTrue(parser.parse_args(["harvest", "--overwrite"]).force)

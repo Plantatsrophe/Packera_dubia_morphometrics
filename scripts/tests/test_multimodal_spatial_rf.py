@@ -499,7 +499,7 @@ class TestMultimodalSpatialRF(unittest.TestCase):
               cat("STEP06_RF_POSTERIOR_POOLING_OK\\n")
             }})
             """
-            r_batch_file = cls._class_tmp_path / "batched_step06_checks.R"
+            r_batch_file = cls._class_tmp_path / "batched_step05_07_checks.R"
             r_batch_file.write_text(r_batch_code, encoding="utf-8")
             cls.r_unit_proc = run_warm_r_cmd(
                 ["Rscript", str(r_batch_file)],
@@ -667,7 +667,7 @@ class TestMultimodalSpatialRF(unittest.TestCase):
                 "--demo",
             ]
             res = run_warm_r_cmd(cmd, stage_key='step05', cwd=PROJECT_ROOT, skip_figures=True)
-            self.assertEqual(res.returncode, 0, f"Step 06 Rscript failed: {res.stderr}\n{res.stdout}")
+            self.assertEqual(res.returncode, 0, f"Step 05/07 Rscript failed: {res.stderr}\n{res.stdout}")
 
             # Verify synthetic SSURGO records are never cached into ssurgo_cache under --demo
             cache_dir = tmp / "ssurgo_cache"
@@ -718,14 +718,14 @@ class TestMultimodalSpatialRF(unittest.TestCase):
             for col in ["D_clim", "I_clim", "D_edaph", "I_edaph", "D_joint", "I_joint", "Schoener_D", "Warren_D", "Warren_I"]:
                 self.assertIn(col, sum_df.columns, f"Missing column '{col}' in multimodal_spatial_rf_summary.csv")
 
-            # Verify Step 06 06_triage_dashboard_synthesis.R accepts the Step 05 outputs and completes without error
-            step06_script = PROJECT_ROOT / "scripts" / "analysis" / "06_triage_dashboard_synthesis.R"
+            # Verify Step 07 07_triage_dashboard_synthesis.R accepts the Step 05 outputs and completes without error
+            step07_script = PROJECT_ROOT / "scripts" / "analysis" / "07_triage_dashboard_synthesis.R"
             out_queue = tmp / "triage_queue.csv"
             out_report = tmp / "revision_summary.md"
-            out_triage_plot = tmp / "fig06a_integrative_taxonomic_synthesis.png"
-            cmd06 = [
+            out_triage_plot = tmp / "fig07a_integrative_taxonomic_synthesis.png"
+            cmd07 = [
                 "Rscript",
-                str(step06_script),
+                str(step07_script),
                 "--vouchers", str(vouchers_csv),
                 "--morphometrics", str(morph_csv),
                 "--multimodal-flags", str(out_flags),
@@ -734,9 +734,9 @@ class TestMultimodalSpatialRF(unittest.TestCase):
                 "--output-report", str(out_report),
                 "--output-plot", str(out_triage_plot),
             ]
-            res07 = run_warm_r_cmd(cmd06, stage_key='step06', cwd=PROJECT_ROOT, skip_figures=True)
-            self.assertEqual(res07.returncode, 0, f"Step 06 execution failed: {res07.stderr}\n{res07.stdout}")
-            self.assertTrue(out_queue.exists(), "Step 06 triage_queue.csv must be generated from Step 05 outputs.")
+            res07 = run_warm_r_cmd(cmd07, stage_key='step07', cwd=PROJECT_ROOT, skip_figures=True)
+            self.assertEqual(res07.returncode, 0, f"Step 07 execution failed: {res07.stderr}\n{res07.stdout}")
+            self.assertTrue(out_queue.exists(), "Step 07 triage_queue.csv must be generated from Step 05 outputs.")
             queue_df = pd.read_csv(out_queue)
             self.assertEqual(len(queue_df), 32)
 
@@ -1332,7 +1332,7 @@ class TestMultimodalSpatialRF(unittest.TestCase):
         self.assertNotIn("mean(x, na.rm = TRUE)", buf_slice)
 
         # 3. Verify run_pipeline.sh Step 05 invocation does not pass --morphometrics and Step 05 main() does not require_step04 = TRUE
-        step05_sh_slice = rp_src.split("05_multimodal_spatial_rf.R")[1].split("06_triage_dashboard_synthesis.R")[0]
+        step05_sh_slice = rp_src.split("05_multimodal_spatial_rf.R")[1].split("06_ingest_genetic_data.py")[0]
         self.assertNotIn("--morphometrics", step05_sh_slice)
         self.assertNotIn("require_step04 = TRUE", s05_src)
 
@@ -1347,7 +1347,7 @@ class TestMultimodalSpatialRF(unittest.TestCase):
             source("scripts/morphometrics/pub_figures_utils.R")
             source("scripts/analysis/edaphic_fine_grain_utils.R")
             source("scripts/analysis/05_multimodal_spatial_rf.R")
-            source("scripts/analysis/06_triage_dashboard_synthesis.R")
+            source("scripts/analysis/07_triage_dashboard_synthesis.R")
 
             tmp_root <- {repr(str(tmp_d))}
             sol_dir <- file.path(tmp_root, "env", "solus_100m")

@@ -437,6 +437,7 @@ from scripts.core.db_schema import (
     _migrate_vouchers_schema_columns,
     _table_needs_canonical_rebuild,
     init_db_schema,
+    migrate_database_schema,
 )
 
 
@@ -2520,7 +2521,7 @@ def persist_taxon_complexes(
     rows: Sequence[Mapping[str, Any]],
     demo: bool = False,
 ) -> int:
-    """Upsert Step 06 empirical species-complex delimitation rows into `taxon_complexes`."""
+    """Upsert Step 07 empirical species-complex delimitation rows into `taxon_complexes`."""
     if demo or not rows:
         return 0
     eff_run = str(run_id).strip() or "canonical"
@@ -2657,6 +2658,7 @@ def ingest_existing_run_tables_into_db(
                 "w_morph_kappa",
                 "w_edaphic_kappa",
                 "w_pheno_kappa",
+                "w_geno_kappa",
                 "probabilistic_consensus_conflict",
                 "probabilistic_consensus_score",
                 "hopkins_adjusted_doy",
@@ -2669,7 +2671,121 @@ def ingest_existing_run_tables_into_db(
             conn, "curation_triage", norm_tri, ("run_id", "catalogNumber", "plant_individual_id")
         )
 
+    gla_rows = _read_csv_dicts(t_dir / "genomic_assignments.csv")
+    if gla_rows:
+        run_counts["genetic_lineage_assignments"] = persist_genetic_lineage_assignments(
+            conn, eff_run, gla_rows, demo=False
+        )
+
     return run_counts
+
+
+def upsert_genomic_samples(
+    conn: sqlite3.Connection,
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    preserve_existing_on_null: bool = False,
+) -> int:
+    """Upsert Tier A genomic sample metadata rows into `genomic_samples`."""
+    if not rows:
+        return 0
+    str_cols = (
+        "genetic_sample_id", "catalogNumber", "project_id", "population_id",
+        "replicate_pair_id", "taxon_raw", "species_standardized", "marker_platform",
+        "stateProvince", "county", "eventDate", "linkage_tier",
+        "inferred_cytotype", "plastid_clade", "its_ribotype",
+    )
+    int_cols = ("ploidy_level", "hq_reads", "mapped_reads", "n_called_loci", "hdplot_retained_loci")
+    bool_cols = ("is_putative_novel_or_hybrid_query", "geno_quality_pass", "cytonuclear_discordant")
+    float_cols = ("pct_repetitive", "decimalLatitude", "decimalLongitude", "missing_genotype_rate", "observed_het", "nquire_delta_logl")
+
+    norm_rows: List[Dict[str, Any]] = []
+    for raw in rows:
+        gid = _to_str(raw.get("genetic_sample_id"))
+        if not gid:
+            continue
+        item: Dict[str, Any] = {"genetic_sample_id": gid}
+        for col in str_cols:
+            if col != "genetic_sample_id":
+                item[col] = _to_str(raw.get(col))
+        for col in int_cols:
+            item[col] = _to_int(raw.get(col))
+        for col in bool_cols:
+            bval = _to_bool_int(raw.get(col))
+            item[col] = 0 if (col == "is_putative_novel_or_hybrid_query" and bval is None) else bval
+        for col in float_cols:
+            item[col] = _to_float(raw.get(col))
+        norm_rows.append(item)
+
+    return upsert_rows_generic(
+        conn,
+        "genomic_samples",
+        norm_rows,
+        ("genetic_sample_id",),
+        preserve_existing_on_null=preserve_existing_on_null,
+    )
+
+
+def persist_genetic_lineage_assignments(
+    conn: sqlite3.Connection,
+    run_id: str,
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    demo: bool = False,
+    prune_stale: bool = True,
+) -> int:
+    """Persist Tier B run-scoped genomic lineage assignments and optionally prune stale rows for `run_id`."""
+    if demo or not rows:
+        return 0
+    eff_run = str(run_id).strip() or "canonical"
+    ensure_pipeline_run(conn, run_id=eff_run)
+
+    str_cols = (
+        "genetic_sample_id", "catalogNumber", "population_id", "geno_predicted_taxon",
+        "genetic_cluster", "q_admixture_json", "geno_parent_1", "geno_parent_2",
+        "nearest_tree_sister_taxon", "hybrid_generation_class", "coancestry_cluster",
+        "f_branch_donor_taxon",
+    )
+    float_cols = (
+        "geno_posterior_prob", "geno_margin", "q_max",
+        "patristic_dist_to_dubia", "replicate_pair_concordance",
+        "hybrid_index_h", "interspecific_ancestry_q12", "f_branch_max",
+        "snaq_gamma_minor", "coalescent_gdi", "bpp_introgression_bf",
+        "mmrr_beta_ibd", "mmrr_beta_ibe", "mmrr_p_ibe",
+    )
+    norm_rows: List[Dict[str, Any]] = []
+    kept_ids: List[str] = []
+    for raw in rows:
+        gid = _to_str(raw.get("genetic_sample_id"))
+        if not gid:
+            continue
+        kept_ids.append(gid)
+        item: Dict[str, Any] = {"run_id": eff_run, "genetic_sample_id": gid}
+        for col in str_cols:
+            if col != "genetic_sample_id":
+                item[col] = _to_str(raw.get(col))
+        for col in float_cols:
+            item[col] = _to_float(raw.get(col))
+        item["is_geno_admixed"] = _to_bool_int(raw.get("is_geno_admixed"))
+        norm_rows.append(item)
+
+    if not norm_rows:
+        return 0
+    written = upsert_rows_generic(
+        conn,
+        "genetic_lineage_assignments",
+        norm_rows,
+        ("run_id", "genetic_sample_id"),
+        preserve_existing_on_null=False,
+    )
+    if prune_stale and kept_ids:
+        placeholders = ", ".join("?" for _ in kept_ids)
+        conn.execute(
+            f"DELETE FROM genetic_lineage_assignments WHERE run_id = ? AND genetic_sample_id NOT IN ({placeholders});",
+            [eff_run, *kept_ids],
+        )
+        conn.commit()
+    return written
 
 
 def ingest_existing_csvs_to_db(
@@ -2937,6 +3053,7 @@ def purge_segments_and_runs(
             conn.execute("PRAGMA foreign_keys = OFF;")
             purge_tables = (
                 "taxon_complexes",
+                "genetic_lineage_assignments",
                 "curation_triage",
                 "spatial_rf_predictions",
                 "otu_morphometrics",
@@ -2990,7 +3107,7 @@ def purge_runs_only(
     vacuum: bool = True,
 ) -> Dict[str, int]:
     """
-    Purges ONLY Step 03 to 06 run outputs (`runs/*`, `outputs/figures/*`,
+    Purges ONLY Step 03 to 07 run outputs (`runs/*`, `outputs/figures/*`,
     `outputs/reports/*`, `outputs/rasters/*`, non-Step-01/02 tables in `data/tables/`,
     and Tier B SQLite run/morphometrics/ENM/triage tables) while 100% preserving
     Step 01 harvested vouchers, raw voucher images, and Step 02 segmentation assets
@@ -3079,6 +3196,7 @@ def purge_runs_only(
             conn.execute("PRAGMA foreign_keys = OFF;")
             tier_b_run_tables = (
                 "taxon_complexes",
+                "genetic_lineage_assignments",
                 "curation_triage",
                 "spatial_rf_predictions",
                 "otu_morphometrics",

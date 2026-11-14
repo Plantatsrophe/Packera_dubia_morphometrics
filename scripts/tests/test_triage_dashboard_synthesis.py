@@ -6,7 +6,7 @@ Project: Packera dubia Species Delimitation & Morphometrics Pipeline
 Affiliation: University of North Carolina at Chapel Hill Herbarium (NCU)
 
 Description:
-    Unit and integration tests for Step 06 (scripts/analysis/06_triage_dashboard_synthesis.R):
+    Unit and integration tests for Step 07 (scripts/analysis/07_triage_dashboard_synthesis.R):
     - Safe Relational Joins & Non-Georeferenced Voucher Coalescing
     - Reliability-Weighted Probabilistic Consensus Score (Dawid & Skene 1979)
       with Dynamic Missing-Modality Weight Renormalization & OOF Class Precision
@@ -42,11 +42,11 @@ if str(PROJECT_ROOT) not in sys.path:
 
 
 class TestTriageDashboardSynthesis(unittest.TestCase):
-    """Test suite for Step 06 active R script (scripts/analysis/06_triage_dashboard_synthesis.R)."""
+    """Test suite for Step 07 active R script (scripts/analysis/07_triage_dashboard_synthesis.R)."""
 
     @classmethod
     def setUpClass(cls) -> None:
-        cls.r_script_path = PROJECT_ROOT / "scripts" / "analysis" / "06_triage_dashboard_synthesis.R"
+        cls.r_script_path = PROJECT_ROOT / "scripts" / "analysis" / "07_triage_dashboard_synthesis.R"
         cls._class_temp_dir = tempfile.TemporaryDirectory()
         cls._class_tmp_path = Path(cls._class_temp_dir.name)
         cls.r_unit_proc = None
@@ -274,12 +274,12 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
             cls.nd_out_csv = cls.nd_dir / "non_dubia_triage.csv"
             cls.nd_multi_report = cls.nd_dir / "multi_species_report.md"
             cls.nd_focal_report_default = cls.nd_dir / "Packera_Taxonomic_Revision_Summary.md"
-            cls.nd_focal_plot_default = cls.nd_dir / "fig06a_integrative_taxonomic_synthesis.png"
+            cls.nd_focal_plot_default = cls.nd_dir / "fig07a_integrative_taxonomic_synthesis.png"
             cls.nd_helper_check_csv = cls.nd_dir / "pub_fig_helpers.csv"
             cls.dubia_dir = cls.nd_dir / "dubia_focal"
             cls.dubia_dir.mkdir(parents=True, exist_ok=True)
             dubia_rep_def = cls.dubia_dir / "Packera_Taxonomic_Revision_Summary.md"
-            dubia_fig_def = cls.dubia_dir / "fig06a_integrative_taxonomic_synthesis.png"
+            dubia_fig_def = cls.dubia_dir / "fig07a_integrative_taxonomic_synthesis.png"
             dubia_fig_def.write_bytes(b"\x89PNG\r\n\x1a\n")
 
             nd_rows = [
@@ -318,7 +318,7 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
               readr::write_csv(res, "{cls.nd_out_csv.as_posix()}")
               opts_multi <- list(output_report = "{cls.nd_multi_report.as_posix()}", output_plot = "", focal_taxon = "", gmm_bic = "", gmm_summary = "")
               generate_taxonomic_revision_report(res, opts_multi)
-              render_synthesis_figure_pdf(res, "{cls.nd_focal_plot_default.as_posix()}", focal_taxon = "Packera aurea")
+              render_synthesis_figure_png(res, "{cls.nd_focal_plot_default.as_posix()}", focal_taxon = "Packera aurea")
               opts_focal <- list(output_report = "{cls.nd_focal_report_default.as_posix()}", output_plot = "{cls.nd_focal_plot_default.as_posix()}", focal_taxon = "Packera aurea", gmm_bic = "", gmm_summary = "")
               generate_taxonomic_revision_report(res[res$species_standardized == "Packera aurea", , drop = FALSE], opts_focal)
               opts_dub <- list(output_report = "{dubia_rep_def.as_posix()}", output_plot = "{dubia_fig_def.as_posix()}", focal_taxon = "Packera dubia", gmm_bic = "", gmm_summary = "")
@@ -403,7 +403,7 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
               stopifnot(row_corrob$recommended_determination == "Packera obovata")
               stopifnot(all(res7$probabilistic_consensus_conflict >= 0.0 & res7$probabilistic_consensus_conflict <= 1.0))
 
-              anc_m <- .resolve_step06_anchor_mask(df7)
+              anc_m <- .resolve_step07_anchor_mask(df7)
               prec_edaph <- .compute_oof_class_precision_map(df7$species_standardized[anc_m], df7$edaphic_best_fit_taxon[anc_m])
               prec_mor <- .compute_oof_class_precision_map(df7$species_standardized[anc_m], df7$cda_predicted_taxon[anc_m])
               stopifnot(prec_edaph[["Packera obovata"]] < prec_mor[["Packera obovata"]])
@@ -423,7 +423,7 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
             r_batch_file.write_text(r_batch_code, encoding="utf-8")
             cls.r_unit_proc = run_warm_r_cmd(
                 ["Rscript", str(r_batch_file)],
-                stage_key="step06",
+                stage_key="step07",
                 cwd=PROJECT_ROOT,
             )
 
@@ -432,7 +432,7 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
         cls._class_temp_dir.cleanup()
 
     def setUp(self) -> None:
-        self.r_script_path = PROJECT_ROOT / "scripts" / "analysis" / "06_triage_dashboard_synthesis.R"
+        self.r_script_path = PROJECT_ROOT / "scripts" / "analysis" / "07_triage_dashboard_synthesis.R"
 
     def _require_batched_r(self) -> str:
         if self.r_unit_proc is None:
@@ -440,7 +440,7 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
         self.assertEqual(
             self.r_unit_proc.returncode,
             0,
-            f"Batched Step 06 R unit suite failed:\n{self.r_unit_proc.stderr}\n{self.r_unit_proc.stdout}",
+            f"Batched Step 07 R unit suite failed:\n{self.r_unit_proc.stderr}\n{self.r_unit_proc.stdout}",
         )
         return self.r_unit_proc.stdout
 
@@ -524,7 +524,7 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
         self.assertIn("STEP07_PRECISION_AND_GATE_OK", out)
 
 
-    def test_step06_cli_handoff_coalescing_multi_plant_artifact_gate_and_ood_cryptic(self):
+    def test_step07_cli_handoff_coalescing_multi_plant_artifact_gate_and_ood_cryptic(self):
         if not rscript_available():
             self.skipTest("Rscript not installed or fast mode enabled.")
         """Verify Step 07 CLI preserves multi-plant keys, coalesces ungeoreferenced vouchers (missing-modality renormalization), assigns RESOLVED/CRITICAL priorities, gates Stage 1 on cross-modal non-contradiction, and corroborates Stage 3 cryptic divergence across morphometric + edaphic + phenological streams."""
@@ -538,7 +538,7 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
             out_queue = tmp / "triage_queue.csv"
             out_html = tmp / "Triage_Dashboard_Interactive.html"
             out_rep = tmp / "Packera_Taxonomic_Revision_Summary.md"
-            out_fig = tmp / "fig06a_integrative_taxonomic_synthesis.png"
+            out_fig = tmp / "fig07a_integrative_taxonomic_synthesis.png"
 
             pd.DataFrame([
                 {"catalogNumber": "CAT-ANCHOR-A1", "institutionCode": "NCU", "species_raw": "Packera aurea", "scientificName": "Packera aurea", "determiner_tier": "Tier_1_Gold", "decimalLatitude": 35.5, "decimalLongitude": -82.5, "doy": 118},
@@ -605,8 +605,8 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
                     "--output-html", str(out_html),
                     "--output-report", str(out_rep),
                     "--output-plot", str(out_fig),
-                ], stage_key='step06', cwd=PROJECT_ROOT, skip_figures=True)
-            self.assertEqual(proc.returncode, 0, f"Step 06 handoff run failed:\n{proc.stderr}\n{proc.stdout}")
+                ], stage_key='step07', cwd=PROJECT_ROOT, skip_figures=True)
+            self.assertEqual(proc.returncode, 0, f"Step 07 handoff run failed:\n{proc.stderr}\n{proc.stdout}")
             self.assertTrue(out_queue.exists() and out_rep.exists() and out_html.exists())
             tdf = pd.read_csv(out_queue)
             self.assertEqual(len(tdf), 10, "Expected 10 rows (preserving ungeoreferenced NCU-HIST-2 and both individuals on CAT-MULTI-SHEET).")
@@ -663,7 +663,7 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
             self.skipTest("Rscript not installed.")
         r_code = r"""
         suppressPackageStartupMessages({ library(readr); library(dplyr) })
-        source("scripts/analysis/06_triage_dashboard_synthesis.R")
+        source("scripts/analysis/07_triage_dashboard_synthesis.R")
 
         set.seed(2026)
         # 25 active-anthesis anchors (alpha = clip((25 - 5)/15, 0, 1) = 1.0 -> full empirical circular slope)
@@ -717,10 +717,10 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
         cat("STEP07_COHORT_ADAPTIVE_OK\\n")
         """
         with tempfile.TemporaryDirectory() as tmp_r:
-            r_tmp = Path(tmp_r) / "check_step06_ca.R"
+            r_tmp = Path(tmp_r) / "check_step07_ca.R"
             r_tmp.write_text(r_code, encoding="utf-8")
-            res = run_warm_r_cmd(["Rscript", str(r_tmp)], stage_key="step06", cwd=PROJECT_ROOT)
-        self.assertEqual(res.returncode, 0, f"Step 06 cohort-adaptive test failed:\n{res.stderr}\n{res.stdout}")
+            res = run_warm_r_cmd(["Rscript", str(r_tmp)], stage_key="step07", cwd=PROJECT_ROOT)
+        self.assertEqual(res.returncode, 0, f"Step 07 cohort-adaptive test failed:\n{res.stderr}\n{res.stdout}")
         self.assertIn("STEP07_COHORT_ADAPTIVE_OK", res.stdout)
 
     def test_nomenclatural_type_control_rules_a_b_c_and_locus_classicus_step06_baseline(self):
@@ -730,7 +730,7 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
         r_code = """
         suppressPackageStartupMessages({ library(readr); library(dplyr) })
         source("scripts/analysis/05_multimodal_spatial_rf.R")
-        source("scripts/analysis/06_triage_dashboard_synthesis.R")
+        source("scripts/analysis/07_triage_dashboard_synthesis.R")
 
         # 1. Verify Step 06 compute_type_locality_ecological_control() computes type_edaphic_z_score,
         #    nearest_type_niche_taxon, and matches_type_lithology relative to locus classicus,
@@ -974,8 +974,8 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
                     "--output-html", str(out_html),
                     "--output-report", str(out_rep),
                     "--output-plot", str(out_fig),
-                ], stage_key='step06', cwd=PROJECT_ROOT, skip_figures=True)
-            self.assertEqual(proc.returncode, 0, f"Step 06 cohesion gate test failed:\n{proc.stderr}\n{proc.stdout}")
+                ], stage_key='step07', cwd=PROJECT_ROOT, skip_figures=True)
+            self.assertEqual(proc.returncode, 0, f"Step 07 cohesion gate test failed:\n{proc.stderr}\n{proc.stdout}")
             self.assertTrue(out_queue.exists())
             qdf = pd.read_csv(out_queue)
             self.assertIn("cryptic_cluster_cohesion_pass", qdf.columns)
@@ -986,7 +986,7 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
 
     def test_sibling_ramet_propagation_and_morph_concordance_protection(self):
         """
-        Verify in `apply_taxonomic_decision_matrix()` (`scripts/analysis/06_triage_dashboard_synthesis.R`):
+        Verify in `apply_taxonomic_decision_matrix()` (`scripts/analysis/07_triage_dashboard_synthesis.R`):
         1. Leafless ramets on a multi-plant sheet (`catalogNumber`) inherit sibling sheet-mate
            morphology and are never assigned `Putative_Hybrid_Introgression` / `Hybrid_Introgressant`
            via an imputed `cda_margin = 0.15` fallback.
@@ -999,7 +999,7 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
 
         r_code = """
         suppressPackageStartupMessages({ library(readr); library(dplyr) })
-        source("scripts/analysis/06_triage_dashboard_synthesis.R")
+        source("scripts/analysis/07_triage_dashboard_synthesis.R")
 
         df_test <- data.frame(
           catalogNumber = c(
@@ -1066,7 +1066,7 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             r_script = Path(tmpdir) / "test_sibling_and_morph_protection.R"
             r_script.write_text(r_code, encoding="utf-8")
-            proc = run_warm_r_cmd(['Rscript', str(r_script)], stage_key='step06', cwd=PROJECT_ROOT)
+            proc = run_warm_r_cmd(['Rscript', str(r_script)], stage_key='step07', cwd=PROJECT_ROOT)
         self.assertEqual(
             proc.returncode,
             0,
@@ -1078,7 +1078,7 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
 
     def test_step06_zero_trust_four_gates_and_offline_html_dashboard(self):
         """
-        Zero-trust regression suite for Step 06 Four-Gate Overhaul:
+        Zero-trust regression suite for Step 07 Four-Gate Overhaul:
           1. Canonical single-column contract (zero twin/obsolete columns in R output & SQLite).
           2. p_type_morph adapts dynamically to selected_morph_features dimensionality.
           3. Stage 4 late-season foliar wear evaluates circular Hopkins-adjusted DOY quantiles
@@ -1093,16 +1093,16 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
         r_src = self.r_script_path.read_text(encoding="utf-8")
         self.assertIn("generate_interactive_triage_html", r_src)
         self.assertIn("Triage_Dashboard_Interactive.html", r_src)
-        self.assertIn("persist_step06_to_sqlite", r_src)
-        self.assertIn("generate_step06_pub_figures", r_src)
-        self.assertIn("render_step06_synthesis_plate_pdf", r_src)
+        self.assertIn("persist_step07_to_sqlite", r_src)
+        self.assertIn("generate_step07_pub_figures", r_src)
+        self.assertIn("render_step07_synthesis_plate_png", r_src)
 
         if not rscript_available():
             self.skipTest("Rscript not installed.")
 
         r_code = """
         suppressPackageStartupMessages({ library(readr); library(dplyr) })
-        source("scripts/analysis/06_triage_dashboard_synthesis.R")
+        source("scripts/analysis/07_triage_dashboard_synthesis.R")
 
         # 1. p_type_morph dimensionality (p=6: chisq_0.95,6 = 12.592 vs df=3: 7.815) & Rule B rf_prob floor
         df_dim <- data.frame(
@@ -1218,10 +1218,10 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
         cat("STEP06_ZERO_TRUST_OK\n")
         """
         with tempfile.TemporaryDirectory() as tmpdir:
-            r_script = Path(tmpdir) / "test_step06_zero_trust.R"
+            r_script = Path(tmpdir) / "test_step07_zero_trust.R"
             r_script.write_text(r_code, encoding="utf-8")
-            proc = run_warm_r_cmd(['Rscript', str(r_script)], stage_key='step06', cwd=PROJECT_ROOT)
-        self.assertEqual(proc.returncode, 0, f"Step 06 zero-trust suite failed:\n{proc.stderr}\n{proc.stdout}")
+            proc = run_warm_r_cmd(['Rscript', str(r_script)], stage_key='step07', cwd=PROJECT_ROOT)
+        self.assertEqual(proc.returncode, 0, f"Step 07 zero-trust suite failed:\n{proc.stderr}\n{proc.stdout}")
         self.assertIn("STEP06_ZERO_TRUST_OK", proc.stdout)
 
     def test_conservative_five_gate_hybrid_swarm_parentage_and_intraspecific_guard(self):
@@ -1248,7 +1248,7 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
 
         r_code = """
         suppressPackageStartupMessages({ library(readr); library(dplyr) })
-        source("scripts/analysis/06_triage_dashboard_synthesis.R")
+        source("scripts/analysis/07_triage_dashboard_synthesis.R")
 
         df_hyb <- data.frame(
           catalogNumber = c(
@@ -1465,7 +1465,7 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             r_script = Path(tmpdir) / "test_five_gate_hybrid.R"
             r_script.write_text(r_code, encoding="utf-8")
-            proc = run_warm_r_cmd(["Rscript", str(r_script)], stage_key="step06", cwd=PROJECT_ROOT)
+            proc = run_warm_r_cmd(["Rscript", str(r_script)], stage_key="step07", cwd=PROJECT_ROOT)
         self.assertEqual(proc.returncode, 0, f"5-gate hybrid test failed:\n{proc.stderr}\n{proc.stdout}")
         self.assertIn("CONSERVATIVE_FIVE_GATE_HYBRID_OK", proc.stdout)
 
@@ -1475,7 +1475,7 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
 
 REPO_ROOT = PROJECT_ROOT
 DISCOVERY_UTILS_R = REPO_ROOT / "scripts" / "analysis" / "taxon_complex_discovery_utils.R"
-SYNTHESIS_R_SCRIPT = REPO_ROOT / "scripts" / "analysis" / "06_triage_dashboard_synthesis.R"
+SYNTHESIS_R_SCRIPT = REPO_ROOT / "scripts" / "analysis" / "07_triage_dashboard_synthesis.R"
 PUB_FIG_R_SCRIPT = REPO_ROOT / "scripts" / "morphometrics" / "pub_figures_utils.R"
 
 CANONICAL_COMPLEX_COLS = {
@@ -1506,7 +1506,7 @@ CANONICAL_COMPLEX_COLS = {
 
 
 class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
-    """Tests for N-taxon basionym mapping, unified Step 06 complex discovery, and Four-Gate contracts."""
+    """Tests for N-taxon basionym mapping, unified Step 07 complex discovery, and Four-Gate contracts."""
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -1641,7 +1641,7 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
               cat("STEP06_HIERARCHICAL_OK\\n")
             }})
 
-            # Block 3: Unified Step 06 multimodal left join + complex discovery integration
+            # Block 3: Unified Step 07 multimodal left join + complex discovery integration
             source("{SYNTHESIS_R_SCRIPT.as_posix()}")
             local({{
               opts_m <- parse_args_robust()
@@ -1655,7 +1655,7 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
               opts_m$output_complexes <- "{(mm_dir / 'empirical_taxon_complexes.csv').as_posix()}"
               opts_m$output_affinity <- "{(mm_dir / 'pairwise_taxon_affinity_matrix.csv').as_posix()}"
               opts_m$output_neighbors <- "{(mm_dir / 'focal_auto_neighbors.txt').as_posix()}"
-              opts_m$output_complex_plot <- "{(mm_dir / 'fig06b_taxon_complex_delimitation_network.png').as_posix()}"
+              opts_m$output_complex_plot <- "{(mm_dir / 'fig07b_taxon_complex_delimitation_network.png').as_posix()}"
               opts_m$demo <- TRUE
               mdf <- build_triage_queue(opts_m)
               req <- c("fine_soil_ph", "fine_soil_sand", "fine_bedrock_depth_cm", "ssurgo_rock_outcrop_pct",
@@ -1749,13 +1749,13 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
               export_spatial_rf_figures(df, srf_mock, niche_mock, f_srf)
               stopifnot(file.exists(f_srf) && file.info(f_srf)$size > 1000)
 
-              f_s06 <- file.path("{intra_fig_dir.as_posix()}", "fig06a_integrative_taxonomic_synthesis.png")
-              render_step06_synthesis_plate_pdf(df, f_s06)
+              f_s06 <- file.path("{intra_fig_dir.as_posix()}", "fig07a_integrative_taxonomic_synthesis.png")
+              render_step07_synthesis_plate_png(df, f_s06)
               stopifnot(file.exists(f_s06) && file.info(f_s06)$size > 1000)
               cat("STEP06_INTRA_FIGS_OK\\n")
             }})
             """
-            r_batch_file = cls._class_tmp_path / "batched_step06_complex_checks.R"
+            r_batch_file = cls._class_tmp_path / "batched_step07_complex_checks.R"
             r_batch_file.write_text(r_batch_code, encoding="utf-8")
             cls.r_unit_proc = run_warm_r_cmd(
                 ["Rscript", str(r_batch_file)],
@@ -1773,7 +1773,7 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
         self.assertEqual(
             self.r_unit_proc.returncode,
             0,
-            f"Batched Step 06 complex discovery R unit checks failed:\n{self.r_unit_proc.stderr}\n{self.r_unit_proc.stdout}",
+            f"Batched Step 07 complex discovery R unit checks failed:\n{self.r_unit_proc.stderr}\n{self.r_unit_proc.stdout}",
         )
         return self.r_unit_proc.stdout
 
@@ -1851,7 +1851,7 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
         self.assertIn("STEP06_R_PALETTE_OK", self._require_batched_r())
 
     def test_discover_taxon_complexes_8_species_3_complexes(self):
-        """Verify unified Step 06 recovers 3 true complexes across 8 species with canonical twin-free outputs."""
+        """Verify unified Step 07 recovers 3 true complexes across 8 species with canonical twin-free outputs."""
         rng = np.random.default_rng(20261025)
         complex_map = {
             "Packera dubia": ("C1", np.array([-4.5, 3.2, 0.4, -0.2, 0.1]), 2.15),
@@ -1937,7 +1937,7 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
             out_complexes = tmp_path / "empirical_taxon_complexes.csv"
             out_affinity = tmp_path / "pairwise_taxon_affinity_matrix.csv"
             out_neighbors = tmp_path / "focal_auto_neighbors.txt"
-            out_figure = tmp_path / "fig06b_taxon_complex_delimitation_network.png"
+            out_figure = tmp_path / "fig07b_taxon_complex_delimitation_network.png"
 
             pd.DataFrame(vouchers_rows).to_csv(vouchers_csv, index=False)
             pd.DataFrame(harmonics_rows).to_csv(harmonics_csv, index=False)
@@ -1945,7 +1945,7 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
 
             cmd = [
                 "Rscript",
-                "scripts/analysis/06_triage_dashboard_synthesis.R",
+                "scripts/analysis/07_triage_dashboard_synthesis.R",
                 "--vouchers", str(vouchers_csv),
                 "--harmonics", str(harmonics_csv),
                 "--morphometrics", str(morph_csv),
@@ -1963,8 +1963,8 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
             ]
             if not rscript_available():
                 self.skipTest("Rscript not installed.")
-            res = run_warm_r_cmd(cmd, stage_key='step06', cwd=REPO_ROOT, skip_figures=False)
-            self.assertEqual(res.returncode, 0, f"Unified Step 06 failed:\nSTDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}")
+            res = run_warm_r_cmd(cmd, stage_key='step07', cwd=REPO_ROOT, skip_figures=False)
+            self.assertEqual(res.returncode, 0, f"Unified Step 07 failed:\nSTDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}")
 
             self.assertTrue(out_complexes.exists() and out_complexes.stat().st_size > 0)
             self.assertTrue(out_affinity.exists() and out_affinity.stat().st_size > 0)
@@ -2010,7 +2010,7 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
         self.assertIn("STEP06_HIERARCHICAL_OK", self._require_batched_r())
 
     def test_subcluster_network_when_2_species_or_within_species_gmm_clusters(self) -> None:
-        """Verify taxon_complex_discovery_utils.R (<=800 lines) builds Taxon x Morphotype subcluster network inside Step 06 when <=2 species."""
+        """Verify taxon_complex_discovery_utils.R (<=800 lines) builds Taxon x Morphotype subcluster network inside Step 07 when <=2 species."""
         line_count = len(DISCOVERY_UTILS_R.read_text(encoding="utf-8").splitlines())
         self.assertLessEqual(line_count, 800, f"taxon_complex_discovery_utils.R has {line_count} lines; must be <= 800 lines.")
 
@@ -2025,7 +2025,7 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
             out_complexes = tmp_path / "empirical_taxon_complexes.csv"
             out_affinity = tmp_path / "pairwise_taxon_affinity_matrix.csv"
             out_neighbors = tmp_path / "focal_auto_neighbors.txt"
-            out_fig = tmp_path / "fig06b_taxon_complex_delimitation_network.png"
+            out_fig = tmp_path / "fig07b_taxon_complex_delimitation_network.png"
 
             subclusters = [
                 ("Packera dubia", 1, 8, np.array([-2.2, -1.5, 0.0, 0.0, 0.0])),
@@ -2072,7 +2072,7 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
                     "--output-neighbors", str(out_neighbors),
                     "--output-complex-plot", str(out_fig),
                     "--demo",
-                ], stage_key='step06', cwd=REPO_ROOT, skip_figures=False)
+                ], stage_key='step07', cwd=REPO_ROOT, skip_figures=False)
             self.assertEqual(res.returncode, 0, f"Subcluster discovery failed:\n{res.stderr}\n{res.stdout}")
             comp_df = pd.read_csv(out_complexes)
             expected_nodes = {"P. dubia [K1]", "P. dubia [K2]", "P. paupercula [K1]", "P. paupercula [K2]"}
@@ -2085,13 +2085,13 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
         self.assertIn("STEP06_INTRA_FIGS_OK", self._require_batched_r())
 
     def test_multimodal_cli_flag_and_ecological_edaphic_left_join(self) -> None:
-        """Verify unified Step 06 merges Step 05 ecological/edaphic columns and taxon_complex_discovery_utils.R stays <=800 lines."""
+        """Verify unified Step 07 merges Step 05 ecological/edaphic columns and taxon_complex_discovery_utils.R stays <=800 lines."""
         line_count = len(DISCOVERY_UTILS_R.read_text(encoding="utf-8").splitlines())
         self.assertLessEqual(line_count, 800, f"taxon_complex_discovery_utils.R has {line_count} lines; must be <= 800 lines.")
         self.assertIn("STEP06_MULTIMODAL_JOIN_OK", self._require_batched_r())
 
     def test_dynamic_morph_and_primary_env_predictor_discovery_in_step06(self) -> None:
-        """Verify unified Step 06 dynamically discovers >5 PCs via selected_morph_features, Step 05 primary_env_predictors, and Peak_Anthesis DOY."""
+        """Verify unified Step 07 dynamically discovers >5 PCs via selected_morph_features, Step 05 primary_env_predictors, and Peak_Anthesis DOY."""
         rng = np.random.default_rng(20261031)
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -2104,7 +2104,7 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
             out_complexes = tmp_path / "empirical_taxon_complexes.csv"
             out_affinity = tmp_path / "pairwise_taxon_affinity_matrix.csv"
             out_neighbors = tmp_path / "focal_auto_neighbors.txt"
-            out_fig = tmp_path / "fig06b_taxon_complex_delimitation_network.png"
+            out_fig = tmp_path / "fig07b_taxon_complex_delimitation_network.png"
 
             taxa_specs = [
                 ("Packera hyperborea", (-3.5, -3.0), (5.5, 1.8)),
@@ -2175,8 +2175,8 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
                     "--output-neighbors", str(out_neighbors),
                     "--output-complex-plot", str(out_fig),
                     "--demo",
-                ], stage_key='step06', cwd=REPO_ROOT, skip_figures=True)
-            self.assertEqual(res.returncode, 0, f"Step 06 dynamic feature test failed:\n{res.stderr}\n{res.stdout}")
+                ], stage_key='step07', cwd=REPO_ROOT, skip_figures=True)
+            self.assertEqual(res.returncode, 0, f"Step 07 dynamic feature test failed:\n{res.stderr}\n{res.stdout}")
             comp_df = pd.read_csv(out_complexes)
             self.assertEqual(len(comp_df), 3)
             hyp_row = comp_df.loc[comp_df["species_standardized"] == "Packera hyperborea"].iloc[0]
@@ -2211,15 +2211,15 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
         if not rscript_available():
             self.skipTest("Rscript not installed.")
         with tempfile.TemporaryDirectory() as tmp_r:
-            r_tmp = Path(tmp_r) / "check_step06_guard.R"
+            r_tmp = Path(tmp_r) / "check_step07_guard.R"
             r_tmp.write_text(r_code, encoding="utf-8")
-            res = run_warm_r_cmd(["Rscript", str(r_tmp)], stage_key="step06", cwd=REPO_ROOT)
+            res = run_warm_r_cmd(["Rscript", str(r_tmp)], stage_key="step07", cwd=REPO_ROOT)
         self.assertEqual(res.returncode, 0, f"Subcluster multi-species guard test failed:\n{res.stderr}\n{res.stdout}")
         self.assertIn("SUBCLUSTER_MULTI_SP_GUARD_OK", res.stdout)
 
     def test_unified_step06_complex_discovery_zero_trust_four_gates(self):
         """
-        Zero-trust regression suite for unified Step 06 Complex Delimitation Four-Gate Overhaul:
+        Zero-trust regression suite for unified Step 07 Complex Delimitation Four-Gate Overhaul:
           1. Gate 1: S_morph proximity gating prevents sympatric habitat convergence from merging distant clades,
              metric sqrt(1 - W_ij) distance is used in Ward.D2, and Peak_Anthesis vouchers yield has_pheno == TRUE.
           2. Gate 2: Confident-noise & Misidentification_Reassign rows are excluded from anchors and C_morph,
@@ -2232,12 +2232,12 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_p = Path(tmpdir)
-            db_file = tmp_p / "step06_complexes.sqlite"
+            db_file = tmp_p / "step07_complexes.sqlite"
             with get_db_connection(db_file, init_schema=True):
                 pass
 
             r_code = rf"""
-            source("scripts/analysis/06_triage_dashboard_synthesis.R")
+            source("scripts/analysis/07_triage_dashboard_synthesis.R")
 
             # 1. Sympatric habitat convergence must NOT merge morphologically distant clades (Gate 1)
             set.seed(777)
@@ -2319,19 +2319,19 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
             stopifnot(kw_sub$w_morph_raw < 0.80)
 
             # 4. SQLite persistence into taxon_complexes (Gate 3)
-            Sys.setenv(PACKERA_DB_PATH = "{db_file.as_posix()}", RUN_ID = "run_step06_tc")
-            full_res <- run_step06_complex_discovery(df_symp, list(min_affinity = 0.03, demo = FALSE, vouchers = ""))
-            persist_step06_complexes_to_sqlite(full_res$complexes_df, vouchers_path = NULL, run_id = "run_step06_tc", demo = FALSE)
+            Sys.setenv(PACKERA_DB_PATH = "{db_file.as_posix()}", RUN_ID = "run_step07_tc")
+            full_res <- run_step07_complex_discovery(df_symp, list(min_affinity = 0.03, demo = FALSE, vouchers = ""))
+            persist_step07_complexes_to_sqlite(full_res$complexes_df, vouchers_path = NULL, run_id = "run_step07_tc", demo = FALSE)
             cat("STEP06_COMPLEX_FOUR_GATES_OK\n")
             """
             r_file = tmp_p / "test_complex_gates.R"
             r_file.write_text(r_code, encoding="utf-8")
-            proc = run_warm_r_cmd(["Rscript", str(r_file)], stage_key="step06", cwd=REPO_ROOT, skip_figures=True)
-            self.assertEqual(proc.returncode, 0, f"Step 06 complex four-gate R test failed:\n{proc.stderr}\n{proc.stdout}")
+            proc = run_warm_r_cmd(["Rscript", str(r_file)], stage_key="step07", cwd=REPO_ROOT, skip_figures=True)
+            self.assertEqual(proc.returncode, 0, f"Step 07 complex four-gate R test failed:\n{proc.stderr}\n{proc.stdout}")
             self.assertIn("STEP06_COMPLEX_FOUR_GATES_OK", proc.stdout)
 
             conn = sqlite3.connect(db_file)
-            rows = conn.execute("SELECT species_standardized, consensus_complex_id FROM taxon_complexes WHERE run_id = 'run_step06_tc'").fetchall()
+            rows = conn.execute("SELECT species_standardized, consensus_complex_id FROM taxon_complexes WHERE run_id = 'run_step07_tc'").fetchall()
             conn.close()
             self.assertEqual(len(rows), 3)
 
@@ -2347,7 +2347,7 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
           5. Stage 3 separates Heterotypic Basionym Resurrection (Taxonomic_Resurrection_Candidate + resurrection_basionym)
              from unnamed de novo Putative_Cryptic_Species.
         """
-        r06_path = REPO_ROOT / "scripts" / "analysis" / "06_triage_dashboard_synthesis.R"
+        r06_path = REPO_ROOT / "scripts" / "analysis" / "07_triage_dashboard_synthesis.R"
         r06_src = r06_path.read_text(encoding="utf-8")
         r04_src = (REPO_ROOT / "scripts" / "morphometrics" / "04_gmm_morphotools.R").read_text(encoding="utf-8")
         auth_src = (REPO_ROOT / "scripts" / "morphometrics" / "authority_weighting_utils.R").read_text(encoding="utf-8")
@@ -2363,7 +2363,7 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
 
         r_code = """
         suppressPackageStartupMessages({ library(readr); library(dplyr) })
-        source("scripts/analysis/06_triage_dashboard_synthesis.R")
+        source("scripts/analysis/07_triage_dashboard_synthesis.R")
 
         # A. Stage 1: Self-ellipsoid protection, Tier_1_Gold/Tier_2_Silver vestiture/habitat protection, vs corroborated reassign
         df_s1 <- data.frame(
@@ -2569,7 +2569,7 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             r_file = Path(tmpdir) / "test_five_step_misid_cryptic.R"
             r_file.write_text(r_code, encoding="utf-8")
-            proc = run_warm_r_cmd(["Rscript", str(r_file)], stage_key="step06", cwd=REPO_ROOT, skip_figures=True)
+            proc = run_warm_r_cmd(["Rscript", str(r_file)], stage_key="step07", cwd=REPO_ROOT, skip_figures=True)
         self.assertEqual(proc.returncode, 0, f"Five-step misid/cryptic R suite failed:\n{proc.stderr}\n{proc.stdout}")
         self.assertIn("FIVE_STEP_MISID_AND_CRYPTIC_OK", proc.stdout)
 

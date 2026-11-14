@@ -340,7 +340,7 @@ def _build_master_view_ddl() -> str:
         om.open_set_novelty_p AS open_set_novelty_p,
         om.open_set_df AS open_set_df,
         om.is_confident_label_noise AS is_confident_label_noise,
-        -- Step 06 Spatial RF & Hopkins Phenology
+        -- Step 05 Spatial RF & Hopkins Phenology
         COALESCE(srf.lat_lon_key, ec.lat_lon_key) AS lat_lon_key,
         srf.ecotype_regime AS ecotype_regime,
         srf.lithic_outcrop_index AS lithic_outcrop_index,
@@ -377,10 +377,11 @@ def _build_master_view_ddl() -> str:
         -- Environmental Cache (Fine-grain SSURGO / POLARIS / SOLUS / 3DEP / SGMC & 19 WorldClim Rasters)
         {env_view_selects},
         {wc_view_selects},
-        -- Step 06 Curation Triage
+        -- Step 07 Curation Triage
         ct.w_morph_kappa AS w_morph_kappa,
         ct.w_edaphic_kappa AS w_edaphic_kappa,
         ct.w_pheno_kappa AS w_pheno_kappa,
+        ct.w_geno_kappa AS w_geno_kappa,
         ct.n_available_modalities AS n_available_modalities,
         ct.probabilistic_consensus_conflict AS probabilistic_consensus_conflict,
         ct.probabilistic_consensus_score AS probabilistic_consensus_score,
@@ -399,7 +400,52 @@ def _build_master_view_ddl() -> str:
         ct.hybrid_zone_cohesion_pass AS hybrid_zone_cohesion_pass,
         ct.hybrid_parent_1 AS hybrid_parent_1,
         ct.hybrid_parent_2 AS hybrid_parent_2,
-        ct.is_completed_voucher AS is_completed_voucher
+        ct.is_completed_voucher AS is_completed_voucher,
+        -- Step 06 Genomic Phylogenomics (1-to-1 per run_id, catalogNumber)
+        geno_v.genetic_sample_id AS genetic_sample_id,
+        geno_v.geno_population_id AS geno_population_id,
+        geno_v.geno_replicate_pair_id AS geno_replicate_pair_id,
+        geno_v.geno_taxon_raw AS geno_taxon_raw,
+        geno_v.geno_species_standardized AS geno_species_standardized,
+        geno_v.is_putative_novel_or_hybrid_query AS is_putative_novel_or_hybrid_query,
+        geno_v.geno_ploidy_level AS geno_ploidy_level,
+        geno_v.geno_marker_platform AS geno_marker_platform,
+        geno_v.geno_hq_reads AS geno_hq_reads,
+        geno_v.geno_missing_genotype_rate AS geno_missing_genotype_rate,
+        geno_v.geno_observed_het AS geno_observed_het,
+        geno_v.geno_quality_pass AS geno_quality_pass,
+        geno_v.geno_linkage_tier AS geno_linkage_tier,
+        geno_v.geno_predicted_taxon AS geno_predicted_taxon,
+        geno_v.geno_posterior_prob AS geno_posterior_prob,
+        geno_v.geno_margin AS geno_margin,
+        geno_v.genetic_cluster AS genetic_cluster,
+        geno_v.q_max AS q_max,
+        geno_v.q_admixture_json AS q_admixture_json,
+        geno_v.is_geno_admixed AS is_geno_admixed,
+        geno_v.geno_parent_1 AS geno_parent_1,
+        geno_v.geno_parent_2 AS geno_parent_2,
+        geno_v.nearest_tree_sister_taxon AS nearest_tree_sister_taxon,
+        geno_v.patristic_dist_to_dubia AS patristic_dist_to_dubia,
+        geno_v.replicate_pair_concordance AS replicate_pair_concordance,
+        geno_v.n_genomic_samples_linked AS n_genomic_samples_linked,
+        geno_v.hdplot_retained_loci AS hdplot_retained_loci,
+        geno_v.inferred_cytotype AS inferred_cytotype,
+        geno_v.nquire_delta_logl AS nquire_delta_logl,
+        geno_v.plastid_clade AS plastid_clade,
+        geno_v.its_ribotype AS its_ribotype,
+        geno_v.cytonuclear_discordant AS cytonuclear_discordant,
+        geno_v.hybrid_index_h AS hybrid_index_h,
+        geno_v.interspecific_ancestry_q12 AS interspecific_ancestry_q12,
+        geno_v.hybrid_generation_class AS hybrid_generation_class,
+        geno_v.coancestry_cluster AS coancestry_cluster,
+        geno_v.f_branch_max AS f_branch_max,
+        geno_v.f_branch_donor_taxon AS f_branch_donor_taxon,
+        geno_v.snaq_gamma_minor AS snaq_gamma_minor,
+        geno_v.coalescent_gdi AS coalescent_gdi,
+        geno_v.bpp_introgression_bf AS bpp_introgression_bf,
+        geno_v.mmrr_beta_ibd AS mmrr_beta_ibd,
+        geno_v.mmrr_beta_ibe AS mmrr_beta_ibe,
+        geno_v.mmrr_p_ibe AS mmrr_p_ibe
     FROM run_active_cohort rac
     LEFT JOIN vouchers v
         ON v.catalogNumber = rac.catalogNumber
@@ -434,7 +480,128 @@ def _build_master_view_ddl() -> str:
     LEFT JOIN curation_triage ct
         ON ct.run_id = rac.run_id
        AND ct.catalogNumber = rac.catalogNumber
-       AND ct.plant_individual_id = rac.plant_individual_id;
+       AND ct.plant_individual_id = rac.plant_individual_id
+    LEFT JOIN (
+        SELECT
+            run_id,
+            linked_catalog_number AS catalogNumber,
+            genetic_sample_id,
+            geno_population_id,
+            geno_replicate_pair_id,
+            geno_taxon_raw,
+            geno_species_standardized,
+            is_putative_novel_or_hybrid_query,
+            geno_ploidy_level,
+            geno_marker_platform,
+            geno_hq_reads,
+            geno_missing_genotype_rate,
+            geno_observed_het,
+            geno_quality_pass,
+            geno_linkage_tier,
+            geno_predicted_taxon,
+            geno_posterior_prob,
+            geno_margin,
+            genetic_cluster,
+            q_max,
+            q_admixture_json,
+            is_geno_admixed,
+            geno_parent_1,
+            geno_parent_2,
+            nearest_tree_sister_taxon,
+            patristic_dist_to_dubia,
+            replicate_pair_concordance,
+            n_genomic_samples_linked,
+            hdplot_retained_loci,
+            inferred_cytotype,
+            nquire_delta_logl,
+            plastid_clade,
+            its_ribotype,
+            cytonuclear_discordant,
+            hybrid_index_h,
+            interspecific_ancestry_q12,
+            hybrid_generation_class,
+            coancestry_cluster,
+            f_branch_max,
+            f_branch_donor_taxon,
+            snaq_gamma_minor,
+            coalescent_gdi,
+            bpp_introgression_bf,
+            mmrr_beta_ibd,
+            mmrr_beta_ibe,
+            mmrr_p_ibe
+        FROM (
+            SELECT
+                gla.run_id AS run_id,
+                COALESCE(gla.catalogNumber, gs.catalogNumber) AS linked_catalog_number,
+                gla.genetic_sample_id AS genetic_sample_id,
+                COALESCE(gla.population_id, gs.population_id) AS geno_population_id,
+                gs.replicate_pair_id AS geno_replicate_pair_id,
+                gs.taxon_raw AS geno_taxon_raw,
+                gs.species_standardized AS geno_species_standardized,
+                gs.is_putative_novel_or_hybrid_query AS is_putative_novel_or_hybrid_query,
+                gs.ploidy_level AS geno_ploidy_level,
+                gs.marker_platform AS geno_marker_platform,
+                gs.hq_reads AS geno_hq_reads,
+                gs.missing_genotype_rate AS geno_missing_genotype_rate,
+                gs.observed_het AS geno_observed_het,
+                gs.geno_quality_pass AS geno_quality_pass,
+                gs.linkage_tier AS geno_linkage_tier,
+                gla.geno_predicted_taxon AS geno_predicted_taxon,
+                gla.geno_posterior_prob AS geno_posterior_prob,
+                gla.geno_margin AS geno_margin,
+                gla.genetic_cluster AS genetic_cluster,
+                gla.q_max AS q_max,
+                gla.q_admixture_json AS q_admixture_json,
+                gla.is_geno_admixed AS is_geno_admixed,
+                gla.geno_parent_1 AS geno_parent_1,
+                gla.geno_parent_2 AS geno_parent_2,
+                gla.nearest_tree_sister_taxon AS nearest_tree_sister_taxon,
+                gla.patristic_dist_to_dubia AS patristic_dist_to_dubia,
+                gla.replicate_pair_concordance AS replicate_pair_concordance,
+                gs.hdplot_retained_loci AS hdplot_retained_loci,
+                gs.inferred_cytotype AS inferred_cytotype,
+                gs.nquire_delta_logl AS nquire_delta_logl,
+                gs.plastid_clade AS plastid_clade,
+                gs.its_ribotype AS its_ribotype,
+                gs.cytonuclear_discordant AS cytonuclear_discordant,
+                gla.hybrid_index_h AS hybrid_index_h,
+                gla.interspecific_ancestry_q12 AS interspecific_ancestry_q12,
+                gla.hybrid_generation_class AS hybrid_generation_class,
+                gla.coancestry_cluster AS coancestry_cluster,
+                gla.f_branch_max AS f_branch_max,
+                gla.f_branch_donor_taxon AS f_branch_donor_taxon,
+                gla.snaq_gamma_minor AS snaq_gamma_minor,
+                gla.coalescent_gdi AS coalescent_gdi,
+                gla.bpp_introgression_bf AS bpp_introgression_bf,
+                gla.mmrr_beta_ibd AS mmrr_beta_ibd,
+                gla.mmrr_beta_ibe AS mmrr_beta_ibe,
+                gla.mmrr_p_ibe AS mmrr_p_ibe,
+                COUNT(*) OVER (
+                    PARTITION BY gla.run_id, COALESCE(gla.catalogNumber, gs.catalogNumber)
+                ) AS n_genomic_samples_linked,
+                ROW_NUMBER() OVER (
+                    PARTITION BY gla.run_id, COALESCE(gla.catalogNumber, gs.catalogNumber)
+                    ORDER BY
+                        CASE gs.linkage_tier
+                            WHEN 'G1_Direct_Voucher' THEN 1
+                            WHEN 'G2_Population_Voucher_Proxy' THEN 2
+                            WHEN 'G3_Georeferenced_Unvouchered' THEN 3
+                            ELSE 4
+                        END ASC,
+                        COALESCE(gs.geno_quality_pass, 0) DESC,
+                        COALESCE(gs.hq_reads, 0) DESC,
+                        COALESCE(gla.geno_posterior_prob, -1.0) DESC,
+                        gla.genetic_sample_id ASC
+                ) AS _geno_rn
+            FROM genetic_lineage_assignments gla
+            LEFT JOIN genomic_samples gs
+                ON gs.genetic_sample_id = gla.genetic_sample_id
+            WHERE COALESCE(gla.catalogNumber, gs.catalogNumber) IS NOT NULL
+        ) geno_ranked
+        WHERE _geno_rn = 1
+    ) geno_v
+        ON geno_v.run_id = rac.run_id
+       AND geno_v.catalogNumber = rac.catalogNumber;
     """
 
 
@@ -671,6 +838,41 @@ def _build_schema_ddl() -> str:
     BEGIN
         DELETE FROM environmental_rtree WHERE id = OLD.rowid;
     END;
+
+    CREATE TABLE IF NOT EXISTS genomic_samples (
+        genetic_sample_id TEXT PRIMARY KEY,
+        catalogNumber TEXT NULL,
+        project_id TEXT,
+        population_id TEXT,
+        replicate_pair_id TEXT,
+        taxon_raw TEXT,
+        species_standardized TEXT,
+        is_putative_novel_or_hybrid_query INTEGER DEFAULT 0,
+        ploidy_level INTEGER,
+        marker_platform TEXT,
+        decimalLatitude REAL,
+        decimalLongitude REAL,
+        stateProvince TEXT,
+        county TEXT,
+        eventDate TEXT,
+        hq_reads INTEGER,
+        mapped_reads INTEGER,
+        pct_repetitive REAL,
+        n_called_loci INTEGER,
+        missing_genotype_rate REAL,
+        observed_het REAL,
+        geno_quality_pass INTEGER,
+        linkage_tier TEXT,
+        hdplot_retained_loci INTEGER,
+        inferred_cytotype TEXT,
+        nquire_delta_logl REAL,
+        plastid_clade TEXT,
+        its_ribotype TEXT,
+        cytonuclear_discordant INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_genomic_samples_catalog ON genomic_samples(catalogNumber);
+    CREATE INDEX IF NOT EXISTS idx_genomic_samples_pop ON genomic_samples(population_id);
+    CREATE INDEX IF NOT EXISTS idx_genomic_samples_taxon ON genomic_samples(species_standardized);
 
     -- =========================================================================
     -- TIER B: RUN-SCOPED ANALYTICAL TABLES & MASTER VIEW
@@ -919,6 +1121,7 @@ def _build_schema_ddl() -> str:
         w_morph_kappa REAL,
         w_edaphic_kappa REAL,
         w_pheno_kappa REAL,
+        w_geno_kappa REAL,
         n_available_modalities INTEGER,
         probabilistic_consensus_conflict REAL,
         probabilistic_consensus_score REAL,
@@ -941,6 +1144,41 @@ def _build_schema_ddl() -> str:
         PRIMARY KEY (run_id, catalogNumber, plant_individual_id),
         FOREIGN KEY (run_id) REFERENCES pipeline_runs(run_id) ON DELETE CASCADE
     );
+
+    CREATE TABLE IF NOT EXISTS genetic_lineage_assignments (
+        run_id TEXT NOT NULL,
+        genetic_sample_id TEXT NOT NULL,
+        catalogNumber TEXT NULL,
+        population_id TEXT,
+        geno_predicted_taxon TEXT,
+        geno_posterior_prob REAL,
+        geno_margin REAL,
+        genetic_cluster TEXT,
+        q_max REAL,
+        q_admixture_json TEXT,
+        is_geno_admixed INTEGER,
+        geno_parent_1 TEXT,
+        geno_parent_2 TEXT,
+        nearest_tree_sister_taxon TEXT,
+        patristic_dist_to_dubia REAL,
+        replicate_pair_concordance REAL,
+        hybrid_index_h REAL,
+        interspecific_ancestry_q12 REAL,
+        hybrid_generation_class TEXT,
+        coancestry_cluster TEXT,
+        f_branch_max REAL,
+        f_branch_donor_taxon TEXT,
+        snaq_gamma_minor REAL,
+        coalescent_gdi REAL,
+        bpp_introgression_bf REAL,
+        mmrr_beta_ibd REAL,
+        mmrr_beta_ibe REAL,
+        mmrr_p_ibe REAL,
+        PRIMARY KEY (run_id, genetic_sample_id),
+        FOREIGN KEY (run_id) REFERENCES pipeline_runs(run_id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_gla_run_cat ON genetic_lineage_assignments(run_id, catalogNumber);
+    CREATE INDEX IF NOT EXISTS idx_gla_run_pop ON genetic_lineage_assignments(run_id, population_id);
 
     CREATE TABLE IF NOT EXISTS taxon_complexes (
         run_id TEXT NOT NULL,
@@ -1133,12 +1371,35 @@ _DYNAMIC_TABLE_MIGRATION_SPECS: Dict[str, Tuple[Tuple[str, str], ...]] = {
         ]
     ),
     "curation_triage": (
+        ("w_geno_kappa", "REAL"),
         ("cryptic_cluster_cohesion_pass", "INTEGER"),
         ("cryptic_non_clinal_pass", "INTEGER"),
         ("resurrection_basionym", "TEXT"),
         ("hybrid_zone_cohesion_pass", "INTEGER"),
         ("hybrid_parent_1", "TEXT"),
         ("hybrid_parent_2", "TEXT"),
+    ),
+    "genomic_samples": (
+        ("hdplot_retained_loci", "INTEGER"),
+        ("inferred_cytotype", "TEXT"),
+        ("nquire_delta_logl", "REAL"),
+        ("plastid_clade", "TEXT"),
+        ("its_ribotype", "TEXT"),
+        ("cytonuclear_discordant", "INTEGER"),
+    ),
+    "genetic_lineage_assignments": (
+        ("hybrid_index_h", "REAL"),
+        ("interspecific_ancestry_q12", "REAL"),
+        ("hybrid_generation_class", "TEXT"),
+        ("coancestry_cluster", "TEXT"),
+        ("f_branch_max", "REAL"),
+        ("f_branch_donor_taxon", "TEXT"),
+        ("snaq_gamma_minor", "REAL"),
+        ("coalescent_gdi", "REAL"),
+        ("bpp_introgression_bf", "REAL"),
+        ("mmrr_beta_ibd", "REAL"),
+        ("mmrr_beta_ibe", "REAL"),
+        ("mmrr_p_ibe", "REAL"),
     ),
     "environmental_cache": tuple(
         (
@@ -1161,6 +1422,8 @@ _MASTER_VIEW_REQUIRED_TABLES: Tuple[str, ...] = (
     "spatial_rf_predictions",
     "environmental_cache",
     "curation_triage",
+    "genomic_samples",
+    "genetic_lineage_assignments",
 )
 
 
@@ -1177,7 +1440,7 @@ def _migrate_vouchers_schema_columns(conn: sqlite3.Connection) -> None:
             existing_cols.add(col_name)
 
 
-PACKERA_SCHEMA_USER_VERSION: int = 20261121
+PACKERA_SCHEMA_USER_VERSION: int = 20261123
 
 
 _CANONICAL_PLANT_INDIVIDUALS_COLS: Tuple[str, ...] = (
@@ -1533,11 +1796,18 @@ def _migrate_dynamic_schema_columns(
 
     _rebuild_tier_a_step02_tables_if_needed(conn, existing_tables)
 
+    if "genomic_samples" not in existing_tables or "genetic_lineage_assignments" not in existing_tables:
+        conn.executescript(SCHEMA_DDL)
+        # Ensure master view stays dropped until subsequent table rebuilds finish.
+        conn.execute("DROP VIEW IF EXISTS v_integrative_triage_master;")
+        existing_tables.update({"genomic_samples", "genetic_lineage_assignments"})
+
     if "curation_triage" in existing_tables:
         ct_cols_now = {
             str(r[1]) for r in conn.execute("PRAGMA table_info(curation_triage);").fetchall()
         }
         for _ct_col, _ct_type in (
+            ("w_geno_kappa", "REAL"),
             ("cryptic_cluster_cohesion_pass", "INTEGER"),
             ("cryptic_non_clinal_pass", "INTEGER"),
             ("resurrection_basionym", "TEXT"),
@@ -1550,7 +1820,7 @@ def _migrate_dynamic_schema_columns(
                 ct_cols_now.add(_ct_col)
         if ct_cols_now and ct_cols_now != {
             "run_id", "catalogNumber", "plant_individual_id",
-            "w_morph_kappa", "w_edaphic_kappa", "w_pheno_kappa",
+            "w_morph_kappa", "w_edaphic_kappa", "w_pheno_kappa", "w_geno_kappa",
             "n_available_modalities", "probabilistic_consensus_conflict",
             "probabilistic_consensus_score", "hopkins_adjusted_doy",
             "delta_doy_resid", "taxonomic_status_call", "recommended_determination",
@@ -1563,7 +1833,7 @@ def _migrate_dynamic_schema_columns(
         }:
             canon_ct_cols = (
                 "run_id", "catalogNumber", "plant_individual_id",
-                "w_morph_kappa", "w_edaphic_kappa", "w_pheno_kappa",
+                "w_morph_kappa", "w_edaphic_kappa", "w_pheno_kappa", "w_geno_kappa",
                 "n_available_modalities", "probabilistic_consensus_conflict",
                 "probabilistic_consensus_score", "hopkins_adjusted_doy",
                 "delta_doy_resid", "taxonomic_status_call", "recommended_determination",
@@ -1585,6 +1855,7 @@ def _migrate_dynamic_schema_columns(
                     w_morph_kappa REAL,
                     w_edaphic_kappa REAL,
                     w_pheno_kappa REAL,
+                    w_geno_kappa REAL,
                     n_available_modalities INTEGER,
                     probabilistic_consensus_conflict REAL,
                     probabilistic_consensus_score REAL,
@@ -1625,6 +1896,16 @@ def _migrate_dynamic_schema_columns(
         conn.executescript(MASTER_VIEW_DDL)
 
 
+def migrate_database_schema(conn: sqlite3.Connection) -> None:
+    """Idempotently migrate existing SQLite schemas to PACKERA_SCHEMA_USER_VERSION and refresh the master view."""
+    _migrate_vouchers_schema_columns(conn)
+    _migrate_dynamic_schema_columns(conn, recreate_view=False)
+    conn.executescript(SCHEMA_DDL)
+    conn.execute(f"PRAGMA user_version = {PACKERA_SCHEMA_USER_VERSION};")
+    conn.execute("PRAGMA foreign_keys = ON;")
+    conn.commit()
+
+
 def init_db_schema(conn: sqlite3.Connection) -> None:
     """Create or idempotently migrate all Tier A and Tier B tables, indexes, triggers, R*Tree, and master view."""
     cur_ver_row = conn.execute("PRAGMA user_version;").fetchone()
@@ -1652,12 +1933,13 @@ def init_db_schema(conn: sqlite3.Connection) -> None:
             el_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(extracted_leaves);").fetchall()}
             om_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(otu_morphometrics);").fetchall()}
             mv_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(v_integrative_triage_master);").fetchall()}
-            req_mv_cols = {"is_passive", "scale_source", "AR_inv_std", "log1p_capitulum_count", "blade_cie_l_norm", "nearest_type_basionym", "reproductive_trait_status", "ecoregion_can1", "ecoregion_can2", "hybrid_zone_cohesion_pass", "hybrid_parent_1", "hybrid_parent_2", "cda_oof_posterior_prob", "self_morph_mahal_d2", "open_set_df", "cryptic_non_clinal_pass", "resurrection_basionym"}
+            req_mv_cols = {"is_passive", "scale_source", "AR_inv_std", "log1p_capitulum_count", "blade_cie_l_norm", "nearest_type_basionym", "reproductive_trait_status", "ecoregion_can1", "ecoregion_can2", "hybrid_zone_cohesion_pass", "hybrid_parent_1", "hybrid_parent_2", "cda_oof_posterior_prob", "self_morph_mahal_d2", "open_set_df", "cryptic_non_clinal_pass", "resurrection_basionym", "w_geno_kappa", "geno_predicted_taxon", "geno_linkage_tier", "is_geno_admixed", "coalescent_gdi", "hybrid_generation_class", "cytonuclear_discordant"}
             if (
                 "leaf_zone" not in el_cols
                 or "area_mm2" not in el_cols
                 or "ect_path" not in el_cols
                 or "mask_is_upright" not in el_cols
+                or "petiole_width_px" not in el_cols
                 or "petiole_width_mm" not in el_cols
                 or "efa_qc_pass" not in el_cols
                 or "enclosed_void_frac" not in el_cols
@@ -1675,9 +1957,4 @@ def init_db_schema(conn: sqlite3.Connection) -> None:
             conn.execute("PRAGMA foreign_keys = ON;")
             return
 
-    _migrate_vouchers_schema_columns(conn)
-    _migrate_dynamic_schema_columns(conn, recreate_view=False)
-    conn.executescript(SCHEMA_DDL)
-    conn.execute(f"PRAGMA user_version = {PACKERA_SCHEMA_USER_VERSION};")
-    conn.execute("PRAGMA foreign_keys = ON;")
-    conn.commit()
+    migrate_database_schema(conn)

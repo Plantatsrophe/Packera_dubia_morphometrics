@@ -32,18 +32,17 @@ flowchart TD
     DB[("Central SQLite WAL Store (data/packera_pipeline.sqlite)\nTier A: vouchers · plant_individuals · extracted_leaves · environmental_cache\nTier B: pipeline_runs · run_active_cohort · leaf_efa_harmonics · otu_morphometrics · spatial_rf_predictions · curation_triage · taxon_complexes\nMaster View: v_integrative_triage_master (Schema 20261121)")]
 
     S1["Step 01: Specimen Harvesting & Authority Stratification\n(01_voucher_harvester.py · taxonomy_authority.py · epa_ecoregions.py · usda_plants_ranges.py)"] -->|"Atomic UPSERT + WebP Scans"| DB
-    S1 --> S2["Step 02: Read-Only LeafMachine3 ONNX Ingestion & Organ Indexing\n(02_segment_and_extract.py · lm3_inference_engines.py · organ_crown_metrics.py · step02_figures.py)"]
+    S1 --> S2["Step 02: Read-Only LeafMachine3 ONNX Ingestion & CPU Re-Scoring\n(02_segment_and_extract.py · lm3_inference_engines.py · organ_crown_metrics.py · rescore_step02_qc_and_zones.py)"]
     S2 -->|"Per-Voucher Transaction + 120-pt Contours + 32x360 ECT"| DB
     S2 --> E0["Environmental Layer Cache\n(download_environmental_layers.py: SOLUS100 · USGS SGMC · 3DEP 30 m DEM)"]
-    E0 --> S5
-    S2 --> S3["Step 03: Homologized EFA (>=99% Power), 32x360 ECT SVD & Basal/Cauline OTU Tracks\n(03_fourier_extractor.R · dissected_leaf_utils.R · step03_figures.R)"]
+    S2 --> S3["Step 03: Homologized EFA (>=99% Power), 32x360 ECT SVD & 3-Way Zone Routing\n(03_fourier_extractor.R · dissected_leaf_utils.R · step03_figures.R)"]
     S3 -->|"leaf_efa_harmonics"| DB
-    S3 --> S4["Step 04: Deme Plasticity Mitigation, RRPP Allometry, Canonical GMM, Shrinkage CDA & OSR\n(04_gmm_morphotools.R · authority_weighting_utils.R · plasticity_mitigation_utils.R · step04_figures.R)"]
-    S4 -->|"otu_morphometrics"| DB
-    S4 --> S5["Step 05: 0 to 15 cm Rhizosphere Stack, Hopkins Circular Phenology, Spatial RF & MaxEnt SDMs\n(05_multimodal_spatial_rf.R · step05_phenology_ecotypes.R · step05_sdm_maxent.R · step05_figures.R)"]
-    S5 -->|"spatial_rf_predictions"| DB
-    S5 --> S6["Step 06: 5-Stage Integrative Taxonomic Synthesis & Unsupervised Complex Delimitation\n(06_triage_dashboard_synthesis.R · taxon_complex_discovery_utils.R · step06_figures.R)"]
-    DB -->|"v_integrative_triage_master"| S6
+    S3 --> S4["Step 04: Phenophase Residualization, RRPP Allometry, Canonical GMM, Shrinkage CDA & OSR\n(04_gmm_morphotools.R · authority_weighting_utils.R · plasticity_mitigation_utils.R · step04_figures.R)"]
+    S4 -->|"otu_morphometrics"| S6
+    S2 --> S5["Step 05: Independent Rhizosphere ENM, Regime Discovery (ecotype_regime), Hopkins Phenology & MaxEnt SDMs\n(05_multimodal_spatial_rf.R · step05_phenology_ecotypes.R · step05_sdm_maxent.R · step05_figures.R)"]
+    E0 --> S5
+    S5 -->|"spatial_rf_predictions"| S6
+    DB -->|"v_integrative_triage_master"| S6["Step 06: 5-Stage Integrative Synthesis & Unsupervised Complex Delimitation\n(06_triage_dashboard_synthesis.R · taxon_complex_discovery_utils.R · step06_figures.R)"]
     S6 -->|"curation_triage · taxon_complexes · Reports · HTML Dashboard"| DB
 ```
 
@@ -51,12 +50,12 @@ flowchart TD
 
 | Step | Primary Entrypoints | Core Inputs | Primary Outputs | Scientific Function |
 | :---: | :--- | :--- | :--- | :--- |
-| **01** | `scripts/data_prep/01_voucher_harvester.py`<br>`scripts/core/harvester.py`<br>`scripts/core/taxonomy_authority.py` | GBIF & iDigBio APIs, EPA Level III Ecoregions, USDA PLANTS county ranges | `vouchers`, `taxon_synonyms`, `curated_vouchers.csv`, `data/raw_vouchers/*.webp` | Dynamic genus-wide or targeted *Packera* harvesting, basionym resolution, exsiccatae deduplication, `identifiedBy` isolation, institutional batch demotion, type protection, and ecoregion tagging |
-| **02** | `scripts/pipeline/02_segment_and_extract.py`<br>`scripts/vision/lm3_inference_engines.py`<br>`scripts/vision/step02_figures.py` | `curated_vouchers.csv`, `raw_vouchers/*.webp`, LeafMachine3 ONNX models | `plant_individuals`, `extracted_leaves`, `extracted_leaf_manifest.csv`, `fig02a`, `fig02b`, `lm3_assets/`, `ect_overlays/`, `lm3_sheet_overlays/` | Read-only LeafMachine3 ONNX detection (`yolo26x_det_1280`), UNet++ v9 paper cleanup, ruler tick-lattice calibration, `yolo26x_seg_1024` leaf/petiole/hole masks, 31-keypoint pose, DBSCAN ramet clustering, basal vs. cauline zoning, and optical anthesis staging |
-| **03** | `scripts/morphometrics/03_fourier_extractor.R`<br>`scripts/morphometrics/dissected_leaf_utils.R`<br>`scripts/figures/step03_figures.R` | SQLite `contour_xy_json`, `data/ect/*_ect.npy`, `extracted_leaf_manifest.csv` | `leaf_efa_harmonics`, `leaf_efa_harmonics.csv`, `leaf_efa_harmonics_individual.csv`, `fig03a`, `fig03b` | R-side LM3 clump and boundary QC, rigid tip-up homologized `Momocs::efourier` ($H_{\text{opt}} \in [6, 24]$ at $\ge 99\%$ power), bilateral symmetrization, $32 \times 360$ ECT SVD, pure basal OTU medians, and orthogonal cauline heteroblasty metrics |
-| **04** | `scripts/morphometrics/04_gmm_morphotools.R`<br>`scripts/morphometrics/authority_weighting_utils.R`<br>`scripts/morphometrics/plasticity_mitigation_utils.R`<br>`scripts/figures/step04_figures.R` | `leaf_efa_harmonics`, `curated_vouchers.csv`, `voucher_reproductive_metrics.csv` | `otu_morphometrics`, `morphometric_flags.csv`, `gmm_bayes_factors_summary.csv`, `fig04a`, `fig04b`, `fig04c` | Conspecific $10\text{ km}$ deme assignment, within-deme phenophase residualization and $Q_{ST}$ whitening, Klingenberg `RRPP` allometry, Stratified Authority Pool Cap, FastMCD + Confident Learning anchor screening, canonical GMM relabeling, deme-blocked shrinkage CDA, OSR novelty, and EPA Ecoregion MANOVA |
-| **05** | `scripts/analysis/05_multimodal_spatial_rf.R`<br>`scripts/analysis/step05_phenology_ecotypes.R`<br>`scripts/analysis/step05_sdm_maxent.R`<br>`scripts/figures/step05_figures.R` | `otu_morphometrics`, WorldClim v2.1, SOLUS100, POLARIS, SSURGO, 3DEP, SGMC | `spatial_rf_predictions`, `multimodal_conflict_flags.csv`, `sdm_*.tif`, `fig05a`, `fig05b`, `fig05c` | Uncertainty-gated $0\text{ to }15\text{ cm}$ rhizosphere and bedrock extraction, *locus classicus* ecological baseline control, circular Hopkins phenology residuals, 3-block VIF pruning, Spatial Block-CV Random Forest, MaxEnt + Spatial RF ensemble SDMs, and `PCA-env` Schoener's $D$ tests |
-| **06** | `scripts/analysis/06_triage_dashboard_synthesis.R`<br>`scripts/analysis/taxon_complex_discovery_utils.R`<br>`scripts/figures/step06_figures.R` | `v_integrative_triage_master` (joined SQLite view of Steps 01 to 05) | `curation_triage`, `taxon_complexes`, `triage_queue.csv`, `empirical_taxon_complexes.csv`, `Triage_Dashboard_Interactive.html`, `fig06a`, `fig06b` | Out-of-fold Cohen's $\kappa$ consensus weighting, sibling ramet coherence, 5-stage hierarchical decision matrix (Rules A, B, and C), Population-Cohesion Lineage Gate (`cryptic_cluster_cohesion_pass`), Leiden and metric Ward.D2 species-complex delimitation, Markdown revision monograph, and offline HTML triage dashboard |
+| **01** | `scripts/data_prep/01_voucher_harvester.py`<br>`scripts/core/harvester.py`<br>`scripts/core/taxonomy_authority.py` | GBIF & iDigBio APIs, EPA Level III Ecoregions, USDA PLANTS county ranges | `vouchers`, `taxon_synonyms`, `curated_vouchers.csv`, `data/raw_vouchers/*.webp` | Dynamic genus-wide (`taxa: []`) or targeted *Packera* harvesting, basionym resolution, exsiccatae deduplication, `identifiedBy` isolation, institutional batch demotion, type protection, and ecoregion tagging |
+| **02** | `scripts/pipeline/02_segment_and_extract.py`<br>`scripts/vision/lm3_inference_engines.py`<br>`scripts/vision/rescore_step02_qc_and_zones.py`<br>`scripts/vision/step02_figures.py` | `curated_vouchers.csv`, `raw_vouchers/*.webp`, LeafMachine3 ONNX models | `plant_individuals`, `extracted_leaves`, `extracted_leaf_manifest.csv`, `fig02a`, `fig02b`, `lm3_assets/`, `ect_overlays/`, `lm3_sheet_overlays/` | Read-only LeafMachine3 ONNX detection (`yolo26x_det_1280`), UNet++ v9 paper cleanup, deterministic tick-lattice ruler calibration, `yolo26x_seg_1024` leaf/petiole/hole masks, 31-keypoint pose, DBSCAN ramet clustering, 4-case polarity-invariant `leaf_zone` and void-aware QC scoring (with fast CPU rescoring), and optical anthesis staging |
+| **03** | `scripts/morphometrics/03_fourier_extractor.R`<br>`scripts/morphometrics/dissected_leaf_utils.R`<br>`scripts/figures/step03_figures.R` | SQLite `contour_xy_json`, `data/ect/*_ect.npy`, `extracted_leaf_manifest.csv` | `leaf_efa_harmonics`, `leaf_efa_harmonics.csv`, `leaf_efa_harmonics_individual.csv`, `fig03a`, `fig03b` | R-side LM3 clump and boundary QC (`evaluate_step03_lm3_efa_qc`), rigid tip-up homologized `Momocs::efourier` ($H_{\text{opt}} \in [6, 24]$ at $\ge 99\%$ power), bilateral symmetrization, $32 \times 360$ ECT SVD, 3-way OTU zone routing (`Basal_Rosette` at `leaf_zone_confidence >= 0.65`, `Transitional_Passive`, `Cauline_Only_Fallback`), and orthogonal cauline heteroblasty metrics |
+| **04** | `scripts/morphometrics/04_gmm_morphotools.R`<br>`scripts/morphometrics/authority_weighting_utils.R`<br>`scripts/morphometrics/plasticity_mitigation_utils.R`<br>`scripts/figures/step04_figures.R` | `leaf_efa_harmonics`, `curated_vouchers.csv`, `voucher_reproductive_metrics.csv` | `otu_morphometrics`, `morphometric_flags.csv`, `gmm_bayes_factors_summary.csv`, `fig04a`, `fig04b`, `fig04c` | Conspecific $10\text{ km}$ deme assignment, ontogenetic phenophase residualization (`residualize_ontogenetic_phenophase_plasticity`), Hennig ridgeline merging, Klingenberg `RRPP` allometry, Stratified Authority Pool Cap, FastMCD + Confident Learning anchor screening (withholding `blade_cie_l_sd_std` and transitional/cauline fallback sheets from covariance fitting), canonical GMM relabeling, deme-blocked shrinkage CDA, OSR novelty, and EPA Ecoregion MANOVA |
+| **05** | `scripts/analysis/05_multimodal_spatial_rf.R`<br>`scripts/analysis/step05_phenology_ecotypes.R`<br>`scripts/analysis/step05_sdm_maxent.R`<br>`scripts/figures/step05_figures.R` | `curated_vouchers.csv`, `voucher_phenological_states.csv`, WorldClim v2.1, SOLUS100, POLARIS, SSURGO, 3DEP, SGMC *(100% morphometric-independent)* | `spatial_rf_predictions`, `multimodal_conflict_flags.csv`, `sdm_*.tif`, `fig05a`, `fig05b`, `fig05c` | Uncertainty-buffered rhizosphere and bedrock extraction (`<= 5000 m` buffered `min_bedrock_depth_buffer_cm` via `min()`), derived habitat indices (`lithic_outcrop_index`, `summer_moisture_deficit_idx`, `maritime_continentality_idx`), multi-domain `resolve_analysis_group()` `ecotype_regime` discovery, morphometric-free `resolve_ecological_authority_weights()`, circular Hopkins phenology, disjunct-safe Spatial Block-CV Random Forest, land-masked MaxEnt + SRF SDMs, and `PCA-env` Schoener's $D$ tests |
+| **06** | `scripts/analysis/06_triage_dashboard_synthesis.R`<br>`scripts/analysis/taxon_complex_discovery_utils.R`<br>`scripts/figures/step06_figures.R` | `v_integrative_triage_master` (joining independent Step 04 morphometrics, Step 05 `ecotype_regime` & Hopkins phenology, and Step 01/02 tables) | `curation_triage`, `taxon_complexes`, `triage_queue.csv`, `empirical_taxon_complexes.csv`, `Triage_Dashboard_Interactive.html`, `fig06a`, `fig06b` | Out-of-fold $\kappa$ reliability weighting avoiding single-species tautology, sibling ramet coherence, 5-stage hierarchical decision matrix (Rule A `Confirmed_Type_Control` and `Type_Synonymy_Candidate` preservation), Population-Cohesion Lineage Gate (`cryptic_cluster_cohesion_pass`), Leiden and metric Ward.D2 species-complex delimitation, Markdown revision monograph, and offline HTML triage dashboard |
 
 ## Hardware and System Requirements
 
@@ -121,8 +120,8 @@ Rscript -e 'install.packages(c("remotes", "tidyverse", "optparse", "mclust", "cl
 # 2. Run Steps 02 to 06 from existing harvested vouchers in SQLite / curated_vouchers.csv
 ./run_pipeline.sh --skip-harvest
 
-# 3. Targeted species complex cohort
-./run_pipeline.sh --taxon "Packera dubia" "Packera aurea" "Packera paupercula" "Packera anonyma"
+# 3. Targeted focal-taxon cohort (omit --taxon for dynamic genus-wide discovery via taxa: [])
+./run_pipeline.sh --taxon "Packera dubia"
 
 # 4. Focal taxon + cascading outgroup reference anchors (default: 30 anchors per outgroup)
 ./run_pipeline.sh --focal-taxon "Packera dubia" --gold-anchors 30
@@ -145,13 +144,37 @@ Rscript -e 'install.packages(c("remotes", "tidyverse", "optparse", "mclust", "cl
 # 10. Iterative curation pass excluding previously flagged Misidentification_Reassign sheets
 ./run_pipeline.sh --skip-harvest --start-step 3 --exclude-misidentified --triage-source ALL
 
-# 11. Reset all Step 02 to 06 segments, masks, contours, ECT arrays, and runs/ (keeps Step 01 scans & SQLite vouchers)
+# 11. Non-destructive Tier B run-output purge (wipes runs/, outputs/, Step 03 to 06 CSVs, and Tier B SQLite tables while preserving Step 01 vouchers and Step 02 masks, contours, and ECT arrays)
+./run_pipeline.sh --purge-runs-only
+# Python CLI equivalent (also supports --purge-runs-only as a top-level flag):
+.venv/bin/python main.py purge-runs-only
+
+# 12. Full segment and run reset (wipes Step 02 to 06 masks, contours, ECT arrays, and runs/; preserves Step 01 scans and SQLite vouchers)
 ./run_pipeline.sh --purge-segments
+# Python CLI equivalent:
+.venv/bin/python main.py purge-segments
 
-# 12. Automated 4-stage focal species-complex resolution workflow (defaults to Packera dubia)
-./resolve_packera_dubia_complex.sh --threads 12 --gpu-batch-size 16
+# 13. Fast CPU-only leaf-zone and void-aware QC re-scoring (updates Tier A SQLite and CSVs without GPU re-segmentation)
+.venv/bin/python scripts/vision/rescore_step02_qc_and_zones.py --db data/packera_pipeline.sqlite --data-dir data
 
-# 13. Standalone Step 06 taxonomic synthesis, HTML dashboard, and 300-DPI complex network plate
+# 14. Automated 4-stage focal species-complex resolution workflow from existing harvested sheets (Steps 03/04 morphometrics and Step 05 ENM run independently before Step 06 synthesis)
+bash resolve_packera_dubia_complex.sh --skip-harvest --threads 32
+
+# 15. Standalone morphometric-independent Step 05 ENM, ecotype_regime discovery, and Hopkins phenology (invoked without --morphometrics)
+Rscript scripts/analysis/05_multimodal_spatial_rf.R \
+  --vouchers runs/latest/data/tables/curated_vouchers.csv \
+  --pheno-states runs/latest/data/tables/voucher_phenological_states.csv \
+  --env-dir data/environmental \
+  --ssurgo-table runs/latest/data/tables/ssurgo_edaphic_validation.csv \
+  --contingency-table runs/latest/outputs/reports/micro_edaphic_outcrop_contingency.csv \
+  --pheno-anomalies runs/latest/data/tables/phenological_anomalies.csv \
+  --pheno-summary runs/latest/outputs/reports/phenological_anomaly_summary.csv \
+  --pheno-plot runs/latest/outputs/figures/fig05b_hopkins_circular_phenology.png \
+  --output-flags runs/latest/data/tables/multimodal_conflict_flags.csv \
+  --output-summary runs/latest/outputs/reports/multimodal_spatial_rf_summary.csv \
+  --output-plot runs/latest/outputs/figures/fig05a_ecological_niche_and_rf_importance.png
+
+# 16. Standalone Step 06 taxonomic synthesis, HTML dashboard, and 300-DPI complex network plate
 Rscript scripts/analysis/06_triage_dashboard_synthesis.R \
   --vouchers runs/latest/data/tables/curated_vouchers.csv \
   --harmonics runs/latest/data/tables/leaf_efa_harmonics.csv \
@@ -183,6 +206,7 @@ Central defaults live in [`config/config.yaml`](config/config.yaml) and load thr
 | `--skip-env-download` | *(flag)* | `false` | Skips automated pre-Step-05 downloads of missing SOLUS100, USGS SGMC, and cohort 3DEP 30 m DEM tiles. |
 | `--force`, `--overwrite` | *(flag)* | `false` | Forces re-execution and overwrites cached Step 01 and Step 02 outputs. |
 | `--resegment`, `--force-segment` | *(flag)* | `false` | Clears cached segmentation artifacts for the active cohort and re-runs Step 02 ONNX inference. |
+| `--purge-runs-only`, `--purge-run-outputs` | *(flag)* | `false` | Wipes `runs/`, `outputs/`, non-Step-01/02 CSVs, and Tier B SQLite tables while preserving Step 01 `vouchers` and Step 02 masks, contours, ECT arrays, and Tier A tables (resets `min_bedrock_depth_buffer_cm` for clean buffered re-extraction). |
 | `--purge-segments`, `--purge-old-data` | *(flag)* | `false` | Wipes Step 02 to 06 masks, contours, ECT files, organ crops, `runs/`, and SQLite Step 02 to 06 rows (`VACUUM`) while preserving Step 01 `vouchers`, `raw_vouchers/`, and `environmental_cache`. |
 | `-j`, `--threads`, `--workers` | `<INT>` | Auto-detected | Sets CPU worker thread count across Python and R stages (`PACKERA_MAX_WORKERS`). |
 | `--gpu-batch-size`, `--batch-size` | `<N>` | Auto-detected | Sets Step 02 LeafMachine3 ONNX inference batch size (`PACKERA_GPU_BATCH_SIZE`). |
@@ -211,26 +235,28 @@ Central defaults live in [`config/config.yaml`](config/config.yaml) and load thr
 | :--- | :--- | :--- |
 | `check-env` | `main.py` | Verifies Python ($\ge 3.10$), ONNX Runtime / CUDA, R ($\ge 4.3$) packages, writable directories, and LeafMachine3 checkpoints. |
 | `download-weights` | `scripts/core/artifact_manager.py` | Verifies SHA-256 checksums and stages pinned model weights under `models/lm3/`. |
-| `purge-segments` | `scripts/core/db.py` | Resets Step 02 to 06 masks, contours, ECT matrices, `runs/`, and Tier B / Step 02 SQLite tables while preserving Step 01 scans and `vouchers`. |
+| `download-env` | `scripts/data_prep/download_environmental_layers.py` | Verifies and downloads cached SOLUS100 (`100 m`), USGS SGMC, and cohort 3DEP `30 m` DEM layers into `data/environmental/`. |
+| `purge-runs-only` (`purge-run-outputs`) | `scripts/core/db.py` | Non-destructively wipes `runs/`, `outputs/`, non-Step-01/02 CSVs, and Tier B SQLite tables while preserving Step 01 vouchers and Step 02 masks, contours, and ECT arrays (also available via `--purge-runs-only`). |
+| `purge-segments` (`purge-old-data`) | `scripts/core/db.py` | Resets Step 02 to 06 masks, contours, ECT matrices, `runs/`, and Tier B / Step 02 SQLite tables while preserving Step 01 scans and `vouchers`. |
 | `harvest` | `scripts/data_prep/01_voucher_harvester.py` | Runs Step 01 GBIF/iDigBio harvesting, synonym resolution, authority stratification, USDA county range tagging, and WebP downloads. |
-| `segment` | `scripts/pipeline/02_segment_and_extract.py` | Runs Step 02 read-only LeafMachine3 ONNX segmentation, DBSCAN plant clustering, basal/cauline zoning, $32 \times 360$ ECT export, and `fig02a`/`fig02b` generation. |
+| `segment` | `scripts/pipeline/02_segment_and_extract.py` | Runs Step 02 read-only LeafMachine3 ONNX segmentation, DBSCAN plant clustering, 4-case `leaf_zone` scoring, $32 \times 360$ ECT export, and `fig02a`/`fig02b` generation. |
 | `morphometrics` | `03_fourier_extractor.R` + `04_gmm_morphotools.R` | Runs Step 03 EFA + ECT decomposition (`fig03a`, `fig03b`) followed by Step 04 allometry, GMM, shrinkage CDA, OSR, and batch/ecoregion audits (`fig04a`, `fig04b`, `fig04c`). |
-| `synthesis` (`analyze`) | `05_multimodal_spatial_rf.R` + `06_triage_dashboard_synthesis.R` | Ensures cached environmental layers via `download_environmental_layers.py` (unless `--skip-env-download`), runs Step 05 Spatial RF/MaxEnt/Hopkins (`fig05a` to `fig05c`), and executes Step 06 5-stage triage + complex delimitation (`fig06a`, `fig06b`). |
+| `synthesis` (`analyze`) | `05_multimodal_spatial_rf.R` + `06_triage_dashboard_synthesis.R` | Ensures cached environmental layers via `download_environmental_layers.py` (unless `--skip-env-download`), runs morphometric-independent Step 05 Spatial RF, `ecotype_regime` discovery, MaxEnt SDMs, and Hopkins phenology (`fig05a` to `fig05c`), and executes Step 06 joint consensus synthesis (`fig06a`, `fig06b`). |
 | `run-all` | `main.py` | Executes `harvest` $\to$ `segment` $\to$ `morphometrics` $\to$ `synthesis` end to end inside a run-scoped directory. |
 
 ## External Data Sources and Geospatial Layers
 
-To prevent coarse historical locality centroids from contaminating fine-scale soil models, Step 05 enforces strict coordinate-uncertainty gates before raster extraction: rhizosphere edaphic and $30\text{ m}$ topographic layers require `coordinateUncertaintyInMeters <= 2000` m, whereas macro-climatic rasters allow `<= 10000` m (with $150\text{ km}$ / shared-ecoregion Gold neighbor fallback for historical *locus classicus* type sheets). Full raster filenames, integer scalar divisors, trapezoidal $0\text{ to }15\text{ cm}$ equations, and citations appear in [`docs/ENVIRONMENTAL_DATA_SOURCES.md`](docs/ENVIRONMENTAL_DATA_SOURCES.md).
+To prevent coarse historical locality centroids from contaminating fine-scale soil models, Step 05 enforces explicit coordinate-uncertainty gates before raster extraction. Direct point extractions for $0\text{ to }15\text{ cm}$ rhizosphere chemistry and $30\text{ m}$ topographic indices require `coordinateUncertaintyInMeters <= 2000` m, whereas uncertainty-buffered outcrop and soil extractions (`min_bedrock_depth_buffer_cm` computed via `min()` across finite pixels, `ph_q10_buffer`, `ph_q90_buffer`, and `max_cfvo_buffer_pct`) extend up to `<= 5000` m using a capped `100 to 1500` m buffer radius (`50` m default for pinpoint GPS coordinates) weighted continuously by `edaphic_coord_weight`. Macro-climatic rasters permit `<= 10000` m (paired with a $150\text{ km}$ / shared-ecoregion Gold neighbor fallback for historical *locus classicus* type sheets). Full raster filenames, integer scalar divisors, derived habitat index equations, and citations appear in [`docs/ENVIRONMENTAL_DATA_SOURCES.md`](docs/ENVIRONMENTAL_DATA_SOURCES.md).
 
 | Domain | Source / Layer | Native Resolution | Uncertainty Gate | Local Cache Path |
 | :--- | :--- | :--- | :--- | :--- |
 | **Occurrences & Images** | GBIF & iDigBio Preserved Specimens | Point + uncertainty (m) | Retained (flagged $> 5000\text{ m}$) | `data/raw_vouchers/*.webp` |
 | **Taxonomy & County Range** | GBIF Backbone + USDA PLANTS | Taxon / US County | Audit tag by default (`50 km` buffer) | SQLite `taxon_synonyms` & `vouchers` |
 | **Biogeographic Regions** | US EPA Level III Ecoregions | Vector polygons | Point-in-polygon ($\ge 95\%$ county fallback) | `data/environmental/epa_ecoregions_l3/` |
-| **Pedology (Map Units)** | USDA-NRCS SSURGO (SDA) | $10\text{ to }30\text{ m}$ ($50\text{ m}$ buffer) | $\le 2000\text{ m}$ | `data/environmental/ssurgo_cache/` |
-| **Probabilistic Soils** | POLARIS ($0\text{ to }15\text{ cm}$ trapezoid) | $30\text{ m}$ ($1\text{ arcsec}$) | $\le 2000\text{ m}$ | `data/environmental/polaris_30m/` |
-| **Soil & Bedrock Grids** | USDA-NRCS SOLUS100 ($0\text{ to }15\text{ cm}$) | $100\text{ m}$ | $\le 2000\text{ m}$ | `data/environmental/solus_100m/` |
-| **Bedrock Lithology** | USGS State Geologic Map Compilation (SGMC) | Vector `.gpkg` (6 lithic classes) | $\le 2000\text{ m}$ | `data/environmental/sgmc/` |
+| **Pedology (Map Units)** | USDA-NRCS SSURGO (SDA) | $10\text{ to }30\text{ m}$ (`50 m` point buffer) | $\le 2000\text{ m}$ point ($\le 5000\text{ m}$ buffered) | `data/environmental/ssurgo_cache/` |
+| **Probabilistic Soils** | POLARIS ($0\text{ to }15\text{ cm}$ trapezoid) | $30\text{ m}$ ($1\text{ arcsec}$) | $\le 2000\text{ m}$ point ($\le 5000\text{ m}$ buffered) | `data/environmental/polaris_30m/` |
+| **Soil & Bedrock Grids** | USDA-NRCS SOLUS100 ($0\text{ to }15\text{ cm}$) | $100\text{ m}$ | $\le 2000\text{ m}$ point ($\le 5000\text{ m}$ buffered) | `data/environmental/solus_100m/` |
+| **Bedrock Lithology** | USGS State Geologic Map Compilation (SGMC) | Vector `.gpkg` (6 lithic classes) | $\le 2000\text{ m}$ point ($\le 5000\text{ m}$ buffered) | `data/environmental/sgmc/` |
 | **Micro-Topography** | USGS 3DEP Elevation (Slope, TPI, HLI, D8 TWI) | $\sim 30\text{ m}$ ($1^\circ \times 1^\circ$ cohort tiles) | $\le 2000\text{ m}$ | `data/environmental/dem_3dep_30m/` |
 | **Macro-Climate** | WorldClim v2.1 (`bio1` to `bio19`, NA-cropped) | $30\text{ arcsec}$ ($\sim 1\text{ km}$) | $\le 10000\text{ m}$ | `data/environmental/` |
 
@@ -246,22 +272,22 @@ Every run writes self-contained tables, reports, rasters, and **300-DPI PNG-only
 
 ### Canonical 12-Plate 300-DPI PNG Figure Inventory
 
-All 12 publication plates scale dynamically from $N = 1$ intraspecific runs to $60+$ taxa and infraspecific ranks (`subsp.`, `var.`, `f.`) through a combinatorial 12-hue Tol/Okabe-Ito colorblind-safe palette paired with 5 unfilled hollow marker geometries ($12 \times 5 = 60$ unique combinations), dynamic canvas height ($0.28\text{ in}$ per taxon row), repelled centroid labels above 10 groups, automatic 1D `Can1` density-plus-raincloud switching when $G = 2$, ICN rank-aware italicization, and equal-area `EPSG:5070` (`NAD83 / Conus Albers`) projections:
+All 12 publication plates scale dynamically from $N = 1$ intraspecific runs to $60+$ taxa and infraspecific ranks (`subsp.`, `var.`, `f.`) through a combinatorial 12-hue Tol/Okabe-Ito colorblind-safe palette paired with 5 **unfilled hollow scatterplot markers** ($12 \times 5 = 60$ unique open symbol geometries enforced across every 2D ordination, allometry, niche, phenology, and spatial map panel), dynamic canvas height ($0.28\text{ in}$ per taxon row), repelled centroid labels above 10 groups, automatic 1D `Can1` density-plus-raincloud switching when $G = 2$, ICN rank-aware italicization, and equal-area `EPSG:5070` (`NAD83 / Conus Albers`) projections:
 
 | Canonical PNG Filename | Step | Scientific Contents and Visual Protocol |
 | :--- | :---: | :--- |
 | `fig02a_lm3_organ_and_ect_exemplars.png` | **02** | Dynamic all-taxa montage of downstream-QC-verified `LeafMachine3` leaf cutouts (`20th`, `50th`, `80th` dissection quantiles, ruler scale bars, and basal/cauline tracks) paired with polar radial ECT badges |
-| `fig02b_segmentation_qc_and_phenophase.png` | **02** | Horizontal multi-panel QC plate covering ruler vs. MP scale calibration, lamina solidity and aspect-ratio distributions across zones, optical capitulum anthesis staging, and failure audit counts |
-| `fig03a_efa_morphospace_and_harmonics.png` | **03** | Symmetric EFA morphospace (`PC1` vs. `PC2`) over a $5 \times 3$ `Momocs` inverse-Fourier background deformation grid, paired with cumulative harmonic power ($H_{\text{opt}}$ at $\ge 99\%$) and dynamic `PC1..PC{k_95}` variance scree |
-| `fig03b_topological_ect_and_heteroblasty.png` | **03** | Basal $32 \times 360$ topological ECT ordination (`ECT_PC1` vs. `ECT_PC2`), embedded native `LeafMachine3` radial ECT medoid gallery, taxon-ordered lobe complexity boxplots, and basal-to-cauline heteroblastic divergence |
-| `fig04a_foliar_allometry_audit.png` | **04** | Ruler-calibrated multivariate foliar allometry regression ($\log_{10}\text{CS}$ vs. shape with `RRPP` homogeneity statistics) alongside size-free residualized morphospace or calibrated size distributions |
-| `fig04b_gmm_cda_morphometrics.png` | **04** | Unsupervised GMM $2\Delta\text{BIC}$ curve, Ledoit-Wolf shrinkage CDA ordination (2D biplot with top structure vectors for $G \ge 3$, or 1D `Can1` density + hollow raincloud for $G = 2$), scale-invariant trait boxplots, and Taxon $\times$ GMM concordance matrix |
-| `fig04c_ecoregion_and_batch_audit.png` | **04** | Supervised US EPA Level III Ecoregion CDA ordination (with Pillai's Trace MANOVA subtitle) paired with taxon-controlled ANCOVA partial $R^2$ institutional herbarium batch-effect audit |
-| `fig05a_ecological_niche_and_rf_importance.png` | **05** | Spatial Block-CV Random Forest non-MEM variable importance across Climatic, Topographic, and Rhizosphere streams, top-2 realized niche space, rhizosphere/climatic boxplots with Kruskal-Wallis $p$, and full $N \times N$ `PCA-env` Schoener's $D$ matrix (or IBE partial RDA in $K = 1$ mode) |
-| `fig05b_hopkins_circular_phenology.png` | **05** | Verified-anthesis DOY vs. latitude regression with empirical Hopkins bioclimatic slope, circular polar rose histogram of Hopkins-adjusted flowering clock, and taxon-stratified $\Delta\text{DOY}$ isolation residuals |
-| `fig05c_sdm_suitability_and_distribution_map.png` | **05** | Focal MaxEnt (`cloglog`) and Spatial RF + MaxEnt ensemble suitability maps, marginal response curves, spatial-block ROC + Continuous Boyce Index calibration, and multi-taxon ensemble suitability grid (or `EPSG:5070` Albers distribution map with scale bar and north arrow when rasters are absent) |
-| `fig06a_integrative_taxonomic_synthesis.png` | **06** | 5-stage decision-call morphospace, `EPSG:5070` Albers contact-zone and type-locality map, 5-stage taxonomic treatment proportions per taxon, and 5-stream OOF $\kappa$-weighted Wettstein concordance grid (also copied to `Figure_Integrative_<Focal_Taxon>_Revision.png` when `--focal-taxon` is set) |
-| `fig06b_taxon_complex_delimitation_network.png` | **06** | Ward.D2 clustered multimodal pairwise affinity heatmap ($W_{ij}$) paired with Leiden/consensus community network graph encoding intra-complex vs. inter-complex topology and $\log_{10}(N)$ node sizes |
+| `fig02b_segmentation_qc_and_phenophase.png` | **02** | Horizontal multi-panel QC plate covering ruler vs. MP scale calibration (unfilled hollow scatter), lamina solidity and aspect-ratio distributions across zones, optical capitulum anthesis staging, and failure audit counts |
+| `fig03a_efa_morphospace_and_harmonics.png` | **03** | Symmetric EFA morphospace (`PC1` vs. `PC2` with unfilled hollow taxon markers) over a $5 \times 3$ `Momocs` inverse-Fourier background deformation grid, paired with cumulative harmonic power ($H_{\text{opt}}$ at $\ge 99\%$) and dynamic `PC1..PC{k_95}` variance scree |
+| `fig03b_topological_ect_and_heteroblasty.png` | **03** | Basal $32 \times 360$ topological ECT ordination (`ECT_PC1` vs. `ECT_PC2`, unfilled hollow markers), embedded native `LeafMachine3` radial ECT medoid gallery, taxon-ordered lobe complexity boxplots, and basal-to-cauline heteroblastic divergence |
+| `fig04a_foliar_allometry_audit.png` | **04** | Ruler-calibrated multivariate foliar allometry regression ($\log_{10}\text{CS}$ vs. shape with `RRPP` homogeneity statistics and unfilled hollow symbols) alongside size-free residualized morphospace or calibrated size distributions |
+| `fig04b_gmm_cda_morphometrics.png` | **04** | Unsupervised GMM $2\Delta\text{BIC}$ curve with Hennig ridgeline merge callout, Ledoit-Wolf shrinkage CDA ordination (or 1D OSR $\chi^2$ tail audit with unfilled hollow markers when $K^* = 1$; 1D `Can1` density + hollow raincloud when $G = 2$), scale-invariant trait boxplots, and Taxon $\times$ GMM concordance matrix |
+| `fig04c_ecoregion_and_batch_audit.png` | **04** | Supervised US EPA Level III Ecoregion CDA ordination (unfilled hollow markers + Pillai's Trace MANOVA subtitle) paired with taxon-controlled ANCOVA partial $R^2$ institutional herbarium batch-effect audit |
+| `fig05a_ecological_niche_and_rf_importance.png` | **05** | Spatial Block-CV Random Forest non-MEM variable importance across Climatic, Topographic, and Rhizosphere streams, top-2 realized niche space (unfilled hollow points by taxon or `ecotype_regime`), rhizosphere/climatic boxplots with Kruskal-Wallis $p$, and full $N \times N$ `PCA-env` Schoener's $D$ matrix (or IBE distance-decay in $K = 1$ mode) |
+| `fig05b_hopkins_circular_phenology.png` | **05** | Verified-anthesis DOY vs. latitude regression (unfilled hollow markers) with empirical Hopkins bioclimatic slope, circular polar rose histogram of Hopkins-adjusted flowering clock, and taxon-stratified $\Delta\text{DOY}$ isolation residuals |
+| `fig05c_sdm_suitability_and_distribution_map.png` | **05** | Land-masked `SOLUS100` + `WorldClim` MaxEnt (`cloglog`) and Spatial RF ensemble suitability maps in `EPSG:5070` with unfilled hollow specimen overlays, marginal response curves, spatial-block ROC + Continuous Boyce Index calibration, and multi-taxon ensemble grid (or `EPSG:5070` distribution map with scale bar and north arrow when rasters are absent) |
+| `fig06a_integrative_taxonomic_synthesis.png` | **06** | 5-stage decision-call morphospace (unfilled hollow symbols), `EPSG:5070` Albers contact-zone and type-locality map, 5-stage taxonomic treatment proportions per taxon, and 5-stream OOF $\kappa$-weighted Wettstein concordance grid (exported as the 4-panel `Figure_Integrative_<Focal_Taxon>_Revision.png` when `--focal-taxon` is set) |
+| `fig06b_taxon_complex_delimitation_network.png` | **06** | Ward.D2 clustered multimodal pairwise affinity heatmap ($W_{ij}$) paired with Leiden/consensus community network (or deme IBE network in $K = 1$ mode) encoding intra-complex vs. inter-complex topology and $\log_{10}(N)$ node sizes |
 
 ## Repository Structure
 
@@ -292,7 +318,7 @@ Packera_dubia_morphometrics/
 └── scripts/
     ├── core/
     │   ├── config.py                                # Typed PipelineConfig loader and thread/batch resolvers
-    │   ├── db.py                                    # Transactional SQLite WAL and DuckDB operations + purge_segments_and_runs
+    │   ├── db.py                                    # Transactional SQLite WAL and DuckDB operations + purge_runs_only / purge_segments_and_runs
     │   ├── db_schema.py                             # Schema 20261121 DDL, migrations, and v_integrative_triage_master view
     │   ├── db_utils.R                               # R SQLite/DuckDB batch reader, dynamic column sync, and atomic writers
     │   ├── harvester.py                             # GBIF/iDigBio harvester, synonym resolver, exsiccatae deduplicator, and WebP saver
@@ -312,18 +338,19 @@ Packera_dubia_morphometrics/
     │   ├── leaf_geometry_utils.py                   # Native LM3 geometry delegation, 120-pt tip-up contour export, and 32x360 ECT
     │   ├── organ_crown_metrics.py                   # DBSCAN ramet clustering, caudex crown estimation, leaf_zone, and scape/petiole metrics
     │   ├── capitulum_phenology_classifier.py        # Optical bud/anthesis/fruit head staging and determinate cyme rules
+    │   ├── rescore_step02_qc_and_zones.py           # Fast CPU-only leaf_zone, void-aware QC, and margin ruler rescorer
     │   └── step02_figures.py                        # Step 02 300-DPI PNG plates (fig02a, fig02b) and native LM3 asset/overlay exporters
     ├── pipeline/
     │   ├── 01_voucher_harvester.py                  # Step 01 pipeline module alias
     │   ├── 02_segment_and_extract.py                # Step 02 read-only LM3 adapter and 3-stage asynchronous wave engine
     │   └── resolve_focal_species_complex.py         # 4-stage focal species-complex runner and cross-stage report compiler
     ├── morphometrics/
-    │   ├── 03_fourier_extractor.R                   # Step 03 LM3 EFA QC, homologized Momocs EFA, 32x360 ECT SVD, and basal/cauline medians
+    │   ├── 03_fourier_extractor.R                   # Step 03 LM3 EFA QC, homologized Momocs EFA, 32x360 ECT SVD, and 3-way zone routing
     │   ├── 04_gmm_morphotools.R                     # Step 04 RRPP allometry, canonical GMM, deme-blocked shrinkage CDA, OSR, and batch audit
     │   ├── authority_weighting_utils.R              # Stratified pool cap, FastMCD + Confident Learning anchors, and crossed Bayesian weights
     │   ├── dissected_leaf_utils.R                   # Harmonic power calibration, 32x360 ECT alignment/SVD, and dissection metrics
     │   ├── fourier_parallel_utils.R                 # Parallel contour alignment and harmonic extraction workers
-    │   ├── plasticity_mitigation_utils.R            # 10 km spatial demes, phenophase residualization, Q_ST whitening, and ridgeline merging
+    │   ├── plasticity_mitigation_utils.R            # 10 km spatial demes, ontogenetic phenophase residualization, and ridgeline merging
     │   ├── pub_figures_utils.R                      # Taxon standardization, dynamic palettes, PC table exports, and figure dispatchers
     │   ├── pub_ecoregion_manova_utils.R             # Supervised EPA Level III Ecoregion CDA and Pillai/Hotelling MANOVA suite
     │   └── pub_synthesis_plates.R                   # Pure-R GMM EM fallback solver and Step 06 figure dispatch wrappers
@@ -334,23 +361,23 @@ Packera_dubia_morphometrics/
     │   ├── step05_figures.R                         # Renders fig05a_ecological_niche_and_rf_importance.png, fig05b_hopkins_circular_phenology.png, and fig05c_sdm_suitability_and_distribution_map.png
     │   └── step06_figures.R                         # Renders fig06a_integrative_taxonomic_synthesis.png and fig06b_taxon_complex_delimitation_network.png
     ├── analysis/
-    │   ├── 05_multimodal_spatial_rf.R               # Step 05 19-BioClim + 0 to 15 cm rhizosphere Spatial Block-CV RF and PCA-env niche tests
-    │   ├── step05_phenology_ecotypes.R              # Circular Hopkins phenology regression, locus classicus controls, and K=1 ecotype gate
-    │   ├── step05_sdm_maxent.R                      # Authority-weighted MaxEnt (cloglog) + Spatial RF ensemble SDMs and Boyce calibration
-    │   ├── edaphic_fine_grain_utils.R               # SSURGO SDA, POLARIS 30 m, SOLUS100, 3DEP 30 m topography, and USGS SGMC extractors
-    │   ├── 06_triage_dashboard_synthesis.R          # Step 06 OOF kappa consensus, 5-stage decision matrix, Markdown report, and offline HTML dashboard
+    │   ├── 05_multimodal_spatial_rf.R               # Independent Step 05 19-BioClim + 0 to 15 cm rhizosphere Spatial Block-CV RF and PCA-env niche tests
+    │   ├── step05_phenology_ecotypes.R              # Circular Hopkins phenology regression, locus classicus controls, and resolve_analysis_group() ecotype_regime gate
+    │   ├── step05_sdm_maxent.R                      # Authority-weighted MaxEnt (cloglog) + Spatial RF land-masked SDMs and Boyce calibration
+    │   ├── edaphic_fine_grain_utils.R               # SSURGO SDA, POLARIS 30 m, SOLUS100, 3DEP 30 m topography, derived habitat indices, and USGS SGMC extractors
+    │   ├── 06_triage_dashboard_synthesis.R          # Step 06 consensus integration, 5-stage decision matrix, Markdown report, and offline HTML dashboard
     │   └── taxon_complex_discovery_utils.R          # Step 06 Leiden/Louvain modularity and Ward.D2 species-complex delimitation
-    └── tests/                                       # 222-test Python, SQLite handshake, warm-R integration, and code-hygiene QA suite
+    └── tests/                                       # 238-test Python, SQLite handshake, warm-R integration, and code-hygiene QA suite
 ```
 
 ## Verification, Reproducibility, and Troubleshooting
 
 Developer workflow conventions, R script line-count budgets, and pre-commit QA rules are documented in [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
-### Running the Automated Audit Suite (`222` Tests)
+### Running the Automated Audit Suite (`238` Tests)
 
 ```bash
-# Run the centralized 222-test Python + warm-R integration and code-hygiene runner
+# Run the centralized 238-test Python + warm-R integration and code-hygiene runner
 .venv/bin/python scripts/tests/run_audit.py
 
 # Run rapid Python-only preflight checks (~25s, skips Rscript workers cleanly)
@@ -367,7 +394,7 @@ Developer workflow conventions, R script line-count budgets, and pre-commit QA r
 ### Common Troubleshooting
 * **`CUDAExecutionProvider` Missing During Step 02:** Run `LeafMachine3/.venv/bin/python -c "import onnxruntime as ort; print(ort.get_available_providers())"`. If only `CPUExecutionProvider` appears on a machine with an NVIDIA GPU, re-run `bash setup_leafmachine3.sh` after confirming `nvidia-smi` succeeds.
 * **Missing GDAL / PROJ / HarfBuzz Headers During R Package Compilation:** Install `libgdal-dev`, `libgeos-dev`, `libproj-dev`, `libudunits2-dev`, `libharfbuzz-dev`, and `libfribidi-dev` via `apt-get` (or `brew install pkg-config gdal geos proj udunits` on macOS) before installing `sf`, `terra`, and `ragg`.
-* **Refreshing Downstream Analyses After Re-Curation:** Use `./run_pipeline.sh --skip-harvest --start-step 3 --exclude-misidentified` to start a clean Tier B run directory from existing Step 02 contours and ECT arrays without re-downloading images or re-running ONNX segmentation.
+* **Refreshing Downstream Analyses After Re-Curation:** Run `./run_pipeline.sh --purge-runs-only` (followed by `./run_pipeline.sh --skip-harvest --start-step 3` or `bash resolve_packera_dubia_complex.sh --skip-harvest`) to start a clean Tier B run from existing Step 02 contours and ECT arrays without repeating image downloads or GPU segmentation. To apply updated `leaf_zone` or void-aware QC rules on existing Step 02 masks first, run `.venv/bin/python scripts/vision/rescore_step02_qc_and_zones.py` on CPU before purging Tier B runs.
 
 ## License and Citation
 

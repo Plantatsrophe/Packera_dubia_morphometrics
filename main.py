@@ -1050,6 +1050,139 @@ def run_download_env(args: argparse.Namespace, cfg: Optional[PipelineConfig] = N
     )
 
 
+def run_genomics_stream(
+    args: argparse.Namespace,
+    run_dir: Optional[Path],
+    tables_dir: Path,
+    figures_dir: Path,
+    rscript_bin: str,
+    reports_dir: Optional[Path] = None,
+    *,
+    respect_test_mock_guard: bool = True,
+) -> Optional[Path]:
+    """Execute standalone Step 06 genomic ingestion and phylogenomic integration when data/genomics/ has inputs."""
+    env_geno = os.environ.get("PACKERA_GENOMICS_DIR", "").strip()
+    if respect_test_mock_guard and not env_geno and getattr(subprocess.run, "__module__", "") != "subprocess":
+        return None
+
+    import importlib
+
+    discover_genomic_inputs = importlib.import_module("scripts.data_prep.06_ingest_genetic_data").discover_genomic_inputs
+
+    genomics_dir = Path(getattr(args, "genomics_dir", None) or env_geno or (PROJECT_ROOT / "data" / "genomics"))
+    if not discover_genomic_inputs(genomics_dir).has_genetic_payload:
+        logger.info("[Step 06/07] No genomic files staged in data/genomics/ - skipping standalone Step 06")
+        print("[Step 06/07] No genomic files staged in data/genomics/ - skipping standalone Step 06")
+        return None
+
+    eff_reports_dir = (
+        Path(reports_dir)
+        if reports_dir is not None
+        else ((run_dir / "outputs" / "reports") if run_dir is not None else (PROJECT_ROOT / "outputs" / "reports"))
+    )
+    eff_reports_dir.mkdir(parents=True, exist_ok=True)
+    geno_out_dir = (
+        (run_dir / "outputs" / "genomics")
+        if run_dir is not None
+        else (PROJECT_ROOT / "outputs" / "genomics")
+    )
+    geno_out_dir.mkdir(parents=True, exist_ok=True)
+    db_arg = (
+        getattr(args, "db", None)
+        or os.environ.get("PACKERA_SQLITE_DB")
+        or os.environ.get("PACKERA_DB_PATH")
+        or None
+    )
+    is_demo = bool(getattr(args, "demo", False))
+    eff_run_id = run_dir.name if run_dir is not None else (getattr(args, "run_id", None) or "canonical")
+
+    ingest_script = PROJECT_ROOT / "scripts" / "data_prep" / "06_ingest_genetic_data.py"
+    verify_file_exists(ingest_script, "Step 06 Genomic Ingestion Python script")
+    cmd_ingest = [
+        sys.executable,
+        str(ingest_script),
+        "--genomics-dir",
+        str(genomics_dir),
+        "--out-dir",
+        str(eff_reports_dir),
+    ]
+    if db_arg and str(db_arg) != ":memory:":
+        cmd_ingest.extend(["--db-path", str(db_arg)])
+    if is_demo:
+        cmd_ingest.append("--demo")
+
+    logger.info("Detected staged genomic inputs in %s; running standalone Step 06.", genomics_dir)
+    subprocess.run(cmd_ingest, check=True)
+
+    geno_script = PROJECT_ROOT / "scripts" / "analysis" / "06_genomic_phylogenomics.R"
+    verify_file_exists(geno_script, "Step 06 Genomic Phylogenomics R script")
+    cmd_geno = [
+        rscript_bin,
+        str(geno_script),
+        "--genomics-dir",
+        str(genomics_dir),
+        "--parsed-dir",
+        str(eff_reports_dir),
+        "--out-dir",
+        str(geno_out_dir),
+        "--tables-dir",
+        str(tables_dir),
+        "--figure-a",
+        str(figures_dir / "fig06a_genomic_pcoa_tree_concordance.png"),
+        "--figure-b",
+        str(figures_dir / "fig06b_reticulation_gdi_landscape.png"),
+        "--run-id",
+        eff_run_id,
+    ]
+    if db_arg and str(db_arg) != ":memory:":
+        cmd_geno.extend(["--db", str(db_arg)])
+    if is_demo:
+        cmd_geno.append("--demo")
+
+    logger.info(f"Running Step 06 Genomic Phylogenomics: {' '.join(cmd_geno)}")
+    subprocess.run(cmd_geno, check=True)
+    return geno_out_dir
+
+
+def run_genomics_cli(args: argparse.Namespace, cfg: PipelineConfig) -> None:
+    """CLI entrypoint for standalone Step 06 genomic ingestion & phylogenomics."""
+    run_dir, cfg = _resolve_active_run_context(args, cfg)
+    rscript_bin = shutil.which("Rscript")
+    if not rscript_bin:
+        logger.error("Rscript binary not found in system PATH.")
+        sys.exit(1)
+    tables_dir = (run_dir / "data" / "tables") if run_dir is not None else Path(cfg.get("paths", {}).get("tables_dir", "data/tables"))
+    figures_dir = (run_dir / "outputs" / "figures") if run_dir is not None else Path(cfg.get("paths", {}).get("figures_dir", "outputs/figures"))
+    reports_dir = (run_dir / "outputs" / "reports") if run_dir is not None else Path(cfg.get("paths", {}).get("reports_dir", str(figures_dir.parent / "reports")))
+    tables_dir.mkdir(parents=True, exist_ok=True)
+    figures_dir.mkdir(parents=True, exist_ok=True)
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    run_genomics_stream(
+        args,
+        run_dir,
+        tables_dir,
+        figures_dir,
+        rscript_bin,
+        reports_dir=reports_dir,
+        respect_test_mock_guard=False,
+    )
+
+
+def run_skim_organellar_cli(args: argparse.Namespace, cfg: PipelineConfig) -> None:
+    """CLI entrypoint for offline off-target plastid/ITS skimming into flat data/genomics/."""
+    _ = cfg
+    skim_script = PROJECT_ROOT / "scripts" / "data_prep" / "skim_offtarget_organellar.py"
+    verify_file_exists(skim_script, "Off-target Organellar Skimmer Python script")
+    cmd = [sys.executable, str(skim_script)]
+    if getattr(args, "fastq_source", None):
+        cmd.extend(["--fastq-source", str(args.fastq_source)])
+    if getattr(args, "genomics_dir", None):
+        cmd.extend(["--genomics-dir", str(args.genomics_dir)])
+    if getattr(args, "nuclear_tree", None):
+        cmd.extend(["--nuclear-tree", str(args.nuclear_tree)])
+    subprocess.run(cmd, check=True)
+
+
 def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     """Executes Phases 5 and 6: Spatial Macroecology and Synthesis Triage."""
     logger.info("=== Starting Synthesis Workflow (Phases 5, 6) ===")
@@ -1158,10 +1291,22 @@ def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     verify_file_exists(conflict_flags, "multimodal conflict flags CSV")
 
     # -------------------------------------------------------------------------
-    # Stage 6: Multi-Evidence Taxonomic Decision Matrix & Triage Dashboard
+    # Stage 6 (Automatic when data/genomics/ populated): Standalone Step 06 Genomic & Phylogenomic Stream
     # -------------------------------------------------------------------------
-    triage_script = PROJECT_ROOT / "scripts" / "analysis" / "06_triage_dashboard_synthesis.R"
-    verify_file_exists(triage_script, "Triage Dashboard R script")
+    geno_out_dir = run_genomics_stream(
+        args,
+        run_dir,
+        tables_dir,
+        figures_dir,
+        rscript_bin,
+        reports_dir=reports_dir_s05,
+    )
+
+    # -------------------------------------------------------------------------
+    # Stage 7: Multi-Evidence Taxonomic Decision Matrix & Triage Dashboard
+    # -------------------------------------------------------------------------
+    triage_script = PROJECT_ROOT / "scripts" / "analysis" / "07_triage_dashboard_synthesis.R"
+    verify_file_exists(triage_script, "Step 07 Triage Dashboard R script")
 
     default_gmm_summary = (
         run_dir / "outputs" / "reports" / "gmm_bayes_factors_summary.csv"
@@ -1181,7 +1326,7 @@ def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         fallback_fig = str(figures_dir / default_fig_name)
         fallback_rep = f"outputs/reports/{default_rep_name}"
     else:
-        default_fig_name = "fig06a_integrative_taxonomic_synthesis.png"
+        default_fig_name = "fig07a_integrative_taxonomic_synthesis.png"
         default_rep_name = "Packera_Taxonomic_Revision_Summary.md"
         fallback_fig = cfg.get("paths", {}).get("cda_biplot_pdf", str(figures_dir / default_fig_name))
         fallback_rep = cfg.get("paths", {}).get("revision_report_md", f"outputs/reports/{default_rep_name}")
@@ -1202,7 +1347,7 @@ def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     output_complexes = Path(getattr(args, "output_complexes", None) or (reports_dir_s05 / "empirical_taxon_complexes.csv"))
     output_affinity = Path(getattr(args, "output_affinity", None) or (reports_dir_s05 / "pairwise_taxon_affinity_matrix.csv"))
     output_neighbors = Path(getattr(args, "output_neighbors", None) or (reports_dir_s05 / "focal_auto_neighbors.txt"))
-    output_complex_plot = Path(getattr(args, "output_complex_plot", None) or (figures_dir / "fig06b_taxon_complex_delimitation_network.png"))
+    output_complex_plot = Path(getattr(args, "output_complex_plot", None) or (figures_dir / "fig07b_taxon_complex_delimitation_network.png"))
     min_affinity_val = getattr(args, "min_affinity", None)
     if min_affinity_val is None:
         min_affinity_val = float((cfg.get("synthesis", {}) or {}).get("min_affinity", 0.03))
@@ -1227,11 +1372,13 @@ def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     ]
     if focal_taxon:
         cmd_triage.extend(["--focal-taxon", focal_taxon])
+    if geno_out_dir is not None:
+        cmd_triage.extend(["--genomic-dir", str(geno_out_dir)])
     if intraspecific_mode:
         cmd_triage.append("--intraspecific-mode")
     if getattr(args, "demo", False):
         cmd_triage.append("--demo")
-    logger.info(f"Running Phase 6 Triage Dashboard Synthesis: {' '.join(cmd_triage)}")
+    logger.info(f"Running Step 07 Triage Dashboard Synthesis: {' '.join(cmd_triage)}")
     subprocess.run(cmd_triage, check=True)
     verify_file_exists(output_queue, "triage queue CSV")
     verify_file_exists(synthesis_report, "taxonomic revision summary markdown report")
@@ -1419,7 +1566,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="purge_runs_only",
         action="store_true",
         default=False,
-        help="Purge only Step 03 to 06 run outputs and Tier B SQLite tables while preserving Step 01 vouchers and Step 02 segmentation.",
+        help="Purge only Step 03 to 07 run outputs and Tier B SQLite tables while preserving Step 01 vouchers and Step 02 segmentation.",
     )
     parser.add_argument(
         "--no-purge-runs",
@@ -1450,10 +1597,37 @@ def build_parser() -> argparse.ArgumentParser:
     p_purge_runs = subparsers.add_parser(
         "purge-runs-only",
         aliases=["purge-run-outputs"],
-        help="Purge only Step 03 to 06 run outputs and Tier B SQLite tables while preserving Step 01 & Step 02 segmentation",
+        help="Purge only Step 03 to 07 run outputs and Tier B SQLite tables while preserving Step 01 & Step 02 segmentation",
     )
     _add_common_subparser_args(p_purge_runs, include_gpu=False)
     p_purge_runs.add_argument("--output-dir", type=Path, default=None, help="Optional root data directory override")
+
+    # Subcommand: purge (--runs-only / --segments)
+    p_purge_cmd = subparsers.add_parser(
+        "purge",
+        help="Purge pipeline artifacts (--runs-only for Tier B runs or --segments for Step 02 to 07)",
+    )
+    _add_common_subparser_args(p_purge_cmd, include_gpu=False)
+    p_purge_cmd.add_argument(
+        "--runs-only",
+        action="store_true",
+        default=False,
+        help="Purge Tier B run outputs and genetic_lineage_assignments while preserving Tier A vouchers, segments, and genomic_samples",
+    )
+    p_purge_cmd.add_argument(
+        "--segments",
+        action="store_true",
+        default=False,
+        help="Purge Step 02 to 07 segments, masks, contours, and run directories",
+    )
+    p_purge_cmd.add_argument(
+        "--no-purge-runs",
+        dest="purge_runs",
+        action="store_false",
+        default=True,
+        help="Preserve historical runs/ directories when purging Step 02 segments.",
+    )
+    p_purge_cmd.add_argument("--output-dir", type=Path, default=None, help="Optional root data directory override")
 
     # Subcommand: check-env
     p_check = subparsers.add_parser(
@@ -1647,8 +1821,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_morph.add_argument("--focal-taxon", type=str, default=None, help="Optional focal Packera taxon for targeted morphometric CDA")
     p_morph.add_argument("--intraspecific-mode", action="store_true", default=False, help="Run single-taxon intraspecific delimitation mode")
 
+    # Subcommand: genomics (Step 06 standalone phylogenomics)
+    p_geno = subparsers.add_parser("genomics", help="Step 06: Independent genomic ingestion & phylogenomics")
+    _add_common_subparser_args(p_geno, include_gpu=False)
+    p_geno.add_argument("--genomics-dir", type=Path, default=None, help="Directory holding staged genomic files (default: data/genomics)")
+
+    # Subcommand: skim-organellar (offline off-target chloroplast/ITS skimming)
+    p_skim = subparsers.add_parser("skim-organellar", help="Offline skimming of off-target plastid/ITS reads into flat data/genomics/")
+    p_skim.add_argument("--fastq-source", type=Path, default=None, help="Optional .zip, .tar.gz, or directory containing raw FASTQ reads")
+    p_skim.add_argument("--genomics-dir", type=Path, default=None, help="Flat destination data/genomics/ directory")
+    p_skim.add_argument("--nuclear-tree", type=Path, default=None, help="Optional nuclear Newick tree for cytonuclear comparison")
+
     # Subcommand: synthesis
-    p_synth = subparsers.add_parser("synthesis", aliases=["analyze"], help="Phases 5-6: Spatial RF & Triage Dashboard")
+    p_synth = subparsers.add_parser("synthesis", aliases=["analyze"], help="Steps 05-07: Spatial RF, Phylogenomics, & Triage Dashboard")
     _add_common_subparser_args(p_synth, include_gpu=True)
     p_synth.add_argument("--vouchers", type=Path, default=None, help="Curated vouchers CSV")
     p_synth.add_argument("--manifest", dest="manifest_csv", type=Path, default=None, help="Extracted leaf manifest CSV")
@@ -1677,7 +1862,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_synth.add_argument("--synthesis-plot", type=Path, default=None, help=argparse.SUPPRESS)
     p_synth.add_argument("--synthesis-report", type=Path, default=None, help=argparse.SUPPRESS)
     p_synth.add_argument("--synthesis-html", type=Path, default=None, help=argparse.SUPPRESS)
-    p_synth.add_argument("--min-affinity", type=float, default=None, help="Minimum multimodal affinity threshold for Step 06 complex neighbors (default: 0.03)")
+    p_synth.add_argument("--min-affinity", type=float, default=None, help="Minimum multimodal affinity threshold for Step 07 complex neighbors (default: 0.03)")
     p_synth.add_argument("--output-complexes", type=Path, default=None, help=argparse.SUPPRESS)
     p_synth.add_argument("--output-affinity", type=Path, default=None, help=argparse.SUPPRESS)
     p_synth.add_argument("--output-neighbors", type=Path, default=None, help=argparse.SUPPRESS)
@@ -1811,7 +1996,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_all.add_argument("--no-export-figures", dest="export_figures", action="store_false", help="Disable figure export")
     p_all.add_argument("--focal-taxon", type=str, default=None, help="Optional focal Packera taxon for targeted revision synthesis")
     p_all.add_argument("--intraspecific-mode", action="store_true", default=False, help="Run single-taxon intraspecific delimitation mode")
-    p_all.add_argument("--min-affinity", type=float, default=None, help="Minimum multimodal affinity threshold for Step 06 complex neighbors (default: 0.03)")
+    p_all.add_argument("--min-affinity", type=float, default=None, help="Minimum multimodal affinity threshold for Step 07 complex neighbors (default: 0.03)")
 
     return parser
 
@@ -1835,7 +2020,7 @@ def run_purge_segments(args: argparse.Namespace, cfg: Optional[PipelineConfig] =
 
 
 def run_purge_runs_only(args: argparse.Namespace, cfg: Optional[PipelineConfig] = None) -> None:
-    """Purges only Step 03 to 06 run outputs and Tier B SQLite tables while preserving Step 02 segmentation."""
+    """Purges only Step 03 to 07 run outputs and Tier B SQLite tables while preserving Step 02 segmentation."""
     _ = cfg
     _apply_explicit_db_arg(args)
     summary = purge_runs_only(
@@ -1859,6 +2044,15 @@ def main() -> None:
 
     if args.verbose:
         logger.setLevel(logging.DEBUG)
+
+    if args.subcommand == "purge":
+        if getattr(args, "runs_only", False) and not getattr(args, "segments", False):
+            run_purge_runs_only(args)
+        elif getattr(args, "segments", False):
+            run_purge_segments(args)
+        else:
+            parser.error("purge requires --runs-only or --segments")
+        return
 
     if args.subcommand in ("purge-runs-only", "purge-run-outputs"):
         run_purge_runs_only(args)
@@ -1899,6 +2093,8 @@ def main() -> None:
         "harvest": run_harvest,
         "segment": run_segment,
         "morphometrics": run_morphometrics,
+        "genomics": run_genomics_cli,
+        "skim-organellar": run_skim_organellar_cli,
         "synthesis": run_synthesis,
         "analyze": run_synthesis,
         "run-all": run_all,

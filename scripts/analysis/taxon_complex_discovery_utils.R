@@ -1,7 +1,7 @@
 # ==============================================================================
 # Module: scripts/analysis/taxon_complex_discovery_utils.R
 # Project: Packera Species Delimitation & Morphometrics Pipeline (NCU)
-# Description: Unified Step 06 Unsupervised Quantitative Taxon-Complex Discovery
+# Description: Unified Step 07 Unsupervised Quantitative Taxon-Complex Discovery
 #   & Multimodal Affinity Engine: OOF Cohen's kappa weights (Dawid & Skene 1979),
 #   authority-weighted Kish-N_eff Ledoit-Wolf morphometric affinity, anchor-clean
 #   ecological KDE Schoener's D, Hopkins-adjusted circular phenological affinity
@@ -30,14 +30,14 @@
   }
   as.character(x)
 }
-.parse_step06_complex_semicolon <- function(df, col_nm) {
+.parse_step07_complex_semicolon <- function(df, col_nm) {
   if (!(col_nm %in% names(df))) return(character(0))
   raw <- trimws(as.character(stats::na.omit(df[[col_nm]]))); raw <- raw[nzchar(raw)]
   if (length(raw) == 0L) return(character(0))
   toks <- unique(trimws(unlist(strsplit(raw, ";", fixed = TRUE))))
   intersect(toks[nzchar(toks) & !(tolower(toks) %in% c("na", "none", "null"))], names(df))
 }
-.sort_step06_complex_pcs <- function(cols, pfx) {
+.sort_step07_complex_pcs <- function(cols, pfx) {
   if (length(cols) <= 1L) return(cols)
   cols[order(suppressWarnings(as.integer(sub(paste0("^", pfx), "", cols))), cols)]
 }
@@ -95,7 +95,7 @@ select_taxon_anchors <- function(morph_df) {
   clean_non_gs <- !noise & !is_misid & !mo_out
   # Extreme damaged nomenclatural types (> chisq_0.99) excluded from covariance estimation while counted in n_type_specimens
   d2_col <- if ("mahalanobis_d2" %in% names(morph_df)) suppressWarnings(as.numeric(morph_df$mahalanobis_d2)) else rep(NA_real_, n)
-  p_est <- max(2L, length(.parse_step06_complex_semicolon(morph_df, "selected_morph_features")))
+  p_est <- max(2L, length(.parse_step07_complex_semicolon(morph_df, "selected_morph_features")))
   type_extreme <- is_type & is.finite(d2_col) & (d2_col > stats::qchisq(0.99, df = p_est))
   taxa <- sort(unique(as.character(morph_df$species_standardized))); anchor_mask <- rep(FALSE, n)
   n_gs_vec <- stats::setNames(integer(length(taxa)), taxa); n_type_vec <- stats::setNames(integer(length(taxa)), taxa)
@@ -145,7 +145,7 @@ compute_modality_kappa_weights <- function(morph_df, anchor_mask = NULL, ...) {
   ed_col <- intersect(c("edaphic_best_fit_taxon", "rf_predicted_taxon"), names(anch_df))[1L]
   has_eco_obs <- !is.na(ed_col) && any(!is.na(anch_df[[ed_col]]) & nzchar(trimws(as.character(anch_df[[ed_col]]))))
   if (!has_eco_obs) {
-    eco_p <- resolve_step06_complex_eco_predictors(morph_df); has_eco_obs <- length(eco_p) > 0L
+    eco_p <- resolve_step07_complex_eco_predictors(morph_df); has_eco_obs <- length(eco_p) > 0L
   }
   kappa_eco <- if (!is.na(ed_col) && any(!is.na(anch_df[[ed_col]]))) compute_cohens_kappa_stat(yt_morph, anch_df[[ed_col]]) else NA_real_
   w_eco_raw <- if (is.finite(kappa_eco)) max(0.05, min(1.0, kappa_eco)) else if (has_eco_obs && "w_edaphic_kappa" %in% names(anch_df) && any(is.finite(as.numeric(anch_df$w_edaphic_kappa)))) stats::median(as.numeric(anch_df$w_edaphic_kappa), na.rm = TRUE) else if (has_eco_obs) 0.55 else NA_real_
@@ -168,18 +168,18 @@ compute_modality_kappa_weights <- function(morph_df, anchor_mask = NULL, ...) {
     w_edaphic = unname(norm_w["edaphic"]), w_pheno = unname(norm_w["pheno"]))
 }
 # 3. Dynamic Morphometric & Ecological Feature Discovery
-resolve_step06_complex_morph_features <- function(morph_df, anchor_df = morph_df, n_taxa = 2L) {
+resolve_step07_complex_morph_features <- function(morph_df, anchor_df = morph_df, n_taxa = 2L) {
   max_p <- max(2L, min(15L, nrow(anchor_df) - as.integer(n_taxa) - 1L))
   ok_num <- function(cc) {
     if (!(cc %in% names(anchor_df)) || !(cc %in% names(morph_df)) || is.logical(anchor_df[[cc]]) || is.character(anchor_df[[cc]])) return(FALSE)
     v <- suppressWarnings(as.numeric(anchor_df[[cc]])); v <- v[is.finite(v)]; length(v) >= 3L && is.finite(stats::sd(v)) && stats::sd(v) > 1e-8
   }
-  sel <- .parse_step06_complex_semicolon(morph_df, "selected_morph_features"); sel <- sel[vapply(sel, ok_num, logical(1))]
+  sel <- .parse_step07_complex_semicolon(morph_df, "selected_morph_features"); sel <- sel[vapply(sel, ok_num, logical(1))]
   if (length(sel) >= 2L) {
-    is_pc <- grepl("^PC[0-9]+$", sel); ord_pc <- .sort_step06_complex_pcs(grep("^PC[0-9]+$", sel, value = TRUE), "PC")
+    is_pc <- grepl("^PC[0-9]+$", sel); ord_pc <- .sort_step07_complex_pcs(grep("^PC[0-9]+$", sel, value = TRUE), "PC")
     return(utils::head(unique(c(ord_pc, sel[!is_pc])), max_p))
   }
-  pc_cols <- .sort_step06_complex_pcs(grep("^PC[0-9]+$", names(anchor_df), value = TRUE), "PC")
+  pc_cols <- .sort_step07_complex_pcs(grep("^PC[0-9]+$", names(anchor_df), value = TRUE), "PC")
   pc_cols <- pc_cols[vapply(pc_cols, ok_num, logical(1))]; can_cols <- intersect(c("can1", "can2", "can3"), names(anchor_df))
   can_cols <- can_cols[vapply(can_cols, ok_num, logical(1))]; cands <- if (length(pc_cols) >= 2L) pc_cols else unique(c(can_cols, pc_cols))
   if (length(cands) <= 2L) return(cands)
@@ -193,7 +193,7 @@ resolve_step06_complex_morph_features <- function(morph_df, anchor_df = morph_df
   keep_k <- max(2L, min(max_p, sum(cumprod(as.integer(ev_prop >= bs_prop | ev_prop >= pa_q95)) == 1L)))
   cands[seq_len(min(length(cands), keep_k))]
 }
-resolve_step06_complex_eco_predictors <- function(df) {
+resolve_step07_complex_eco_predictors <- function(df) {
   excl <- c(
     "edaphic_z_score", "climatic_z_score", "type_edaphic_z_score", "edaphic_schoener_d", "schoener_d", "edaphic_niche_overlap_d",
     "sgmc_lithology_class", "Dominant_Lithology_Class", "edaphic_best_fit_taxon",
@@ -206,8 +206,8 @@ resolve_step06_complex_eco_predictors <- function(df) {
     }, logical(1))]
   }
   meta_cols <- ok_env(c(
-    .parse_step06_complex_semicolon(df, "primary_env_predictors"), .parse_step06_complex_semicolon(df, "primary_edaph_predictors"),
-    .parse_step06_complex_semicolon(df, "primary_clim_predictors")
+    .parse_step07_complex_semicolon(df, "primary_env_predictors"), .parse_step07_complex_semicolon(df, "primary_edaph_predictors"),
+    .parse_step07_complex_semicolon(df, "primary_clim_predictors")
   ))
   if (length(meta_cols) > 0L) return(meta_cols)
   cands <- ok_env(grep("^(bio[0-9]+_|fine_|ilr_texture_|ssurgo_|polaris_|solus_|topo_)", names(df), value = TRUE))
@@ -229,7 +229,7 @@ compute_ecological_affinity <- function(morph_df, taxa, anchor_mask = NULL) {
   morph_df <- as.data.frame(morph_df, stringsAsFactors = FALSE); n_taxa <- length(taxa); n <- nrow(morph_df)
   S_env <- matrix(NA_real_, nrow = n_taxa, ncol = n_taxa, dimnames = list(taxa, taxa)); diag(S_env) <- 0.0
   D_env <- matrix(NA_real_, nrow = n_taxa, ncol = n_taxa, dimnames = list(taxa, taxa)); diag(D_env) <- 0.0
-  eco_cols <- resolve_step06_complex_eco_predictors(morph_df)
+  eco_cols <- resolve_step07_complex_eco_predictors(morph_df)
   if (length(eco_cols) == 0L) {
     return(list(S_env = S_env, D_env = D_env, has_env = FALSE, eco_predictors = character(0), specimen_schoener_d = rep(NA_real_, n)))
   }
@@ -294,7 +294,7 @@ compute_ecological_affinity <- function(morph_df, taxa, anchor_mask = NULL) {
   list(S_env = S_env, D_env = D_env, has_env = sum(has_tx_env) >= 2L, eco_predictors = eco_cols, specimen_schoener_d = spec_d)
 }
 compute_morphometric_affinity <- function(morph_df, anchor_df, taxa) {
-  morph_df <- as.data.frame(morph_df, stringsAsFactors = FALSE); anchor_df <- as.data.frame(anchor_df, stringsAsFactors = FALSE); n_taxa <- length(taxa); feat_cols <- resolve_step06_complex_morph_features(morph_df, anchor_df, n_taxa)
+  morph_df <- as.data.frame(morph_df, stringsAsFactors = FALSE); anchor_df <- as.data.frame(anchor_df, stringsAsFactors = FALSE); n_taxa <- length(taxa); feat_cols <- resolve_step07_complex_morph_features(morph_df, anchor_df, n_taxa)
   if (length(feat_cols) == 0L) {
     fb_c <- intersect(c("PC1", "PC2", "PC3", "can1", "can2", "can3"), names(anchor_df))
     feat_cols <- fb_c[vapply(fb_c, function(cc) any(is.finite(suppressWarnings(as.numeric(anchor_df[[cc]])))), logical(1))]
@@ -386,7 +386,7 @@ compute_hopkins_phenological_affinity <- function(morph_df, taxa, anchor_mask = 
   doy_vec <- if ("doy" %in% names(morph_df)) suppressWarnings(as.numeric(morph_df$doy)) else rep(NA_real_, n)
   hop_in <- if ("hopkins_adjusted_doy" %in% names(morph_df)) suppressWarnings(as.numeric(morph_df$hopkins_adjusted_doy)) else rep(NA_real_, n)
   has_valid_doy <- (is.finite(doy_vec) & doy_vec >= 1 & doy_vec <= 366) | (is.finite(hop_in) & hop_in >= 1 & hop_in <= 366)
-  # Use canonical Step 06 anthesis resolver (properly matching Peak_Anthesis, Early_Anthesis, Late_Anthesis, is_verified_anthesis)
+  # Use canonical Step 07 anthesis resolver (properly matching Peak_Anthesis, Early_Anthesis, Late_Anthesis, is_verified_anthesis)
   is_anth <- if (exists("resolve_active_anthesis_mask", mode = "function")) {
     resolve_active_anthesis_mask(morph_df)
   } else {
@@ -405,7 +405,7 @@ compute_hopkins_phenological_affinity <- function(morph_df, taxa, anchor_mask = 
   noise_m <- if ("is_confident_label_noise" %in% names(morph_df)) (!is.na(morph_df$is_confident_label_noise) & as.logical(morph_df$is_confident_label_noise)) else rep(FALSE, n)
   mo_m <- if ("morphometric_outlier_flag" %in% names(morph_df)) (!is.na(morph_df$morphometric_outlier_flag) & as.logical(morph_df$morphometric_outlier_flag)) else rep(FALSE, n)
   wt_all <- .resolve_complex_specimen_weights(morph_df)
-  # Honor upstream Step 05/06 hopkins_adjusted_doy or delegate to Step 06 compute_hopkins_adjusted_phenology()
+  # Honor upstream Step 05/06 hopkins_adjusted_doy or delegate to Step 07 compute_hopkins_adjusted_phenology()
   if (!any(is.finite(hop_in)) && exists("compute_hopkins_adjusted_phenology", mode = "function")) {
     h_df <- tryCatch(compute_hopkins_adjusted_phenology(morph_df), error = function(e) NULL)
     if (!is.null(h_df) && "hopkins_adjusted_doy" %in% names(h_df)) hop_in <- suppressWarnings(as.numeric(h_df$hopkins_adjusted_doy))
@@ -502,7 +502,7 @@ evaluate_hierarchical_complex_delimitation <- function(morph_df, pheno_res = NUL
   pre_sub <- if ("taxonomic_treatment_subtype" %in% names(morph_df)) trimws(as.character(morph_df$taxonomic_treatment_subtype)) else rep(NA_character_, n)
   has_pre <- !is.na(pre_sub) & nzchar(pre_sub) & !(tolower(pre_sub) %in% c("na", "null", "none"))
   if (all(has_pre)) return(pre_sub)
-  # Delegate to canonical Step 06 apply_taxonomic_decision_matrix when loaded, else run strict zero-imputation fallback
+  # Delegate to canonical Step 07 apply_taxonomic_decision_matrix when loaded, else run strict zero-imputation fallback
   if (exists("apply_taxonomic_decision_matrix", mode = "function")) {
     df_tmp <- morph_df
     if (!("delta_doy_resid" %in% names(df_tmp)) && !is.null(pheno_res) && !is.null(pheno_res$delta_doy_resid)) {
@@ -539,7 +539,7 @@ evaluate_hierarchical_complex_delimitation <- function(morph_df, pheno_res = NUL
   }
   type_info <- if (exists(".identify_type_specimen_vec", mode = "function")) .identify_type_specimen_vec(morph_df) else list(is_type_specimen = rep(FALSE, n))
   is_type_spec <- as.logical(type_info$is_type_specimen); is_type_spec[is.na(is_type_spec)] <- FALSE
-  p_morph <- max(2L, length(.parse_step06_complex_semicolon(morph_df, "selected_morph_features")), 3L)
+  p_morph <- max(2L, length(.parse_step07_complex_semicolon(morph_df, "selected_morph_features")), 3L)
   min_cong_d2 <- if ("min_congener_mahal_d2" %in% names(morph_df)) suppressWarnings(as.numeric(morph_df$min_congener_mahal_d2)) else rep(NA_real_, n)
   min_cong_tx <- if ("min_congener_taxon" %in% names(morph_df)) as.character(morph_df$min_congener_taxon) else rep(NA_character_, n)
   morph_disagrees <- !is.na(cda_pred) & nzchar(cda_pred) & (cda_pred != sp_given) & is.finite(cda_prob) & (cda_prob >= 0.50)
@@ -685,7 +685,7 @@ build_taxon_morphotype_subclusters <- function(morph_df, min_vouchers = 5L) {
   message(sprintf("[Subcluster Mode] Built %d Taxon x Morphotype clusters (>= %d vouchers): %s", length(valid_c), min_vouchers, paste(valid_c, collapse = ", ")))
   list(morph_df = morph_df, subcluster_mode = TRUE)
 }
-# 8. Unified Step 06 Complex Discovery Orchestrator
+# 8. Unified Step 07 Complex Discovery Orchestrator
 .atomic_write_complex_csv <- function(df, path) {
   if (is.null(path) || !nzchar(trimws(as.character(path)))) return(invisible(NULL))
   dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE); tmp <- paste0(path, ".", Sys.getpid(), ".tmp")
@@ -696,7 +696,7 @@ build_taxon_morphotype_subclusters <- function(morph_df, min_vouchers = 5L) {
   dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE); tmp <- paste0(path, ".", Sys.getpid(), ".tmp")
   writeLines(as.character(lines_vec), con = tmp); file.rename(tmp, path); invisible(path)
 }
-run_step06_complex_discovery <- function(full_df, opts = list()) {
+run_step07_complex_discovery <- function(full_df, opts = list()) {
   if (is.null(full_df) || nrow(full_df) == 0L) return(NULL)
   full_df <- as.data.frame(full_df, stringsAsFactors = FALSE)
   valid_sp <- !is.na(full_df$species_standardized) & nzchar(trimws(as.character(full_df$species_standardized))) & (as.character(full_df$species_standardized) != "Unknown")
@@ -707,13 +707,13 @@ run_step06_complex_discovery <- function(full_df, opts = list()) {
   sub_res <- build_taxon_morphotype_subclusters(work_df, min_vouchers = min_sub); morph_df <- sub_res$morph_df
   taxa <- sort(unique(as.character(morph_df$species_standardized))); n_taxa <- length(taxa)
   if (n_taxa < 2L) {
-    message("[Step 06 Complex Discovery] Single taxon without >=2 qualifying morphotype subclusters; skipping multi-complex graph partitioning.")
+    message("[Step 07 Complex Discovery] Single taxon without >=2 qualifying morphotype subclusters; skipping multi-complex graph partitioning.")
     return(NULL)
   }
   n_vouchers_vec <- stats::setNames(as.integer(table(morph_df$species_standardized)[taxa]), taxa); anc <- select_taxon_anchors(morph_df)
   kappa_wts <- compute_modality_kappa_weights(morph_df, anc$anchor_mask)
   message(sprintf(
-    "[Step 06 Complex Discovery] Evaluating %d vouchers across %d Packera groups (%d anchors; kappa weights: morph=%.3f, edaphic=%.3f, pheno=%.3f).",
+    "[Step 07 Complex Discovery] Evaluating %d vouchers across %d Packera groups (%d anchors; kappa weights: morph=%.3f, edaphic=%.3f, pheno=%.3f).",
     nrow(morph_df), n_taxa, nrow(anc$anchor_df), kappa_wts$w_morph, kappa_wts$w_edaphic, kappa_wts$w_pheno
   ))
   morph_res <- compute_morphometric_affinity(morph_df, anc$anchor_df, taxa)
@@ -775,15 +775,15 @@ run_step06_complex_discovery <- function(full_df, opts = list()) {
     .atomic_write_complex_lines(part_res$complexes_df$species_standardized, opts$output_neighbors)
   }
   if (!is.null(opts$output_complex_plot) && nzchar(opts$output_complex_plot)) {
-    if (!exists("render_step06_complex_discovery_pdf", mode = "function") && file.exists("scripts/morphometrics/pub_figures_utils.R")) {
+    if (!exists("render_step07_complex_discovery_png", mode = "function") && file.exists("scripts/morphometrics/pub_figures_utils.R")) {
       source("scripts/morphometrics/pub_figures_utils.R")
     }
-    if (exists("render_step06_complex_discovery_pdf", mode = "function")) {
-      tryCatch(render_step06_complex_discovery_pdf(W = W, part_res = part_res, out_pdf = opts$output_complex_plot), error = function(e) warning("Step 06 complex network figure warning: ", e$message))
+    if (exists("render_step07_complex_discovery_png", mode = "function")) {
+      tryCatch(render_step07_complex_discovery_png(W = W, part_res = part_res, out_pdf = opts$output_complex_plot), error = function(e) warning("Step 07 complex network figure warning: ", e$message))
     }
   }
-  if (!isTRUE(opts$demo) && exists("persist_step06_complexes_to_sqlite", mode = "function")) {
-    tryCatch(persist_step06_complexes_to_sqlite(part_res$complexes_df, vouchers_path = opts$vouchers, demo = isTRUE(opts$demo)), error = function(e) warning("SQLite taxon_complexes persistence note: ", e$message))
+  if (!isTRUE(opts$demo) && exists("persist_step07_complexes_to_sqlite", mode = "function")) {
+    tryCatch(persist_step07_complexes_to_sqlite(part_res$complexes_df, vouchers_path = opts$vouchers, demo = isTRUE(opts$demo)), error = function(e) warning("SQLite taxon_complexes persistence note: ", e$message))
   }
   list(
     complexes_df = part_res$complexes_df, affinity_matrix = W, part_res = part_res, morph_res = morph_res, eco_res = eco_res,

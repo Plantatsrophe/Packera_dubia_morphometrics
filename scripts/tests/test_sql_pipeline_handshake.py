@@ -714,11 +714,11 @@ class TestSQLPipelineHandshake(unittest.TestCase):
             triage_queue_csv = tables_dir / "triage_queue.csv"
             rev_report_md = reports_dir / "Packera_Taxonomic_Revision_Summary.md"
             rev_html = reports_dir / "Triage_Dashboard_Interactive.html"
-            rev_fig_pdf = figures_dir / "fig06a_integrative_taxonomic_synthesis.png"
+            rev_fig_pdf = figures_dir / "fig07a_integrative_taxonomic_synthesis.png"
 
             cmd_step06 = [
                 rscript_bin,
-                str(PROJECT_ROOT / "scripts" / "analysis" / "06_triage_dashboard_synthesis.R"),
+                str(PROJECT_ROOT / "scripts" / "analysis" / "07_triage_dashboard_synthesis.R"),
                 "--vouchers", str(vouchers_csv),
                 "--morphometrics", str(tables_dir / "morphometric_flags.csv"),
                 "--multimodal-flags", str(conflict_csv),
@@ -728,9 +728,9 @@ class TestSQLPipelineHandshake(unittest.TestCase):
                 "--output-report", str(rev_report_md),
                 "--output-html", str(rev_html),
             ]
-            proc06 = run_warm_r_cmd(cmd_step06, stage_key='step06', cwd=PROJECT_ROOT, env=env, skip_figures=True)
+            proc06 = run_warm_r_cmd(cmd_step06, stage_key='step07', cwd=PROJECT_ROOT, env=env, skip_figures=True)
             combined06 = proc06.stdout + "\n" + proc06.stderr
-            self.assertEqual(proc06.returncode, 0, f"Step 06 failed:\n{combined06}")
+            self.assertEqual(proc06.returncode, 0, f"Step 07 failed:\n{combined06}")
             self.assertIn("v_integrative_triage_master", combined06)
             self.assertTrue(triage_queue_csv.is_file())
             self.assertTrue(rev_html.is_file())
@@ -1092,7 +1092,7 @@ class TestSQLPipelineHandshake(unittest.TestCase):
             raw.executescript(
                 f"""
                 PRAGMA foreign_keys = OFF;
-                PRAGMA user_version = 20261121;
+                PRAGMA user_version = 20261123;
                 INSERT INTO vouchers (catalogNumber, scientificName, species_standardized, qc_status) VALUES
                     ('WILLI_82182', 'Packera dubia', 'Packera dubia', 'PASS'),
                     ('GA202225', 'Packera anonyma', 'Packera anonyma', 'PENDING'),

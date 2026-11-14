@@ -197,14 +197,16 @@ _STAGE_CONFIG: Dict[str, tuple[str, str]] = {
     "step03": ("scripts/morphometrics/03_fourier_extractor.R", "run_fourier_extraction"),
     "step04": ("scripts/morphometrics/04_gmm_morphotools.R", "run_gmm_morphotools_pipeline"),
     "step05": ("scripts/analysis/05_multimodal_spatial_rf.R", "main"),
-    "step06": ("scripts/analysis/06_triage_dashboard_synthesis.R", "main"),
+    "step06": ("scripts/analysis/06_genomic_phylogenomics.R", "main"),
+    "step07": ("scripts/analysis/07_triage_dashboard_synthesis.R", "main"),
 }
 
 _SCRIPT_TO_STAGE: Dict[str, str] = {
     "03_fourier_extractor.R": "step03",
     "04_gmm_morphotools.R": "step04",
     "05_multimodal_spatial_rf.R": "step05",
-    "06_triage_dashboard_synthesis.R": "step06",
+    "06_genomic_phylogenomics.R": "step06",
+    "07_triage_dashboard_synthesis.R": "step07",
 }
 
 

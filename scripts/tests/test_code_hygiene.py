@@ -137,16 +137,20 @@ FORBIDDEN_OBSOLETE_SAM2_AND_PRUNED_HELPER_TOKENS = (
     "integrative_consensus_prob",
     "n_active_modalities",
     "render_step07_synthesis_plate_pdf",
-    "generate_step07_pub_figures",
-    "persist_step07_to_sqlite",
     "render_step08_complex_discovery_pdf",
     "load_step08_merged_inputs",
     "fig07_multimodal_discordance_summary",
     "fig07b_taxonomic_treatment_summary",
-    # Retired Step 07 script, Step 08 helper names, and complex-table twin columns
+    # Retired Step 06 synthesis / Step 06b / Step 08 helper names and complex-table twin columns
+    "06_triage_dashboard_synthesis",
+    "step06b",
+    "Step 06b",
+    "fig06a_integrative_taxonomic_synthesis",
+    "fig06b_taxon_complex_delimitation_network",
+    "fig06c_",
+    "ingest_genetic_data",
     "07_discover_taxon_complexes",
     "render_step07_complex_discovery_pdf",
-    "load_step07_merged_inputs",
     ".discover_step08_eco_cols",
     ".discover_step08_dynamic_morph_cols",
     "resolve_step08_morph_features",
@@ -292,7 +296,7 @@ class TestCodeHygiene(unittest.TestCase):
             rel = src_path.relative_to(PROJECT_ROOT)
             for lineno, line in enumerate(content.splitlines(), start=1):
                 for token in FORBIDDEN_OBSOLETE_SAM2_AND_PRUNED_HELPER_TOKENS:
-                    if token in ("x_norm", "y_norm"):
+                    if token in ("x_norm", "y_norm", "ingest_genetic_data"):
                         hit = bool(re.search(rf"(?<![A-Za-z0-9_]){re.escape(token)}(?![A-Za-z0-9_])", line))
                     else:
                         hit = token in line

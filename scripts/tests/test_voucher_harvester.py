@@ -1530,7 +1530,7 @@ class TestDynamicAuthorityEngineAndSynonymExpansion(unittest.TestCase):
         self.assertNotIn("mod05.TARGET_TAXA", sh_text)
         self.assertNotIn('"Packera dubia" "Packera anonyma" "Packera paupercula" "Packera plattensis"', sh_text)
         self.assertIn("Packera_Taxonomic_Revision_Summary.md", sh_text)
-        self.assertIn("fig06a_integrative_taxonomic_synthesis.png", sh_text)
+        self.assertIn("fig07a_integrative_taxonomic_synthesis.png", sh_text)
         self.assertIn("select_cascading_outgroup_anchors", sh_text)
         self.assertIn("--geographic-scope", sh_text)
         self.assertIn("--include-western", sh_text)
@@ -1888,30 +1888,32 @@ class TestDynamicAuthorityEngineAndSynonymExpansion(unittest.TestCase):
             self.assertEqual(_arg_value(cmd_step06, "--focal-taxon"), "Packera aurea")
             self.assertIn("--intraspecific-mode", cmd_step06)
 
-            # Unified Step 06 synthesis + complex delimitation assertions
-            self.assertTrue(any("06_triage_dashboard_synthesis.R" in tok for tok in cmd_step07))
+            # Step 07 synthesis + complex delimitation assertions
+            self.assertTrue(any("07_triage_dashboard_synthesis.R" in tok for tok in cmd_step07))
             self.assertEqual(_arg_value(cmd_step07, "--harmonics"), str(tables_dir / "leaf_efa_harmonics.csv"))
             self.assertEqual(_arg_value(cmd_step07, "--output-queue"), str(tables_dir / "triage_queue.csv"))
             self.assertEqual(_arg_value(cmd_step07, "--output-html"), str(reports_dir / "Triage_Dashboard_Interactive.html"))
             self.assertEqual(_arg_value(cmd_step07, "--output-complexes"), str(reports_dir / "empirical_taxon_complexes.csv"))
             self.assertEqual(_arg_value(cmd_step07, "--output-affinity"), str(reports_dir / "pairwise_taxon_affinity_matrix.csv"))
             self.assertEqual(_arg_value(cmd_step07, "--output-neighbors"), str(reports_dir / "focal_auto_neighbors.txt"))
-            self.assertEqual(_arg_value(cmd_step07, "--output-complex-plot"), str(figures_dir / "fig06b_taxon_complex_delimitation_network.png"))
+            self.assertEqual(_arg_value(cmd_step07, "--output-complex-plot"), str(figures_dir / "fig07b_taxon_complex_delimitation_network.png"))
             self.assertEqual(_arg_value(cmd_step07, "--focal-taxon"), "Packera aurea")
             self.assertIn("--intraspecific-mode", cmd_step07)
 
-        # 3. Verify run_pipeline.sh unified 6-stage ordering (Step 05 -> unified Step 06 with complex discovery)
+        # 3. Verify run_pipeline.sh unified 7-stage ordering (Step 05 -> Step 06 genomics -> Step 07 synthesis)
         run_sh = Path(__file__).resolve().parents[2] / "run_pipeline.sh"
         sh_text = run_sh.read_text(encoding="utf-8")
 
         pos_step05 = sh_text.index("scripts/analysis/05_multimodal_spatial_rf.R")
-        pos_step06 = sh_text.index("scripts/analysis/06_triage_dashboard_synthesis.R")
-        self.assertLess(pos_step05, pos_step06, "Unified Step 06 must run AFTER Step 05 completes in run_pipeline.sh")
+        pos_step06 = sh_text.index("scripts/data_prep/06_ingest_genetic_data.py")
+        pos_step07 = sh_text.index("scripts/analysis/07_triage_dashboard_synthesis.R")
+        self.assertLess(pos_step05, pos_step06, "Step 06 genomics must follow Step 05 in run_pipeline.sh")
+        self.assertLess(pos_step06, pos_step07, "Step 07 synthesis must run AFTER Step 06 in run_pipeline.sh")
 
-        step06_block = sh_text[pos_step06:]
-        self.assertIn('--multimodal-flags "${RUN_DIR}/data/tables/multimodal_conflict_flags.csv"', step06_block)
-        self.assertIn('--output-complexes "${RUN_DIR}/outputs/reports/empirical_taxon_complexes.csv"', step06_block)
-        self.assertIn('--output-complex-plot "${RUN_DIR}/outputs/figures/fig06b_taxon_complex_delimitation_network.png"', step06_block)
+        step07_block = sh_text[pos_step07:]
+        self.assertIn('--multimodal-flags "${RUN_DIR}/data/tables/multimodal_conflict_flags.csv"', step07_block)
+        self.assertIn('--output-complexes "${RUN_DIR}/outputs/reports/empirical_taxon_complexes.csv"', step07_block)
+        self.assertIn('--output-complex-plot "${RUN_DIR}/outputs/figures/fig07b_taxon_complex_delimitation_network.png"', step07_block)
 
         proc = subprocess.run(["bash", "-n", str(run_sh)], capture_output=True, text=True, check=False)
         self.assertEqual(proc.returncode, 0, f"bash -n run_pipeline.sh failed: {proc.stderr}")

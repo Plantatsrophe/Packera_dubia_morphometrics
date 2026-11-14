@@ -2394,8 +2394,10 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
             "fig05a_ecological_niche_and_rf_importance.png",
             "fig05b_hopkins_circular_phenology.png",
             "fig05c_sdm_suitability_and_distribution_map.png",
-            "fig06a_integrative_taxonomic_synthesis.png",
-            "fig06b_taxon_complex_delimitation_network.png",
+            "fig06a_genomic_pcoa_tree_concordance.png",
+            "fig06b_reticulation_gdi_landscape.png",
+            "fig07a_integrative_taxonomic_synthesis.png",
+            "fig07b_taxon_complex_delimitation_network.png",
         }
         r_fig_dir = PROJECT_ROOT / "scripts" / "figures"
         combined_r_src = "\n".join(p.read_text(encoding="utf-8") for p in sorted(r_fig_dir.glob("*.R")))
@@ -2795,7 +2797,7 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
             try:
                 uv = int(conn.execute("PRAGMA user_version;").fetchone()[0])
                 self.assertEqual(uv, PACKERA_SCHEMA_USER_VERSION)
-                self.assertEqual(uv, 20261121)
+                self.assertEqual(uv, 20261123)
 
                 m1 = np.zeros((150, 110), dtype=np.uint8)
                 cv2.ellipse(m1, (55, 75), (30, 54), 0, 0, 360, 255, -1)

@@ -1,9 +1,9 @@
 # ==============================================================================
-# Module: scripts/figures/step06_figures.R
-# Step 06 Canonical 300-DPI PNG Figures (5-Stage Integrative Taxonomic Synthesis
+# Module: scripts/figures/step07_figures.R
+# Step 07 Canonical 300-DPI PNG Figures (5-Stage Integrative Taxonomic Synthesis
 # & Unsupervised Leiden / Metric Ward.D2 Taxon-Complex Delimitation):
-#   1. fig06a_integrative_taxonomic_synthesis.png
-#   2. fig06b_taxon_complex_delimitation_network.png
+#   1. fig07a_integrative_taxonomic_synthesis.png
+#   2. fig07b_taxon_complex_delimitation_network.png
 # ==============================================================================
 
 PACKERA_TREATMENT_PALETTE <- c(
@@ -28,9 +28,9 @@ PACKERA_TREATMENT_HOLLOW_SHAPES <- c(
   "Misidentification_Reassign" = 3L
 )
 
-render_step06a_integrative_synthesis_png <- function(
+render_step07a_integrative_synthesis_png <- function(
   df,
-  out_plot_path = "outputs/figures/fig06a_integrative_taxonomic_synthesis.png",
+  out_plot_path = "outputs/figures/fig07a_integrative_taxonomic_synthesis.png",
   cda_summary = NULL,
   focal_taxon = ""
 ) {
@@ -224,11 +224,11 @@ render_step06a_integrative_synthesis_png <- function(
 
   dyn_h_06a <- max(10.2, 6.2 + 0.28 * length(active_taxa))
   hdr_title <- if (length(active_taxa) >= 2L && nzchar(trimws(as.character(focal_taxon)))) {
-    sprintf("Step 06: Integrative Species Delimitation Across Packera Complexes (%s Focus, N = %d Taxa)", trimws(as.character(focal_taxon)), length(active_taxa))
+    sprintf("Step 07: Integrative Species Delimitation Across Packera Complexes (%s Focus, N = %d Taxa)", trimws(as.character(focal_taxon)), length(active_taxa))
   } else if (nzchar(trimws(as.character(focal_taxon)))) {
-    sprintf("Step 06: Integrative Species Delimitation & Curatorial Synthesis (%s)", trimws(as.character(focal_taxon)))
+    sprintf("Step 07: Integrative Species Delimitation & Curatorial Synthesis (%s)", trimws(as.character(focal_taxon)))
   } else {
-    sprintf("Step 06: Integrative Species Delimitation Across Packera Complexes (N = %d Taxa)", length(active_taxa))
+    sprintf("Step 07: Integrative Species Delimitation Across Packera Complexes (N = %d Taxa)", length(active_taxa))
   }
   plate_06a <- ((p_morph | p_map) / (p_treat | p_wett)) +
     patchwork::plot_layout(heights = c(1.12, 1.05)) +
@@ -237,7 +237,7 @@ render_step06a_integrative_synthesis_png <- function(
       theme = ggplot2::theme(plot.title = ggplot2::element_text(face = "bold", size = 12.5))
     )
 
-  canon_06a <- file.path(fdir, "fig06a_integrative_taxonomic_synthesis.png")
+  canon_07a <- file.path(fdir, "fig07a_integrative_taxonomic_synthesis.png")
   extra_targets <- character(0)
   if (!is.null(out_plot_path) && nzchar(out_plot_path)) extra_targets <- c(extra_targets, out_plot_path)
   if (nzchar(trimws(as.character(focal_taxon)))) {
@@ -247,13 +247,13 @@ render_step06a_integrative_synthesis_png <- function(
       if (file.exists(focal_old_pdf)) unlink(focal_old_pdf, force = TRUE)
     }
   }
-  save_packera_png_300(plate_06a, canon_06a, width = 14.4, height = dyn_h_06a, also_copy_to = extra_targets)
+  save_packera_png_300(plate_06a, canon_07a, width = 14.4, height = dyn_h_06a, also_copy_to = extra_targets)
 }
 
-render_step06b_complex_network_png <- function(
+render_step07b_complex_network_png <- function(
   complexes_df,
   affinity_mat,
-  out_complex_path = "outputs/figures/fig06b_taxon_complex_delimitation_network.png",
+  out_complex_path = "outputs/figures/fig07b_taxon_complex_delimitation_network.png",
   min_affinity = 0.03,
   voucher_df = NULL
 ) {
@@ -262,12 +262,6 @@ render_step06b_complex_network_png <- function(
   }
   fdir <- if (!is.null(out_complex_path) && nzchar(out_complex_path)) dirname(out_complex_path) else "outputs/figures"
   dir.create(fdir, recursive = TRUE, showWarnings = FALSE)
-  for (ext in c(".pdf", ".png")) {
-    p_old <- file.path(fdir, paste0("fig06c_taxon_complex_network", ext))
-    if (file.exists(p_old) && normalizePath(p_old, mustWork = FALSE) != normalizePath(normalize_png_path(out_complex_path), mustWork = FALSE)) {
-      unlink(p_old, force = TRUE)
-    }
-  }
 
   cdf <- as.data.frame(complexes_df, stringsAsFactors = FALSE)
   W <- as.matrix(affinity_mat)
@@ -497,25 +491,25 @@ render_step06b_complex_network_png <- function(
   }
 
   dyn_h_06b <- max(6.6, 4.4 + 0.24 * n_t)
-  canon_06b <- file.path(fdir, "fig06b_taxon_complex_delimitation_network.png")
+  canon_07b <- file.path(fdir, "fig07b_taxon_complex_delimitation_network.png")
   plate_06b <- (p_heat | build_net_panel(TRUE)) +
     patchwork::plot_layout(widths = c(1.08, 1.0)) +
     patchwork::plot_annotation(
-      title = "Step 06: Unsupervised Quantitative Taxon-Complex Delimitation",
+      title = "Step 07: Unsupervised Quantitative Taxon-Complex Delimitation",
       theme = ggplot2::theme(plot.title = ggplot2::element_text(face = "bold", size = 12.4))
     )
-  out_saved <- save_packera_png_300(plate_06b, canon_06b, width = 14.2, height = dyn_h_06b, also_copy_to = out_complex_path)
-  if (!file.exists(canon_06b) || isTRUE(file.info(canon_06b)$size == 0)) {
+  out_saved <- save_packera_png_300(plate_06b, canon_07b, width = 14.2, height = dyn_h_06b, also_copy_to = out_complex_path)
+  if (!file.exists(canon_07b) || isTRUE(file.info(canon_07b)$size == 0)) {
     p_heat_fb <- p_heat +
       ggplot2::scale_y_discrete(labels = function(x) abbreviate_icn_taxon(x, abbreviate_genus = TRUE)) +
       ggplot2::theme(axis.text.y = ggplot2::element_text(face = "italic"))
     plate_06b_fb <- (p_heat_fb | build_net_panel(FALSE)) +
       patchwork::plot_layout(widths = c(1.08, 1.0)) +
       patchwork::plot_annotation(
-        title = "Step 06: Unsupervised Quantitative Taxon-Complex Delimitation",
+        title = "Step 07: Unsupervised Quantitative Taxon-Complex Delimitation",
         theme = ggplot2::theme(plot.title = ggplot2::element_text(face = "bold", size = 12.4))
       )
-    out_saved <- save_packera_png_300(plate_06b_fb, canon_06b, width = 14.2, height = dyn_h_06b, also_copy_to = out_complex_path)
+    out_saved <- save_packera_png_300(plate_06b_fb, canon_07b, width = 14.2, height = dyn_h_06b, also_copy_to = out_complex_path)
   }
   out_saved
 }

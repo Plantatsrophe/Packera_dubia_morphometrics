@@ -1544,7 +1544,7 @@ compute_ari_pure <- function(labels_true, labels_pred) {
 }
 
 .fig_mod_dir <- .resolve_scripts_figures_dir()
-for (.fmod in c("theme_packera_pub.R", "step03_figures.R", "step04_figures.R", "step05_figures.R", "step06_figures.R")) {
+for (.fmod in c("theme_packera_pub.R", "step03_figures.R", "step04_figures.R", "step05_figures.R", "step06_figures.R", "step07_figures.R")) {
   .fp <- file.path(.fig_mod_dir, .fmod)
   if (file.exists(.fp)) source(.fp)
 }

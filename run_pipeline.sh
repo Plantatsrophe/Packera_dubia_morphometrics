@@ -97,9 +97,9 @@ Taxonomic Scope & Complex Discovery:
   --intraspecific-mode               Single-taxon intraspecific morphotype/ecotype delimitation mode
   --expand-synonyms / --no-expand-synonyms
                                      Toggle GBIF synonym/basionym expansion (default: --expand-synonyms)
-  --discover-complexes               Enable focal auto-neighbor complex scoping in unified Step 06 synthesis
-  --auto-neighbors                   Append high-affinity neighbor taxa from Step 06 complex network output
-  --min-affinity <FLOAT>             Minimum multimodal affinity weight threshold in Step 06 (default: 0.03)
+  --discover-complexes               Enable focal auto-neighbor complex scoping in unified Step 07 synthesis
+  --auto-neighbors                   Append high-affinity neighbor taxa from Step 07 complex network output
+  --min-affinity <FLOAT>             Minimum multimodal affinity weight threshold in Step 07 (default: 0.03)
 
 Authority Tiering & Curation Filters:
   --gold-only                        Restrict active cohort to Nomenclatural Types and Tier_1_Gold vouchers
@@ -490,7 +490,7 @@ if [[ "${PURGE_RUNS_ONLY}" == "true" && "${PURGE_SEGMENTS}" != "true" ]]; then
   else
     _PURGE_PY="python3"
   fi
-  echo "[Purge] Purging Step 03 to 06 run outputs and Tier B SQLite tables (preserving Step 01 & Step 02 segmentation)..."
+  echo "[Purge] Purging Step 03 to 07 run outputs and Tier B SQLite tables (preserving Step 01 & Step 02 segmentation)..."
   _PURGE_WS="${PACKERA_WORKSPACE_ROOT:-${PROJECT_ROOT}}"
   "${_PURGE_PY}" -c "
 import sys
@@ -779,7 +779,7 @@ write_run_metadata(
 # ------------------------------------------------------------------------------
 if [[ "${START_STEP}" -le 1 && "${REUSE_CANONICAL_DATA}" == "false" ]]; then
   if [[ "${SKIP_HARVEST}" == "false" && ( -n "${FORCE_FLAG} $([[ "${RESEGMENT}" == "true" ]] && echo "--force")" || ! -s "${RUN_DIR}/data/tables/curated_vouchers.csv" ) ]]; then
-    echo "[Step 01/06] Running Voucher Harvester (with high-res image downloads & quality audit)..."
+    echo "[Step 01/07] Running Voucher Harvester (with high-res image downloads & quality audit)..."
     HARVEST_TAXON_ARGS=()
     if [[ ${#CUSTOM_TAXA_RAW[@]} -gt 0 ]]; then
       HARVEST_TAXON_ARGS=(--taxon "${CUSTOM_TAXA_RAW[@]}" "${EXPAND_SYNONYMS_FLAG}")
@@ -1411,7 +1411,7 @@ run_preflight_env_layers
 # Step 02: LeafMachine3 (YOLO26x / UNet++ v9 / ONNX Runtime) Segmentation, Geometric Gatekeeper & 2-Tier Leaf Extraction
 # ------------------------------------------------------------------------------
 if [[ "${START_STEP}" -le 2 && "${REUSE_CANONICAL_DATA}" == "false" ]]; then
-  echo "[Step 02/06] Running LeafMachine3 Segmentation & Organ Extraction..."
+  echo "[Step 02/07] Running LeafMachine3 Segmentation & Organ Extraction..."
   find "${RUN_DIR}/data/cropped_patches" -type l -delete 2>/dev/null || true
   "${PYTHON_LM3}" scripts/pipeline/02_segment_and_extract.py \
     --vouchers "${RUN_DIR}/data/tables/curated_vouchers.csv" \
@@ -1421,7 +1421,7 @@ if [[ "${START_STEP}" -le 2 && "${REUSE_CANONICAL_DATA}" == "false" ]]; then
     "${COMPUTE_ARGS[@]}"
 
   # Sync newly extracted masks, contours, cropped patches, and Step 02 manifests back to canonical root data/
-  echo "[Step 02/06] Syncing newly extracted Step 02 assets back to canonical root data/ store..."
+  echo "[Step 02/07] Syncing newly extracted Step 02 assets back to canonical root data/ store..."
   mkdir -p \
     "${PROJECT_ROOT}/data/masks" \
     "${PROJECT_ROOT}/data/contours" \
@@ -1463,7 +1463,7 @@ fi
 # Step 03: Elliptic Fourier Analysis (Momocs) & Bilateral Symmetry Decomposition
 # ------------------------------------------------------------------------------
 if [[ "${START_STEP}" -le 3 ]]; then
-  echo "[Step 03/06] Running Elliptic Fourier Extractor..."
+  echo "[Step 03/07] Running Elliptic Fourier Extractor..."
   Rscript scripts/morphometrics/03_fourier_extractor.R \
     --input "${RUN_DIR}/data/contours" \
     --contours-dir "${RUN_DIR}/data/contours" \
@@ -1478,7 +1478,7 @@ fi
 # Step 04: Gaussian Mixture Modeling (mclust), Passive CDA & Allometry
 # ------------------------------------------------------------------------------
 if [[ "${START_STEP}" -le 4 ]]; then
-  echo "[Step 04/06] Running GMM Clustering & Passive CDA..."
+  echo "[Step 04/07] Running GMM Clustering & Passive CDA..."
   Rscript scripts/morphometrics/04_gmm_morphotools.R \
     --vouchers "${RUN_DIR}/data/tables/curated_vouchers.csv" \
     --harmonics "${RUN_DIR}/data/tables/leaf_efa_harmonics.csv" \
@@ -1493,7 +1493,7 @@ if [[ "${START_STEP}" -le 4 ]]; then
     "${FOCAL_ARGS[@]}" \
     "${INTRASPECIFIC_ARGS[@]}"
 
-  echo "[Step 04/06] Regenerating post-QC Step 02 publication figures..."
+  echo "[Step 04/07] Regenerating post-QC Step 02 publication figures..."
   "${PYTHON_MAIN}" scripts/pipeline/02_segment_and_extract.py \
     --vouchers "${RUN_DIR}/data/tables/curated_vouchers.csv" \
     --output-dir "${RUN_DIR}/data" \
@@ -1504,7 +1504,7 @@ fi
 # Step 05: Multimodal Spatial Random Forests, SoilGrids/SSURGO & Hopkins Phenology
 # ------------------------------------------------------------------------------
 if [[ "${START_STEP}" -le 5 ]]; then
-  echo "[Step 05/06] Running Multimodal Spatial RF & Niche Identity Tests..."
+  echo "[Step 05/07] Running Multimodal Spatial RF & Niche Identity Tests..."
   Rscript scripts/analysis/05_multimodal_spatial_rf.R \
     --vouchers "${RUN_DIR}/data/tables/curated_vouchers.csv" \
     --pheno-states "${RUN_DIR}/data/tables/voucher_phenological_states.csv" \
@@ -1523,19 +1523,64 @@ if [[ "${START_STEP}" -le 5 ]]; then
 fi
 
 # ------------------------------------------------------------------------------
-# Step 06: Multi-Evidence Taxonomic Synthesis, Complex Delimitation & Dashboard
+# Step 06: Independent Genomic Ingestion & Phase 2 Phylogenomics Stream
 # ------------------------------------------------------------------------------
-if [[ "${START_STEP}" -le 6 || "${START_STEP}" -eq 7 ]]; then
-  echo "[Step 06/06] Running Integrative Taxonomic Synthesis & Complex Delimitation..."
+GENOMIC_STEP07_ARGS=()
+if [[ -s "${RUN_DIR}/outputs/genomics/genomic_assignments.csv" ]]; then
+  GENOMIC_STEP07_ARGS=(--genomic-dir "${RUN_DIR}/outputs/genomics")
+fi
+GENOMICS_DIR_EFF="${PACKERA_GENOMICS_DIR:-${PROJECT_ROOT}/data/genomics}"
+if [[ "${START_STEP}" -le 6 ]]; then
+  HAS_GENO=0
+  if [[ -d "${GENOMICS_DIR_EFF}" ]]; then
+    GENOMIC_CHECK_OUT="$("${PYTHON_MAIN}" scripts/data_prep/06_ingest_genetic_data.py --genomics-dir "${GENOMICS_DIR_EFF}" --check-only 2>/dev/null || true)"
+    if [[ "${GENOMIC_CHECK_OUT}" == *"HAS_GENOMIC_INPUTS=1"* ]]; then
+      HAS_GENO=1
+    fi
+  fi
+  if [[ "${HAS_GENO}" -eq 1 ]]; then
+    echo "[Step 06/07] Running Independent Genomic Ingestion & Phylogenomic Integration..."
+    GENO_IN_DB_ARGS=()
+    GENO_R_DB_ARGS=()
+    if [[ -n "${PACKERA_DB_PATH:-}" ]]; then
+      GENO_IN_DB_ARGS=(--db-path "${PACKERA_DB_PATH}")
+      GENO_R_DB_ARGS=(--db "${PACKERA_DB_PATH}")
+    fi
+    "${PYTHON_MAIN}" scripts/data_prep/06_ingest_genetic_data.py \
+      --genomics-dir "${GENOMICS_DIR_EFF}" \
+      --out-dir "${RUN_DIR}/outputs/reports" \
+      ${GENO_IN_DB_ARGS[@]+"${GENO_IN_DB_ARGS[@]}"} \
+      ${DEMO_FLAG[@]+"${DEMO_FLAG[@]}"}
+    Rscript scripts/analysis/06_genomic_phylogenomics.R \
+      --genomics-dir "${GENOMICS_DIR_EFF}" \
+      --parsed-dir "${RUN_DIR}/outputs/reports" \
+      --out-dir "${RUN_DIR}/outputs/genomics" \
+      --tables-dir "${RUN_DIR}/data/tables" \
+      --figure-a "${RUN_DIR}/outputs/figures/fig06a_genomic_pcoa_tree_concordance.png" \
+      --figure-b "${RUN_DIR}/outputs/figures/fig06b_reticulation_gdi_landscape.png" \
+      --run-id "${RUN_ID}" \
+      ${GENO_R_DB_ARGS[@]+"${GENO_R_DB_ARGS[@]}"} \
+      ${DEMO_FLAG[@]+"${DEMO_FLAG[@]}"}
+    GENOMIC_STEP07_ARGS=(--genomic-dir "${RUN_DIR}/outputs/genomics")
+  else
+    echo "[Step 06/07] No genomic files staged in data/genomics/ - skipping standalone Step 06"
+  fi
+fi
+
+# ------------------------------------------------------------------------------
+# Step 07: Multi-Evidence Taxonomic Synthesis, Complex Delimitation & Dashboard
+# ------------------------------------------------------------------------------
+if [[ "${START_STEP}" -le 7 ]]; then
+  echo "[Step 07/07] Running Integrative Taxonomic Synthesis & Complex Delimitation..."
   if [[ -n "${FOCAL_TAXON}" ]]; then
     FOCAL_TAXON_SLUG="$(printf '%s' "${FOCAL_TAXON}" | sed -E 's/[^A-Za-z0-9]+/_/g; s/^_+|_+$//g')"
-    STEP06_FIGURE="${RUN_DIR}/outputs/figures/Figure_Integrative_${FOCAL_TAXON_SLUG}_Revision.png"
-    STEP06_REPORT="${RUN_DIR}/outputs/reports/${FOCAL_TAXON_SLUG}_Taxonomic_Revision_Summary.md"
+    STEP07_FIGURE="${RUN_DIR}/outputs/figures/Figure_Integrative_${FOCAL_TAXON_SLUG}_Revision.png"
+    STEP07_REPORT="${RUN_DIR}/outputs/reports/${FOCAL_TAXON_SLUG}_Taxonomic_Revision_Summary.md"
   else
-    STEP06_FIGURE="${RUN_DIR}/outputs/figures/fig06a_integrative_taxonomic_synthesis.png"
-    STEP06_REPORT="${RUN_DIR}/outputs/reports/Packera_Taxonomic_Revision_Summary.md"
+    STEP07_FIGURE="${RUN_DIR}/outputs/figures/fig07a_integrative_taxonomic_synthesis.png"
+    STEP07_REPORT="${RUN_DIR}/outputs/reports/Packera_Taxonomic_Revision_Summary.md"
   fi
-  Rscript scripts/analysis/06_triage_dashboard_synthesis.R \
+  Rscript scripts/analysis/07_triage_dashboard_synthesis.R \
     --vouchers "${RUN_DIR}/data/tables/curated_vouchers.csv" \
     --harmonics "${RUN_DIR}/data/tables/leaf_efa_harmonics.csv" \
     --morphometrics "${RUN_DIR}/data/tables/morphometric_flags.csv" \
@@ -1543,14 +1588,15 @@ if [[ "${START_STEP}" -le 6 || "${START_STEP}" -eq 7 ]]; then
     --gmm-summary "${RUN_DIR}/outputs/reports/gmm_bayes_factors_summary.csv" \
     --niche-summary "${RUN_DIR}/outputs/reports/multimodal_spatial_rf_summary.csv" \
     --output-queue "${RUN_DIR}/data/tables/triage_queue.csv" \
-    --output-plot "${STEP06_FIGURE}" \
-    --output-report "${STEP06_REPORT}" \
+    --output-plot "${STEP07_FIGURE}" \
+    --output-report "${STEP07_REPORT}" \
     --output-html "${RUN_DIR}/outputs/reports/Triage_Dashboard_Interactive.html" \
     --min-affinity "${MIN_AFFINITY}" \
     --output-complexes "${RUN_DIR}/outputs/reports/empirical_taxon_complexes.csv" \
     --output-affinity "${RUN_DIR}/outputs/reports/pairwise_taxon_affinity_matrix.csv" \
     --output-neighbors "${RUN_DIR}/outputs/reports/focal_auto_neighbors.txt" \
-    --output-complex-plot "${RUN_DIR}/outputs/figures/fig06b_taxon_complex_delimitation_network.png" \
+    --output-complex-plot "${RUN_DIR}/outputs/figures/fig07b_taxon_complex_delimitation_network.png" \
+    ${GENOMIC_STEP07_ARGS[@]+"${GENOMIC_STEP07_ARGS[@]}"} \
     "${FOCAL_ARGS[@]}" \
     "${INTRASPECIFIC_ARGS[@]}" \
     "${DEMO_FLAG[@]}"

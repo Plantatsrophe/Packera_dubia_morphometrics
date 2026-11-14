@@ -5,13 +5,13 @@
 # Affiliation: University of North Carolina at Chapel Hill Herbarium (NCU)
 #
 # Description:
-#   Step 05 ecological niche & geographic map publication figures, Step 06
+#   Step 05 ecological niche & geographic map publication figures, Step 07
 #   integrative synthesis and complex discovery plates, pure-R
 #   Gaussian Mixture Model EM solver, and individual-level trait mergers.
 # ==============================================================================
 
 # ==============================================================================
-# Step 06 Figures:
+# Step 07 Figures:
 #   - spatial_rf_niche_importance.png (300-DPI companion to .pdf)
 #   - fig05_ecological_niche_phenology.{pdf,png} (4-panel ecological niche plate)
 #   - fig05d_geographic_map_and_hopkins_phenology.{pdf,png} (US state map + Hopkins)
@@ -46,13 +46,13 @@ compute_dynamic_na_map_bounds <- function(lon_v, lat_v) {
 
 
 # ==============================================================================
-# Step 06 Integrative Taxonomic Synthesis & Complex Network 300-DPI PNG Wrappers
+# Step 07 Integrative Taxonomic Synthesis & Complex Network 300-DPI PNG Wrappers
 #   - Stream 3: "3. Topological ECT & OSR"
 #   - Consensus weighting: probabilistic_consensus_score with position_fill(reverse = TRUE)
 # ==============================================================================
-.ensure_step06_fig_modules <- function() {
-  if (!exists("render_step06a_integrative_synthesis_png", mode = "function")) {
-    for (.f in c("scripts/figures/theme_packera_pub.R", "scripts/figures/step06_figures.R")) {
+.ensure_step07_fig_modules <- function() {
+  if (!exists("render_step07a_integrative_synthesis_png", mode = "function")) {
+    for (.f in c("scripts/figures/theme_packera_pub.R", "scripts/figures/step07_figures.R")) {
       if (file.exists(.f)) source(.f)
     }
   }
@@ -63,16 +63,16 @@ export_step05d_geographic_and_hopkins <- function(df, out_plot_path = NULL, ...)
   invisible("")
 }
 
-generate_step06_pub_figures <- function(triage_df, out_fig_pdf = NULL) {
-  # Consolidated into canonical fig06a_integrative_taxonomic_synthesis.png
+generate_step07_pub_figures <- function(triage_df, out_fig_pdf = NULL) {
+  # Consolidated into canonical fig07a_integrative_taxonomic_synthesis.png
   invisible("")
 }
 
-render_step06_synthesis_plate_pdf <- function(df, out_pdf, cda_summary = NULL, focal_taxon = "") {
+render_step07_synthesis_plate_png <- function(df, out_pdf, cda_summary = NULL, focal_taxon = "") {
   if (identical(Sys.getenv("PACKERA_SKIP_FIGURES", unset = ""), "1")) return(invisible(""))
-  .ensure_step06_fig_modules()
-  out_png <- if (!is.null(out_pdf) && nzchar(out_pdf)) normalize_png_path(out_pdf) else "outputs/figures/fig06a_integrative_taxonomic_synthesis.png"
-  render_step06a_integrative_synthesis_png(
+  .ensure_step07_fig_modules()
+  out_png <- if (!is.null(out_pdf) && nzchar(out_pdf)) normalize_png_path(out_pdf) else "outputs/figures/fig07a_integrative_taxonomic_synthesis.png"
+  render_step07a_integrative_synthesis_png(
     df = df,
     out_plot_path = out_png,
     cda_summary = cda_summary,
@@ -80,12 +80,12 @@ render_step06_synthesis_plate_pdf <- function(df, out_pdf, cda_summary = NULL, f
   )
 }
 
-render_step06_complex_discovery_pdf <- function(W, part_res, out_pdf, min_affinity = 0.03) {
+render_step07_complex_discovery_png <- function(W, part_res, out_pdf, min_affinity = 0.03) {
   if (identical(Sys.getenv("PACKERA_SKIP_FIGURES", unset = ""), "1")) return(invisible(""))
-  .ensure_step06_fig_modules()
-  out_png <- if (!is.null(out_pdf) && nzchar(out_pdf)) normalize_png_path(out_pdf) else "outputs/figures/fig06b_taxon_complex_delimitation_network.png"
+  .ensure_step07_fig_modules()
+  out_png <- if (!is.null(out_pdf) && nzchar(out_pdf)) normalize_png_path(out_pdf) else "outputs/figures/fig07b_taxon_complex_delimitation_network.png"
   cdf_in <- if (is.list(part_res) && !is.null(part_res$complexes_df)) part_res$complexes_df else as.data.frame(part_res, stringsAsFactors = FALSE)
-  render_step06b_complex_network_png(
+  render_step07b_complex_network_png(
     complexes_df = cdf_in,
     affinity_mat = W,
     out_complex_path = out_png,
@@ -271,7 +271,7 @@ merge_reproductive_traits_by_individual <- function(agg_df, repro_path) {
 render_focal_revision_synthesis_plate_png <- function(df, out_png, full_df = NULL, focal_taxon = "") {
   if (identical(Sys.getenv("PACKERA_SKIP_FIGURES", unset = ""), "1")) return(invisible(""))
   if (!requireNamespace("ggplot2", quietly = TRUE) || !requireNamespace("patchwork", quietly = TRUE)) return(invisible(""))
-  .ensure_step06_fig_modules()
+  .ensure_step07_fig_modules()
   fdir <- if (!is.null(out_png) && nzchar(out_png)) dirname(out_png) else "outputs/figures"
   dir.create(fdir, recursive = TRUE, showWarnings = FALSE)
   foc_df <- as.data.frame(df, stringsAsFactors = FALSE)
