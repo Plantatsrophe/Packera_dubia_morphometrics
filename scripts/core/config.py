@@ -9,13 +9,44 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "config.yaml"
 RUNS_ROOT = PROJECT_ROOT / "runs"
+
+
+def load_dotenv_defaults(paths: Optional[Sequence[Path]] = None) -> None:
+    """Load missing KEY=VALUE credentials from local `.env` files without overriding existing env vars."""
+    if os.environ.get("PLANTMATICS_SKIP_DOTENV", "").strip() == "1":
+        return
+    candidates = tuple(paths) if paths is not None else (PROJECT_ROOT / ".env", Path.home() / ".env")
+    for env_path in candidates:
+        if not env_path.is_file():
+            continue
+        try:
+            lines = env_path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for raw_line in lines:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[7:].strip()
+            if "=" not in line:
+                continue
+            key, val = line.split("=", 1)
+            key, val = key.strip(), val.strip()
+            if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
+                val = val[1:-1]
+            if key and key not in os.environ:
+                os.environ[key] = val
+
+
+load_dotenv_defaults()
 
 # Path fields in PathsConfig that are scoped to the active run directory
 # (shared read-only caches like raw_vouchers_dir, quarantine_dir, models_dir, and model_weights remain at PROJECT_ROOT)

@@ -1721,6 +1721,17 @@ cat("BATCHED_PHASE2_R_OK\\n")
             self.assertEqual(proc.returncode, 0, f"R PhyTop node lookup test failed:\n{proc.stdout}\n{proc.stderr}")
             self.assertIn("PHYTOP_NODE_LOOKUP_OK", proc.stdout)
 
+            dotenv_file = tmp / ".env"
+            dotenv_file.write_text(
+                "DRYAD_CLIENT_ID=dotenv_cid\nexport DRYAD_CLIENT_SECRET='dotenv_csec'\n",
+                encoding="utf-8",
+            )
+            with mock.patch.dict(os.environ, {"DRYAD_API_TOKEN": "keep_existing"}, clear=True):
+                PUBLIC_DL_MOD._load_dotenv_defaults([dotenv_file])
+                self.assertEqual(os.environ.get("DRYAD_API_TOKEN"), "keep_existing")
+                self.assertEqual(os.environ.get("DRYAD_CLIENT_ID"), "dotenv_cid")
+                self.assertEqual(os.environ.get("DRYAD_CLIENT_SECRET"), "dotenv_csec")
+
 
 if __name__ == "__main__":
     unittest.main()

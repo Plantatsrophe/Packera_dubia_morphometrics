@@ -248,7 +248,27 @@ def _skim_sra_accessions(accessions: Sequence[str], sra_rows: Sequence[Dict[str,
     return downloaded
 
 
+def _load_dotenv_defaults(paths: Optional[Sequence[Path]] = None) -> None:
+    """Load missing KEY=VALUE secrets from `.env` files without overriding active environment variables."""
+    if os.environ.get("PLANTMATICS_SKIP_DOTENV", "").strip() == "1":
+        return
+    for env_path in (tuple(paths) if paths is not None else (Path(__file__).resolve().parents[2] / ".env", Path.home() / ".env")):
+        if not env_path.is_file():
+            continue
+        for raw in env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            ln = raw.strip()
+            if not ln or ln.startswith("#"):
+                continue
+            ln = ln[7:].strip() if ln.startswith("export ") else ln
+            if "=" in ln:
+                k, v = (p.strip() for p in ln.split("=", 1))
+                v = v[1:-1] if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"') else v
+                if k and k not in os.environ:
+                    os.environ[k] = v
+
+
 def _obtain_dryad_token() -> str:
+    _load_dotenv_defaults()
     if tok := os.environ.get("DRYAD_API_TOKEN", "").strip():
         return tok
     cid, csec = os.environ.get("DRYAD_CLIENT_ID", "").strip(), os.environ.get("DRYAD_CLIENT_SECRET", "").strip()
@@ -408,6 +428,7 @@ def download_public_packera_sequences(
     dryad_zip_dir: Optional[Path] = None, skim_sra_accessions: Optional[Sequence[str]] = None, force: bool = False,
 ) -> Dict[str, Any]:
     """Download public Packera reference sequences and phylogenomic trees into flat `genomics_dir`."""
+    _load_dotenv_defaults()
     genomics_dir = Path(genomics_dir)
     genomics_dir.mkdir(parents=True, exist_ok=True)
     src_list = [s.strip().lower() for raw in sources for s in str(raw).split(",") if s.strip()] or ["ncbi", "dryad", "bold"]
