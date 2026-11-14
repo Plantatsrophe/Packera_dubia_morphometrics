@@ -1292,8 +1292,16 @@ class TestSQLPipelineHandshake(unittest.TestCase):
 
         new_gs_cols = {"public_plastome_match", "public_its_match", "waxy_lineage_match"}
         new_gla_cols = {"public_backbone_clade", "public_phytop_ils_index", "public_phytop_ih_index"}
+        new_ct_prop_cols = {
+            "genomic_propagation_tier",
+            "tier0_calibrated_taxon",
+            "tier0_calibrated_prob",
+            "tier0_abstention_flag",
+            "deme_mahal_d2",
+            "cluster_propagated_gdi",
+        }
 
-        # 1. Python db.py atomic migration + WAL replay + 20261124 schema upgrade
+        # 1. Python db.py atomic migration + WAL replay + 20261125 schema upgrade
         with tempfile.TemporaryDirectory() as td_py:
             ws_py = Path(td_py)
             legacy_db, target_db = _seed_legacy_wal_workspace(
@@ -1310,14 +1318,16 @@ class TestSQLPipelineHandshake(unittest.TestCase):
                     self.assertFalse(Path(f"{legacy_db}-shm").exists())
                     self.assertTrue(target_db.is_file())
                     uv = int(conn.execute("PRAGMA user_version;").fetchone()[0])
-                    self.assertEqual(uv, 20261124)
+                    self.assertEqual(uv, 20261125)
 
                     gs_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(genomic_samples);").fetchall()}
                     gla_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(genetic_lineage_assignments);").fetchall()}
+                    ct_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(curation_triage);").fetchall()}
                     view_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(v_integrative_triage_master);").fetchall()}
                     self.assertTrue(new_gs_cols.issubset(gs_cols))
                     self.assertTrue(new_gla_cols.issubset(gla_cols))
-                    self.assertTrue((new_gs_cols | new_gla_cols).issubset(view_cols))
+                    self.assertTrue(new_ct_prop_cols.issubset(ct_cols))
+                    self.assertTrue((new_gs_cols | new_gla_cols | new_ct_prop_cols).issubset(view_cols))
 
                     v_cats = {
                         str(r[0])
@@ -1344,16 +1354,23 @@ local({{
   on.exit(disconnect_packera_db(conn), add = TRUE)
   stopifnot(!is.null(conn))
   uv <- as.integer(DBI::dbGetQuery(conn, "PRAGMA user_version;")[[1L]][1L])
-  stopifnot(uv == 20261124L)
+  stopifnot(uv == 20261125L)
   gs_cols <- DBI::dbListFields(conn, "genomic_samples")
   gla_cols <- DBI::dbListFields(conn, "genetic_lineage_assignments")
+  ct_cols <- DBI::dbListFields(conn, "curation_triage")
   mv_cols <- DBI::dbListFields(conn, "v_integrative_triage_master")
   req_cols <- c(
     "public_plastome_match", "public_its_match", "waxy_lineage_match",
-    "public_backbone_clade", "public_phytop_ils_index", "public_phytop_ih_index"
+    "public_backbone_clade", "public_phytop_ils_index", "public_phytop_ih_index",
+    "genomic_propagation_tier", "tier0_calibrated_taxon", "tier0_calibrated_prob",
+    "tier0_abstention_flag", "deme_mahal_d2", "cluster_propagated_gdi"
   )
   stopifnot(all(c("public_plastome_match", "public_its_match", "waxy_lineage_match") %in% gs_cols))
   stopifnot(all(c("public_backbone_clade", "public_phytop_ils_index", "public_phytop_ih_index") %in% gla_cols))
+  stopifnot(all(c(
+    "genomic_propagation_tier", "tier0_calibrated_taxon", "tier0_calibrated_prob",
+    "tier0_abstention_flag", "deme_mahal_d2", "cluster_propagated_gdi"
+  ) %in% ct_cols))
   stopifnot(all(req_cols %in% mv_cols))
   vs <- DBI::dbGetQuery(conn, "SELECT catalogNumber FROM vouchers ORDER BY catalogNumber;")$catalogNumber
   stopifnot(all(c("NCU_R_LEGACY_01", "NCU_R_WAL_02") %in% vs))
@@ -1370,6 +1387,127 @@ local({{
                 self.assertFalse(Path(f"{legacy_r}-wal").exists())
                 self.assertFalse(Path(f"{legacy_r}-shm").exists())
                 self.assertTrue(target_r.is_file())
+
+    def test_curation_triage_genomic_propagation_columns_and_migration(self) -> None:
+        """Verify schema 20261125 migrates from previous schema version and exposes the 6 genomic propagation columns."""
+        from scripts.core.db import ensure_pipeline_run, populate_run_active_cohort
+        from scripts.core.db_schema import PACKERA_SCHEMA_USER_VERSION, PLANTMATICS_SCHEMA_USER_VERSION
+
+        self.assertEqual(PLANTMATICS_SCHEMA_USER_VERSION, 20261125)
+        self.assertEqual(PACKERA_SCHEMA_USER_VERSION, 20261125)
+        prev_ver = PLANTMATICS_SCHEMA_USER_VERSION - 1
+        prop_cols = (
+            "genomic_propagation_tier",
+            "tier0_calibrated_taxon",
+            "tier0_calibrated_prob",
+            "tier0_abstention_flag",
+            "deme_mahal_d2",
+            "cluster_propagated_gdi",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_p = Path(tmp) / "legacy_prop.sqlite"
+            raw_conn = sqlite3.connect(db_p)
+            raw_conn.executescript(
+                f"""
+                PRAGMA user_version = {prev_ver};
+                CREATE TABLE pipeline_runs (
+                    run_id TEXT PRIMARY KEY,
+                    run_dir TEXT,
+                    start_timestamp TEXT,
+                    end_timestamp TEXT,
+                    git_commit_sha TEXT,
+                    cli_arguments_json TEXT,
+                    focal_taxon TEXT,
+                    intraspecific_mode INTEGER DEFAULT 0
+                );
+                INSERT INTO pipeline_runs (run_id, start_timestamp) VALUES ('r_prop', '2026-11-14T00:00:00Z');
+                CREATE TABLE curation_triage (
+                    run_id TEXT NOT NULL,
+                    catalogNumber TEXT NOT NULL,
+                    plant_individual_id INTEGER NOT NULL DEFAULT 0,
+                    taxonomic_status_call TEXT,
+                    taxonomic_treatment_subtype TEXT,
+                    recommended_determination TEXT,
+                    cryptic_cluster_cohesion_pass INTEGER,
+                    is_completed_voucher INTEGER,
+                    PRIMARY KEY (run_id, catalogNumber, plant_individual_id)
+                );
+                INSERT INTO curation_triage VALUES (
+                    'r_prop', 'NCU-PROP-OLD', 0, 'Species_Confirmed', 'Confirmed_Species', 'Packera dubia', 0, 1
+                );
+                """
+            )
+            raw_conn.commit()
+            raw_conn.close()
+
+            conn = get_db_connection(db_p, init_schema=True)
+            try:
+                uv_after = int(conn.execute("PRAGMA user_version;").fetchone()[0])
+                self.assertEqual(uv_after, PLANTMATICS_SCHEMA_USER_VERSION)
+                ct_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(curation_triage);").fetchall()}
+                mv_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(v_integrative_triage_master);").fetchall()}
+                for col in prop_cols:
+                    self.assertIn(col, ct_cols, f"curation_triage missing {col}")
+                    self.assertIn(col, mv_cols, f"v_integrative_triage_master missing {col}")
+
+                kept = conn.execute(
+                    "SELECT recommended_determination FROM curation_triage WHERE run_id = 'r_prop' AND catalogNumber = 'NCU-PROP-OLD';"
+                ).fetchone()
+                self.assertEqual(kept[0], "Packera dubia")
+
+                v_rows = [
+                    {
+                        "catalogNumber": "NCU-PROP-NEW",
+                        "institutionCode": "NCU",
+                        "scientificName": "Packera dubia",
+                        "species_standardized": "Packera dubia",
+                        "determiner_tier": "Tier_2_Silver",
+                        "qc_status": "PASS",
+                    }
+                ]
+                upsert_vouchers_records(conn, v_rows)
+                ensure_pipeline_run(conn, run_id="r_prop")
+                populate_run_active_cohort(conn, run_id="r_prop", voucher_rows=v_rows, clear_existing=False)
+                upsert_rows_generic(
+                    conn,
+                    table_name="curation_triage",
+                    rows=[
+                        {
+                            "run_id": "r_prop",
+                            "catalogNumber": "NCU-PROP-NEW",
+                            "plant_individual_id": 0,
+                            "taxonomic_status_call": "Tier0_Calibrated_Match",
+                            "taxonomic_treatment_subtype": "Confirmed_Species",
+                            "recommended_determination": "Packera dubia",
+                            "genomic_propagation_tier": "Tier0_Projected_Calibrated",
+                            "tier0_calibrated_taxon": "Packera dubia",
+                            "tier0_calibrated_prob": 0.94,
+                            "tier0_abstention_flag": 0,
+                            "deme_mahal_d2": 1.85,
+                            "cluster_propagated_gdi": 0.84,
+                            "is_completed_voucher": 1,
+                        }
+                    ],
+                    pk_cols=("run_id", "catalogNumber", "plant_individual_id"),
+                )
+                mv_row = conn.execute(
+                    """
+                    SELECT genomic_propagation_tier, tier0_calibrated_taxon, tier0_calibrated_prob,
+                           tier0_abstention_flag, deme_mahal_d2, cluster_propagated_gdi
+                    FROM v_integrative_triage_master
+                    WHERE run_id = 'r_prop' AND catalogNumber = 'NCU-PROP-NEW';
+                    """
+                ).fetchone()
+                self.assertIsNotNone(mv_row)
+                self.assertEqual(mv_row[0], "Tier0_Projected_Calibrated")
+                self.assertEqual(mv_row[1], "Packera dubia")
+                self.assertAlmostEqual(float(mv_row[2]), 0.94, places=4)
+                self.assertEqual(int(mv_row[3]), 0)
+                self.assertAlmostEqual(float(mv_row[4]), 1.85, places=4)
+                self.assertAlmostEqual(float(mv_row[5]), 0.84, places=4)
+            finally:
+                conn.close()
 
 
 if __name__ == "__main__":

@@ -401,6 +401,12 @@ def _build_master_view_ddl() -> str:
         ct.hybrid_parent_1 AS hybrid_parent_1,
         ct.hybrid_parent_2 AS hybrid_parent_2,
         ct.is_completed_voucher AS is_completed_voucher,
+        ct.genomic_propagation_tier AS genomic_propagation_tier,
+        ct.tier0_calibrated_taxon AS tier0_calibrated_taxon,
+        ct.tier0_calibrated_prob AS tier0_calibrated_prob,
+        ct.tier0_abstention_flag AS tier0_abstention_flag,
+        ct.deme_mahal_d2 AS deme_mahal_d2,
+        ct.cluster_propagated_gdi AS cluster_propagated_gdi,
         -- Step 06 Genomic Phylogenomics (1-to-1 per run_id, catalogNumber)
         geno_v.genetic_sample_id AS genetic_sample_id,
         geno_v.geno_population_id AS geno_population_id,
@@ -602,9 +608,11 @@ def _build_master_view_ddl() -> str:
                     ORDER BY
                         CASE gs.linkage_tier
                             WHEN 'G1_Direct_Voucher' THEN 1
-                            WHEN 'G2_Population_Voucher_Proxy' THEN 2
-                            WHEN 'G3_Georeferenced_Unvouchered' THEN 3
-                            ELSE 4
+                            WHEN 'G1_Exsiccatae_Isoduplicate' THEN 2
+                            WHEN 'G2_Population_Voucher_Proxy' THEN 3
+                            WHEN 'G2_Conditional_Deme_Hull' THEN 4
+                            WHEN 'G3_Georeferenced_Unvouchered' THEN 5
+                            ELSE 6
                         END ASC,
                         COALESCE(gs.geno_quality_pass, 0) DESC,
                         COALESCE(gs.hq_reads, 0) DESC,
@@ -1162,6 +1170,12 @@ def _build_schema_ddl() -> str:
         hybrid_parent_1 TEXT,
         hybrid_parent_2 TEXT,
         is_completed_voucher INTEGER,
+        genomic_propagation_tier TEXT,
+        tier0_calibrated_taxon TEXT,
+        tier0_calibrated_prob REAL,
+        tier0_abstention_flag INTEGER,
+        deme_mahal_d2 REAL,
+        cluster_propagated_gdi REAL,
         PRIMARY KEY (run_id, catalogNumber, plant_individual_id),
         FOREIGN KEY (run_id) REFERENCES pipeline_runs(run_id) ON DELETE CASCADE
     );
@@ -1402,6 +1416,12 @@ _DYNAMIC_TABLE_MIGRATION_SPECS: Dict[str, Tuple[Tuple[str, str], ...]] = {
         ("hybrid_zone_cohesion_pass", "INTEGER"),
         ("hybrid_parent_1", "TEXT"),
         ("hybrid_parent_2", "TEXT"),
+        ("genomic_propagation_tier", "TEXT"),
+        ("tier0_calibrated_taxon", "TEXT"),
+        ("tier0_calibrated_prob", "REAL"),
+        ("tier0_abstention_flag", "INTEGER"),
+        ("deme_mahal_d2", "REAL"),
+        ("cluster_propagated_gdi", "REAL"),
     ),
     "genomic_samples": (
         ("catalogNumber", "TEXT NULL"),
@@ -1506,7 +1526,7 @@ def _migrate_vouchers_schema_columns(conn: sqlite3.Connection) -> None:
             existing_cols.add(col_name)
 
 
-PLANTMATICS_SCHEMA_USER_VERSION: int = 20261124
+PLANTMATICS_SCHEMA_USER_VERSION: int = 20261125
 PACKERA_SCHEMA_USER_VERSION: int = PLANTMATICS_SCHEMA_USER_VERSION
 
 
@@ -1873,19 +1893,11 @@ def _migrate_dynamic_schema_columns(
         ct_cols_now = {
             str(r[1]) for r in conn.execute("PRAGMA table_info(curation_triage);").fetchall()
         }
-        for _ct_col, _ct_type in (
-            ("w_geno_kappa", "REAL"),
-            ("cryptic_cluster_cohesion_pass", "INTEGER"),
-            ("cryptic_non_clinal_pass", "INTEGER"),
-            ("resurrection_basionym", "TEXT"),
-            ("hybrid_zone_cohesion_pass", "INTEGER"),
-            ("hybrid_parent_1", "TEXT"),
-            ("hybrid_parent_2", "TEXT"),
-        ):
+        for _ct_col, _ct_type in _DYNAMIC_TABLE_MIGRATION_SPECS["curation_triage"]:
             if ct_cols_now and _ct_col not in ct_cols_now:
                 conn.execute(f"ALTER TABLE curation_triage ADD COLUMN {_ct_col} {_ct_type};")
                 ct_cols_now.add(_ct_col)
-        if ct_cols_now and ct_cols_now != {
+        canon_ct_cols = (
             "run_id", "catalogNumber", "plant_individual_id",
             "w_morph_kappa", "w_edaphic_kappa", "w_pheno_kappa", "w_geno_kappa",
             "n_available_modalities", "probabilistic_consensus_conflict",
@@ -1896,26 +1908,16 @@ def _migrate_dynamic_schema_columns(
             "synthesis_rationale", "cryptic_cluster_cohesion_pass",
             "cryptic_non_clinal_pass", "resurrection_basionym",
             "hybrid_zone_cohesion_pass", "hybrid_parent_1", "hybrid_parent_2",
-            "is_completed_voucher",
-        }:
-            canon_ct_cols = (
-                "run_id", "catalogNumber", "plant_individual_id",
-                "w_morph_kappa", "w_edaphic_kappa", "w_pheno_kappa", "w_geno_kappa",
-                "n_available_modalities", "probabilistic_consensus_conflict",
-                "probabilistic_consensus_score", "hopkins_adjusted_doy",
-                "delta_doy_resid", "taxonomic_status_call", "recommended_determination",
-                "taxonomic_treatment_broad", "taxonomic_treatment_subtype",
-                "synthesis_triage_priority", "synthesis_triage_action",
-                "synthesis_rationale", "cryptic_cluster_cohesion_pass",
-                "cryptic_non_clinal_pass", "resurrection_basionym",
-                "hybrid_zone_cohesion_pass", "hybrid_parent_1", "hybrid_parent_2",
-                "is_completed_voucher",
-            )
+            "is_completed_voucher", "genomic_propagation_tier",
+            "tier0_calibrated_taxon", "tier0_calibrated_prob",
+            "tier0_abstention_flag", "deme_mahal_d2", "cluster_propagated_gdi",
+        )
+        if ct_cols_now and ct_cols_now != set(canon_ct_cols):
             shared_ct = [c for c in canon_ct_cols if c in ct_cols_now]
             conn.executescript(
                 """
-                DROP TABLE IF EXISTS _curation_triage_v20261115;
-                CREATE TABLE _curation_triage_v20261115 (
+                DROP TABLE IF EXISTS _curation_triage_v20261125;
+                CREATE TABLE _curation_triage_v20261125 (
                     run_id TEXT NOT NULL,
                     catalogNumber TEXT NOT NULL,
                     plant_individual_id INTEGER NOT NULL DEFAULT 0,
@@ -1942,6 +1944,12 @@ def _migrate_dynamic_schema_columns(
                     hybrid_parent_1 TEXT,
                     hybrid_parent_2 TEXT,
                     is_completed_voucher INTEGER,
+                    genomic_propagation_tier TEXT,
+                    tier0_calibrated_taxon TEXT,
+                    tier0_calibrated_prob REAL,
+                    tier0_abstention_flag INTEGER,
+                    deme_mahal_d2 REAL,
+                    cluster_propagated_gdi REAL,
                     PRIMARY KEY (run_id, catalogNumber, plant_individual_id),
                     FOREIGN KEY (run_id) REFERENCES pipeline_runs(run_id) ON DELETE CASCADE
                 );
@@ -1950,12 +1958,12 @@ def _migrate_dynamic_schema_columns(
             if shared_ct:
                 cols_csv = ", ".join(shared_ct)
                 conn.execute(
-                    f"INSERT OR REPLACE INTO _curation_triage_v20261115 ({cols_csv}) SELECT {cols_csv} FROM curation_triage;"
+                    f"INSERT OR REPLACE INTO _curation_triage_v20261125 ({cols_csv}) SELECT {cols_csv} FROM curation_triage;"
                 )
             conn.executescript(
                 """
                 DROP TABLE curation_triage;
-                ALTER TABLE _curation_triage_v20261115 RENAME TO curation_triage;
+                ALTER TABLE _curation_triage_v20261125 RENAME TO curation_triage;
                 """
             )
 
@@ -2000,7 +2008,7 @@ def init_db_schema(conn: sqlite3.Connection) -> None:
             el_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(extracted_leaves);").fetchall()}
             om_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(otu_morphometrics);").fetchall()}
             mv_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(v_integrative_triage_master);").fetchall()}
-            req_mv_cols = {"is_passive", "scale_source", "AR_inv_std", "log1p_capitulum_count", "blade_cie_l_norm", "nearest_type_basionym", "reproductive_trait_status", "ecoregion_can1", "ecoregion_can2", "hybrid_zone_cohesion_pass", "hybrid_parent_1", "hybrid_parent_2", "cda_oof_posterior_prob", "self_morph_mahal_d2", "open_set_df", "cryptic_non_clinal_pass", "resurrection_basionym", "w_geno_kappa", "geno_predicted_taxon", "geno_linkage_tier", "is_geno_admixed", "coalescent_gdi", "hybrid_generation_class", "cytonuclear_discordant", "public_plastome_match", "public_its_match", "waxy_lineage_match", "public_backbone_clade", "public_phytop_ils_index", "public_phytop_ih_index"}
+            req_mv_cols = {"is_passive", "scale_source", "AR_inv_std", "log1p_capitulum_count", "blade_cie_l_norm", "nearest_type_basionym", "reproductive_trait_status", "ecoregion_can1", "ecoregion_can2", "hybrid_zone_cohesion_pass", "hybrid_parent_1", "hybrid_parent_2", "cda_oof_posterior_prob", "self_morph_mahal_d2", "open_set_df", "cryptic_non_clinal_pass", "resurrection_basionym", "w_geno_kappa", "geno_predicted_taxon", "geno_linkage_tier", "is_geno_admixed", "coalescent_gdi", "hybrid_generation_class", "cytonuclear_discordant", "public_plastome_match", "public_its_match", "waxy_lineage_match", "public_backbone_clade", "public_phytop_ils_index", "public_phytop_ih_index", "genomic_propagation_tier", "cluster_propagated_gdi"}
             if (
                 "leaf_zone" not in el_cols
                 or "area_mm2" not in el_cols

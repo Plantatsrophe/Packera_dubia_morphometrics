@@ -18,12 +18,11 @@
 
 .resolve_step07_genomic_tables_dir <- function(opts) {
   q_dir <- if (!is.null(opts$output_queue) && nzchar(opts$output_queue)) dirname(opts$output_queue) else "outputs/tables"
-  cands <- unique(c(
-    q_dir,
+  g_dirs <- c(
     if (!is.null(opts$genomic_dir) && nzchar(opts$genomic_dir)) opts$genomic_dir else character(0),
-    file.path(dirname(q_dir), "reports"),
-    file.path(dirname(dirname(q_dir)), "outputs", "reports")
-  ))
+    if (!is.null(opts$genomics_dir) && nzchar(opts$genomics_dir)) opts$genomics_dir else character(0)
+  )
+  cands <- unique(c(q_dir, g_dirs, file.path(dirname(q_dir), "reports"), file.path(dirname(dirname(q_dir)), "outputs", "reports")))
   for (cd in cands) {
     if (nzchar(cd) && (file.exists(file.path(cd, "genomic_assignments.csv")) || file.exists(file.path(cd, "genomic_model_metrics.csv")))) {
       return(cd)
@@ -35,13 +34,11 @@
 .resolve_step07_genomic_reports_dir <- function(opts) {
   q_dir <- if (!is.null(opts$output_queue) && nzchar(opts$output_queue)) dirname(opts$output_queue) else "outputs/tables"
   rep_dir <- if (!is.null(opts$output_report) && nzchar(opts$output_report)) dirname(opts$output_report) else character(0)
-  cands <- unique(c(
+  g_dirs <- c(
     if (!is.null(opts$genomic_dir) && nzchar(opts$genomic_dir)) opts$genomic_dir else character(0),
-    rep_dir,
-    file.path(dirname(q_dir), "reports"),
-    file.path(dirname(dirname(q_dir)), "outputs", "reports"),
-    q_dir
-  ))
+    if (!is.null(opts$genomics_dir) && nzchar(opts$genomics_dir)) opts$genomics_dir else character(0)
+  )
+  cands <- unique(c(g_dirs, rep_dir, file.path(dirname(q_dir), "reports"), file.path(dirname(dirname(q_dir)), "outputs", "reports"), q_dir))
   for (cd in cands) {
     if (nzchar(cd) && (
       file.exists(file.path(cd, "coalescent_gdi_delimitation.csv")) ||
@@ -61,8 +58,8 @@ has_active_genomic_row_mask <- function(df) {
   if (!("geno_predicted_taxon" %in% nms)) return(rep(FALSE, n))
   pred <- as.character(df$geno_predicted_taxon)
   pred_ok <- !is.na(pred) & nzchar(trimws(pred)) & (pred != "Unknown")
-  tier_col <- if ("geno_linkage_tier" %in% nms) as.character(df$geno_linkage_tier) else if ("linkage_tier" %in% nms) as.character(df$linkage_tier) else rep("G1_Direct_Voucher", n)
-  tier_ok <- tier_col %in% c("G1_Direct_Voucher", "G2_Population_Voucher_Proxy")
+  tier_col <- if ("geno_linkage_tier" %in% nms) as.character(df$geno_linkage_tier) else if ("linkage_tier" %in% names(df)) as.character(df$linkage_tier) else rep("G1_Direct_Voucher", n)
+  tier_ok <- tier_col %in% c("G1_Direct_Voucher", "G1_Exsiccatae_Isoduplicate", "G2_Population_Voucher_Proxy", "G2_Conditional_Deme_Hull")
   qc_ok <- if ("geno_quality_pass" %in% nms) .safe_bool_vec_r(df$geno_quality_pass) else rep(TRUE, n)
   prob_ok <- if ("geno_posterior_prob" %in% nms) is.finite(suppressWarnings(as.numeric(df$geno_posterior_prob))) else rep(TRUE, n)
   pred_ok & tier_ok & qc_ok & prob_ok
@@ -89,48 +86,57 @@ load_step07_genomic_metrics <- function(opts, df) {
     "snaq_gamma_minor", "coalescent_gdi", "bpp_introgression_bf",
     "mmrr_beta_ibd", "mmrr_beta_ibe", "mmrr_p_ibe",
     "public_plastome_match", "public_its_match", "waxy_lineage_match",
-    "public_backbone_clade", "public_phytop_ils_index", "public_phytop_ih_index"
+    "public_backbone_clade", "public_phytop_ils_index", "public_phytop_ih_index",
+    "genomic_propagation_tier", "deme_mahal_d2", "tier0_calibrated_taxon",
+    "tier0_calibrated_prob", "tier0_abstention_flag", "cluster_propagated_gdi"
   )
 
+  ga_df <- if (file.exists(ga_path)) tryCatch(utils::read.csv(ga_path, stringsAsFactors = FALSE), error = function(e) NULL) else NULL
   has_geno_cols <- ("geno_predicted_taxon" %in% names(df)) && any(!is.na(df$geno_predicted_taxon) & nzchar(as.character(df$geno_predicted_taxon)))
   missing_phase2_cols <- setdiff(geno_keep_schema, names(df))
-  need_csv_hydrate <- file.exists(ga_path) && ("catalogNumber" %in% names(df)) && (!has_geno_cols || length(missing_phase2_cols) > 0L)
+  need_csv_hydrate <- !is.null(ga_df) && nrow(ga_df) > 0L && ("catalogNumber" %in% names(df)) && (!has_geno_cols || length(missing_phase2_cols) > 0L)
 
-  if (need_csv_hydrate) {
-    ga_df <- tryCatch(utils::read.csv(ga_path, stringsAsFactors = FALSE), error = function(e) NULL)
-    if (!is.null(ga_df) && nrow(ga_df) > 0L && "catalogNumber" %in% names(ga_df)) {
-      ga_df$catalogNumber <- as.character(ga_df$catalogNumber)
-      pass_ga <- ga_df[
-        !is.na(ga_df$catalogNumber) & nzchar(trimws(ga_df$catalogNumber)) &
-          .safe_bool_vec_r(ga_df$geno_quality_pass) &
-          as.character(ga_df$linkage_tier) %in% c("G1_Direct_Voucher", "G2_Population_Voucher_Proxy"),
-        , drop = FALSE
-      ]
-      if (nrow(pass_ga) > 0L) {
-        tier_ord <- ifelse(pass_ga$linkage_tier == "G1_Direct_Voucher", 1L, 2L)
-        hq_ord <- ifelse(is.finite(suppressWarnings(as.numeric(pass_ga$hq_reads))), suppressWarnings(as.numeric(pass_ga$hq_reads)), 0.0)
-        pass_ga <- pass_ga[order(tier_ord, -hq_ord, pass_ga$genetic_sample_id), , drop = FALSE]
-        pass_ga <- pass_ga[!duplicated(pass_ga$catalogNumber), , drop = FALSE]
-        if ("linkage_tier" %in% names(pass_ga) && !("geno_linkage_tier" %in% names(pass_ga))) pass_ga$geno_linkage_tier <- pass_ga$linkage_tier
-        keep_cols <- intersect(geno_keep_schema, names(pass_ga))
-        m_idx <- match(as.character(df$catalogNumber), pass_ga$catalogNumber)
-        hit <- !is.na(m_idx)
-        if (any(hit)) {
-          for (cn in setdiff(keep_cols, "catalogNumber")) {
-            if (!(cn %in% names(df))) {
-              df[[cn]] <- NA
-              df[[cn]][hit] <- pass_ga[[cn]][m_idx[hit]]
-            } else if (!has_geno_cols) {
-              df[[cn]][hit] <- pass_ga[[cn]][m_idx[hit]]
-            } else {
-              fill_idx <- hit & is.na(df[[cn]])
-              if (any(fill_idx)) df[[cn]][fill_idx] <- pass_ga[[cn]][m_idx[fill_idx]]
-            }
+  if (need_csv_hydrate && "catalogNumber" %in% names(ga_df)) {
+    ga_df$catalogNumber <- as.character(ga_df$catalogNumber)
+    pass_ga <- ga_df[
+      !is.na(ga_df$catalogNumber) & nzchar(trimws(ga_df$catalogNumber)) &
+        .safe_bool_vec_r(ga_df$geno_quality_pass) &
+        as.character(ga_df$linkage_tier) %in% c("G1_Direct_Voucher", "G2_Population_Voucher_Proxy"),
+      , drop = FALSE
+    ]
+    if (nrow(pass_ga) > 0L) {
+      tier_ord <- ifelse(pass_ga$linkage_tier == "G1_Direct_Voucher", 1L, 2L)
+      hq_ord <- ifelse(is.finite(suppressWarnings(as.numeric(pass_ga$hq_reads))), suppressWarnings(as.numeric(pass_ga$hq_reads)), 0.0)
+      pass_ga <- pass_ga[order(tier_ord, -hq_ord, pass_ga$genetic_sample_id), , drop = FALSE]
+      pass_ga <- pass_ga[!duplicated(pass_ga$catalogNumber), , drop = FALSE]
+      if ("linkage_tier" %in% names(pass_ga) && !("geno_linkage_tier" %in% names(pass_ga))) pass_ga$geno_linkage_tier <- pass_ga$linkage_tier
+      keep_cols <- intersect(geno_keep_schema, names(pass_ga))
+      m_idx <- match(as.character(df$catalogNumber), pass_ga$catalogNumber)
+      hit <- !is.na(m_idx)
+      if (any(hit)) {
+        for (cn in setdiff(keep_cols, "catalogNumber")) {
+          if (!(cn %in% names(df))) {
+            df[[cn]] <- NA
+            df[[cn]][hit] <- pass_ga[[cn]][m_idx[hit]]
+          } else if (!has_geno_cols) {
+            df[[cn]][hit] <- pass_ga[[cn]][m_idx[hit]]
+          } else {
+            fill_idx <- hit & is.na(df[[cn]])
+            if (any(fill_idx)) df[[cn]][fill_idx] <- pass_ga[[cn]][m_idx[fill_idx]]
           }
         }
       }
     }
   }
+
+  n_df <- nrow(df)
+  for (cn in c("genomic_propagation_tier", "tier0_calibrated_taxon")) {
+    if (!(cn %in% names(df))) df[[cn]] <- rep(NA_character_, n_df)
+  }
+  for (cn in c("deme_mahal_d2", "tier0_calibrated_prob", "cluster_propagated_gdi")) {
+    if (!(cn %in% names(df))) df[[cn]] <- rep(NA_real_, n_df)
+  }
+  if (!("tier0_abstention_flag" %in% names(df))) df[["tier0_abstention_flag"]] <- rep(NA_integer_, n_df)
 
   read_opt_csv <- function(fname) {
     p <- file.path(r_dir, fname)
@@ -138,6 +144,7 @@ load_step07_genomic_metrics <- function(opts, df) {
     if (file.exists(p)) tryCatch(utils::read.csv(p, stringsAsFactors = FALSE), error = function(e) NULL) else NULL
   }
 
+  attr(df, "genomic_assignments_df") <- ga_df
   attr(df, "genomic_model_metrics") <- if (file.exists(gm_path)) tryCatch(utils::read.csv(gm_path, stringsAsFactors = FALSE), error = function(e) NULL) else NULL
   attr(df, "genomic_gdi_delimitation") <- read_opt_csv("coalescent_gdi_delimitation.csv")
   attr(df, "genomic_fbranch_summary") <- read_opt_csv("introgressive_fbranch_summary.csv")
@@ -408,6 +415,17 @@ build_genomic_markdown_summary <- function(opts, df) {
     if ((n_pl + n_it + n_wx) > 0L) {
       lines <- c(lines, sprintf("- **GenBank/BOLD Plastid-ITS-waxy Placement:** plastid=%d, ITS=%d, waxy=%d sample matches recorded in `genomic_assignments.csv`%s.", n_pl, n_it, n_wx, if (is.null(pbc_df) || nrow(pbc_df) == 0L) cx_str else ""))
     }
+  }
+  prop_sum <- attr(df, "genomic_propagation_summary")
+  n_ex <- if (!is.null(prop_sum)) as.integer(prop_sum$n_g1_exsiccatae) else if ("genomic_propagation_tier" %in% names(df)) sum(df$genomic_propagation_tier == "G1_Exsiccatae_Isoduplicate", na.rm = TRUE) else 0L
+  n_dh <- if (!is.null(prop_sum)) as.integer(prop_sum$n_g2_deme_hull) else if ("genomic_propagation_tier" %in% names(df)) sum(df$genomic_propagation_tier == "G2_Conditional_Deme_Hull", na.rm = TRUE) else 0L
+  n_t0a <- if (!is.null(prop_sum)) as.integer(prop_sum$n_tier0_anchors) else 0L
+  n_t0c <- if (!is.null(prop_sum)) as.integer(prop_sum$n_tier0_calibrated) else if ("tier0_calibrated_taxon" %in% names(df) && "tier0_abstention_flag" %in% names(df)) sum(!is.na(df$tier0_calibrated_taxon) & df$tier0_abstention_flag == 0L, na.rm = TRUE) else 0L
+  n_t0s <- if (!is.null(prop_sum)) as.integer(prop_sum$n_tier0_abstained) else if ("tier0_abstention_flag" %in% names(df)) sum(df$tier0_abstention_flag == 1L, na.rm = TRUE) else 0L
+  n_cg <- if (!is.null(prop_sum)) as.integer(prop_sum$n_cluster_gdi) else if ("cluster_propagated_gdi" %in% names(df)) sum(is.finite(df$cluster_propagated_gdi)) else 0L
+  if ((n_ex + n_dh + n_t0a + n_t0c + n_t0s + n_cg) > 0L) {
+    k_str <- if (!is.null(prop_sum) && is.finite(prop_sum$lopo_cv_kappa)) sprintf(", LOPO-CV kappa = %.3f", prop_sum$lopo_cv_kappa) else ""
+    lines <- c(lines, sprintf("- **Step 07 Genomic Propagation & Tier_0 Calibration:** %d exsiccatae isoduplicates (`G1`), %d conditional deme priors (`G2`), %d `Tier_0` DNA anchors, %d `Tier_0`-calibrated projections (%d abstained as `Sensu_Lato_DNA_Required`), %d cluster-level `gdi` transfers%s.", n_ex, n_dh, n_t0a, n_t0c, n_t0s, n_cg, k_str))
   }
   lines
 }

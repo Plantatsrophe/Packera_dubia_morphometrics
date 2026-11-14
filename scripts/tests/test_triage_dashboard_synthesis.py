@@ -2573,6 +2573,130 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, f"Five-step misid/cryptic R suite failed:\n{proc.stderr}\n{proc.stdout}")
         self.assertIn("FIVE_STEP_MISID_AND_CRYPTIC_OK", proc.stdout)
 
+    def test_tier0_calibration_soft_prior_and_zero_genomics_invariance(self) -> None:
+        """Warm-R regression test for Tier_0 soft prior gating, 4.0 anchor weighting, Markdown summary, and zero-genomics invariance."""
+        if not rscript_available():
+            self.skipTest("Rscript not installed.")
+
+        r_code = """
+        source("scripts/analysis/07_triage_dashboard_synthesis.R")
+        if (!exists("run_step07_genomic_propagation", mode = "function")) {
+          source("scripts/analysis/step07_genomic_propagation.R")
+        }
+
+        # A. Tier_0 calibrated soft prior t0_soft (0.50 * lopo_cv_kappa) gating in compute_probabilistic_consensus_scores
+        df_soft <- data.frame(
+          catalogNumber = c("ANC_D1", "ANC_D2", "ANC_A1", "ANC_A2", "NO_T0", "T0_ABSTAIN", "T0_LOW_PROB", "T0_CONCORDANT", "T0_DISAGREE", "G1_SEQ"),
+          plant_individual_id = 0L,
+          species_standardized = c("Packera dubia", "Packera dubia", "Packera anonyma", "Packera anonyma", rep("Packera dubia", 6L)),
+          determiner_tier = c(rep("Tier_1_Gold", 4L), rep("Tier_3_Bronze", 6L)),
+          morph_tier_source = "Basal_Rosette",
+          basal_leaf_count = 3L,
+          PC1 = c(-2.0, -2.1, 2.0, 2.1, rep(-1.9, 6L)),
+          PC2 = rep(0.0, 10L),
+          cda_predicted_taxon = c("Packera dubia", "Packera dubia", "Packera anonyma", "Packera anonyma", "Packera anonyma", "Packera dubia", "Packera anonyma", "Packera anonyma", "Packera dubia", "Packera dubia"),
+          cda_posterior_prob = c(0.92, 0.92, 0.92, 0.92, 0.65, 0.90, 0.65, 0.65, 0.90, 0.90),
+          geno_linkage_tier = c(rep("G1_Direct_Voucher", 4L), rep(NA_character_, 5L), "G1_Direct_Voucher"),
+          geno_quality_pass = c(rep(TRUE, 4L), rep(NA, 5L), TRUE),
+          is_geno_admixed = FALSE,
+          geno_predicted_taxon = c("Packera dubia", "Packera dubia", "Packera anonyma", "Packera anonyma", rep(NA_character_, 5L), "Packera dubia"),
+          geno_posterior_prob = c(0.95, 0.95, 0.95, 0.95, rep(NA_real_, 5L), 0.94),
+          tier0_abstention_flag = c(rep(NA_integer_, 4L), NA_integer_, 1L, 0L, 0L, 0L, 0L),
+          tier0_calibrated_taxon = c(rep(NA_character_, 4L), NA_character_, "Sensu_Lato_DNA_Required", "Packera anonyma", "Packera dubia", "Packera anonyma", "Packera anonyma"),
+          tier0_calibrated_prob = c(rep(NA_real_, 4L), NA_real_, 0.92, 0.75, 0.92, 0.92, 0.92),
+          stringsAsFactors = FALSE
+        )
+        attr(df_soft, "genomic_propagation_summary") <- list(
+          active = TRUE, n_g1_exsiccatae = 0L, n_g2_deme_hull = 0L,
+          n_tier0_anchors = 4L, n_tier0_evicted = 0L, n_tier0_calibrated = 3L,
+          n_tier0_abstained = 1L, n_cluster_gdi = 0L, lopo_cv_kappa = 0.80
+        )
+        sc <- compute_probabilistic_consensus_scores(df_soft)
+        idx_of <- function(nm) which(sc$catalogNumber == nm)
+        stopifnot(sc$n_available_modalities[idx_of("NO_T0")] == 1L)
+        stopifnot(sc$n_available_modalities[idx_of("T0_ABSTAIN")] == 1L)
+        stopifnot(sc$n_available_modalities[idx_of("T0_LOW_PROB")] == 1L)
+        stopifnot(sc$n_available_modalities[idx_of("T0_CONCORDANT")] == 2L)
+        stopifnot(sc$n_available_modalities[idx_of("T0_DISAGREE")] == 2L)
+        stopifnot(sc$n_available_modalities[idx_of("G1_SEQ")] == 2L)
+        stopifnot(sc$probabilistic_consensus_score[idx_of("T0_CONCORDANT")] > sc$probabilistic_consensus_score[idx_of("NO_T0")])
+        stopifnot(sc$probabilistic_consensus_score[idx_of("T0_DISAGREE")] < sc$probabilistic_consensus_score[idx_of("T0_ABSTAIN")])
+
+        # B. Tier_0 DNA anchor weight (4.0) dominates unweighted 1.0 reference phenology envelope
+        df_w <- data.frame(
+          catalogNumber = c("DUB_T0_DNA", "DUB_SIL_1", "DUB_SIL_2", "DUB_SIL_3", "AUR_ANC_1", "AUR_ANC_2", "DUB_PROBE"),
+          plant_individual_id = 0L,
+          species_standardized = c(rep("Packera dubia", 4L), "Packera aurea", "Packera aurea", "Packera dubia"),
+          determiner_tier = c("Tier_2_Silver", "Tier_2_Silver", "Tier_2_Silver", "Tier_2_Silver", "Tier_1_Gold", "Tier_1_Gold", "Tier_3_Bronze"),
+          morph_tier_source = "Basal_Rosette",
+          basal_leaf_count = 3L,
+          PC1 = c(-4.0, 0.0, 0.1, -0.1, 4.0, 4.1, -3.9),
+          PC2 = c(-4.0, 0.0, -0.1, 0.1, 4.0, 3.9, -3.9),
+          hopkins_adjusted_doy = c(110, 130, 130, 130, 150, 150, 110),
+          is_active_anthesis = TRUE,
+          cda_predicted_taxon = c(rep("Packera dubia", 4L), "Packera aurea", "Packera aurea", "Packera dubia"),
+          cda_posterior_prob = 0.90,
+          geno_linkage_tier = c("G1_Direct_Voucher", rep(NA_character_, 3L), "G1_Direct_Voucher", "G1_Direct_Voucher", NA_character_),
+          geno_quality_pass = c(TRUE, rep(NA, 3L), TRUE, TRUE, NA),
+          is_geno_admixed = FALSE,
+          geno_predicted_taxon = c("Packera dubia", rep(NA_character_, 3L), "Packera aurea", "Packera aurea", NA_character_),
+          geno_posterior_prob = c(0.96, rep(NA_real_, 3L), 0.96, 0.96, NA_real_),
+          geno_margin = c(0.88, rep(NA_real_, 3L), 0.88, 0.88, NA_real_),
+          stringsAsFactors = FALSE
+        )
+        df_w_unseq <- df_w
+        df_w_unseq$geno_linkage_tier <- NA_character_
+        df_w_unseq$geno_quality_pass <- NA
+        df_w_unseq$geno_predicted_taxon <- NA_character_
+        df_w_unseq$geno_posterior_prob <- NA_real_
+        dec_w <- apply_taxonomic_decision_matrix(df_w)
+        dec_w_unseq <- apply_taxonomic_decision_matrix(df_w_unseq)
+        stopifnot(abs(dec_w$delta_doy_resid[dec_w$catalogNumber == "DUB_PROBE"]) < 10.0)
+        stopifnot(abs(dec_w_unseq$delta_doy_resid[dec_w_unseq$catalogNumber == "DUB_PROBE"]) > 13.0)
+
+        # C. Zero-genomics invariance across decision matrix + build_genomic_markdown_summary propagation bullet
+        df_zero <- data.frame(
+          catalogNumber = sprintf("ZG_%02d", 1:6),
+          plant_individual_id = 0L,
+          species_standardized = rep(c("Packera dubia", "Packera anonyma"), each = 3L),
+          determiner_tier = "Tier_1_Gold",
+          morph_tier_source = "Basal_Rosette",
+          basal_leaf_count = 3L,
+          PC1 = c(-2.0, -2.1, -1.9, 2.0, 2.1, 1.9),
+          PC2 = c(0.0, 0.1, -0.1, 0.0, 0.1, -0.1),
+          cda_predicted_taxon = rep(c("Packera dubia", "Packera anonyma"), each = 3L),
+          cda_posterior_prob = 0.91,
+          edaphic_best_fit_taxon = rep(c("Packera dubia", "Packera anonyma"), each = 3L),
+          rf_predicted_prob = 0.88,
+          delta_doy_resid = 1.5,
+          is_active_anthesis = TRUE,
+          geno_linkage_tier = NA_character_,
+          geno_quality_pass = NA,
+          geno_predicted_taxon = NA_character_,
+          geno_posterior_prob = NA_real_,
+          stringsAsFactors = FALSE
+        )
+        zp <- run_step07_genomic_propagation(df_zero)
+        r_base <- apply_taxonomic_decision_matrix(df_zero)
+        r_prop <- apply_taxonomic_decision_matrix(zp)
+        for (ccol in c("probabilistic_consensus_score", "authority_weight", "taxonomic_treatment_subtype", "recommended_determination", "taxonomic_status_call", "synthesis_rationale")) {
+          stopifnot(identical(r_base[[ccol]], r_prop[[ccol]]))
+        }
+
+        md_lines <- build_genomic_markdown_summary(list(), df_soft)
+        md_text <- paste(md_lines, collapse = "\\n")
+        stopifnot(grepl("Step 07 Genomic Propagation & Tier_0 Calibration:", md_text, fixed = TRUE))
+        stopifnot(grepl("Sensu_Lato_DNA_Required", md_text, fixed = TRUE))
+        stopifnot(grepl("LOPO-CV kappa = 0.800", md_text, fixed = TRUE))
+        cat("STEP07_T0_SOFT_AND_INVARIANCE_OK\\n")
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            r_file = Path(tmpdir) / "test_step07_t0_soft.R"
+            r_file.write_text(r_code, encoding="utf-8")
+            proc = run_warm_r_cmd(["Rscript", str(r_file)], stage_key="step07", cwd=REPO_ROOT, skip_figures=True)
+        self.assertEqual(proc.returncode, 0, f"Tier_0 soft-prior & zero-genomics invariance R suite failed:\n{proc.stderr}\n{proc.stdout}")
+        self.assertIn("STEP07_T0_SOFT_AND_INVARIANCE_OK", proc.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

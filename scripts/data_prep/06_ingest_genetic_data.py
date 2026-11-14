@@ -31,6 +31,7 @@ import json
 import re
 import sqlite3
 import sys
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
@@ -138,6 +139,122 @@ def clean_sample_id(raw_id: Any) -> str:
     if s.endswith("_sorted"):
         s = s[: -len("_sorted")]
     return s.strip()
+
+
+_UNNUMBERED_RECORD_TOKENS = frozenset({
+    "sn",
+    "unnumbered",
+    "none",
+    "na",
+    "n/a",
+    "unknown",
+    "null",
+})
+
+_NON_COLLECTOR_TOKENS = frozenset({
+    "unknown",
+    "anonymous",
+    "anon",
+    "na",
+    "none",
+    "null",
+    "collector",
+    "unattributed",
+})
+
+_NON_TYPE_STATUS_TOKENS = frozenset({
+    "NONE",
+    "NOT A TYPE",
+    "NOTATYPE",
+    "NON-TYPE",
+    "NONTYPE",
+    "UNSPECIFIED",
+    "NULL",
+    "NAN",
+    "NA",
+    "N/A",
+    "FALSE",
+    "0",
+    "UNKNOWN",
+})
+
+
+def _safe_text(val: Any) -> str:
+    if val is None or (isinstance(val, float) and np.isnan(val)):
+        return ""
+    s = strip_smart_quotes(val)
+    if s.lower() in {"nan", "none", "null"}:
+        return ""
+    return s
+
+
+def _extract_collector_surname(collector: Any) -> str:
+    raw = _safe_text(collector)
+    if not raw:
+        return ""
+    primary = re.split(r"\s*(?:;|&|\||\band\b|\bet\s+al\.?)\s*", raw, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+    if not primary:
+        return ""
+    ascii_name = unicodedata.normalize("NFKD", primary).encode("ascii", "ignore").decode("ascii")
+    ascii_name = re.sub(r"(?:,\s*|\s+)\b(?:jr|sr|ii|iii|iv)\.?\s*$", "", ascii_name, flags=re.IGNORECASE).strip()
+    if "," in ascii_name:
+        before, _ = ascii_name.split(",", 1)
+        tokens = before.strip().split()
+        if len(tokens) >= 2 and (tokens[0].endswith(".") or len(tokens[0].rstrip(".")) == 1):
+            raw_surname = tokens[-1]
+        else:
+            raw_surname = before
+    else:
+        tokens = ascii_name.strip().split()
+        non_init = [t for t in tokens if len(t.rstrip(".")) > 1]
+        raw_surname = non_init[-1] if non_init else (tokens[-1] if tokens else "")
+    surname = re.sub(r"[^a-z0-9]+", "", raw_surname.lower())
+    if not surname or surname in _NON_COLLECTOR_TOKENS:
+        return ""
+    return surname
+
+
+def _normalize_record_number(record_number: Any) -> str:
+    raw = _safe_text(record_number)
+    if not raw:
+        return ""
+    cleaned = re.sub(r"^(?:no\.?|#)\s*", "", raw, flags=re.IGNORECASE).strip()
+    low = cleaned.lower()
+    compact = re.sub(r"[\s._-]+", "", low)
+    if (
+        not compact
+        or low in {"s.n.", "s.n", "s. n.", "s. n"}
+        or compact in _UNNUMBERED_RECORD_TOKENS
+        or bool(re.fullmatch(r"0+", compact))
+    ):
+        return ""
+    norm_num = re.sub(r"[^a-z0-9]+", "", low)
+    norm_num = re.sub(r"^0+(?=\d)", "", norm_num)
+    return norm_num
+
+
+def _normalize_event_date_part(event_date: Any) -> str:
+    raw = _safe_text(event_date)
+    if not raw:
+        return ""
+    m_ymd = re.search(r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})", raw)
+    if m_ymd:
+        return f"{m_ymd.group(1)}-{int(m_ymd.group(2)):02d}-{int(m_ymd.group(3)):02d}"
+    m_ym = re.search(r"(\d{4})[-/](\d{1,2})\b", raw)
+    if m_ym:
+        return f"{m_ym.group(1)}-{int(m_ym.group(2)):02d}"
+    m_y = re.search(r"\b(1[7-9]\d{2}|20\d{2})\b", raw)
+    return m_y.group(1) if m_y else ""
+
+
+def _normalize_exsiccatae_key(collector: str, record_number: str, event_date: str = "") -> str:
+    """Build deterministic `<surname>|<number>|<date>` key for numbered exsiccatae; return `""` when unnumbered."""
+    surname = _extract_collector_surname(collector)
+    norm_num = _normalize_record_number(record_number)
+    if not surname or not norm_num:
+        return ""
+    date_part = _normalize_event_date_part(event_date)
+    return f"{surname}|{norm_num}|{date_part}" if date_part else f"{surname}|{norm_num}"
 
 
 def normalize_taxon_name(raw_taxon: Optional[str]) -> Tuple[Optional[str], Optional[str], bool]:
@@ -335,11 +452,16 @@ def _parse_field_metadata(metadata_csvs: Sequence[Path]) -> Tuple[List[Dict[str,
         # Explicit user_genetic_metadata schema if sample_id / genetic_sample_id column present
         sid_col = cols_low.get("genetic_sample_id") or cols_low.get("sample_id")
         if sid_col is not None:
+            ex_col = cols_low.get("exsiccatae_key")
             for _, row in df.iterrows():
                 sid = clean_sample_id(row.get(sid_col, ""))
                 if not sid:
                     continue
-                direct_user_meta[sid] = {str(k).strip(): (str(v).strip() if str(v).strip() != "" else None) for k, v in row.items()}
+                meta_row = {str(k).strip(): (str(v).strip() if str(v).strip() != "" else None) for k, v in row.items()}
+                if ex_col and "exsiccatae_key" not in meta_row:
+                    raw_ex = str(row.get(ex_col, "")).strip()
+                    meta_row["exsiccatae_key"] = raw_ex or None
+                direct_user_meta[sid] = meta_row
             continue
 
         fam_col = cols_low.get("family")
@@ -352,6 +474,9 @@ def _parse_field_metadata(metadata_csvs: Sequence[Path]) -> Tuple[List[Dict[str,
         county_col = cols_low.get("county")
         date_col = cols_low.get("date_collected") or cols_low.get("eventdate")
         notes_col = cols_low.get("notes")
+        ex_col = cols_low.get("exsiccatae_key")
+        rec_by_col = cols_low.get("recordedby") or cols_low.get("collector")
+        rec_num_col = cols_low.get("recordnumber") or cols_low.get("record_number") or cols_low.get("collector_number") or cols_low.get("collection_number")
 
         for _, row in df.iterrows():
             taxon_str = str(row.get(tax_col, "")).strip() if tax_col else ""
@@ -375,6 +500,12 @@ def _parse_field_metadata(metadata_csvs: Sequence[Path]) -> Tuple[List[Dict[str,
 
             t_raw, sp_std, is_query = normalize_taxon_name(taxon_str)
             notes_str = str(row.get(notes_col, "")).strip() if notes_col else ""
+            ev_date_str = str(row.get(date_col, "")).strip() or None if date_col else None
+            rec_by = str(row.get(rec_by_col, "")).strip() or None if rec_by_col else None
+            rec_num = str(row.get(rec_num_col, "")).strip() or None if rec_num_col else None
+            ex_key = str(row.get(ex_col, "")).strip() or None if ex_col else None
+            if not ex_key and rec_by and rec_num:
+                ex_key = _normalize_exsiccatae_key(rec_by, rec_num, ev_date_str or "") or None
             field_rows.append(
                 {
                     "project_id": proj_clean or None,
@@ -387,7 +518,10 @@ def _parse_field_metadata(metadata_csvs: Sequence[Path]) -> Tuple[List[Dict[str,
                     "decimalLongitude": lon,
                     "stateProvince": str(row.get(state_col, "")).strip() or None if state_col else None,
                     "county": str(row.get(county_col, "")).strip() or None if county_col else None,
-                    "eventDate": str(row.get(date_col, "")).strip() or None if date_col else None,
+                    "eventDate": ev_date_str,
+                    "recordedBy": rec_by,
+                    "recordNumber": rec_num,
+                    "exsiccatae_key": ex_key,
                     "notes": notes_str or None,
                 }
             )
@@ -634,6 +768,7 @@ def _load_db_vouchers(conn: Optional[sqlite3.Connection]) -> List[Dict[str, Any]
             "catalogNumber", "recordNumber", "recordedBy", "scientificName",
             "species_standardized", "decimalLatitude", "decimalLongitude",
             "stateProvince", "county", "eventDate", "determiner_tier",
+            "type_status", "image_path", "exsiccatae_key", "is_primary_duplicate",
         )
         if c in cols
     ]
@@ -690,13 +825,173 @@ def _match_field_record(
     return candidates[0]
 
 
+def _coerce_flag_int(val: Any) -> int:
+    if val is None or (isinstance(val, float) and np.isnan(val)):
+        return 0
+    if isinstance(val, bool):
+        return 1 if val else 0
+    s = str(val).strip().lower()
+    if not s or s in {"false", "f", "no", "n", "nan", "none", "null", "na"}:
+        return 0
+    if s in {"true", "t", "yes", "y"}:
+        return 1
+    try:
+        return int(float(s))
+    except ValueError:
+        return 0
+
+
+def _authority_tier_rank(voucher: Mapping[str, Any]) -> int:
+    """Rank authority tier descending: Tier_0/type (3) > Gold (2) > Silver (1) > Bronze (0)."""
+    det = str(voucher.get("determiner_tier") or "").strip().lower()
+    type_stat = str(voucher.get("type_status") or "").strip().upper()
+    is_type = bool(
+        type_stat
+        and type_stat not in _NON_TYPE_STATUS_TOKENS
+        and not re.search(r"\b(?:NOT\s+A?\s*TYPE|NON[-\s]?TYPE)\b", type_stat)
+    )
+    if is_type or det.startswith("tier_0"):
+        return 3
+    if det.startswith("tier_1") or det == "gold":
+        return 2
+    if det.startswith("tier_2") or det == "silver":
+        return 1
+    return 0
+
+
+def _duplicate_rank_key(voucher: Mapping[str, Any]) -> Tuple[int, int, int, str]:
+    """Deterministic duplicate sort key: imaged > primary_duplicate > authority_tier > catalogNumber asc."""
+    has_img = 1 if _safe_text(voucher.get("image_path")) else 0
+    is_primary = _coerce_flag_int(voucher.get("is_primary_duplicate"))
+    tier_rank = _authority_tier_rank(voucher)
+    return (-has_img, -is_primary, -tier_rank, str(voucher.get("catalogNumber") or ""))
+
+
+def _voucher_exsiccatae_keys(voucher: Mapping[str, Any]) -> Tuple[str, str, str]:
+    """Return `(stored_key, normalized_key, dateless_key)` for a voucher dict."""
+    stored = _safe_text(voucher.get("exsiccatae_key"))
+    col = str(voucher.get("recordedBy") or "")
+    num = str(voucher.get("recordNumber") or "")
+    dt = str(voucher.get("eventDate") or "")
+    norm = _normalize_exsiccatae_key(col, num, dt)
+    dateless = _normalize_exsiccatae_key(col, num, "")
+    return stored, norm, dateless
+
+
+def _build_exsiccatae_index(vouchers: Sequence[Mapping[str, Any]]) -> Dict[str, List[Mapping[str, Any]]]:
+    """Index vouchers by stored `exsiccatae_key`, normalized collector+number+date, and dateless fallback."""
+    index: Dict[str, List[Mapping[str, Any]]] = {}
+    seen_per_key: Dict[str, set] = {}
+
+    def _add(key: str, v: Mapping[str, Any]) -> None:
+        if not key:
+            return
+        cat = str(v.get("catalogNumber") or "")
+        bucket = seen_per_key.setdefault(key, set())
+        if cat and cat in bucket:
+            return
+        if cat:
+            bucket.add(cat)
+        index.setdefault(key, []).append(v)
+
+    for v in vouchers:
+        stored, norm, dateless = _voucher_exsiccatae_keys(v)
+        if stored:
+            _add(stored, v)
+            _add(stored.lower(), v)
+        if norm:
+            _add(norm, v)
+        if dateless:
+            _add(f"__dateless__:{dateless}", v)
+    return index
+
+
+def _extract_meta_exsiccatae_keys(meta: Optional[Mapping[str, Any]]) -> Tuple[str, str, str]:
+    """Extract `(explicit_key, normalized_key, dateless_key)` from sample/field metadata."""
+    if not meta:
+        return "", "", ""
+    explicit = _safe_text(meta.get("exsiccatae_key") or meta.get("Exsiccatae_Key"))
+    col = str(meta.get("recordedBy") or meta.get("recorded_by") or meta.get("collector") or "")
+    num = str(
+        meta.get("recordNumber")
+        or meta.get("record_number")
+        or meta.get("collector_number")
+        or meta.get("collection_number")
+        or ""
+    )
+    dt = str(meta.get("eventDate") or meta.get("event_date") or meta.get("date_collected") or "")
+    norm = _normalize_exsiccatae_key(col, num, dt)
+    dateless = _normalize_exsiccatae_key(col, num, "")
+    return explicit, norm, dateless
+
+
+def _lookup_exsiccatae_candidates(
+    explicit_key: str,
+    norm_key: str,
+    dateless_key: str,
+    exsiccatae_index: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> List[Mapping[str, Any]]:
+    """Collect deduplicated exsiccatae sibling candidates respecting date compatibility."""
+    hits: List[Mapping[str, Any]] = []
+    seen_cats: set = set()
+
+    def _extend(rows: Sequence[Mapping[str, Any]]) -> None:
+        for v in rows:
+            cat = str(v.get("catalogNumber") or "")
+            if cat and cat in seen_cats:
+                continue
+            if cat:
+                seen_cats.add(cat)
+            hits.append(v)
+
+    if explicit_key:
+        _extend(exsiccatae_index.get(explicit_key) or exsiccatae_index.get(explicit_key.lower()) or ())
+    if norm_key:
+        _extend(exsiccatae_index.get(norm_key) or ())
+        if dateless_key and norm_key != dateless_key:
+            # Include siblings whose own eventDate was empty so a dated query still finds dateless sheets
+            for cand in exsiccatae_index.get(f"__dateless__:{dateless_key}", ()):
+                if not _normalize_event_date_part(cand.get("eventDate")):
+                    _extend((cand,))
+        elif dateless_key:
+            dateless_bucket = list(exsiccatae_index.get(f"__dateless__:{dateless_key}", ()))
+            distinct_dates = {
+                _normalize_event_date_part(c.get("eventDate"))
+                for c in dateless_bucket
+                if _normalize_event_date_part(c.get("eventDate"))
+            }
+            if len(distinct_dates) <= 1:
+                _extend(dateless_bucket)
+    return hits
+
+
+def _resolve_output_exsiccatae_key(
+    voucher: Optional[Mapping[str, Any]],
+    user_meta: Optional[Mapping[str, Any]],
+    field_row: Optional[Mapping[str, Any]],
+) -> Optional[str]:
+    if voucher:
+        v_stored, v_norm, _ = _voucher_exsiccatae_keys(voucher)
+        if v_stored:
+            return v_stored
+        if v_norm:
+            return v_norm
+    for meta in (user_meta, field_row):
+        exp_k, norm_k, _ = _extract_meta_exsiccatae_keys(meta)
+        if exp_k:
+            return exp_k
+        if norm_k:
+            return norm_k
+    return None
+
+
 def _score_voucher_match(
     voucher: Mapping[str, Any],
     code: str,
     sp_std: Optional[str],
     pop_tok: str,
     is_alias_fallback: bool,
-) -> Optional[Tuple[int, int, str]]:
+) -> Optional[Tuple[Any, ...]]:
     """Score compatible voucher match using anchored token regex + taxon compatibility."""
     rec = strip_smart_quotes(voucher.get("recordNumber") or "")
     cat = strip_smart_quotes(voucher.get("catalogNumber") or "")
@@ -731,10 +1026,12 @@ def _score_voucher_match(
     if not prefix_compatible and sp_std and v_sp and v_sp != sp_std:
         return None
 
-    tier_rank = 0 if (voucher.get("determiner_tier") == "Tier_1_Gold") else (1 if voucher.get("determiner_tier") == "Tier_2_Silver" else 2)
+    tier_rank = 3 - _authority_tier_rank(voucher)
     has_coords = 0 if (voucher.get("decimalLatitude") is not None and voucher.get("decimalLongitude") is not None) else 1
     alias_pen = 1 if is_alias_fallback else 0
-    return (alias_pen, 0 if prefix_compatible else 1, 0 if sp_match else 1, tier_rank, has_coords, str(voucher.get("catalogNumber") or ""))
+    has_img_pen = 0 if _safe_text(voucher.get("image_path")) else 1
+    prim_pen = -_coerce_flag_int(voucher.get("is_primary_duplicate"))
+    return (alias_pen, 0 if prefix_compatible else 1, 0 if sp_match else 1, tier_rank, has_coords, has_img_pen, prim_pen, str(voucher.get("catalogNumber") or ""))
 
 
 def _link_sample_to_voucher(
@@ -743,18 +1040,73 @@ def _link_sample_to_voucher(
     user_meta: Optional[Mapping[str, Any]],
     field_row: Optional[Mapping[str, Any]],
     vouchers: Sequence[Mapping[str, Any]],
+    exsiccatae_index: Optional[Mapping[str, Sequence[Mapping[str, Any]]]] = None,
 ) -> Dict[str, Any]:
-    """Resolve 4-tier voucher linkage (`G1_Direct_Voucher` .. `G4_Ungeoreferenced_Tip`) without fabricating IDs."""
+    """Resolve 4-tier voucher linkage (`G1_Direct_Voucher` .. `G4_Ungeoreferenced_Tip`) with exsiccatae duplicate ranking."""
     voucher_by_cat = {str(v.get("catalogNumber") or ""): v for v in vouchers if v.get("catalogNumber")}
+    eff_index = exsiccatae_index if exsiccatae_index is not None else _build_exsiccatae_index(vouchers)
 
-    # 1. Explicit user_genetic_metadata catalogNumber -> G1_Direct_Voucher
+    def _siblings_for_voucher(v: Mapping[str, Any]) -> List[Mapping[str, Any]]:
+        v_stored, v_norm, v_dateless = _voucher_exsiccatae_keys(v)
+        return _lookup_exsiccatae_candidates(v_stored, v_norm, v_dateless, eff_index)
+
+    def _upgrade_pinned_if_unimaged(pinned_v: Mapping[str, Any]) -> Mapping[str, Any]:
+        if _safe_text(pinned_v.get("image_path")):
+            return pinned_v
+        siblings = list(_siblings_for_voucher(pinned_v))
+        u_exp, u_norm, u_dateless = _extract_meta_exsiccatae_keys(user_meta)
+        if u_exp or u_norm:
+            siblings.extend(_lookup_exsiccatae_candidates(u_exp, u_norm, u_dateless, eff_index))
+        imaged = [s for s in siblings if _safe_text(s.get("image_path"))]
+        if imaged:
+            return min(imaged, key=_duplicate_rank_key)
+        return pinned_v
+
+    # 1. Explicit user_genetic_metadata catalogNumber -> G1_Direct_Voucher (upgrade to imaged duplicate if unimaged)
     if user_meta and user_meta.get("catalogNumber"):
         u_cat = str(user_meta["catalogNumber"]).strip()
         matched = voucher_by_cat.get(u_cat)
         if matched:
-            return {"catalogNumber": u_cat, "voucher": matched, "linkage_tier": "G1_Direct_Voucher"}
+            resolved = _upgrade_pinned_if_unimaged(matched)
+            return {
+                "catalogNumber": str(resolved.get("catalogNumber")),
+                "voucher": resolved,
+                "linkage_tier": "G1_Direct_Voucher",
+                "exsiccatae_key": _resolve_output_exsiccatae_key(resolved, user_meta, field_row),
+            }
 
-    # 2. Exact Project_ID / sample_id == catalogNumber or recordNumber -> G1_Direct_Voucher
+    # 2a. Explicit exsiccatae_key or collector+number from user_meta (or exact sample-matched field_row) -> G1_Direct_Voucher
+    u_exp, u_norm, u_dateless = _extract_meta_exsiccatae_keys(user_meta)
+    if u_exp or u_norm:
+        u_cands = _lookup_exsiccatae_candidates(u_exp, u_norm, u_dateless, eff_index)
+        if u_cands:
+            best_v = min(u_cands, key=_duplicate_rank_key)
+            return {
+                "catalogNumber": str(best_v.get("catalogNumber")),
+                "voucher": best_v,
+                "linkage_tier": "G1_Direct_Voucher",
+                "exsiccatae_key": _resolve_output_exsiccatae_key(best_v, user_meta, field_row),
+            }
+
+    field_is_exact_sample = bool(
+        field_row
+        and field_row.get("project_id")
+        and strip_smart_quotes(field_row["project_id"]).upper() == sample_id.upper()
+    )
+    if field_is_exact_sample:
+        f_exp, f_norm, f_dateless = _extract_meta_exsiccatae_keys(field_row)
+        if f_exp or f_norm:
+            f_cands = _lookup_exsiccatae_candidates(f_exp, f_norm, f_dateless, eff_index)
+            if f_cands:
+                best_v = min(f_cands, key=_duplicate_rank_key)
+                return {
+                    "catalogNumber": str(best_v.get("catalogNumber")),
+                    "voucher": best_v,
+                    "linkage_tier": "G1_Direct_Voucher",
+                    "exsiccatae_key": _resolve_output_exsiccatae_key(best_v, user_meta, field_row),
+                }
+
+    # 2b. Exact Project_ID / sample_id == catalogNumber or recordNumber -> G1_Direct_Voucher
     probe_ids = [sample_id]
     if user_meta and user_meta.get("project_id"):
         probe_ids.append(str(user_meta["project_id"]))
@@ -762,15 +1114,41 @@ def _link_sample_to_voucher(
         pid_clean = strip_smart_quotes(pid).upper()
         if not pid_clean:
             continue
+        cat_hits: List[Mapping[str, Any]] = []
+        rec_hits: List[Mapping[str, Any]] = []
         for v in vouchers:
             cat_c = strip_smart_quotes(v.get("catalogNumber") or "").upper()
             rec_c = strip_smart_quotes(v.get("recordNumber") or "").upper()
-            if pid_clean == cat_c or (rec_c and (pid_clean == rec_c or pid_clean.startswith(rec_c + "-"))):
-                return {
-                    "catalogNumber": str(v.get("catalogNumber")),
-                    "voucher": v,
-                    "linkage_tier": "G1_Direct_Voucher",
-                }
+            if pid_clean == cat_c:
+                cat_hits.append(v)
+            elif rec_c and (pid_clean == rec_c or pid_clean.startswith(rec_c + "-")):
+                rec_hits.append(v)
+        if cat_hits:
+            resolved = _upgrade_pinned_if_unimaged(cat_hits[0])
+            return {
+                "catalogNumber": str(resolved.get("catalogNumber")),
+                "voucher": resolved,
+                "linkage_tier": "G1_Direct_Voucher",
+                "exsiccatae_key": _resolve_output_exsiccatae_key(resolved, user_meta, field_row),
+            }
+        if rec_hits:
+            expanded: List[Mapping[str, Any]] = []
+            seen_cats: set = set()
+            for rv in rec_hits:
+                for cand in [rv, *_siblings_for_voucher(rv)]:
+                    c_id = str(cand.get("catalogNumber") or "")
+                    if c_id and c_id in seen_cats:
+                        continue
+                    if c_id:
+                        seen_cats.add(c_id)
+                    expanded.append(cand)
+            best_v = min(expanded, key=_duplicate_rank_key)
+            return {
+                "catalogNumber": str(best_v.get("catalogNumber")),
+                "voucher": best_v,
+                "linkage_tier": "G1_Direct_Voucher",
+                "exsiccatae_key": _resolve_output_exsiccatae_key(best_v, user_meta, field_row),
+            }
 
     # 3. Population proxy match -> G2_Population_Voucher_Proxy
     pop = (parsed.get("population_id") or "").upper()
@@ -796,6 +1174,7 @@ def _link_sample_to_voucher(
                 "catalogNumber": str(best_v.get("catalogNumber")),
                 "voucher": best_v,
                 "linkage_tier": "G2_Population_Voucher_Proxy",
+                "exsiccatae_key": _resolve_output_exsiccatae_key(best_v, user_meta, field_row),
             }
 
     # 4. Georeferenced field sample vs ungeoreferenced tip -> G3 or G4
@@ -809,9 +1188,10 @@ def _link_sample_to_voucher(
         and field_row.get("decimalLatitude") is not None
         and field_row.get("decimalLongitude") is not None
     )
+    out_ex = _resolve_output_exsiccatae_key(None, user_meta, field_row)
     if has_user_coords or has_field_coords:
-        return {"catalogNumber": None, "voucher": None, "linkage_tier": "G3_Georeferenced_Unvouchered"}
-    return {"catalogNumber": None, "voucher": None, "linkage_tier": "G4_Ungeoreferenced_Tip"}
+        return {"catalogNumber": None, "voucher": None, "linkage_tier": "G3_Georeferenced_Unvouchered", "exsiccatae_key": out_ex}
+    return {"catalogNumber": None, "voucher": None, "linkage_tier": "G4_Ungeoreferenced_Tip", "exsiccatae_key": out_ex}
 
 
 def _infer_sample_cytotype(
@@ -1115,6 +1495,7 @@ def run_genomic_ingestion(
 
     sample_idx_map = {sid: i for i, sid in enumerate(dosage_samples)}
     n_loci_raw = int(dosage_mat.shape[1]) if dosage_mat.ndim == 2 else 0
+    exsiccatae_index = _build_exsiccatae_index(vouchers)
 
     records: List[Dict[str, Any]] = []
     for sid in all_sample_ids:
@@ -1188,7 +1569,14 @@ def run_genomic_ingestion(
         else:
             qc_pass = True
 
-        link = _link_sample_to_voucher(sid, parsed, u_meta, f_row, vouchers)
+        link = _link_sample_to_voucher(
+            sid,
+            parsed,
+            u_meta,
+            f_row,
+            vouchers,
+            exsiccatae_index=exsiccatae_index,
+        )
         v_rec = link.get("voucher") or {}
 
         lat = lon = state = county = ev_date = None
@@ -1216,6 +1604,7 @@ def run_genomic_ingestion(
         records.append({
             "genetic_sample_id": sid,
             "catalogNumber": link.get("catalogNumber"),
+            "exsiccatae_key": link.get("exsiccatae_key"),
             "project_id": (
                 (u_meta or {}).get("project_id")
                 or ((f_row or {}).get("project_id") if (f_same_taxon or force_novel_pair) else None)

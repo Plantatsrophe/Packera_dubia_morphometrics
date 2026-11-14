@@ -2797,7 +2797,7 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
             try:
                 uv = int(conn.execute("PRAGMA user_version;").fetchone()[0])
                 self.assertEqual(uv, PACKERA_SCHEMA_USER_VERSION)
-                self.assertEqual(uv, 20261124)
+                self.assertEqual(uv, 20261125)
 
                 m1 = np.zeros((150, 110), dtype=np.uint8)
                 cv2.ellipse(m1, (55, 75), (30, 54), 0, 0, 360, 255, -1)

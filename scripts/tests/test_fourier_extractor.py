@@ -1146,7 +1146,7 @@ class TestFourierExtractor(unittest.TestCase):
         dlu_txt = (PROJECT_ROOT / "scripts" / "morphometrics" / "dissected_leaf_utils.R").read_text(encoding="utf-8")
         s03_txt = (PROJECT_ROOT / "scripts" / "morphometrics" / "03_fourier_extractor.R").read_text(encoding="utf-8")
 
-        self.assertIn("PLANTMATICS_SCHEMA_USER_VERSION <- 20261124L", dbu_txt)
+        self.assertIn("PLANTMATICS_SCHEMA_USER_VERSION <- 20261125L", dbu_txt)
         self.assertIn("PACKERA_SCHEMA_USER_VERSION <- PLANTMATICS_SCHEMA_USER_VERSION", dbu_txt)
         for col_name in (
             "detector_class_id",

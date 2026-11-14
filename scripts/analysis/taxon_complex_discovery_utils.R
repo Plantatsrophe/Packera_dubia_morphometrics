@@ -1,99 +1,85 @@
-# ==============================================================================
-# Module: scripts/analysis/taxon_complex_discovery_utils.R
-# Project: Packera Species Delimitation & Morphometrics Pipeline (NCU)
-# Description: Unified Step 07 Unsupervised Quantitative Taxon-Complex Discovery
-#   & Multimodal Affinity Engine: OOF Cohen's kappa weights (Dawid & Skene 1979),
-#   authority-weighted Kish-N_eff Ledoit-Wolf morphometric affinity, anchor-clean
-#   ecological KDE Schoener's D, Hopkins-adjusted circular phenological affinity
-#   (Hopkins 1918; Pewsey et al. 2013; Mardia & Jupp 2000), and Leiden/Louvain
-#   graph modularity + metric Ward.D2 hierarchical complex delimitation
-#   (Murtagh & Legendre 2014; Padial et al. 2010; Schlick-Steiner et al. 2010).
-# ==============================================================================
+# Module: scripts/analysis/taxon_complex_discovery_utils.R (Packera Step 07 Complex Discovery)
+# Dawid-Skene OOF kappa weights, Ledoit-Wolf morphometric + Schoener D eco + Hopkins
+# circular phenology affinities, Leiden modularity & Ward.D2 complex delimitation (Schlick-Steiner et al. 2010).
 .with_preserved_rng_seed <- function(seed, expr_fn) {
   had_seed <- exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)
   old_seed <- if (had_seed) get(".Random.seed", envir = .GlobalEnv, inherits = FALSE) else NULL
-  on.exit({
-    if (had_seed) assign(".Random.seed", old_seed, envir = .GlobalEnv)
-    else if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) rm(".Random.seed", envir = .GlobalEnv)
-  }, add = TRUE)
-  if (!is.null(seed)) set.seed(as.integer(seed))
-  expr_fn()
+  on.exit({ if (had_seed) assign(".Random.seed", old_seed, envir = .GlobalEnv) else if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) rm(".Random.seed", envir = .GlobalEnv) }, add = TRUE)
+  if (!is.null(seed)) set.seed(as.integer(seed)); expr_fn()
 }
 .std_complex_taxon <- function(x) {
-  if (exists("standardize_packera_taxon", mode = "function")) {
-    res <- standardize_packera_taxon(x)
-    return(ifelse(is.na(res) | res == "Unknown", as.character(x), res))
-  }
-  if (exists("standardize_taxon_name", mode = "function")) {
-    res <- standardize_taxon_name(x)
-    return(ifelse(is.na(res), as.character(x), res))
-  }
+  if (exists("standardize_packera_taxon", mode = "function")) { res <- standardize_packera_taxon(x); return(ifelse(is.na(res) | res == "Unknown", as.character(x), res)) }
+  if (exists("standardize_taxon_name", mode = "function")) { res <- standardize_taxon_name(x); return(ifelse(is.na(res), as.character(x), res)) }
   as.character(x)
 }
 .parse_step07_complex_semicolon <- function(df, col_nm) {
   if (!(col_nm %in% names(df))) return(character(0))
-  raw <- trimws(as.character(stats::na.omit(df[[col_nm]]))); raw <- raw[nzchar(raw)]
-  if (length(raw) == 0L) return(character(0))
-  toks <- unique(trimws(unlist(strsplit(raw, ";", fixed = TRUE))))
-  intersect(toks[nzchar(toks) & !(tolower(toks) %in% c("na", "none", "null"))], names(df))
+  raw <- trimws(as.character(stats::na.omit(df[[col_nm]]))); raw <- raw[nzchar(raw)]; if (length(raw) == 0L) return(character(0))
+  toks <- unique(trimws(unlist(strsplit(raw, ";", fixed = TRUE)))); intersect(toks[nzchar(toks) & !(tolower(toks) %in% c("na", "none", "null"))], names(df))
 }
-.sort_step07_complex_pcs <- function(cols, pfx) {
-  if (length(cols) <= 1L) return(cols)
-  cols[order(suppressWarnings(as.integer(sub(paste0("^", pfx), "", cols))), cols)]
-}
-.resolve_complex_specimen_weights <- function(df) {
-  n <- nrow(df)
-  if (n == 0L) return(numeric(0))
-  if ("authority_weight" %in% names(df)) {
-    aw <- suppressWarnings(as.numeric(df$authority_weight))
-    if (any(is.finite(aw) & aw > 0)) {
-      aw[!is.finite(aw) | aw <= 0] <- 0.50
-      return(pmin(4.0, pmax(0.15, aw)))
-    }
+.sort_step07_complex_pcs <- function(cols, pfx) if (length(cols) <= 1L) cols else cols[order(suppressWarnings(as.integer(sub(paste0("^", pfx), "", cols))), cols)]
+
+.complex_dna_tier0_flags <- function(df, is_type) {
+  n <- nrow(df); f0 <- list(dna_ok = rep(FALSE, n), dna_bad = rep(FALSE, n))
+  if (n == 0L || !any(c("geno_predicted_taxon", "geno_linkage_tier", "linkage_tier") %in% names(df))) return(f0)
+  if (exists("resolve_tier0_anchor_overrides", mode = "function")) {
+    t0 <- resolve_tier0_anchor_overrides(df)
+    return(list(dna_ok = t0$is_tier0_dna_anchor & !t0$evict_from_given_anchor & !is_type, dna_bad = t0$evict_from_given_anchor & !is_type))
   }
+  bfn <- function(v) if (is.logical(v)) !is.na(v) & v else if (is.numeric(v) || is.integer(v)) !is.na(v) & (v != 0) else tolower(trimws(as.character(v))) %in% c("1", "true", "t", "yes", "y")
+  tier <- if ("geno_linkage_tier" %in% names(df)) as.character(df$geno_linkage_tier) else if ("linkage_tier" %in% names(df)) as.character(df$linkage_tier) else rep("", n)
+  qc <- if ("geno_quality_pass" %in% names(df)) bfn(df$geno_quality_pass) else rep(FALSE, n)
+  adm <- if ("is_geno_admixed" %in% names(df)) bfn(df$is_geno_admixed) else rep(FALSE, n)
+  nov <- if ("is_putative_novel_or_hybrid_query" %in% names(df)) bfn(df$is_putative_novel_or_hybrid_query) else rep(FALSE, n)
+  pred <- if ("geno_predicted_taxon" %in% names(df)) trimws(as.character(df$geno_predicted_taxon)) else rep("", n); pred[is.na(pred)] <- ""
+  sp <- if ("species_standardized" %in% names(df)) trimws(as.character(df$species_standardized)) else rep("", n); sp[is.na(sp)] <- ""
+  prob <- if ("geno_posterior_prob" %in% names(df)) suppressWarnings(as.numeric(df$geno_posterior_prob)) else rep(NA_real_, n)
+  margin <- if ("geno_margin" %in% names(df)) suppressWarnings(as.numeric(df$geno_margin)) else rep(NA_real_, n)
+  q12_col <- intersect(c("interclass_het_Q12", "interspecific_ancestry_q12"), names(df))[1L]
+  q12 <- if (!is.na(q12_col)) suppressWarnings(as.numeric(df[[q12_col]])) else rep(NA_real_, n)
+  is_t0 <- !is_type & (tier %in% c("G1_Direct_Voucher", "G1_Exsiccatae_Isoduplicate")) & qc & !adm & !nov & is.finite(prob) & (prob >= 0.85) & (is.na(margin) | margin >= 0.40) & nzchar(pred) & (pred != "Unknown")
+  ev <- !is_type & (tier %in% c("G1_Direct_Voucher", "G1_Exsiccatae_Isoduplicate")) & qc & ((nzchar(pred) & (pred != "Unknown") & (pred != sp) & is.finite(prob) & (prob >= 0.85)) | (is.finite(q12) & (q12 >= 0.35)))
+  list(dna_ok = is_t0 & !ev & !is_type, dna_bad = ev & !is_type)
+}
+
+.resolve_complex_specimen_weights <- function(df) {
+  n <- nrow(df); if (n == 0L) return(numeric(0))
   type_info <- if (exists(".identify_type_specimen_vec", mode = "function")) .identify_type_specimen_vec(df) else list(is_type_specimen = rep(FALSE, n))
   is_type <- as.logical(type_info$is_type_specimen); is_type[is.na(is_type)] <- FALSE
-  tier <- if ("determiner_tier" %in% names(df)) as.character(df$determiner_tier) else rep("Tier_1_Gold", n)
-  prom <- if ("is_promoted_bronze" %in% names(df)) (!is.na(df$is_promoted_bronze) & as.logical(df$is_promoted_bronze)) else rep(FALSE, n)
-  wt <- ifelse(
-    is_type | grepl("type", tier, ignore.case = TRUE), 4.0, ifelse(
-      grepl("tier_?1|gold", tier, ignore.case = TRUE), 3.0, ifelse(
-        grepl("tier_?2|silver", tier, ignore.case = TRUE), 1.5, ifelse(prom, 1.0, 0.5))))
-  noise <- if ("is_confident_label_noise" %in% names(df)) (!is.na(df$is_confident_label_noise) & as.logical(df$is_confident_label_noise)) else rep(FALSE, n)
-  wt[noise & !is_type] <- 0.05; wt
+  if ("is_type_specimen" %in% names(df)) { itc <- as.logical(df$is_type_specimen); itc[is.na(itc)] <- FALSE; is_type <- is_type | itc }
+  dna <- .complex_dna_tier0_flags(df, is_type)
+  if ("authority_weight" %in% names(df) && any(is.finite(aw <- suppressWarnings(as.numeric(df$authority_weight))) & aw > 0)) {
+    aw[!is.finite(aw) | aw <= 0] <- 0.50; wt <- pmin(4.0, pmax(0.15, aw))
+  } else {
+    tier <- if ("determiner_tier" %in% names(df)) as.character(df$determiner_tier) else rep("Tier_1_Gold", n)
+    prom <- if ("is_promoted_bronze" %in% names(df)) (!is.na(df$is_promoted_bronze) & as.logical(df$is_promoted_bronze)) else rep(FALSE, n)
+    wt <- ifelse(is_type | grepl("type", tier, ignore.case = TRUE), 4.0, ifelse(grepl("tier_?1|gold", tier, ignore.case = TRUE), 3.0, ifelse(grepl("tier_?2|silver", tier, ignore.case = TRUE), 1.5, ifelse(prom, 1.0, 0.5))))
+    noise <- if ("is_confident_label_noise" %in% names(df)) (!is.na(df$is_confident_label_noise) & as.logical(df$is_confident_label_noise)) else rep(FALSE, n)
+    wt[noise & !is_type] <- 0.05
+  }
+  wt[dna$dna_ok] <- 4.0; wt[dna$dna_bad] <- 0.15; wt
 }
-# 1. Clean Basal_Rosette Anchor Selection (Excluding Confident Noise, Passive & Misidentifications)
+# 1. Clean Basal_Rosette Anchor Selection (Excluding Confident Noise, Passive, DNA-Contradicted & Misidentifications)
 select_taxon_anchors <- function(morph_df) {
   morph_df <- as.data.frame(morph_df, stringsAsFactors = FALSE); n <- nrow(morph_df)
   if (n == 0L) return(list(anchor_df = morph_df, anchor_mask = logical(0), n_gold_silver = integer(0), n_type_specimens = integer(0)))
   is_t1_pure <- rep(TRUE, n)
-  if ("morph_tier_source" %in% names(morph_df)) {
-    mts <- as.character(morph_df$morph_tier_source)
-    if (any(!is.na(mts) & nzchar(mts))) is_t1_pure <- !is.na(mts) & (mts == "Basal_Rosette")
-  } else if ("basal_leaf_count" %in% names(morph_df)) {
-    blc <- suppressWarnings(as.integer(morph_df$basal_leaf_count))
-    if (any(!is.na(blc))) is_t1_pure <- !is.na(blc) & (blc >= 1L)
-  }
+  if ("morph_tier_source" %in% names(morph_df) && any(!is.na(mts <- as.character(morph_df$morph_tier_source)) & nzchar(mts))) { is_t1_pure <- !is.na(mts) & (mts == "Basal_Rosette") }
+  else if ("basal_leaf_count" %in% names(morph_df) && any(!is.na(blc <- suppressWarnings(as.integer(morph_df$basal_leaf_count))))) { is_t1_pure <- !is.na(blc) & (blc >= 1L) }
   type_info <- if (exists(".identify_type_specimen_vec", mode = "function")) .identify_type_specimen_vec(morph_df) else list(type_rank = rep(0L, n), is_type_specimen = rep(FALSE, n))
   is_type <- as.logical(type_info$is_type_specimen); is_type[is.na(is_type)] <- FALSE
-  if ("is_type_specimen" %in% names(morph_df)) {
-    it_col <- as.logical(morph_df$is_type_specimen); it_col[is.na(it_col)] <- FALSE; is_type <- is_type | it_col
-  }
+  if ("is_type_specimen" %in% names(morph_df)) { it_col <- as.logical(morph_df$is_type_specimen); it_col[is.na(it_col)] <- FALSE; is_type <- is_type | it_col }
+  dna <- .complex_dna_tier0_flags(morph_df, is_type)
   noise <- if ("is_confident_label_noise" %in% names(morph_df)) (!is.na(morph_df$is_confident_label_noise) & as.logical(morph_df$is_confident_label_noise)) else rep(FALSE, n)
-  if ("anchor_status" %in% names(morph_df)) {
-    ast <- tolower(trimws(as.character(morph_df$anchor_status))); noise <- noise | (!is.na(ast) & grepl("confident_noise|noise_demoted", ast))
-  }
+  if ("anchor_status" %in% names(morph_df)) { ast <- tolower(trimws(as.character(morph_df$anchor_status))); noise <- noise | (!is.na(ast) & grepl("confident_noise|noise_demoted", ast)) }
   is_pass <- if ("is_passive" %in% names(morph_df)) (!is.na(morph_df$is_passive) & as.logical(morph_df$is_passive)) else rep(FALSE, n)
   mo_out <- if ("morphometric_outlier_flag" %in% names(morph_df)) (!is.na(morph_df$morphometric_outlier_flag) & as.logical(morph_df$morphometric_outlier_flag)) else rep(FALSE, n)
   sub_call <- if ("taxonomic_treatment_subtype" %in% names(morph_df)) as.character(morph_df$taxonomic_treatment_subtype) else rep("", n)
   is_misid <- !is.na(sub_call) & (sub_call == "Misidentification_Reassign")
   prom <- if ("is_promoted_bronze" %in% names(morph_df)) (!is.na(morph_df$is_promoted_bronze) & as.logical(morph_df$is_promoted_bronze)) else rep(FALSE, n)
-  det_tier <- if ("determiner_tier" %in% names(morph_df)) {
-    ifelse(is.na(morph_df$determiner_tier) | !nzchar(trimws(as.character(morph_df$determiner_tier))), "Tier_3_Bronze", as.character(morph_df$determiner_tier))
-  } else rep("Tier_1_Gold", n)
-  is_gs <- (grepl("tier_?0|tier_?1|tier_?2|gold|silver|type", det_tier, ignore.case = TRUE) | prom | is_type) & !noise & (!is_pass | is_type) & (!is_misid | is_type)
-  clean_non_gs <- !noise & !is_misid & !mo_out
-  # Extreme damaged nomenclatural types (> chisq_0.99) excluded from covariance estimation while counted in n_type_specimens
+  det_tier <- if ("determiner_tier" %in% names(morph_df)) ifelse(is.na(morph_df$determiner_tier) | !nzchar(trimws(as.character(morph_df$determiner_tier))), "Tier_3_Bronze", as.character(morph_df$determiner_tier)) else rep("Tier_1_Gold", n)
+  is_gs <- ((grepl("tier_?0|tier_?1|tier_?2|gold|silver|type", det_tier, ignore.case = TRUE) | prom | is_type) & !noise & (!is_pass | is_type) & (!is_misid | is_type) & !dna$dna_bad) | dna$dna_ok
+  clean_non_gs <- !noise & !is_misid & !mo_out & !dna$dna_bad
   d2_col <- if ("mahalanobis_d2" %in% names(morph_df)) suppressWarnings(as.numeric(morph_df$mahalanobis_d2)) else rep(NA_real_, n)
   p_est <- max(2L, length(.parse_step07_complex_semicolon(morph_df, "selected_morph_features")))
   type_extreme <- is_type & is.finite(d2_col) & (d2_col > stats::qchisq(0.99, df = p_est))
@@ -109,8 +95,9 @@ select_taxon_anchors <- function(morph_df) {
     else if (length(clean_pure_idx) >= 3L) anchor_mask[clean_pure_idx] <- TRUE
     else if (length(clean_any_idx) >= 2L) anchor_mask[clean_any_idx] <- TRUE
     else anchor_mask[tx_idx] <- TRUE
-    intact_types <- type_idx[!type_extreme[type_idx]]
-    if (length(intact_types) > 0L) anchor_mask[intact_types] <- TRUE
+    intact_types <- type_idx[!type_extreme[type_idx]]; if (length(intact_types) > 0L) anchor_mask[intact_types] <- TRUE
+    dna_pure <- tx_idx[dna$dna_ok[tx_idx] & is_t1_pure[tx_idx] & !mo_out[tx_idx]]; if (length(dna_pure) > 0L) anchor_mask[dna_pure] <- TRUE
+    if (any(anchor_mask[tx_idx] & !dna$dna_bad[tx_idx])) anchor_mask[tx_idx[dna$dna_bad[tx_idx]]] <- FALSE
   }
   list(anchor_df = morph_df[anchor_mask, , drop = FALSE], anchor_mask = anchor_mask, n_gold_silver = n_gs_vec, n_type_specimens = n_type_vec)
 }
@@ -488,7 +475,7 @@ compute_multimodal_complex_affinity <- function(morph_res, eco_res, pheno_res, k
   }
   W <- 0.5 * (W + t(W)); diag(W) <- 0.0; round(W, 6)
 }
-# 5. Row-Wise Canonical Triage Subtype Resolution (Zero Fabricated Constants)
+# 5. Row-Wise Canonical Triage Subtype Resolution (Padial et al. 2010; Zero Fabricated Constants)
 evaluate_hierarchical_complex_delimitation <- function(morph_df, pheno_res = NULL, eco_res = NULL, ...) {
   if (!is.list(pheno_res) || !("delta_doy_resid" %in% names(pheno_res))) {
     dots <- list(...)

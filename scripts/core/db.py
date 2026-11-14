@@ -2676,6 +2676,7 @@ def ingest_existing_run_tables_into_db(
     tri_path = t_dir / "triage_queue.csv"
     tri_rows = _read_csv_dicts(tri_path)
     if tri_rows:
+        _ensure_dynamic_table_migrated(conn, "curation_triage")
         norm_tri: List[Dict[str, Any]] = []
         for r in tri_rows:
             cat = _to_str(r.get("catalogNumber"))
@@ -2697,12 +2698,17 @@ def ingest_existing_run_tables_into_db(
                 "resurrection_basionym",
                 "hybrid_parent_1",
                 "hybrid_parent_2",
+                "genomic_propagation_tier",
+                "tier0_calibrated_taxon",
             ):
                 if sc in r:
                     d_tri[sc] = _to_str(r.get(sc))
-            for ic in ("n_available_modalities",):
+            for ic in ("n_available_modalities", "tier0_abstention_flag"):
                 if ic in r:
-                    d_tri[ic] = _to_int(r.get(ic))
+                    iv = _to_int(r.get(ic))
+                    if iv is None and ic == "tier0_abstention_flag":
+                        iv = _to_bool_int(r.get(ic))
+                    d_tri[ic] = iv
             for bc in ("cryptic_cluster_cohesion_pass", "cryptic_non_clinal_pass", "hybrid_zone_cohesion_pass", "is_completed_voucher"):
                 if bc in r:
                     d_tri[bc] = _to_bool_int(r.get(bc))
@@ -2715,6 +2721,9 @@ def ingest_existing_run_tables_into_db(
                 "probabilistic_consensus_score",
                 "hopkins_adjusted_doy",
                 "delta_doy_resid",
+                "tier0_calibrated_prob",
+                "deme_mahal_d2",
+                "cluster_propagated_gdi",
             ):
                 if fc in r:
                     d_tri[fc] = _to_float(r.get(fc))

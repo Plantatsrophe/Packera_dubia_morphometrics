@@ -230,12 +230,40 @@ render_step07a_integrative_synthesis_png <- function(
   } else {
     sprintf("Step 07: Integrative Species Delimitation Across Packera Complexes (N = %d Taxa)", length(active_taxa))
   }
-  plate_06a <- ((p_morph | p_map) / (p_treat | p_wett)) +
-    patchwork::plot_layout(heights = c(1.12, 1.05)) +
-    patchwork::plot_annotation(
-      title = hdr_title,
-      theme = ggplot2::theme(plot.title = ggplot2::element_text(face = "bold", size = 12.5))
+  prop_tier_v <- if ("genomic_propagation_tier" %in% names(df)) trimws(as.character(df$genomic_propagation_tier)) else rep(NA_character_, nrow(df))
+  t0_tx_v <- if ("tier0_calibrated_taxon" %in% names(df)) trimws(as.character(df$tier0_calibrated_taxon)) else rep(NA_character_, nrow(df))
+  t0_abs_v <- if ("tier0_abstention_flag" %in% names(df)) suppressWarnings(as.integer(df$tier0_abstention_flag)) else rep(NA_integer_, nrow(df))
+  cl_gdi_v <- if ("cluster_propagated_gdi" %in% names(df)) suppressWarnings(as.numeric(df$cluster_propagated_gdi)) else rep(NA_real_, nrow(df))
+  n_exs_dup <- sum(!is.na(prop_tier_v) & prop_tier_v == "G1_Exsiccatae_Isoduplicate")
+  n_deme_hull <- sum(!is.na(prop_tier_v) & prop_tier_v == "G2_Conditional_Deme_Hull")
+  n_t0_cal <- sum(!is.na(t0_tx_v) & nzchar(t0_tx_v) & t0_tx_v != "Sensu_Lato_DNA_Required" & !is.na(t0_abs_v) & t0_abs_v == 0L)
+  n_cl_gdi <- sum(is.finite(cl_gdi_v))
+  n_dna_abst <- sum(!is.na(t0_abs_v) & t0_abs_v == 1L)
+  has_prop_fig <- (n_exs_dup + n_deme_hull + n_t0_cal + n_cl_gdi + n_dna_abst) > 0L
+
+  plate_06a <- if (has_prop_fig) {
+    prop_sub <- sprintf(
+      "[Exs-Dup: %d | Deme-Hull: %d | Tier0-Cal: %d | Cluster-gdi: %d | DNA-Abstain: %d]",
+      n_exs_dup, n_deme_hull, n_t0_cal, n_cl_gdi, n_dna_abst
     )
+    ((p_morph | p_map) / (p_treat | p_wett)) +
+      patchwork::plot_layout(heights = c(1.12, 1.05)) +
+      patchwork::plot_annotation(
+        title = hdr_title,
+        subtitle = prop_sub,
+        theme = ggplot2::theme(
+          plot.title = ggplot2::element_text(face = "bold", size = 12.5),
+          plot.subtitle = ggplot2::element_text(size = 9.0, color = "#374151")
+        )
+      )
+  } else {
+    ((p_morph | p_map) / (p_treat | p_wett)) +
+      patchwork::plot_layout(heights = c(1.12, 1.05)) +
+      patchwork::plot_annotation(
+        title = hdr_title,
+        theme = ggplot2::theme(plot.title = ggplot2::element_text(face = "bold", size = 12.5))
+      )
+  }
 
   canon_07a <- file.path(fdir, "fig07a_integrative_taxonomic_synthesis.png")
   extra_targets <- character(0)

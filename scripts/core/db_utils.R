@@ -16,7 +16,7 @@
 #       with seamless CSV fallback merging.
 # ==============================================================================
 
-PLANTMATICS_SCHEMA_USER_VERSION <- 20261124L
+PLANTMATICS_SCHEMA_USER_VERSION <- 20261125L
 PACKERA_SCHEMA_USER_VERSION <- PLANTMATICS_SCHEMA_USER_VERSION
 
 resolve_packera_workers <- function(max_workers = 32L, n_tasks = NULL) {
@@ -320,7 +320,13 @@ PACKERA_DB_WC_BIO_COLS <- c(
       resurrection_basionym = "TEXT",
       hybrid_zone_cohesion_pass = "INTEGER",
       hybrid_parent_1 = "TEXT",
-      hybrid_parent_2 = "TEXT"
+      hybrid_parent_2 = "TEXT",
+      genomic_propagation_tier = "TEXT",
+      tier0_calibrated_taxon = "TEXT",
+      tier0_calibrated_prob = "REAL",
+      tier0_abstention_flag = "INTEGER",
+      deme_mahal_d2 = "REAL",
+      cluster_propagated_gdi = "REAL"
     ))
   }
   if (identical(table_name, "spatial_rf_predictions")) {
@@ -667,7 +673,8 @@ connect_packera_db <- function(
     "geno_predicted_taxon", "geno_linkage_tier", "is_geno_admixed",
     "coalescent_gdi", "hybrid_generation_class", "cytonuclear_discordant",
     "public_plastome_match", "public_its_match", "waxy_lineage_match",
-    "public_backbone_clade", "public_phytop_ils_index", "public_phytop_ih_index"
+    "public_backbone_clade", "public_phytop_ils_index", "public_phytop_ih_index",
+    "genomic_propagation_tier", "cluster_propagated_gdi"
   ) %in% mv_fields_chk)
   if (cur_ver >= PLANTMATICS_SCHEMA_USER_VERSION &&
     el_has_zone && om_has_cauline && mv_has_latest &&
@@ -704,7 +711,8 @@ connect_packera_db <- function(
         "w_geno_kappa", "geno_predicted_taxon", "geno_linkage_tier", "is_geno_admixed",
         "coalescent_gdi", "hybrid_generation_class", "cytonuclear_discordant",
         "public_plastome_match", "public_its_match", "waxy_lineage_match",
-        "public_backbone_clade", "public_phytop_ils_index", "public_phytop_ih_index"
+        "public_backbone_clade", "public_phytop_ils_index", "public_phytop_ih_index",
+        "genomic_propagation_tier", "cluster_propagated_gdi"
       )
       if (length(v_cols) > 0L && !all(req_v_cols %in% v_cols)) {
         view_needs_refresh <- TRUE
@@ -2074,7 +2082,9 @@ try_fetch_master_view_for_cohort <- function(
       "synthesis_triage_priority", "synthesis_triage_action", "synthesis_rationale",
       "cryptic_cluster_cohesion_pass", "cryptic_non_clinal_pass", "resurrection_basionym",
       "hybrid_zone_cohesion_pass", "hybrid_parent_1", "hybrid_parent_2",
-      "is_completed_voucher"
+      "is_completed_voucher",
+      "genomic_propagation_tier", "tier0_calibrated_taxon", "tier0_calibrated_prob",
+      "tier0_abstention_flag", "deme_mahal_d2", "cluster_propagated_gdi"
     )
     master_df <- master_df[, setdiff(names(master_df), stale_ct_cols), drop = FALSE]
   }
@@ -2123,6 +2133,32 @@ persist_step07_to_sqlite <- function(
   ct_df$plant_individual_id[is.na(ct_df$plant_individual_id)] <- 0L
   for (.bcol in intersect(c("cryptic_cluster_cohesion_pass", "cryptic_non_clinal_pass", "hybrid_zone_cohesion_pass", "is_completed_voucher"), names(ct_df))) {
     ct_df[[.bcol]] <- ifelse(is.na(ct_df[[.bcol]]), NA_integer_, as.integer(as.logical(ct_df[[.bcol]])))
+  }
+  if ("tier0_abstention_flag" %in% names(ct_df)) {
+    v_abs <- ct_df$tier0_abstention_flag
+    if (is.logical(v_abs)) {
+      ct_df$tier0_abstention_flag <- as.integer(v_abs)
+    } else if (is.character(v_abs) || is.factor(v_abs)) {
+      s_abs <- trimws(as.character(v_abs))
+      out_abs <- suppressWarnings(as.integer(s_abs))
+      u_abs <- toupper(s_abs)
+      out_abs[is.na(out_abs) & u_abs %in% c("TRUE", "T", "YES", "Y")] <- 1L
+      out_abs[is.na(out_abs) & u_abs %in% c("FALSE", "F", "NO", "N")] <- 0L
+      ct_df$tier0_abstention_flag <- out_abs
+    } else {
+      v_num <- suppressWarnings(as.numeric(v_abs))
+      out_abs <- rep(NA_integer_, length(v_num))
+      ok_abs <- !is.na(v_num) & is.finite(v_num)
+      out_abs[ok_abs] <- as.integer(round(v_num[ok_abs]))
+      ct_df$tier0_abstention_flag <- out_abs
+    }
+  }
+  for (.fcol in intersect(c("tier0_calibrated_prob", "deme_mahal_d2", "cluster_propagated_gdi"), names(ct_df))) {
+    v_f <- ct_df[[.fcol]]
+    ct_df[[.fcol]] <- if (is.factor(v_f)) suppressWarnings(as.numeric(as.character(v_f))) else suppressWarnings(as.numeric(v_f))
+  }
+  for (.scol in intersect(c("genomic_propagation_tier", "tier0_calibrated_taxon"), names(ct_df))) {
+    ct_df[[.scol]] <- as.character(ct_df[[.scol]])
   }
 
   db_upsert_dataframe(
