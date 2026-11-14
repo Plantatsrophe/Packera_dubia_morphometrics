@@ -63,8 +63,13 @@ for (.gt_p in c("scripts/analysis/genomic_triage_utils.R", file.path(dirname(c(s
 # ------------------------------------------------------------------------------
 # 1. CLI Argument Parsing & Taxonomic Normalization
 # ------------------------------------------------------------------------------
+.env_plantmatics_or_packera <- function(p_key, k_key) {
+  v <- Sys.getenv(p_key, unset = "")
+  if (nzchar(trimws(v))) v else Sys.getenv(k_key, unset = "")
+}
+
 parse_args_robust <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
-  run_dir <- Sys.getenv("PACKERA_RUN_DIR", unset = "")
+  run_dir <- .env_plantmatics_or_packera("PLANTMATICS_RUN_DIR", "PACKERA_RUN_DIR")
   rp <- function(rel) if (nzchar(run_dir)) file.path(run_dir, rel) else rel
   option_list <- list(
     optparse::make_option(c("-v", "--vouchers"), type = "character", default = rp("data/tables/curated_vouchers.csv")),
@@ -1043,7 +1048,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
   can_evaluate_hybrids <- !is_intra && (length(cohort_species) >= 2L)
 
   has_any_geo_in_df <- any(nzchar(state_vec_geo)) || any(is.finite(lat_vec_geo) & is.finite(lon_vec_geo))
-  use_ext_geo_db <- nzchar(Sys.getenv("RUN_ID", unset = "")) || nzchar(Sys.getenv("PACKERA_DB_PATH", unset = "")) || has_any_geo_in_df
+  use_ext_geo_db <- nzchar(Sys.getenv("RUN_ID", unset = "")) || nzchar(.env_plantmatics_or_packera("PLANTMATICS_DB_PATH", "PACKERA_DB_PATH")) || has_any_geo_in_df
   usda_states_by_tx <- list()
   db_syntopy_rows <- NULL
   if (use_ext_geo_db && Sys.getenv("PACKERA_DEMO_MODE", unset = "") != "1" && exists("connect_packera_db", mode = "function") && requireNamespace("DBI", quietly = TRUE)) {
@@ -1079,7 +1084,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
           if (any(ok_u)) usda_states_by_tx <- lapply(split(u_st[ok_u], u_tx[ok_u]), unique)
         }
       }
-      if ((can_evaluate_hybrids || is_intra) && (nzchar(Sys.getenv("RUN_ID", unset = "")) || nzchar(Sys.getenv("PACKERA_DB_PATH", unset = ""))) &&
+      if ((can_evaluate_hybrids || is_intra) && (nzchar(Sys.getenv("RUN_ID", unset = "")) || nzchar(.env_plantmatics_or_packera("PLANTMATICS_DB_PATH", "PACKERA_DB_PATH"))) &&
           !is.null(c_geo) && DBI::dbExistsTable(c_geo, "vouchers")) {
         v_flds <- tryCatch(DBI::dbListFields(c_geo, "vouchers"), error = function(e) character(0))
         sp_std_sel <- if ("species_standardized" %in% v_flds) "v.species_standardized, " else ""
@@ -1717,7 +1722,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
     pass_osr_d2 <- if (length(fin_c) > 0L) {
       stats::median(min_cong_d2_dv[fin_c] - osr_chisq95_vec[fin_c], na.rm = TRUE) > 0.0
     } else {
-      !is_intra || !nzchar(Sys.getenv("PACKERA_DB_PATH", unset = ""))
+      !is_intra || !nzchar(.env_plantmatics_or_packera("PLANTMATICS_DB_PATH", "PACKERA_DB_PATH"))
     }
     fin_p <- idx_cl[is.finite(osr_p_dv[idx_cl]) & is.finite(min_cong_d2_dv[idx_cl])]
     pass_osr_p <- if (length(fin_p) > 0L) (stats::median(osr_p_dv[fin_p], na.rm = TRUE) < 0.05) else TRUE
@@ -1937,7 +1942,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
     } else if (is.finite(osr_p_dv[i])) {
       osr_p_dv[i] < 0.05
     } else {
-      !is_intra || !nzchar(Sys.getenv("PACKERA_DB_PATH", unset = ""))
+      !is_intra || !nzchar(.env_plantmatics_or_packera("PLANTMATICS_DB_PATH", "PACKERA_DB_PATH"))
     }
 
     has_obs_edaph_i <- (!is.na(edaph_sp_dv[i]) && nzchar(trimws(edaph_sp_dv[i]))) ||
@@ -3080,7 +3085,8 @@ build_triage_queue <- function(opts) {
     "capitula_count", "log1p_capitulum_count", "involucre_height_mm", "involucre_width_mm", "AR_inv", "blade_cie_l_norm", "blade_cie_l_sd"
   )
 
-  def_dt_dir <- normalizePath(if (nzchar(Sys.getenv("PACKERA_RUN_DIR", unset = ""))) file.path(Sys.getenv("PACKERA_RUN_DIR"), "data/tables") else "data/tables", mustWork = FALSE)
+  run_dir_env <- .env_plantmatics_or_packera("PLANTMATICS_RUN_DIR", "PACKERA_RUN_DIR")
+  def_dt_dir <- normalizePath(if (nzchar(run_dir_env)) file.path(run_dir_env, "data/tables") else "data/tables", mustWork = FALSE)
   vouch_dir <- normalizePath(dirname(opts$vouchers), mustWork = FALSE)
   is_isolated_vouch_dir <- !identical(vouch_dir, def_dt_dir)
   if (is_isolated_vouch_dir && !isTRUE(opts$cli_has_multimodal) && !is.null(opts$multimodal_flags) && nzchar(opts$multimodal_flags) &&

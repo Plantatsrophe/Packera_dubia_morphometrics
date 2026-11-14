@@ -1,6 +1,6 @@
 # ==============================================================================
 # Module: scripts/figures/step06_figures.R
-# Project: Packera Species Delimitation & Morphometrics Pipeline
+# Project: Plantmatics
 # Affiliation: University of North Carolina at Chapel Hill Herbarium (NCU)
 #
 # Description:
@@ -272,7 +272,7 @@ render_fig06a_genomic_pcoa_tree_png <- function(out_png, pass_df, assign_df, q_m
   invisible(out_png)
 }
 
-render_fig06b_reticulation_gdi_png <- function(out_png, tri_df, fbranch_df, gdi_df, feems_edges_df, mmrr_summary_df) {
+render_fig06b_reticulation_gdi_png <- function(out_png, tri_df, fbranch_df, gdi_df, feems_edges_df, mmrr_summary_df, organellar_placement_df = NULL) {
   if (identical(Sys.getenv("PACKERA_SKIP_FIGURES", unset = ""), "1")) return(invisible(""))
   if (!requireNamespace("ggplot2", quietly = TRUE) || !requireNamespace("patchwork", quietly = TRUE)) return(invisible(""))
 
@@ -292,13 +292,17 @@ render_fig06b_reticulation_gdi_png <- function(out_png, tri_df, fbranch_df, gdi_
       ggplot2::scale_shape_manual(values = sh_c)
   }
 
+  pol_vals <- if (!is.null(fbranch_df) && "polarization_source" %in% names(fbranch_df)) {
+    v <- as.character(fbranch_df$polarization_source); unique(v[!is.na(v) & nzchar(v)])
+  } else character(0)
+  fb_sub <- if (length(pol_vals) > 0L) sprintf("Polarization: %s", pol_vals[1L]) else NULL
   p_fb <- if (!is.null(fbranch_df) && nrow(fbranch_df) > 0L) {
     ggplot2::ggplot(fbranch_df, ggplot2::aes(x = .data$donor_taxon, y = .data$recipient_taxon, fill = .data$f_branch_fb)) +
       ggplot2::geom_tile(color = "white", linewidth = 0.25) +
       ggplot2::scale_fill_gradient(low = "#F8FAFC", high = "#B91C1C", limits = c(0, 1), name = "f_b") +
-      ggplot2::labs(title = "B. Tree-Guided Introgression (f-branch)", x = "Candidate Donor (P3)", y = "Recipient Branch") +
+      ggplot2::labs(title = "B. Tree-Guided Introgression (f-branch)", subtitle = fb_sub, x = "Candidate Donor (P3)", y = "Recipient Branch") +
       theme_packera_pub(base_size = 9.5) +
-      ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 35, hjust = 1, face = "italic", size = 8), axis.text.y = ggplot2::element_text(face = "italic", size = 8))
+      ggplot2::theme(plot.subtitle = ggplot2::element_text(size = 8.0, color = "#475569"), axis.text.x = ggplot2::element_text(angle = 35, hjust = 1, face = "italic", size = 8), axis.text.y = ggplot2::element_text(face = "italic", size = 8))
   } else {
     ggplot2::ggplot() + ggplot2::annotate("text", x = 0.5, y = 0.5, label = "Fewer than 4 lineages for f-branch ABBA/BABA", size = 3.5) + ggplot2::theme_void() + ggplot2::labs(title = "B. Tree-Guided Introgression (f-branch)")
   }
@@ -360,8 +364,16 @@ render_fig06b_reticulation_gdi_png <- function(out_png, tri_df, fbranch_df, gdi_
     ggplot2::ggplot() + ggplot2::annotate("text", x = 0.5, y = 0.5, label = mm_sub, size = 3.5) + ggplot2::theme_void() + ggplot2::labs(title = "D. Landscape Genomics (FEEMS / MMRR)")
   }
 
+  ann_sub <- if (!is.null(organellar_placement_df) && nrow(organellar_placement_df) > 0L && ("locus" %in% names(organellar_placement_df))) {
+    ltab <- table(as.character(organellar_placement_df$locus))
+    sprintf("GenBank/BOLD 11-mer locus placement: n=%d (%s)", nrow(organellar_placement_df), paste(sprintf("%s=%d", names(ltab), as.integer(ltab)), collapse = ", "))
+  } else NULL
   combo <- (p_tri | p_fb) / (p_gdi | p_feems) +
-    patchwork::plot_annotation(title = "Step 06: Reticulation Dynamics, Coalescent gdi, & Landscape Migration", theme = ggplot2::theme(plot.title = ggplot2::element_text(face = "bold", size = 12.0)))
+    patchwork::plot_annotation(
+      title = "Step 06: Reticulation Dynamics, Coalescent gdi, & Landscape Migration",
+      subtitle = ann_sub,
+      theme = ggplot2::theme(plot.title = ggplot2::element_text(face = "bold", size = 12.0), plot.subtitle = ggplot2::element_text(size = 9.0, color = "#475569"))
+    )
   dir.create(dirname(out_png), recursive = TRUE, showWarnings = FALSE)
   save_packera_png_300(combo, out_png, width = 15.0, height = 10.5, dpi = 300L)
   invisible(out_png)

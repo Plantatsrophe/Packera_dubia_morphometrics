@@ -2319,7 +2319,7 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
             stopifnot(kw_sub$w_morph_raw < 0.80)
 
             # 4. SQLite persistence into taxon_complexes (Gate 3)
-            Sys.setenv(PACKERA_DB_PATH = "{db_file.as_posix()}", RUN_ID = "run_step07_tc")
+            Sys.setenv(PLANTMATICS_DB_PATH = "{db_file.as_posix()}", RUN_ID = "run_step07_tc")
             full_res <- run_step07_complex_discovery(df_symp, list(min_affinity = 0.03, demo = FALSE, vouchers = ""))
             persist_step07_complexes_to_sqlite(full_res$complexes_df, vouchers_path = NULL, run_id = "run_step07_tc", demo = FALSE)
             cat("STEP06_COMPLEX_FOUR_GATES_OK\n")

@@ -574,7 +574,7 @@ class TestFourierExtractor(unittest.TestCase):
 
             if rscript_available():
                 env = dict(os.environ)
-                env["PACKERA_DB_PATH"] = str(eph_db)
+                env["PLANTMATICS_DB_PATH"] = str(eph_db)
                 r_expr = (
                     "source('scripts/morphometrics/pub_figures_utils.R'); "
                     "res <- standardize_taxon_name(c('Packera synalpha', 'Packera synalpha C.Auth', 'P. synalpha', 'Senecio synalpha', 'Packera canonbeta var. minor')); "
@@ -1146,7 +1146,8 @@ class TestFourierExtractor(unittest.TestCase):
         dlu_txt = (PROJECT_ROOT / "scripts" / "morphometrics" / "dissected_leaf_utils.R").read_text(encoding="utf-8")
         s03_txt = (PROJECT_ROOT / "scripts" / "morphometrics" / "03_fourier_extractor.R").read_text(encoding="utf-8")
 
-        self.assertIn("PACKERA_SCHEMA_USER_VERSION <- 20261123L", dbu_txt)
+        self.assertIn("PLANTMATICS_SCHEMA_USER_VERSION <- 20261124L", dbu_txt)
+        self.assertIn("PACKERA_SCHEMA_USER_VERSION <- PLANTMATICS_SCHEMA_USER_VERSION", dbu_txt)
         for col_name in (
             "detector_class_id",
             "is_crop_clipped",

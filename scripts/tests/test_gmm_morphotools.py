@@ -1846,7 +1846,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                   )
                   DBI::dbWriteTable(con, "otu_morphometrics", db_cong, overwrite = TRUE)
                   DBI::dbDisconnect(con)
-                  Sys.setenv(PACKERA_DB_PATH = db_p)
+                  Sys.setenv(PLANTMATICS_DB_PATH = db_p)
                   df_q <- data.frame(
                     catalogNumber = paste0("Q_", 1:6), species_standardized = "Packera dubia",
                     PC1 = rnorm(6, -9.0, 0.1), PC2 = rnorm(6, 9.0, 0.1), # deliberately flipped PC signs matching aurea if PCs were leaked!
@@ -1855,7 +1855,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                     stringsAsFactors = FALSE
                   )
                   osr_res <- compute_type_specimen_morph_control(df_q, X_mat = as.matrix(df_q[, c("PC1", "PC2")]), S_reg = diag(2), taxon_col = "species_standardized")
-                  Sys.unsetenv("PACKERA_DB_PATH")
+                  Sys.unsetenv("PLANTMATICS_DB_PATH")
                   stopifnot(all(osr_res$min_congener_taxon == "Packera anonyma"))
                 }}
                 cat("STEP04_ZERO_TRUST_OK\n")

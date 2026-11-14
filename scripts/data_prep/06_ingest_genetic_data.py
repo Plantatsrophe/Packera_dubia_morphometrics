@@ -45,7 +45,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from scripts.core.db import get_db_connection, upsert_genomic_samples
 from scripts.core.logger import setup_logging
 
-logger = setup_logging(name="packera.genomics.ingest")
+logger = setup_logging(name="plantmatics.genomics.ingest")
 
 # Taxon code table used in Fuller / SNPsaurus field and sequencing labels
 PAC_CODE_TO_TAXON: Dict[str, Tuple[str, str]] = {
@@ -111,6 +111,7 @@ class StagedGenomicAssets:
     alignment_files: List[Path]
     admixture_q_files: List[Path]
     organellar_files: List[Path] = field(default_factory=list)
+    public_reference_files: List[Path] = field(default_factory=list)
 
     @property
     def has_genetic_payload(self) -> bool:
@@ -247,12 +248,12 @@ def parse_sample_code(sample_id: str) -> Dict[str, Optional[str]]:
 
 
 _TRANSIENT_DOWNLOAD_SUFFIXES = (".crdownload", ".part", ".tmp")
-_RAW_SEQ_SUFFIXES = (".fastq", ".fastq.gz", ".fq", ".fq.gz", ".fastqsanger", ".bam", ".bai", ".sam", ".cram")
+_RAW_SEQ_SUFFIXES = (".fastq", ".fastq.gz", ".fq", ".fq.gz", ".fq.g", ".fastq.g", ".fastqsanger", ".bam", ".bai", ".sam", ".cram")
 
 
 def discover_genomic_inputs(genomics_dir: Path) -> StagedGenomicAssets:
-    """Discover flat staged variant, dosage, metadata, alignment, organellar, admixture, and phylogeny inputs."""
-    assets = StagedGenomicAssets([], [], [], [], [], [], [], [], [])
+    """Discover flat staged variant, dosage, metadata, alignment, organellar, public reference, admixture, and phylogeny inputs."""
+    assets = StagedGenomicAssets([], [], [], [], [], [], [], [], [], [])
     if not genomics_dir.exists() or not genomics_dir.is_dir():
         return assets
 
@@ -264,6 +265,9 @@ def discover_genomic_inputs(genomics_dir: Path) -> StagedGenomicAssets:
         if name.startswith(".") or low.endswith(_TRANSIENT_DOWNLOAD_SUFFIXES) or low.endswith(_RAW_SEQ_SUFFIXES):
             continue
         if low in ("parsed_genomic_samples.csv", "allele_dosage_matrix.tsv", "genomic_manifest.json", "hdplot_locus_diagnostics.tsv"):
+            continue
+        if low.startswith("public_packera_"):
+            assets.public_reference_files.append(p)
             continue
         if low.startswith("skimmed_") or low in ("bain_jansen_sequences.fasta", "cytonuclear_discordance.csv", "cytonuclear_discordance.tsv"):
             assets.organellar_files.append(p)
@@ -998,10 +1002,9 @@ def _load_organellar_metadata(organellar_files: Sequence[Path]) -> Dict[str, Dic
                 if not sid:
                     continue
                 rec = meta.setdefault(sid, {})
-                if row.get("plastid_clade"):
-                    rec["plastid_clade"] = str(row["plastid_clade"]).strip()
-                if row.get("its_ribotype"):
-                    rec["its_ribotype"] = str(row["its_ribotype"]).strip()
+                for org_col in ("plastid_clade", "its_ribotype", "public_plastome_match", "public_its_match", "waxy_lineage_match"):
+                    if row.get(org_col):
+                        rec[org_col] = str(row[org_col]).strip()
                 disc = str(row.get("cytonuclear_discordant", "")).strip().lower()
                 if disc in ("1", "true", "yes"):
                     rec["cytonuclear_discordant"] = 1
@@ -1244,6 +1247,9 @@ def run_genomic_ingestion(
             "plastid_clade": (u_meta or {}).get("plastid_clade") or org.get("plastid_clade"),
             "its_ribotype": (u_meta or {}).get("its_ribotype") or org.get("its_ribotype"),
             "cytonuclear_discordant": org.get("cytonuclear_discordant"),
+            "public_plastome_match": org.get("public_plastome_match"),
+            "public_its_match": org.get("public_its_match"),
+            "waxy_lineage_match": org.get("waxy_lineage_match"),
         })
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1300,6 +1306,7 @@ def run_genomic_ingestion(
         "tree_files": [str(p) for p in assets.tree_files],
         "alignment_files": [str(p) for p in assets.alignment_files],
         "organellar_files": [str(p) for p in assets.organellar_files],
+        "public_reference_files": [str(p) for p in assets.public_reference_files],
         "admixture_q_files": [str(p) for p in assets.admixture_q_files],
         "n_samples_total": len(records),
         "n_samples_pass": int(sum(1 for r in records if r["geno_quality_pass"] == 1)),

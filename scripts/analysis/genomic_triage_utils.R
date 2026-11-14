@@ -219,20 +219,40 @@ build_genomic_markdown_summary <- function(opts, df) {
   t_dir <- .resolve_step07_genomic_tables_dir(opts)
   r_dir <- .resolve_step07_genomic_reports_dir(opts)
   resolve_csv <- function(fname) {
-    p1 <- file.path(r_dir, fname)
-    if (file.exists(p1)) return(p1)
-    p2 <- file.path(t_dir, fname)
-    if (file.exists(p2)) return(p2)
+    cands <- unique(c(
+      r_dir,
+      t_dir,
+      if (!is.null(opts$genomic_dir) && nzchar(opts$genomic_dir)) opts$genomic_dir else character(0),
+      if (!is.null(opts$out_dir) && nzchar(opts$out_dir)) opts$out_dir else character(0),
+      file.path(dirname(r_dir), "genomics"),
+      file.path(dirname(t_dir), "genomics"),
+      file.path(dirname(dirname(t_dir)), "outputs", "genomics")
+    ))
+    wd <- normalizePath(getwd(), mustWork = FALSE)
+    is_local <- nzchar(t_dir) && (!grepl("^/", t_dir) || startsWith(normalizePath(t_dir, mustWork = FALSE), wd))
+    if (is_local && dir.exists("outputs/genomics")) cands <- c(cands, "outputs/genomics")
+    for (d in cands) {
+      if (nzchar(d)) {
+        p <- file.path(d, fname)
+        if (file.exists(p)) return(p)
+      }
+    }
     ""
   }
   ga_path <- resolve_csv("genomic_assignments.csv")
   gm_path <- resolve_csv("genomic_model_metrics.csv")
   gc_path <- resolve_csv("genomic_multimodal_congruence_summary.csv")
+  pbc_path <- resolve_csv("public_backbone_concordance.csv")
+  pop_path <- resolve_csv("public_organellar_placement.csv")
+  tc_path <- resolve_csv("taxon_complexes.csv")
   if (!nzchar(ga_path) && !any(has_active_genomic_row_mask(df))) return(character(0))
 
   ga_df <- if (nzchar(ga_path)) tryCatch(utils::read.csv(ga_path, stringsAsFactors = FALSE), error = function(e) NULL) else NULL
   gm_df <- if (nzchar(gm_path)) tryCatch(utils::read.csv(gm_path, stringsAsFactors = FALSE), error = function(e) NULL) else NULL
   gc_df <- if (nzchar(gc_path)) tryCatch(utils::read.csv(gc_path, stringsAsFactors = FALSE), error = function(e) NULL) else NULL
+  pbc_df <- if (nzchar(pbc_path)) tryCatch(utils::read.csv(pbc_path, stringsAsFactors = FALSE), error = function(e) NULL) else NULL
+  pop_df <- if (nzchar(pop_path)) tryCatch(utils::read.csv(pop_path, stringsAsFactors = FALSE), error = function(e) NULL) else NULL
+  tc_df <- if (nzchar(tc_path)) tryCatch(utils::read.csv(tc_path, stringsAsFactors = FALSE), error = function(e) NULL) else NULL
   gdi_df <- attr(df, "genomic_gdi_delimitation")
   if (is.null(gdi_df) && nzchar(resolve_csv("coalescent_gdi_delimitation.csv"))) {
     gdi_df <- tryCatch(utils::read.csv(resolve_csv("coalescent_gdi_delimitation.csv"), stringsAsFactors = FALSE), error = function(e) NULL)
@@ -296,12 +316,17 @@ build_genomic_markdown_summary <- function(opts, df) {
       )
     }
   }
-  if (!is.null(fb_df) && nrow(fb_df) > 0L && "f_branch" %in% names(fb_df)) {
-    fmax <- suppressWarnings(max(as.numeric(fb_df$f_branch), na.rm = TRUE))
+  f_col <- if (!is.null(fb_df) && "f_branch_fb" %in% names(fb_df)) "f_branch_fb" else "f_branch"
+  if (!is.null(fb_df) && nrow(fb_df) > 0L && (f_col %in% names(fb_df))) {
+    f_vals <- suppressWarnings(as.numeric(fb_df[[f_col]]))
+    fmax <- if (any(is.finite(f_vals))) max(f_vals, na.rm = TRUE) else NA_real_
     if (is.finite(fmax)) {
-      top_fb <- fb_df[which.max(suppressWarnings(as.numeric(fb_df$f_branch))), , drop = FALSE]
+      top_fb <- fb_df[which.max(f_vals), , drop = FALSE]
       donor_s <- if ("donor_taxon" %in% names(top_fb)) as.character(top_fb$donor_taxon[1L]) else "NA"
-      lines <- c(lines, sprintf("- **Tree-Guided Introgression (`f-branch`):** Maximum `f_b` = %.4f (donor `%s`).", fmax, donor_s))
+      pol_s <- if ("polarization_source" %in% names(top_fb) && !is.na(top_fb$polarization_source[1L]) && nzchar(as.character(top_fb$polarization_source[1L]))) {
+        sprintf("; polarization `%s`", as.character(top_fb$polarization_source[1L]))
+      } else ""
+      lines <- c(lines, sprintf("- **Tree-Guided Introgression (`f-branch`):** Maximum `f_b` = %.4f (donor `%s`%s).", fmax, donor_s, pol_s))
     }
   }
   if (!is.null(land_df) && nrow(land_df) > 0L && "mmrr_beta_ibd" %in% names(land_df)) {
@@ -325,6 +350,64 @@ build_genomic_markdown_summary <- function(opts, df) {
       sprintf("%s (n=%d, Mantel r=%s)", gc_df$comparison[k], as.integer(gc_df$n_samples[k]), ifelse(is.finite(suppressWarnings(as.numeric(gc_df$mantel_r[k]))), sprintf("%.3f", as.numeric(gc_df$mantel_r[k])), "NA"))
     }, character(1))
     lines <- c(lines, paste0("- **Post-Hoc Multi-Modal Congruence:** ", paste(c_strs, collapse = "; "), "."))
+  }
+  tc_src <- if (!is.null(tc_df) && nrow(tc_df) > 0L) tc_df else df
+  cx_col <- intersect(c("species_complex_id", "taxon_complex_id", "complex_id", "complex_label", "species_complex", "leiden_complex"), names(tc_src))[1L]
+  cx_str <- ""
+  if (!is.na(cx_col)) {
+    cx_vals <- as.character(tc_src[[cx_col]])
+    cx_vals <- cx_vals[!is.na(cx_vals) & nzchar(trimws(cx_vals)) & !grepl("^(NA|Singleton|Unassigned)$", cx_vals, ignore.case = TRUE)]
+    if (length(cx_vals) > 0L) {
+      cx_str <- sprintf("; Step 07 Leiden complexes represented (%d): %s", length(unique(cx_vals)), paste(head(unique(cx_vals), 5L), collapse = ", "))
+    }
+  }
+  if (!is.null(pbc_df) && nrow(pbc_df) > 0L) {
+    n_mo <- if ("in_mo_backbone" %in% names(pbc_df)) sum(.safe_bool_vec_r(pbc_df$in_mo_backbone), na.rm = TRUE) else 0L
+    n_ap <- if ("in_astralpro_backbone" %in% names(pbc_df)) sum(.safe_bool_vec_r(pbc_df$in_astralpro_backbone), na.rm = TRUE) else 0L
+    cmask <- if ("mo_astralpro_concordant" %in% names(pbc_df)) !is.na(pbc_df$mo_astralpro_concordant) else rep(FALSE, nrow(pbc_df))
+    n_both <- sum(cmask); n_conc <- if (n_both > 0L) sum(.safe_bool_vec_r(pbc_df$mo_astralpro_concordant[cmask])) else 0L
+    jacc_v <- if ("mo_astralpro_jaccard" %in% names(pbc_df)) suppressWarnings(as.numeric(pbc_df$mo_astralpro_jaccard)) else numeric(0)
+    jacc_v <- jacc_v[is.finite(jacc_v)]
+    clades <- if ("public_backbone_clade" %in% names(pbc_df)) unique(as.character(pbc_df$public_backbone_clade[!is.na(pbc_df$public_backbone_clade) & nzchar(pbc_df$public_backbone_clade)])) else character(0)
+    ils_v <- if ("public_phytop_ils_index" %in% names(pbc_df)) suppressWarnings(as.numeric(pbc_df$public_phytop_ils_index)) else numeric(0)
+    ih_v <- if ("public_phytop_ih_index" %in% names(pbc_df)) suppressWarnings(as.numeric(pbc_df$public_phytop_ih_index)) else numeric(0)
+    hot_str <- if (any(is.finite(ih_v)) || any(is.finite(ils_v))) {
+      hi <- if (any(is.finite(ih_v))) which.max(ifelse(is.finite(ih_v), ih_v, -Inf)) else which.max(ifelse(is.finite(ils_v), ils_v, -Inf))
+      htx <- if ("taxon" %in% names(pbc_df)) as.character(pbc_df$taxon[hi]) else "NA"
+      sprintf("PhyTop ILS vs IH hotspot: `%s` (ILS_index=%s, IH_index=%s; median ILS=%s, max IH=%s)",
+              htx,
+              if (length(ils_v) >= hi && is.finite(ils_v[hi])) sprintf("%.3f", ils_v[hi]) else "NA",
+              if (length(ih_v) >= hi && is.finite(ih_v[hi])) sprintf("%.3f", ih_v[hi]) else "NA",
+              if (any(is.finite(ils_v))) sprintf("%.3f", stats::median(ils_v[is.finite(ils_v)])) else "NA",
+              if (any(is.finite(ih_v))) sprintf("%.3f", max(ih_v[is.finite(ih_v)])) else "NA")
+    } else "PhyTop ILS_index/IH_index not staged"
+    lines <- c(lines, sprintf(
+      "- **Public 111-Taxon Nuclear Backbone (MO vs. ASTRAL-Pro & PhyTop):** %d/%d taxa mapped to MO and %d to ASTRAL-Pro (%d/%d shared clades concordant, median Jaccard=%s); clades: %s; %s%s.",
+      n_mo, nrow(pbc_df), n_ap, n_conc, n_both,
+      if (length(jacc_v) > 0L) sprintf("%.3f", stats::median(jacc_v)) else "NA",
+      if (length(clades) > 0L) paste(head(clades, 4L), collapse = ", ") else "none",
+      hot_str, cx_str
+    ))
+  }
+  if (!is.null(pop_df) && nrow(pop_df) > 0L) {
+    n_pl <- sum(as.character(pop_df$locus) == "plastid", na.rm = TRUE)
+    n_it <- sum(as.character(pop_df$locus) == "its", na.rm = TRUE)
+    n_wx <- sum(as.character(pop_df$locus) == "waxy", na.rm = TRUE)
+    top_tx <- unique(as.character(pop_df$best_match_taxon[!is.na(pop_df$best_match_taxon) & nzchar(pop_df$best_match_taxon)]))
+    med_c <- if ("kmer_containment" %in% names(pop_df)) suppressWarnings(stats::median(as.numeric(pop_df$kmer_containment), na.rm = TRUE)) else NA_real_
+    lines <- c(lines, sprintf(
+      "- **GenBank/BOLD Plastid-ITS-waxy Placement:** %d sample-locus matches (plastid=%d, ITS=%d, waxy=%d; median 11-mer containment=%s; top matched references: %s)%s.",
+      nrow(pop_df), n_pl, n_it, n_wx,
+      if (is.finite(med_c)) sprintf("%.3f", med_c) else "NA",
+      if (length(top_tx) > 0L) paste(head(top_tx, 5L), collapse = ", ") else "none",
+      if (is.null(pbc_df) || nrow(pbc_df) == 0L) cx_str else ""
+    ))
+  } else if (!is.null(ga_df) && nrow(ga_df) > 0L && any(c("public_plastome_match", "public_its_match", "waxy_lineage_match") %in% names(ga_df))) {
+    cnt_nn <- function(col) if (col %in% names(ga_df)) sum(!is.na(ga_df[[col]]) & nzchar(trimws(as.character(ga_df[[col]])))) else 0L
+    n_pl <- cnt_nn("public_plastome_match"); n_it <- cnt_nn("public_its_match"); n_wx <- cnt_nn("waxy_lineage_match")
+    if ((n_pl + n_it + n_wx) > 0L) {
+      lines <- c(lines, sprintf("- **GenBank/BOLD Plastid-ITS-waxy Placement:** plastid=%d, ITS=%d, waxy=%d sample matches recorded in `genomic_assignments.csv`%s.", n_pl, n_it, n_wx, if (is.null(pbc_df) || nrow(pbc_df) == 0L) cx_str else ""))
+    }
   }
   lines
 }

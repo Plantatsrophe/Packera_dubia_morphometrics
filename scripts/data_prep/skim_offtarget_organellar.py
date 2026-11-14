@@ -465,15 +465,14 @@ def run_offtarget_organellar_skim(
     genomics_dir.mkdir(parents=True, exist_ok=True)
     cp_fasta, its_fasta, waxy_fasta = genomics_dir / "skimmed_plastid_consensus.fasta", genomics_dir / "skimmed_its_consensus.fasta", genomics_dir / "skimmed_waxy_consensus.fasta"
     cyto_csv = genomics_dir / "cytonuclear_discordance.csv"
-    with open(cp_fasta, "wt", encoding="utf-8") as fh:
-        for sid, seq in sorted(cp_cons.items()):
-            fh.write(f">{sid}|clade={cp_clades.get(sid, 'cp_Unassigned')}\n{seq}\n")
-    with open(its_fasta, "wt", encoding="utf-8") as fh:
-        for sid, seq in sorted(its_cons.items()):
-            fh.write(f">{sid}|ribotype={its_ribo.get(sid, 'ITS_Unassigned')}\n{seq}\n")
-    with open(waxy_fasta, "wt", encoding="utf-8") as fh:
-        for sid, seq in sorted(waxy_cons.items()):
-            fh.write(f">{sid}|waxy={waxy_clades.get(sid, 'Waxy_Unassigned')}\n{seq}\n")
+    for out_fa, cons_map, tag, lbl_map, fallback in (
+        (cp_fasta, cp_cons, "clade", cp_clades, "cp_Unassigned"),
+        (its_fasta, its_cons, "ribotype", its_ribo, "ITS_Unassigned"),
+        (waxy_fasta, waxy_cons, "waxy", waxy_clades, "Waxy_Unassigned"),
+    ):
+        with open(out_fa, "wt", encoding="utf-8") as fh:
+            for sid, seq in sorted(cons_map.items()):
+                fh.write(f">{sid}|{tag}={lbl_map.get(sid, fallback)}\n{seq}\n")
     cols = ["genetic_sample_id", "nuclear_taxon", "plastid_clade", "its_ribotype", "cytonuclear_discordant", "public_plastome_match", "public_its_match", "waxy_lineage_match"]
     (pd.DataFrame(cyto_rows) if cyto_rows else pd.DataFrame(columns=cols)).to_csv(cyto_csv, index=False)
 

@@ -222,7 +222,8 @@ Central defaults live in [`config/config.yaml`](config/config.yaml) and load thr
 | Flag | Arguments | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `--run-id` | `<ID>` | `run_<YYYYMMDD_HHMMSS>` | Assigns run directory `runs/<ID>/` and updates symlink `runs/latest`. |
-| `--db` | `<PATH>` | `data/packera_pipeline.sqlite` | Overrides path to the central SQLite WAL database (`PACKERA_DB_PATH`). |
+| `--db` | `<PATH>` | `data/plantmatics.sqlite` | Overrides path to the central SQLite WAL database (`PLANTMATICS_DB_PATH` with `PACKERA_DB_PATH` fallback). |
+| `--download-public-genomics` | *(flag)* | `false` | Downloads public *Packera* Dryad trees and plastomes alongside NCBI nrITS/nuclear `waxy`, SRA runs, and BOLD barcodes flat into `data/genomics/public_packera_*` before Step 06. |
 | `--start-step` | `<1..7>` | `1` | Starts or resumes execution at Step `1` through `7` (steps $\ge 2$ imply `--skip-harvest`). |
 | `--skip-harvest` | *(flag)* | `false` | Skips Step 01 network queries and seeds the cohort from SQLite `vouchers` and `curated_vouchers.csv`. |
 | `--skip-env-download` | *(flag)* | `false` | Skips automated pre-Step-05 downloads of missing SOLUS100, USGS SGMC, and cohort 3DEP 30 m DEM tiles. |
@@ -258,13 +259,14 @@ Central defaults live in [`config/config.yaml`](config/config.yaml) and load thr
 | `check-env` | `main.py` | Verifies Python ($\ge 3.10$), ONNX Runtime / CUDA, R ($\ge 4.3$) packages, writable directories, and LeafMachine3 checkpoints. |
 | `download-weights` | `scripts/core/artifact_manager.py` | Verifies SHA-256 checksums and stages pinned model weights under `models/lm3/`. |
 | `download-env` | `scripts/data_prep/download_environmental_layers.py` | Verifies and downloads cached SOLUS100 (`100 m`), USGS SGMC, and cohort 3DEP `30 m` DEM layers into `data/environmental/`. |
+| `download-public-genomics` | `scripts/data_prep/download_public_packera_sequences.py` | Harvests Dryad phylogenomic trees and `PhyTop` conflict tables alongside complete plastomes (Moore-Pollard et al. 2026), NCBI plastid/nrITS/nuclear `waxy` sequences, SRA runs, and BOLD barcodes directly into flat `data/genomics/public_packera_*` files (`0` subdirectories). |
 | `purge-runs-only` (`purge-run-outputs`) | `scripts/core/db.py` | Non-destructively wipes `runs/`, `outputs/`, non-Step-01/02 CSVs, and Tier B SQLite tables (including `genetic_lineage_assignments`) while preserving Step 01 vouchers, Tier A `genomic_samples`, `data/genomics/`, and Step 02 masks, contours, and ECT arrays (also available via `--purge-runs-only`). |
 | `purge-segments` (`purge-old-data`) | `scripts/core/db.py` | Resets Step 02 to 07 masks, contours, ECT matrices, `runs/`, and Tier B / Step 02 SQLite tables while preserving Step 01 scans, `vouchers`, and `genomic_samples`. |
 | `harvest` | `scripts/data_prep/01_voucher_harvester.py` | Runs Step 01 GBIF/iDigBio harvesting, synonym resolution, authority stratification, USDA county range tagging, and WebP downloads. |
 | `segment` | `scripts/pipeline/02_segment_and_extract.py` | Runs Step 02 read-only LeafMachine3 ONNX segmentation, DBSCAN plant clustering, 4-case `leaf_zone` scoring, $32 \times 360$ ECT export, and `fig02a`/`fig02b` generation. |
 | `morphometrics` | `03_fourier_extractor.R` + `04_gmm_morphotools.R` | Runs Step 03 EFA + ECT decomposition (`fig03a`, `fig03b`) followed by Step 04 allometry, GMM, shrinkage CDA, OSR, and batch/ecoregion audits (`fig04a`, `fig04b`, `fig04c`). |
-| `genomics` | `06_ingest_genetic_data.py` + `06_genomic_phylogenomics.R` | Executes independent Step 06 `HDplot` paralog filtering, Empirical Bayes polyploid dosage estimation, $(h, Q_{12})$ hybrid classification, `fineRADstructure` coancestry, $f_b$/`SNPs2CF` reticulation, invariant-site coalescent `SVDquartets`/`BPP`/`gdi`, and post-hoc `MMRR`/`FEEMS` (`fig06a`, `fig06b`); skips cleanly as a no-op when `data/genomics/` is empty. |
-| `skim-organellar` | `scripts/data_prep/skim_offtarget_organellar.py` | Optional offline companion tool that harvests paired-end or zipped FASTQ reads, runs reference-guided cpDNA and nrITS consensus skimming (`GetOrganelle` / `nQuire` / pure-Python mapper), and writes organelle/ITS CSVs flat into `data/genomics/`. |
+| `genomics` | `06_ingest_genetic_data.py` + `06_genomic_phylogenomics.R` + `step06_public_backbone.R` | Executes independent Step 06 `HDplot` paralog filtering, Empirical Bayes polyploid dosage estimation, $(h, Q_{12})$ hybrid classification, `fineRADstructure` coancestry, public-backbone-polarized $f_b$/`SNPs2CF` reticulation, `PhyTop` conflict indices, invariant-site coalescent `SVDquartets`/`BPP`/`gdi`, and post-hoc `MMRR`/`FEEMS` (`fig06a`, `fig06b`); skips cleanly (`skipped_empty`) when no sample payload sits in `data/genomics/`. |
+| `skim-organellar` | `scripts/data_prep/skim_offtarget_organellar.py` | Optional offline companion tool that harvests paired-end or zipped FASTQ reads, runs reference-guided cpDNA and nrITS consensus skimming alongside nuclear `waxy` baiting on `public_packera_*` references (`GetOrganelle` / `nQuire` / pure-Python mapper), and writes `skimmed_waxy_consensus.fasta` plus organelle/ITS files flat into `data/genomics/`. |
 | `synthesis` (`analyze`) | `05_multimodal_spatial_rf.R` + `06_genomic_phylogenomics.R` + `07_triage_dashboard_synthesis.R` | Ensures cached environmental layers via `download_environmental_layers.py` (unless `--skip-env-download`), runs morphometric- and genomic-independent Step 05 Spatial RF, `ecotype_regime` discovery, MaxEnt SDMs, and Hopkins phenology (`fig05a` to `fig05c`), runs standalone Step 06 phylogenomics whenever `data/genomics/` holds genetic files (`fig06a`, `fig06b`), and executes Step 07 joint consensus synthesis (`fig07a`, `fig07b`). |
 | `run-all` | `main.py` | Executes `harvest` $\to$ `segment` $\to$ `morphometrics` $\to$ `genomics` (when staged) $\to$ `synthesis` end to end inside a run-scoped directory. |
 
@@ -288,9 +290,9 @@ To prevent coarse historical locality centroids from contaminating fine-scale so
 
 Every run writes self-contained tables, reports, rasters, and **300-DPI PNG-only** figures (`0` PDF outputs) under `runs/<RUN_ID>/` (`runs/latest/`):
 
-* **Flat Genomic Staging (`data/genomics/`):** Optional raw sequence variants (`.vcf`, `.vcf.gz`, `.bcf`), SNPsaurus barcode/QC keys (`*_key.txt`, `*_stats.txt`), polyploid allele-dosage tables, invariant-site PHYLIP/NEXUS/FASTA alignments, Newick trees, and user field/organellar CSVs stage directly inside the flat directory `data/genomics/` (`0` subdirectories; gitignored except `.gitkeep`). When `data/genomics/` holds no genetic files, Step 06 logs a skip notice and exits cleanly without altering downstream Step 07 calls.
+* **Flat Genomic Staging (`data/genomics/`):** Optional raw sequence variants (`.vcf`, `.vcf.gz`, `.bcf`), SNPsaurus barcode/QC keys (`*_key.txt`, `*_stats.txt`), polyploid allele-dosage tables, invariant-site PHYLIP/NEXUS/FASTA alignments, sample Newick trees, and user field/organellar CSVs stage directly inside the flat directory `data/genomics/` (`0` subdirectories; gitignored except `.gitkeep`). Downloaded `public_packera_*` files from `download-public-genomics` (Dryad ASTRAL trees, `PhyTop` tables, 18 complete plastomes, NCBI plastid/ITS/`waxy` FASTAs, `public_packera_sra_runs.csv`, and `public_packera_bold_barcodes.fasta`) plus skimmed consensus FASTAs (`skimmed_plastid_consensus.fasta`, `skimmed_its_consensus.fasta`, and `skimmed_waxy_consensus.fasta`) remain flat in the same folder. When `data/genomics/` lacks sample genetic payloads (even with `public_packera_*` references present), `discover_genomic_inputs()` records `has_genetic_payload = False` so Step 06 logs `skipped_empty` without altering Step 07 determinations.
 * **Tables (`runs/<RUN_ID>/data/tables/`):** `curated_vouchers.csv`, `extracted_leaf_manifest.csv`, `voucher_reproductive_metrics.csv`, `voucher_phenological_states.csv`, `leaf_efa_harmonics_individual.csv`, `leaf_efa_harmonics.csv`, `allometry_permanova_summary.csv`, `allometry_pairwise_slopes.csv`, `batch_variance_audit.csv`, `morphometric_flags.csv`, `ssurgo_edaphic_validation.csv`, `phenological_anomalies.csv`, `multimodal_conflict_flags.csv`, `genomic_field_triage.csv` *(when Step 06 runs)*, and `triage_queue.csv`.
-* **Genomic Outputs (`runs/<RUN_ID>/outputs/genomics/` & `genomics_parsed/`):** `parsed_genomic_samples.csv`, `allele_dosage_matrix.tsv`, `hdplot_locus_diagnostics.tsv`, `genomic_assignments.csv`, `coancestry_matrix_finerad.csv`, `hybrid_index_q12_triangle.csv`, `introgressive_fbranch_summary.csv`, `quartet_concordance_factors_snps2cf.csv`, `svdquartets_support.csv`, `coalescent_gdi_delimitation.csv`, and `landscape_mmrr_feems_summary.csv`.
+* **Genomic Outputs (`runs/<RUN_ID>/outputs/genomics/` & `genomics_parsed/`):** `parsed_genomic_samples.csv`, `allele_dosage_matrix.tsv`, `hdplot_locus_diagnostics.tsv`, `genomic_assignments.csv`, `coancestry_matrix_finerad.csv`, `hybrid_index_q12_triangle.csv`, `introgressive_fbranch_summary.csv` (recording `polarization_source`), `quartet_concordance_factors_snps2cf.csv`, `svdquartets_support.csv`, `coalescent_gdi_delimitation.csv`, `landscape_mmrr_feems_summary.csv`, `public_backbone_concordance.csv`, and `public_organellar_placement.csv`.
 * **Reports & Dashboard (`runs/<RUN_ID>/outputs/reports/`):** `gmm_bayes_factors_summary.csv`, `manova_group_significance.csv`, `manova_pairwise_posthoc.csv`, `ecoregion_supervised_cda_summary.csv`, `micro_edaphic_outcrop_contingency.csv`, `phenological_anomaly_summary.csv`, `multimodal_spatial_rf_summary.csv`, `sdm_model_performance.csv`, `empirical_taxon_complexes.csv`, `pairwise_taxon_affinity_matrix.csv`, `focal_auto_neighbors.txt`, `Packera_Taxonomic_Revision_Summary.md`, and the self-contained offline curatorial viewer `Triage_Dashboard_Interactive.html`.
 * **Native LeafMachine3 Visual Caches (`runs/<RUN_ID>/outputs/figures/`):**
   * `lm3_assets/` and `ect_overlays/`: Unlimited taxon-indexed native `LeafMachine3` leaf cutouts (`render_leaf_products`) and polar radial ECT badges (`render_radial_ect_overlay`) across basal and cauline tracks, reused inline across Step 03, Step 07, and `Triage_Dashboard_Interactive.html`.
@@ -320,13 +322,13 @@ All 14 publication plates scale dynamically from $N = 1$ intraspecific runs to $
 ## Repository Structure
 
 ```text
-Packera_dubia_morphometrics/
+Plantmatics/
 ├── config/
 │   ├── __init__.py                                  # Typed configuration package marker
 │   └── config.yaml                                  # Central paths, LeafMachine3 settings, and cohort-adaptive bounds
 ├── docs/
 │   ├── TAXONOMIC_SOP.md                             # Complete mathematical, statistical, and botanical SOP (REV5)
-│   ├── DATA_DICTIONARY.md                           # SQLite Schema 20261123 table, column, unit, and CSV specifications
+│   ├── DATA_DICTIONARY.md                           # SQLite Schema 20261124 table, column, unit, and CSV specifications
 │   └── ENVIRONMENTAL_DATA_SOURCES.md                # Pedological, lithological, topographic, and BioClim layer specs
 ├── .agents/
 │   └── skills/
@@ -346,8 +348,8 @@ Packera_dubia_morphometrics/
 └── scripts/
     ├── core/
     │   ├── config.py                                # Typed PipelineConfig loader and thread/batch resolvers
-    │   ├── db.py                                    # Transactional SQLite WAL and DuckDB operations + purge_runs_only / purge_segments_and_runs
-    │   ├── db_schema.py                             # Schema 20261123 DDL, migrations, and v_integrative_triage_master view
+    │   ├── db.py                                    # Transactional SQLite WAL and DuckDB operations + atomic legacy migration
+    │   ├── db_schema.py                             # Schema 20261124 DDL, migrations, and v_integrative_triage_master view
     │   ├── db_utils.R                               # R SQLite/DuckDB batch reader, dynamic column sync, and atomic writers
     │   ├── harvester.py                             # GBIF/iDigBio harvester, synonym resolver, exsiccatae deduplicator, and WebP saver
     │   ├── taxonomy_authority.py                    # 3-layer determiner authority engine, monographer loan guard, and batch demotion
@@ -358,8 +360,9 @@ Packera_dubia_morphometrics/
     ├── data_prep/
     │   ├── 01_voucher_harvester.py                  # Step 01 CLI parser and occurrence harvester entrypoint
     │   ├── download_environmental_layers.py         # Automated SOLUS100, USGS SGMC (.gpkg), and cohort 3DEP 30 m DEM downloader
+    │   ├── download_public_packera_sequences.py     # Flat Dryad, NCBI nuccore (plastid/ITS/waxy), ENA/SRA, and BOLD public Packera harvester
     │   ├── 06_ingest_genetic_data.py                # Step 06 flat-directory nextRAD/VCF parser, HDplot filter, EB polyploid dosage & G1..G4 linker
-    │   └── skim_offtarget_organellar.py             # Optional offline cpDNA/nrITS FASTQ skimmer into flat data/genomics/
+    │   └── skim_offtarget_organellar.py             # Optional offline cpDNA/nrITS/waxy FASTQ skimmer into flat data/genomics/
     ├── vision/
     │   ├── configure_leafmachine3.py                # Generates LM3_settings.local.yaml and resolves ONNX modelhub paths
     │   ├── lm3_compat.py                            # Lightweight LeafMachine3 compatibility and NumPy DBSCAN fallback helpers
@@ -397,6 +400,7 @@ Packera_dubia_morphometrics/
     │   ├── step05_sdm_maxent.R                      # Authority-weighted MaxEnt (cloglog) + Spatial RF land-masked SDMs and Boyce calibration
     │   ├── edaphic_fine_grain_utils.R               # SSURGO SDA, POLARIS 30 m, SOLUS100, 3DEP 30 m topography, derived habitat indices, and USGS SGMC extractors
     │   ├── 06_genomic_phylogenomics.R               # Independent Step 06 nextRAD PCoA, LORO DAPC, sNMF simplex, and Phase 2 phylogenomic orchestrator
+    │   ├── step06_public_backbone.R                 # Public ASTRAL/plastome backbone concordance, PhyTop conflict metrics, and waxy placement
     │   ├── step06_reticulation_coancestry.R         # Step 06 fineRADstructure coancestry, (h, Q12) hybrid classes, Dsuite f_b, and SNPs2CF quartets
     │   ├── step06_coalescent_delimitation.py        # Step 06 invariant-site SVDquartets, BPP MSci control export, and locus-bootstrapped gdi engine
     │   ├── step06_spatial_landscape_genomics.R      # Step 06 small-n guardrail, post-hoc Wang MMRR, conStruct decay, and FEEMS Laplacian migration
@@ -410,10 +414,10 @@ Packera_dubia_morphometrics/
 
 Developer workflow conventions, R script line-count budgets, and pre-commit QA rules are documented in [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
-### Running the Automated Audit Suite (`244` Tests)
+### Running the Automated Audit Suite
 
 ```bash
-# Run the centralized 244-test Python + warm-R integration and code-hygiene runner
+# Run the centralized Python + warm-R integration and code-hygiene runner
 .venv/bin/python scripts/tests/run_audit.py
 
 # Run rapid Python-only preflight checks (~25s, skips Rscript workers cleanly)
@@ -434,6 +438,6 @@ Developer workflow conventions, R script line-count budgets, and pre-commit QA r
 
 ## License and Citation
 
-Pipeline orchestration, morphometric modeling, spatial niche analysis, and taxonomic synthesis code in this repository are released under the [MIT License](LICENSE). [LeafMachine3](https://github.com/Gene-Weaver/LeafMachine3) is distributed separately under the GNU Affero General Public License v3.0 (AGPL-3.0).
+Pipeline orchestration, morphometric modeling, spatial niche analysis, and taxonomic synthesis code in **Plantmatics** (`https://github.com/Plantatsrophe/Plantmatics`) are released under the [MIT License](LICENSE). [LeafMachine3](https://github.com/Gene-Weaver/LeafMachine3) is distributed separately under the GNU Affero General Public License v3.0 (AGPL-3.0).
 
-Machine-readable citation metadata is provided in [`CITATION.cff`](CITATION.cff). When citing this pipeline or its statistical protocol, cite [`docs/TAXONOMIC_SOP.md`](docs/TAXONOMIC_SOP.md) (`UNC-BOT-SOP-2026-04-REV5`) alongside Weaver (2026; `https://github.com/Gene-Weaver/LeafMachine3`) and Ayub et al. (2026; `doi: 10.64898/2026.04.13.718293`).
+Machine-readable citation metadata is provided in [`CITATION.cff`](CITATION.cff). When citing this pipeline or its statistical protocol, cite [`docs/TAXONOMIC_SOP.md`](docs/TAXONOMIC_SOP.md) (`UNC-BOT-SOP-2026-04-REV5`) alongside Weaver (2026; `https://github.com/Gene-Weaver/LeafMachine3`) and Ayub et al. (2026; `doi: 10.64898/2026.04.13.718293`). For public *Packera* phylogenomic backbones and complete plastomes consumed by Step 06, cite Moore-Pollard, Ellestad, and Mandel (2026, *Systematic Biology*, `doi: 10.1093/sysbio/syag041`; Dryad dataset `doi: 10.5061/dryad.bg79cnppn`). For public nrITS/ETS and nuclear `waxy` reference alignments, cite Boufford et al. (2014, *Systematic Botany*) alongside Bain and Golden (2000) and Pelser et al. (2007).

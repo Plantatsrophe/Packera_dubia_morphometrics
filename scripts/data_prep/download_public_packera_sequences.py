@@ -432,7 +432,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--skim-sra-accessions", nargs="+", default=None, help="SRA/ENA run accessions to stream-skim via skim_offtarget_organellar")
     parser.add_argument("--force", action="store_true", default=False, help="Overwrite existing non-empty public_packera_* files")
     args = parser.parse_args(list(argv) if argv is not None else None)
-    download_public_packera_sequences(args.genomics_dir, sources=args.sources, dryad_zip_dir=args.dryad_zip_dir, skim_sra_accessions=args.skim_sra_accessions, force=bool(args.force))
+    summary = download_public_packera_sequences(args.genomics_dir, sources=args.sources, dryad_zip_dir=args.dryad_zip_dir, skim_sra_accessions=args.skim_sra_accessions, force=bool(args.force))
+    print(f"[INFO] Public Packera download summary: {json.dumps({'dryad_status': summary.get('dryad_status'), 'counts': summary.get('counts')})}")
     return 0
 
 

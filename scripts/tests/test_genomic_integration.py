@@ -5,8 +5,8 @@ Phylogenomic Evidence Stream) and Step 07 (Integrative Synthesis & Triage).
 
 Covers:
   1. `.gitignore` tracking of `!data/genomics/.gitkeep` and flat payload ignores.
-  2. SQLite WAL schema migrations (`20261121 -> 20261123` and `20261122 -> 20261123`),
-     all 18 Phase 2 columns in `genomic_samples`, `genetic_lineage_assignments`,
+  2. SQLite WAL schema migrations (`20261121 -> 20261124`, `20261122 -> 20261124`, and `20261123 -> 20261124`),
+     all Phase 2 and public-reference columns in `genomic_samples`, `genetic_lineage_assignments`,
      and `v_integrative_triage_master` cardinality (`plant_individuals` preserved),
      plus `purge --runs-only` Tier A preservation vs Tier B cleanup.
   3. Empty/transient `data/genomics/` detection, flat-directory write guards, and
@@ -32,7 +32,9 @@ from __future__ import annotations
 
 import csv
 import gzip
+import hashlib
 import importlib
+import io
 import json
 import os
 import shutil
@@ -41,6 +43,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.error
+import urllib.parse
+import urllib.request
 import zipfile
 from pathlib import Path
 from unittest import mock
@@ -60,11 +65,14 @@ from scripts.core.db import (
 )
 from scripts.core.db_schema import (
     PACKERA_SCHEMA_USER_VERSION,
+    PLANTMATICS_SCHEMA_USER_VERSION,
     migrate_database_schema,
 )
 from scripts.data_prep import skim_offtarget_organellar as skim_mod
+from scripts.tests._r_session import rscript_available, run_warm_r_cmd
 
 INGEST_MOD = importlib.import_module("scripts.data_prep.06_ingest_genetic_data")
+PUBLIC_DL_MOD = importlib.import_module("scripts.data_prep.download_public_packera_sequences")
 
 
 def _build_synthetic_vcf_text(
@@ -144,7 +152,8 @@ class TestGenomicIntegration(unittest.TestCase):
                 self.assertEqual(res_ign.returncode, 0, f"Genomic payload not ignored by git: {probe}")
 
     def test_schema_migration_master_cardinality_and_purge_runs_only(self) -> None:
-        self.assertEqual(PACKERA_SCHEMA_USER_VERSION, 20261123)
+        self.assertEqual(PLANTMATICS_SCHEMA_USER_VERSION, 20261124)
+        self.assertEqual(PACKERA_SCHEMA_USER_VERSION, 20261124)
 
         expected_gs_phase2 = {
             "hdplot_retained_loci",
@@ -153,6 +162,9 @@ class TestGenomicIntegration(unittest.TestCase):
             "plastid_clade",
             "its_ribotype",
             "cytonuclear_discordant",
+            "public_plastome_match",
+            "public_its_match",
+            "waxy_lineage_match",
         }
         expected_gla_phase2 = {
             "hybrid_index_h",
@@ -167,9 +179,12 @@ class TestGenomicIntegration(unittest.TestCase):
             "mmrr_beta_ibd",
             "mmrr_beta_ibe",
             "mmrr_p_ibe",
+            "public_backbone_clade",
+            "public_phytop_ils_index",
+            "public_phytop_ih_index",
         }
 
-        for legacy_ver in (20261121, 20261122):
+        for legacy_ver in (20261121, 20261122, 20261123):
             with tempfile.TemporaryDirectory() as td:
                 tmp = Path(td)
                 db_path = tmp / f"legacy_{legacy_ver}.sqlite"
@@ -206,12 +221,54 @@ class TestGenomicIntegration(unittest.TestCase):
                         );
                         """
                     )
+                elif legacy_ver == 20261123:
+                    conn.execute(
+                        """
+                        CREATE TABLE genomic_samples (
+                            genetic_sample_id TEXT PRIMARY KEY,
+                            catalogNumber TEXT,
+                            linkage_tier TEXT,
+                            species_standardized TEXT,
+                            geno_quality_pass INTEGER,
+                            mapped_reads INTEGER,
+                            hdplot_retained_loci INTEGER,
+                            inferred_cytotype TEXT,
+                            nquire_delta_logl REAL,
+                            plastid_clade TEXT,
+                            its_ribotype TEXT,
+                            cytonuclear_discordant INTEGER
+                        );
+                        """
+                    )
+                    conn.execute(
+                        """
+                        CREATE TABLE genetic_lineage_assignments (
+                            run_id TEXT NOT NULL,
+                            genetic_sample_id TEXT NOT NULL,
+                            catalogNumber TEXT,
+                            geno_predicted_taxon TEXT,
+                            hybrid_index_h REAL,
+                            interspecific_ancestry_q12 REAL,
+                            hybrid_generation_class TEXT,
+                            coancestry_cluster TEXT,
+                            f_branch_max REAL,
+                            f_branch_donor_taxon TEXT,
+                            snaq_gamma_minor REAL,
+                            coalescent_gdi REAL,
+                            bpp_introgression_bf REAL,
+                            mmrr_beta_ibd REAL,
+                            mmrr_beta_ibe REAL,
+                            mmrr_p_ibe REAL,
+                            PRIMARY KEY (run_id, genetic_sample_id)
+                        );
+                        """
+                    )
                 conn.execute(f"PRAGMA user_version = {legacy_ver};")
                 conn.commit()
 
                 migrate_database_schema(conn)
                 uv_after = conn.execute("PRAGMA user_version;").fetchone()[0]
-                self.assertEqual(uv_after, 20261123)
+                self.assertEqual(uv_after, 20261124)
                 init_db_schema(conn)
 
                 gs_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(genomic_samples);").fetchall()}
@@ -232,7 +289,7 @@ class TestGenomicIntegration(unittest.TestCase):
             runs_dir = ws / "runs" / "run_alpha"
             for d in (tables_dir, runs_dir):
                 d.mkdir(parents=True, exist_ok=True)
-            db_path = data_dir / "packera_pipeline.sqlite"
+            db_path = data_dir / "plantmatics.sqlite"
 
             conn = get_db_connection(db_path=db_path, init_schema=True, workspace_root=ws)
             try:
@@ -383,7 +440,7 @@ class TestGenomicIntegration(unittest.TestCase):
                     "genomics_dir": None,
                 },
             )()
-            with mock.patch.dict(os.environ, {"PACKERA_GENOMICS_DIR": str(geno_dir)}), mock.patch("subprocess.run") as m_run:
+            with mock.patch.dict(os.environ, {"PLANTMATICS_GENOMICS_DIR": str(geno_dir)}), mock.patch("subprocess.run") as m_run:
                 ret_empty = root_main.run_genomics_stream(cli_args, run_dir, tables_dir, figs_dir, "Rscript")
                 self.assertIsNone(ret_empty)
                 m_run.assert_not_called()
@@ -396,7 +453,7 @@ class TestGenomicIntegration(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            with mock.patch.dict(os.environ, {"PACKERA_GENOMICS_DIR": str(geno_dir)}), mock.patch("subprocess.run") as m_run:
+            with mock.patch.dict(os.environ, {"PLANTMATICS_GENOMICS_DIR": str(geno_dir)}), mock.patch("subprocess.run") as m_run:
                 ret_pop = root_main.run_genomics_stream(cli_args, run_dir, tables_dir, figs_dir, "Rscript")
                 self.assertEqual(ret_pop, run_dir / "outputs" / "genomics")
                 self.assertEqual(m_run.call_count, 2)
@@ -842,9 +899,9 @@ class TestGenomicIntegration(unittest.TestCase):
 
             r_script = f"""
 Sys.setenv(
-  PACKERA_DB_PATH = {json.dumps(str(db_path))},
+  PLANTMATICS_DB_PATH = {json.dumps(str(db_path))},
   PACKERA_SQLITE_DB = {json.dumps(str(db_path))},
-  PACKERA_GENOMICS_DIR = {json.dumps(str(empty_geno))},
+  PLANTMATICS_GENOMICS_DIR = {json.dumps(str(empty_geno))},
   RUN_ID = "batch_smoke"
 )
 
@@ -867,7 +924,7 @@ stopifnot(identical(as.integer(st_empty), 0L))
 stopifnot(!file.exists(file.path({json.dumps(str(step06_empty_out))}, "genomic_assignments.csv")))
 
 # 2. Standalone Step 06 populated Phase 2 execution via CLI
-Sys.setenv(PACKERA_GENOMICS_DIR = {json.dumps(str(pop_geno))})
+Sys.setenv(PLANTMATICS_GENOMICS_DIR = {json.dumps(str(pop_geno))})
 st_pop <- system2(
   {json.dumps(r_bin)},
   args = c(
@@ -1096,6 +1153,505 @@ cat("BATCHED_PHASE2_R_OK\\n")
                 f"Batched R verification failed (exit={proc.returncode}):\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}",
             )
             self.assertIn("BATCHED_PHASE2_R_OK", proc.stdout)
+
+    def test_download_public_packera_sequences_flat_extraction_and_sha256(self) -> None:
+        """(a) Verify mocked Dryad (SHA-256 + nested zip), NCBI nuccore/SRA, and BOLD download flatly."""
+
+        class _MockHTTPResponse(io.BytesIO):
+            def __enter__(self) -> "_MockHTTPResponse":
+                return self
+
+            def __exit__(self, *args: object) -> bool:
+                self.close()
+                return False
+
+        def _zip_bytes(entries: dict[str, str]) -> bytes:
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                for arcname, content in entries.items():
+                    zf.writestr(arcname, content.encode("utf-8"))
+            return buf.getvalue()
+
+        tree_zip = _zip_bytes(
+            {
+                "nested/sub/trees/MO_Astral_lpp.tre": "((Packera_dubia:0.05,Packera_schweinitziana:0.05):0.10,Packera_aurea:0.20);\n",
+                "nested/sub/trees/ASTRALPro_Astral_lpp.tre": "((Packera_dubia:0.06,Packera_schweinitziana:0.06):0.10,Packera_aurea:0.20);\n",
+            }
+        )
+        phytop_zip = _zip_bytes(
+            {
+                "nested/phytop/MO_PhyTop.tsv": "taxon\tils\tih\nPackera dubia\t0.18\t0.06\nPackera schweinitziana\t0.14\t0.04\n",
+            }
+        )
+        align_zip = _zip_bytes(
+            {
+                "nested/plastomes/18complete_Packera_plastomes.fasta": (
+                    ">MK001|Packera_dubia\n" + ("ATGCTAGCTGATCGATCGTA" * 7) + "\n"
+                ),
+            }
+        )
+        zip_payloads = {
+            "101": ("speciestree_files.zip", tree_zip),
+            "102": ("PhyTop_results.zip", phytop_zip),
+            "103": ("alignment_files.zip", align_zip),
+        }
+
+        versions_json = json.dumps(
+            {
+                "_embedded": {
+                    "stash:versions": [
+                        {"versionNumber": 1, "_links": {"self": {"href": "/api/v2/versions/999"}}}
+                    ]
+                }
+            }
+        ).encode("utf-8")
+        files_json = json.dumps(
+            {
+                "_embedded": {
+                    "stash:files": [
+                        {
+                            "id": int(fid),
+                            "path": fname,
+                            "size": len(zbytes),
+                            "digestType": "sha-256",
+                            "digest": hashlib.sha256(zbytes).hexdigest(),
+                            "_links": {"stash:download": {"href": f"/api/v2/files/{fid}/download"}},
+                        }
+                        for fid, (fname, zbytes) in zip_payloads.items()
+                    ]
+                }
+            }
+        ).encode("utf-8")
+        ncbi_nuccore_fasta = (
+            ">NC_0001 Senecio tomentosus chloroplast, complete genome\n"
+            + ("ACGTACGTACGTATCG" * 8)
+            + "\n"
+            ">MT_0002 Packera aurea internal transcribed spacer 1\n"
+            + ("TGCATGCATGCATAGC" * 8)
+            + "\n"
+            ">JX_0003 Senecio tomentosus granule-bound starch synthase (waxy) gene\n"
+            + ("GGCCAATTAAGGCCTT" * 8)
+            + "\n"
+        ).encode("utf-8")
+        ena_tsv = (
+            "run_accession\tsample_accession\tscientific_name\tlibrary_name\tfastq_ftp\tfastq_bytes\n"
+            "SRR22900001\tSAMN01\tPackera dubia\tLIB1\tftp.sra.ebi.ac.uk/vol1/fastq/SRR229/001.fastq.gz\t1024000\n"
+        ).encode("utf-8")
+        sra_runinfo_csv = (
+            "Run,BioProject,Sample,ScientificName,LibraryName,download_path,size_MB\n"
+            "SRR22900002,PRJNA978568,SAMN02,Packera schweinitziana,LIB2,sra-pub-run-odp.s3.amazonaws.com/SRR22900002,12\n"
+        ).encode("utf-8")
+        bold_fasta = ">BOLD_01|Packera schweinitziana|ITS2\n" + ("ACGTGCATGCAT" * 11) + "\n"
+
+        def _mock_open_url(req_or_url: object, data: object = None, timeout: object = 60) -> _MockHTTPResponse:
+            _ = (data, timeout)
+            url = req_or_url.full_url if hasattr(req_or_url, "full_url") else str(req_or_url)
+            if "/datasets/" in url and url.endswith("/versions"):
+                return _MockHTTPResponse(versions_json)
+            if "/versions/999/files" in url:
+                return _MockHTTPResponse(files_json)
+            for fid, (_, zbytes) in zip_payloads.items():
+                if f"/api/v2/files/{fid}/download" in url:
+                    return _MockHTTPResponse(zbytes)
+            if "esearch.fcgi" in url and "db=nuccore" in url:
+                return _MockHTTPResponse(
+                    json.dumps({"esearchresult": {"count": "3", "idlist": ["101", "102", "103"]}}).encode("utf-8")
+                )
+            if "efetch.fcgi" in url and "db=nuccore" in url:
+                return _MockHTTPResponse(ncbi_nuccore_fasta)
+            if "ebi.ac.uk/ena/portal/api/filereport" in url:
+                return _MockHTTPResponse(ena_tsv if "PRJNA907383" in url else b"")
+            if "esearch.fcgi" in url and "db=sra" in url:
+                if "PRJNA978568" in url:
+                    return _MockHTTPResponse(json.dumps({"esearchresult": {"idlist": ["502"]}}).encode("utf-8"))
+                return _MockHTTPResponse(json.dumps({"esearchresult": {"idlist": []}}).encode("utf-8"))
+            if "efetch.fcgi" in url and "db=sra" in url:
+                return _MockHTTPResponse(sra_runinfo_csv)
+            if "portal.boldsystems.org/api/query" in url:
+                return _MockHTTPResponse(bold_fasta.encode("utf-8"))
+            raise AssertionError(f"Unexpected unmocked network URL in offline test: {url}")
+
+        def _mock_opener_open(self_opener: object, fullurl: object, data: object = None, timeout: object = 60) -> _MockHTTPResponse:
+            _ = self_opener
+            return _mock_open_url(fullurl, data=data, timeout=timeout)
+
+        with tempfile.TemporaryDirectory() as td:
+            geno_dir = Path(td) / "genomics"
+            env_patch = {"DRYAD_API_TOKEN": "test_dryad_token", "NCBI_API_KEY": "test_ncbi_key"}
+            with (
+                mock.patch.dict(os.environ, env_patch),
+                mock.patch("urllib.request.urlopen", side_effect=_mock_open_url),
+                mock.patch("urllib.request.OpenerDirector.open", new=_mock_opener_open),
+            ):
+                summary = PUBLIC_DL_MOD.download_public_packera_sequences(genomics_dir=geno_dir)
+
+            self.assertEqual(summary["dryad_status"], "downloaded")
+            self.assertEqual([p for p in geno_dir.iterdir() if p.is_dir()], [], "genomics_dir must have 0 subdirectories")
+            expected_files = {
+                "public_packera_MO_Astral_lpp.tre",
+                "public_packera_ASTRALPro_Astral_lpp.tre",
+                "public_packera_PhyTop_MO.tsv",
+                "public_packera_18complete_plastomes.fasta",
+                "public_packera_plastomes_and_cpdna.fasta",
+                "public_packera_its_ets.fasta",
+                "public_packera_waxy_nuclear.fasta",
+                "public_packera_sra_runs.csv",
+                "public_packera_bold_barcodes.fasta",
+                "public_packera_dryad_manifest.json",
+                "public_packera_sources_manifest.json",
+            }
+            actual_files = {p.name for p in geno_dir.iterdir() if p.is_file()}
+            self.assertTrue(expected_files.issubset(actual_files), f"Missing downloaded files: {expected_files - actual_files}")
+            self.assertIn("Packera_dubia", (geno_dir / "public_packera_plastomes_and_cpdna.fasta").read_text(encoding="utf-8"))
+            self.assertIn("Packera_dubia", (geno_dir / "public_packera_waxy_nuclear.fasta").read_text(encoding="utf-8"))
+            sra_txt = (geno_dir / "public_packera_sra_runs.csv").read_text(encoding="utf-8")
+            self.assertIn("SRR22900001", sra_txt)
+            self.assertIn("SRR22900002", sra_txt)
+
+    def test_public_reference_files_only_stay_noop_no_payload(self) -> None:
+        """(b) Verify public_packera_* references alone keep has_genetic_payload False and Step 06 ingestion skipped_empty."""
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            geno_dir = tmp / "genomics"
+            out_dir = tmp / "parsed_out"
+            geno_dir.mkdir(parents=True, exist_ok=True)
+
+            pub_names = (
+                "public_packera_MO_Astral_lpp.tre",
+                "public_packera_MO_concat_best.fasta",
+                "public_packera_18complete_plastomes.fasta",
+                "public_packera_sra_runs.csv",
+                "public_packera_dryad_manifest.json",
+                "public_packera_bold_barcodes.fasta",
+            )
+            for fname in pub_names:
+                (geno_dir / fname).write_text("placeholder\n", encoding="utf-8")
+
+            assets = INGEST_MOD.discover_genomic_inputs(geno_dir)
+            self.assertFalse(assets.has_genetic_payload)
+            self.assertEqual({p.name for p in assets.public_reference_files}, set(pub_names))
+
+            res = INGEST_MOD.run_genomic_ingestion(genomics_dir=geno_dir, out_dir=out_dir)
+            self.assertEqual(res["status"], "skipped_empty")
+            self.assertEqual(len(list(geno_dir.iterdir())), len(pub_names))
+
+    def test_skim_offtarget_organellar_baits_public_refs_including_waxy(self) -> None:
+        """(c) Verify skim_offtarget_organellar.py baits public plastid, ITS, and waxy FASTA refs and records matches."""
+
+        def _seq(seed_int: int, length: int = 140) -> str:
+            rng = np.random.default_rng(seed_int)
+            return "".join(rng.choice(list("ACGT"), size=length).tolist())
+
+        cp_ser, cp_aur = _seq(202601), _seq(202602)
+        its_ser, its_aur = _seq(202603), _seq(202604)
+        waxy_ser, waxy_aur = _seq(202605), _seq(202606)
+
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            geno_dir = tmp / "genomics"
+            raw_dir = tmp / "raw_reads"
+            geno_dir.mkdir(parents=True, exist_ok=True)
+            raw_dir.mkdir(parents=True, exist_ok=True)
+
+            (geno_dir / "public_packera_18complete_plastomes.fasta").write_text(
+                f">MK_CP_SER Packera serpenticola\n{cp_ser}\n>MK_CP_AUR Packera aurea\n{cp_aur}\n",
+                encoding="utf-8",
+            )
+            (geno_dir / "public_packera_its_ets.fasta").write_text(
+                f">MT_ITS_SER Packera serpenticola\n{its_ser}\n>MT_ITS_AUR Packera aurea\n{its_aur}\n",
+                encoding="utf-8",
+            )
+            (geno_dir / "public_packera_waxy_nuclear.fasta").write_text(
+                f">JX_WAXY_SER Packera serpenticola\n{waxy_ser}\n>JX_WAXY_AUR Packera aurea\n{waxy_aur}\n",
+                encoding="utf-8",
+            )
+
+            zip_path = raw_dir / "run_5563_public_skim.zip"
+            with zipfile.ZipFile(zip_path, "w") as zf:
+                for sid, p_s, i_s, w_s in (
+                    ("PACSERNCS1M", cp_ser, its_ser, waxy_ser),
+                    ("PACAURFK1M", cp_aur, its_aur, waxy_aur),
+                ):
+                    reads = (
+                        [(f"{sid}_cp_{j}", p_s) for j in range(4)]
+                        + [(f"{sid}_its_{j}", i_s) for j in range(4)]
+                        + [(f"{sid}_waxy_{j}", w_s) for j in range(4)]
+                    )
+                    zf.writestr(f"fastqs/{sid}_R1.fastq.gz", _build_r1_fastq_gz_bytes(reads))
+
+            res = skim_mod.run_offtarget_organellar_skim(fastq_source=zip_path, genomics_dir=geno_dir)
+            self.assertEqual(res["status"], "skimmed")
+            self.assertEqual([p for p in geno_dir.iterdir() if p.is_dir()], [])
+            for out_fa in (
+                "skimmed_plastid_consensus.fasta",
+                "skimmed_its_consensus.fasta",
+                "skimmed_waxy_consensus.fasta",
+            ):
+                p = geno_dir / out_fa
+                self.assertTrue(p.is_file(), f"Missing skimmed consensus FASTA: {out_fa}")
+                txt = p.read_text(encoding="utf-8")
+                self.assertIn(">PACSERNCS1M|", txt)
+                self.assertIn(">PACAURFK1M|", txt)
+
+            cyto_rows: dict[str, dict[str, str]] = {}
+            with open(geno_dir / "cytonuclear_discordance.csv", "r", encoding="utf-8", newline="") as fh:
+                for row in csv.DictReader(fh):
+                    cyto_rows[row["genetic_sample_id"]] = row
+            self.assertEqual(cyto_rows["PACSERNCS1M"]["public_plastome_match"], "Packera serpenticola")
+            self.assertEqual(cyto_rows["PACSERNCS1M"]["public_its_match"], "Packera serpenticola")
+            self.assertEqual(cyto_rows["PACSERNCS1M"]["waxy_lineage_match"], "Packera serpenticola")
+            self.assertEqual(cyto_rows["PACAURFK1M"]["public_plastome_match"], "Packera aurea")
+            self.assertEqual(cyto_rows["PACAURFK1M"]["public_its_match"], "Packera aurea")
+            self.assertEqual(cyto_rows["PACAURFK1M"]["waxy_lineage_match"], "Packera aurea")
+
+    def test_step06_public_backbone_outgroup_and_sqlite_columns(self) -> None:
+        """(d) Verify Step 06 prevents focal tree shadowing, uses public backbone outgroup polarization, and persists 6 SQLite cols."""
+        if not rscript_available():
+            self.skipTest("Rscript unavailable or PACKERA_FAST_AUDIT=1")
+
+        def _seq(seed_int: int, length: int = 120) -> str:
+            rng = np.random.default_rng(seed_int)
+            return "".join(rng.choice(list("ACGT"), size=length).tolist())
+
+        cp_dub, cp_aur = _seq(303101), _seq(303102)
+        its_dub, its_aur = _seq(303103), _seq(303104)
+        waxy_dub, waxy_aur = _seq(303105), _seq(303106)
+
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            geno_dir = tmp / "genomics"
+            parsed_dir = tmp / "parsed"
+            out_dir = tmp / "step06_out"
+            tables_dir = tmp / "tables"
+            figs_dir = tmp / "figures"
+            (tmp / "data").mkdir(parents=True, exist_ok=True)
+            for d in (geno_dir, parsed_dir, out_dir, tables_dir, figs_dir):
+                d.mkdir(parents=True, exist_ok=True)
+            db_path = tmp / "data" / "plantmatics.sqlite"
+
+            sample_defs = [
+                ("PACTOMSCG1M", "NCU_DUB_1", "Packera dubia", 35.12, -79.22, [1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 0.5, 0, 0, 0, 0, 0, 0.5, 0, 0, 0, 0, 0, 0, 0]),
+                ("PACTOMVAL2M", "NCU_DUB_2", "Packera dubia", 35.14, -79.19, [1, 1, 1, 0.5, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0.5, 0, 0, 0, 0, 0, 0]),
+                ("PACSCHNCB1M", "NCU_SCH_1", "Packera schweinitziana", 35.82, -82.91, [0.5, 0, 0, 0, 1, 1, 1, 1, 1, 0.5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+                ("PACSCHNCB2M", "NCU_SCH_2", "Packera schweinitziana", 35.85, -82.88, [0, 0.5, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+                ("PACMILVAL1M", "NCU_MIL_1", "Packera millefolium", 35.91, -82.11, [0, 0, 0, 0, 0.5, 0, 0, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0.5, 0, 0, 0, 0, 0, 0, 0]),
+                ("PACMILMIT1M", "NCU_MIL_2", "Packera millefolium", 35.93, -82.13, [0, 0, 0, 0, 0, 0.5, 0, 0, 1, 0.5, 0, 0, 1, 1, 1, 1, 0, 0.5, 0, 0, 0, 0, 0, 0]),
+                ("PACAURFK1M", "NCU_AUR_1", "Packera aurea", 35.60, -81.90, [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 0.5]),
+                ("PACAURFK2M", "NCU_AUR_2", "Packera aurea", 35.63, -81.87, [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 0.5, 1]),
+            ]
+
+            run_id = "run_5563"
+            conn = get_db_connection(db_path=db_path, init_schema=True, workspace_root=tmp)
+            try:
+                conn.execute("INSERT INTO pipeline_runs (run_id, run_dir, intraspecific_mode) VALUES (?, ?, 0);", (run_id, str(tmp)))
+                for sid, cat, sp, lat, lon, _ in sample_defs:
+                    conn.execute(
+                        """
+                        INSERT INTO vouchers (
+                            catalogNumber, scientificName, species_standardized,
+                            decimalLatitude, decimalLongitude, determiner_tier
+                        ) VALUES (?, ?, ?, ?, ?, 'Tier_1_Gold');
+                        """,
+                        (cat, sp, sp, lat, lon),
+                    )
+                    conn.execute(
+                        "INSERT INTO plant_individuals (catalogNumber, plant_individual_id, rosette_centroid_x) VALUES (?, 0, 100.0);",
+                        (cat,),
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO run_active_cohort (
+                            run_id, catalogNumber, plant_individual_id,
+                            species_standardized, determiner_tier, authority_weight
+                        ) VALUES (?, ?, 0, ?, 'Tier_1_Gold', 2.0);
+                        """,
+                        (run_id, cat, sp),
+                    )
+                    pub_sp = sp if sid in ("PACTOMSCG1M", "PACAURFK1M") else None
+                    conn.execute(
+                        """
+                        INSERT INTO genomic_samples (
+                            genetic_sample_id, catalogNumber, linkage_tier, species_standardized,
+                            geno_quality_pass, mapped_reads, public_plastome_match,
+                            public_its_match, waxy_lineage_match
+                        ) VALUES (?, ?, 'G1_Direct_Voucher', ?, 1, 450000, ?, ?, ?);
+                        """,
+                        (sid, cat, sp, pub_sp, pub_sp, pub_sp),
+                    )
+                conn.commit()
+            finally:
+                conn.close()
+
+            loci = [f"L_{i:02d}" for i in range(24)]
+            with open(parsed_dir / "allele_dosage_matrix.tsv", "w", encoding="utf-8", newline="") as fh:
+                wr = csv.writer(fh, delimiter="\t")
+                wr.writerow(["genetic_sample_id"] + loci)
+                for sid, _, _, _, _, vals in sample_defs:
+                    wr.writerow([sid] + [f"{v:.4f}" for v in vals])
+
+            with open(parsed_dir / "parsed_genomic_samples.csv", "w", encoding="utf-8", newline="") as fh:
+                wr = csv.writer(fh)
+                wr.writerow([
+                    "genetic_sample_id", "project_id", "catalogNumber", "linkage_tier",
+                    "taxon_code", "taxon_raw", "species_standardized", "population_id",
+                    "replicate_pair_id", "replicate_suffix", "is_putative_novel_or_hybrid_query",
+                    "decimalLatitude", "decimalLongitude", "hq_reads", "mapped_reads",
+                    "pct_mapped", "pct_repetitive", "n_missing_gt", "missing_genotype_rate",
+                    "observed_het", "n_called_loci", "geno_quality_pass",
+                    "hdplot_retained_loci", "inferred_cytotype", "nquire_delta_logl",
+                    "plastid_clade", "its_ribotype", "cytonuclear_discordant",
+                ])
+                for idx, (sid, cat, sp, lat, lon, _) in enumerate(sample_defs, start=1):
+                    wr.writerow([
+                        sid, sid, cat, "G1_Direct_Voucher", sid[3:6], sp, sp, f"POP_{idx:02d}",
+                        sid[:-1], "M", "0", str(lat), str(lon), "450000", "410000",
+                        "91.1", "3.0", "0", "0.00", "0.20", "24", "1", "24", "2x", "1.1",
+                        f"cp_{sid[3:6]}", f"ITS_{sid[3:6]}", "0",
+                    ])
+
+            raxml_tree = geno_dir / "RAxML_bestTree.test"
+            raxml_tree.write_text(
+                "(((PACTOMSCG1M:0.01,PACTOMVAL2M:0.01):0.04,(PACSCHNCB1M:0.01,PACSCHNCB2M:0.01):0.04):0.05,(PACMILVAL1M:0.01,PACMILMIT1M:0.01):0.10,(PACAURFK1M:0.01,PACAURFK2M:0.01):0.25);\n",
+                encoding="utf-8",
+            )
+            mo_tree = geno_dir / "public_packera_MO_Astral_lpp.tre"
+            mo_tree.write_text(
+                "(((Packera_dubia:0.04,Packera_schweinitziana:0.04):0.06,Packera_millefolium:0.10):0.15,Packera_aurea:0.25);\n",
+                encoding="utf-8",
+            )
+            (geno_dir / "public_packera_ASTRALPro_Astral_lpp.tre").write_text(
+                "(((Packera_dubia:0.05,Packera_schweinitziana:0.05):0.06,Packera_millefolium:0.11):0.14,Packera_aurea:0.25);\n",
+                encoding="utf-8",
+            )
+            (geno_dir / "public_packera_PhyTop_MO.tsv").write_text(
+                "taxon\tils_index\tih_index\n"
+                "Packera dubia\t0.21\t0.08\n"
+                "Packera schweinitziana\t0.19\t0.05\n"
+                "Packera millefolium\t0.14\t0.03\n"
+                "Packera aurea\t0.11\t0.02\n",
+                encoding="utf-8",
+            )
+            (geno_dir / "public_packera_18complete_plastomes.fasta").write_text(
+                f">MK_CP_DUB Packera dubia\n{cp_dub}\n>MK_CP_AUR Packera aurea\n{cp_aur}\n",
+                encoding="utf-8",
+            )
+            (geno_dir / "public_packera_its_ets.fasta").write_text(
+                f">MT_ITS_DUB Packera dubia\n{its_dub}\n>MT_ITS_AUR Packera aurea\n{its_aur}\n",
+                encoding="utf-8",
+            )
+            (geno_dir / "public_packera_waxy_nuclear.fasta").write_text(
+                f">JX_WAXY_DUB Packera dubia\n{waxy_dub}\n>JX_WAXY_AUR Packera aurea\n{waxy_aur}\n",
+                encoding="utf-8",
+            )
+            (geno_dir / "skimmed_plastid_consensus.fasta").write_text(
+                f">PACTOMSCG1M|clade=cp_1\n{cp_dub}\n>PACAURFK1M|clade=cp_2\n{cp_aur}\n",
+                encoding="utf-8",
+            )
+            (geno_dir / "skimmed_its_consensus.fasta").write_text(
+                f">PACTOMSCG1M|ribotype=ITS_1\n{its_dub}\n>PACAURFK1M|ribotype=ITS_2\n{its_aur}\n",
+                encoding="utf-8",
+            )
+            (geno_dir / "skimmed_waxy_consensus.fasta").write_text(
+                f">PACTOMSCG1M|waxy=Waxy_1\n{waxy_dub}\n>PACAURFK1M|waxy=Waxy_2\n{waxy_aur}\n",
+                encoding="utf-8",
+            )
+            # Place public_packera_MO_Astral_lpp.tre first so filtering proves focal RAxML_bestTree.test is not shadowed
+            with open(parsed_dir / "genomic_manifest.json", "w", encoding="utf-8") as fh:
+                json.dump(
+                    {
+                        "status": "ingested",
+                        "n_samples_total": len(sample_defs),
+                        "n_loci_retained": 24,
+                        "tree_files": [str(mo_tree), str(raxml_tree)],
+                    },
+                    fh,
+                )
+
+            proc = run_warm_r_cmd(
+                [
+                    "Rscript",
+                    str(PROJECT_ROOT / "scripts" / "analysis" / "06_genomic_phylogenomics.R"),
+                    "--genomics-dir",
+                    str(geno_dir),
+                    "--raw-genomics-dir",
+                    str(geno_dir),
+                    "--parsed-dir",
+                    str(parsed_dir),
+                    "--out-dir",
+                    str(out_dir),
+                    "--tables-dir",
+                    str(tables_dir),
+                    "--figure-a",
+                    str(figs_dir / "fig06a.png"),
+                    "--figure-b",
+                    str(figs_dir / "fig06b.png"),
+                    "--run-id",
+                    run_id,
+                    "--db",
+                    str(db_path),
+                ],
+                env={
+                    "PLANTMATICS_DB_PATH": str(db_path),
+                    "PLANTMATICS_GENOMICS_DIR": str(geno_dir),
+                    "PYTHONPATH": str(PROJECT_ROOT),
+                },
+            )
+            self.assertEqual(proc.returncode, 0, f"Step 06 public backbone run failed:\n{proc.stdout}\n{proc.stderr}")
+
+            cohesion_csv = out_dir / "genomic_clade_cohesion_summary.csv"
+            self.assertTrue(cohesion_csv.is_file())
+            with open(cohesion_csv, "r", encoding="utf-8", newline="") as fh:
+                cohesion_rows = list(csv.DictReader(fh))
+            self.assertGreaterEqual(len(cohesion_rows), 4, "Focal RAxML_bestTree.test must drive clade cohesion")
+
+            with open(out_dir / "genomic_assignments.csv", "r", encoding="utf-8", newline="") as fh:
+                assign_rows = {r["genetic_sample_id"]: r for r in csv.DictReader(fh)}
+            self.assertTrue(bool(assign_rows["PACTOMSCG1M"].get("nearest_tree_sister_taxon")))
+
+            fb_csv = out_dir / "introgressive_fbranch_summary.csv"
+            self.assertTrue(fb_csv.is_file())
+            with open(fb_csv, "r", encoding="utf-8", newline="") as fh:
+                fb_rows = list(csv.DictReader(fh))
+            self.assertGreater(len(fb_rows), 0)
+            self.assertTrue(all(r["polarization_source"] == "public_nuclear_backbone" for r in fb_rows))
+
+            for req_csv in ("public_backbone_concordance.csv", "public_organellar_placement.csv"):
+                self.assertTrue((out_dir / req_csv).is_file(), f"Missing out_dir/{req_csv}")
+                self.assertTrue((tables_dir / req_csv).is_file(), f"Missing tables_dir/{req_csv}")
+
+            conn_chk = sqlite3.connect(str(db_path))
+            try:
+                gla_row = conn_chk.execute(
+                    """
+                    SELECT public_backbone_clade, public_phytop_ils_index, public_phytop_ih_index
+                    FROM genetic_lineage_assignments
+                    WHERE run_id = ? AND genetic_sample_id = 'PACTOMSCG1M';
+                    """,
+                    (run_id,),
+                ).fetchone()
+                self.assertIsNotNone(gla_row)
+                self.assertEqual(gla_row[0], "MO:Packera dubia+Packera schweinitziana")
+                self.assertAlmostEqual(float(gla_row[1]), 0.21, places=4)
+                self.assertAlmostEqual(float(gla_row[2]), 0.08, places=4)
+
+                mv_row = conn_chk.execute(
+                    """
+                    SELECT public_plastome_match, public_its_match, waxy_lineage_match,
+                           public_backbone_clade, public_phytop_ils_index, public_phytop_ih_index
+                    FROM v_integrative_triage_master
+                    WHERE run_id = ? AND catalogNumber = 'NCU_DUB_1';
+                    """,
+                    (run_id,),
+                ).fetchone()
+                self.assertIsNotNone(mv_row)
+                self.assertEqual(mv_row[0], "Packera dubia")
+                self.assertEqual(mv_row[1], "Packera dubia")
+                self.assertEqual(mv_row[2], "Packera dubia")
+                self.assertEqual(mv_row[3], "MO:Packera dubia+Packera schweinitziana")
+                self.assertAlmostEqual(float(mv_row[4]), 0.21, places=4)
+                self.assertAlmostEqual(float(mv_row[5]), 0.08, places=4)
+            finally:
+                conn_chk.close()
 
 
 if __name__ == "__main__":

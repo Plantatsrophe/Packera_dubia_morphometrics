@@ -581,8 +581,11 @@ is_sqlite_active_for_inputs <- function(input_paths = character(0), demo = FALSE
   if (identical(eff_path, ":memory:")) {
     return(invisible(FALSE))
   }
+  py_p <- strsplit(Sys.getenv("PYTHONPATH", unset = ""), .Platform$path.sep, fixed = TRUE)[[1L]]
+  py_venv_pp <- if (length(py_p) > 0L && nzchar(py_p[1L]) && file.exists(file.path(py_p[1L], ".venv/bin/python"))) file.path(py_p[1L], ".venv/bin/python") else character(0)
   py_cands <- unique(c(
     if (file.exists(".venv/bin/python")) ".venv/bin/python" else character(0),
+    py_venv_pp,
     Sys.which("python3")
   ))
   py_cands <- py_cands[nzchar(py_cands)]

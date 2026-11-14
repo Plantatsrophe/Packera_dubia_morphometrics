@@ -36,6 +36,7 @@ import sys
 import tempfile
 from typing import Any, Dict, List, Tuple
 import unittest
+from unittest import mock
 
 from scripts.tests._r_session import rscript_available, run_warm_r_cmd
 
@@ -254,7 +255,7 @@ class TestSQLPipelineHandshake(unittest.TestCase):
             for d in (tables_dir, contours_dir, reports_dir, figures_dir):
                 d.mkdir(parents=True, exist_ok=True)
 
-            db_path = ws / "data" / "packera_pipeline.sqlite"
+            db_path = ws / "data" / "plantmatics.sqlite"
             run_id = "test_efa_sql_zero_csv"
 
             voucher_rows: List[Dict[str, Any]] = []
@@ -370,9 +371,9 @@ class TestSQLPipelineHandshake(unittest.TestCase):
             out_otu_csv = tables_dir / "leaf_efa_harmonics.csv"
             out_ind_csv = tables_dir / "leaf_efa_harmonics_individual.csv"
             env = os.environ.copy()
-            env["PACKERA_DB_PATH"] = str(db_path)
+            env["PLANTMATICS_DB_PATH"] = str(db_path)
             env["RUN_ID"] = run_id
-            env["PACKERA_RUN_DIR"] = str(ws)
+            env["PLANTMATICS_RUN_DIR"] = str(ws)
 
             cmd = [
                 rscript_bin,
@@ -430,7 +431,7 @@ class TestSQLPipelineHandshake(unittest.TestCase):
             for d in (tables_dir, env_dir, reports_dir, figures_dir):
                 d.mkdir(parents=True, exist_ok=True)
 
-            db_path = ws / "data" / "packera_pipeline.sqlite"
+            db_path = ws / "data" / "plantmatics.sqlite"
             run_id = "test_master_multi_nogeo"
 
             # 10 vouchers (including multi-plant MULTI-001 with pid=0 and pid=1, plus non-georeferenced HIST-NOGEO-99)
@@ -678,9 +679,9 @@ class TestSQLPipelineHandshake(unittest.TestCase):
 
             # Execute Step 06 against SQLite environmental_cache (zero rasters on disk; cached fine-grain values in SQLite!)
             env = os.environ.copy()
-            env["PACKERA_DB_PATH"] = str(db_path)
+            env["PLANTMATICS_DB_PATH"] = str(db_path)
             env["RUN_ID"] = run_id
-            env["PACKERA_RUN_DIR"] = str(ws)
+            env["PLANTMATICS_RUN_DIR"] = str(ws)
 
             conflict_csv = tables_dir / "multimodal_conflict_flags.csv"
             srf_summary_csv = reports_dir / "multimodal_spatial_rf_summary.csv"
@@ -1123,7 +1124,7 @@ class TestSQLPipelineHandshake(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             # Case A: In-place init_db_schema + Step 02 savepoint transaction without --purge-segments
-            db_a = Path(tmp) / "inplace" / "data" / "packera_pipeline.sqlite"
+            db_a = Path(tmp) / "inplace" / "data" / "plantmatics.sqlite"
             db_a.parent.mkdir(parents=True, exist_ok=True)
             _seed_legacy_db(db_a)
 
@@ -1175,7 +1176,7 @@ class TestSQLPipelineHandshake(unittest.TestCase):
             ws_b = Path(tmp) / "purge_ws"
             (ws_b / "data" / "tables").mkdir(parents=True, exist_ok=True)
             (ws_b / "data" / "tables" / "curated_vouchers.csv").write_text("catalogNumber\nWILLI_82182\n", encoding="utf-8")
-            db_b = ws_b / "data" / "packera_pipeline.sqlite"
+            db_b = ws_b / "data" / "plantmatics.sqlite"
             _seed_legacy_db(db_b)
 
             summary = purge_segments_and_runs(workspace_root=ws_b, db_path=db_b, purge_runs=True, vacuum=True)
@@ -1211,6 +1212,164 @@ class TestSQLPipelineHandshake(unittest.TestCase):
                 )
             finally:
                 conn_b.close()
+
+    def test_legacy_packera_pipeline_sqlite_auto_migrates_to_plantmatics(self) -> None:
+        """Verify legacy data/packera_pipeline.sqlite (+ WAL/SHM sidecars) atomically migrates to plantmatics.sqlite."""
+
+        def _seed_legacy_wal_workspace(ws: Path, wal_catalog: str, base_catalog: str) -> tuple[Path, Path]:
+            data_dir = ws / "data"
+            scratch = ws / "_legacy_seed_scratch"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            scratch.mkdir(parents=True, exist_ok=True)
+
+            src_db = scratch / "packera_pipeline.sqlite"
+            conn = get_db_connection(db_path=src_db, init_schema=True, workspace_root=ws)
+            try:
+                conn.executescript(
+                    """
+                    DROP VIEW IF EXISTS v_integrative_triage_master;
+                    DROP TABLE IF EXISTS genomic_samples;
+                    DROP TABLE IF EXISTS genetic_lineage_assignments;
+                    CREATE TABLE genomic_samples (
+                        genetic_sample_id TEXT PRIMARY KEY,
+                        catalogNumber TEXT,
+                        linkage_tier TEXT,
+                        species_standardized TEXT,
+                        geno_quality_pass INTEGER,
+                        mapped_reads INTEGER
+                    );
+                    CREATE TABLE genetic_lineage_assignments (
+                        run_id TEXT NOT NULL,
+                        genetic_sample_id TEXT NOT NULL,
+                        catalogNumber TEXT,
+                        geno_predicted_taxon TEXT,
+                        PRIMARY KEY (run_id, genetic_sample_id)
+                    );
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO vouchers (
+                        catalogNumber, scientificName, species_standardized, determiner_tier
+                    ) VALUES (?, ?, ?, ?);
+                    """,
+                    (base_catalog, "Packera dubia", "Packera dubia", "Tier_1_Gold"),
+                )
+                conn.execute("PRAGMA user_version = 20261123;")
+                conn.commit()
+            finally:
+                conn.close()
+
+            # Write a second committed transaction inside uncheckpointed WAL so -wal and -shm exist cleanly.
+            wal_conn = sqlite3.connect(str(src_db))
+            try:
+                wal_conn.execute("PRAGMA journal_mode = WAL;")
+                wal_conn.execute("PRAGMA wal_autocheckpoint = 0;")
+                wal_conn.execute(
+                    """
+                    INSERT INTO vouchers (
+                        catalogNumber, scientificName, species_standardized, determiner_tier
+                    ) VALUES (?, ?, ?, ?);
+                    """,
+                    (wal_catalog, "Packera schweinitziana", "Packera schweinitziana", "Tier_1_Gold"),
+                )
+                wal_conn.commit()
+                for suffix in ("", "-wal", "-shm"):
+                    src_f = Path(f"{src_db}{suffix}")
+                    self.assertTrue(src_f.is_file(), f"Missing seeded WAL sidecar: {src_f}")
+                    if suffix:
+                        self.assertGreater(src_f.stat().st_size, 0, f"Empty WAL sidecar: {src_f}")
+                    shutil.copy2(src_f, data_dir / f"packera_pipeline.sqlite{suffix}")
+            finally:
+                wal_conn.close()
+                shutil.rmtree(scratch, ignore_errors=True)
+
+            legacy_db = data_dir / "packera_pipeline.sqlite"
+            target_db = data_dir / "plantmatics.sqlite"
+            self.assertTrue(legacy_db.is_file())
+            self.assertFalse(target_db.exists())
+            return legacy_db, target_db
+
+        new_gs_cols = {"public_plastome_match", "public_its_match", "waxy_lineage_match"}
+        new_gla_cols = {"public_backbone_clade", "public_phytop_ils_index", "public_phytop_ih_index"}
+
+        # 1. Python db.py atomic migration + WAL replay + 20261124 schema upgrade
+        with tempfile.TemporaryDirectory() as td_py:
+            ws_py = Path(td_py)
+            legacy_db, target_db = _seed_legacy_wal_workspace(
+                ws_py, wal_catalog="NCU_LEGACY_WAL_02", base_catalog="NCU_LEGACY_01"
+            )
+            env_clean = os.environ.copy()
+            for k in ("PLANTMATICS_DB_PATH", "PACKERA_DB_PATH", "PACKERA_SQLITE_DB", "PACKERA_DEMO_MODE"):
+                env_clean.pop(k, None)
+            with mock.patch.dict(os.environ, env_clean, clear=True):
+                conn = get_db_connection(workspace_root=ws_py, init_schema=True)
+                try:
+                    self.assertFalse(legacy_db.exists())
+                    self.assertFalse(Path(f"{legacy_db}-wal").exists())
+                    self.assertFalse(Path(f"{legacy_db}-shm").exists())
+                    self.assertTrue(target_db.is_file())
+                    uv = int(conn.execute("PRAGMA user_version;").fetchone()[0])
+                    self.assertEqual(uv, 20261124)
+
+                    gs_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(genomic_samples);").fetchall()}
+                    gla_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(genetic_lineage_assignments);").fetchall()}
+                    view_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(v_integrative_triage_master);").fetchall()}
+                    self.assertTrue(new_gs_cols.issubset(gs_cols))
+                    self.assertTrue(new_gla_cols.issubset(gla_cols))
+                    self.assertTrue((new_gs_cols | new_gla_cols).issubset(view_cols))
+
+                    v_cats = {
+                        str(r[0])
+                        for r in conn.execute("SELECT catalogNumber FROM vouchers;").fetchall()
+                    }
+                    self.assertEqual(v_cats, {"NCU_LEGACY_01", "NCU_LEGACY_WAL_02"})
+                finally:
+                    conn.close()
+
+        # 2. R db_utils.R resolve_packera_db_path() + connect_packera_db() migration verification
+        if rscript_available():
+            with tempfile.TemporaryDirectory() as td_r:
+                ws_r = Path(td_r)
+                legacy_r, target_r = _seed_legacy_wal_workspace(
+                    ws_r, wal_catalog="NCU_R_WAL_02", base_catalog="NCU_R_LEGACY_01"
+                )
+                r_code = f"""
+source({json.dumps(str(PROJECT_ROOT / "scripts" / "core" / "db_utils.R"))})
+local({{
+  resolved_p <- resolve_packera_db_path()
+  cat("RESOLVED_DB=", resolved_p, "\\n", sep = "")
+  stopifnot(grepl("plantmatics\\\\.sqlite$", resolved_p))
+  conn <- connect_packera_db(read_only = FALSE, demo = FALSE)
+  on.exit(disconnect_packera_db(conn), add = TRUE)
+  stopifnot(!is.null(conn))
+  uv <- as.integer(DBI::dbGetQuery(conn, "PRAGMA user_version;")[[1L]][1L])
+  stopifnot(uv == 20261124L)
+  gs_cols <- DBI::dbListFields(conn, "genomic_samples")
+  gla_cols <- DBI::dbListFields(conn, "genetic_lineage_assignments")
+  mv_cols <- DBI::dbListFields(conn, "v_integrative_triage_master")
+  req_cols <- c(
+    "public_plastome_match", "public_its_match", "waxy_lineage_match",
+    "public_backbone_clade", "public_phytop_ils_index", "public_phytop_ih_index"
+  )
+  stopifnot(all(c("public_plastome_match", "public_its_match", "waxy_lineage_match") %in% gs_cols))
+  stopifnot(all(c("public_backbone_clade", "public_phytop_ils_index", "public_phytop_ih_index") %in% gla_cols))
+  stopifnot(all(req_cols %in% mv_cols))
+  vs <- DBI::dbGetQuery(conn, "SELECT catalogNumber FROM vouchers ORDER BY catalogNumber;")$catalogNumber
+  stopifnot(all(c("NCU_R_LEGACY_01", "NCU_R_WAL_02") %in% vs))
+}})
+"""
+                proc = run_warm_r_cmd(
+                    ["Rscript", "-e", r_code],
+                    stage_key="step03",
+                    cwd=ws_r,
+                    env={"PYTHONPATH": str(PROJECT_ROOT)},
+                )
+                self.assertEqual(proc.returncode, 0, f"R legacy DB migration failed:\n{proc.stdout}\n{proc.stderr}")
+                self.assertFalse(legacy_r.exists())
+                self.assertFalse(Path(f"{legacy_r}-wal").exists())
+                self.assertFalse(Path(f"{legacy_r}-shm").exists())
+                self.assertTrue(target_r.is_file())
 
 
 if __name__ == "__main__":

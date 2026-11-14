@@ -8,7 +8,7 @@ Affiliation: University of North Carolina at Chapel Hill Herbarium (NCU)
 Description:
     Unified command-line interface (CLI) runner orchestrating the end-to-end
     botanical morphometrics pipeline across transactional SQLite (WAL mode)
-    storage (`data/packera_pipeline.sqlite`) and synchronized CSV snapshots:
+    storage (`data/plantmatics.sqlite`) and synchronized CSV snapshots:
       - harvest: Queries GBIF occurrences, scores determiner tiers, downloads imagery,
                  persists vouchers and taxon synonyms to SQLite and CSV.
       - segment: LeafMachine3 (YOLO26x / UNet++ v9 / ONNX Runtime) segmentation,
@@ -21,7 +21,7 @@ Description:
       - run-all: Executes the complete production workflow sequentially.
 
     CLI Flags & Environment Overrides:
-      - `--db <path>`: Optional override path to the SQLite database (sets `PACKERA_DB_PATH`).
+      - `--db <path>`: Optional override path to the SQLite database (sets `PLANTMATICS_DB_PATH` and `PACKERA_DB_PATH`).
       - `--demo`: Uses an ephemeral in-memory (`:memory:`) or run-local database for testing.
 ===============================================================================
 """
@@ -83,13 +83,19 @@ def _apply_explicit_db_arg(args: Optional[argparse.Namespace], run_dir: Optional
     db_arg = getattr(args, "db", None)
     if db_arg is not None and str(db_arg).strip():
         raw = str(db_arg).strip()
-        os.environ["PACKERA_DB_PATH"] = raw if raw == ":memory:" else str(Path(raw).resolve())
+        resolved_db = raw if raw == ":memory:" else str(Path(raw).resolve())
+        os.environ["PLANTMATICS_DB_PATH"] = resolved_db
+        os.environ["PACKERA_DB_PATH"] = resolved_db
     elif getattr(args, "demo", False):
         os.environ["PACKERA_DEMO_MODE"] = "1"
         if run_dir is not None:
-            os.environ["PACKERA_DB_PATH"] = str((run_dir / "data" / "demo_ephemeral.sqlite").resolve())
-        elif not os.environ.get("PACKERA_DB_PATH"):
-            os.environ["PACKERA_DB_PATH"] = ":memory:"
+            demo_db = str((run_dir / "data" / "demo_ephemeral.sqlite").resolve())
+            os.environ["PLANTMATICS_DB_PATH"] = demo_db
+            os.environ["PACKERA_DB_PATH"] = demo_db
+        else:
+            fallback_db = os.environ.get("PLANTMATICS_DB_PATH") or os.environ.get("PACKERA_DB_PATH") or ":memory:"
+            os.environ["PLANTMATICS_DB_PATH"] = fallback_db
+            os.environ["PACKERA_DB_PATH"] = fallback_db
     if getattr(args, "demo", False):
         os.environ["PACKERA_DEMO_MODE"] = "1"
 
@@ -1061,7 +1067,7 @@ def run_genomics_stream(
     respect_test_mock_guard: bool = True,
 ) -> Optional[Path]:
     """Execute standalone Step 06 genomic ingestion and phylogenomic integration when data/genomics/ has inputs."""
-    env_geno = os.environ.get("PACKERA_GENOMICS_DIR", "").strip()
+    env_geno = (os.environ.get("PLANTMATICS_GENOMICS_DIR") or os.environ.get("PACKERA_GENOMICS_DIR") or "").strip()
     if respect_test_mock_guard and not env_geno and getattr(subprocess.run, "__module__", "") != "subprocess":
         return None
 
@@ -1089,6 +1095,7 @@ def run_genomics_stream(
     geno_out_dir.mkdir(parents=True, exist_ok=True)
     db_arg = (
         getattr(args, "db", None)
+        or os.environ.get("PLANTMATICS_DB_PATH")
         or os.environ.get("PACKERA_SQLITE_DB")
         or os.environ.get("PACKERA_DB_PATH")
         or None
@@ -1180,6 +1187,25 @@ def run_skim_organellar_cli(args: argparse.Namespace, cfg: PipelineConfig) -> No
         cmd.extend(["--genomics-dir", str(args.genomics_dir)])
     if getattr(args, "nuclear_tree", None):
         cmd.extend(["--nuclear-tree", str(args.nuclear_tree)])
+    subprocess.run(cmd, check=True)
+
+
+def run_download_public_genomics_cli(args: argparse.Namespace, cfg: PipelineConfig) -> None:
+    """CLI entrypoint for downloading flat public Packera sequences and trees into data/genomics/."""
+    _ = cfg
+    dl_script = PROJECT_ROOT / "scripts" / "data_prep" / "download_public_packera_sequences.py"
+    verify_file_exists(dl_script, "Public Packera Sequence Downloader Python script")
+    cmd = [sys.executable, str(dl_script)]
+    if getattr(args, "genomics_dir", None):
+        cmd.extend(["--genomics-dir", str(args.genomics_dir)])
+    if getattr(args, "sources", None):
+        cmd.extend(["--sources", *[str(s) for s in args.sources]])
+    if getattr(args, "dryad_zip_dir", None):
+        cmd.extend(["--dryad-zip-dir", str(args.dryad_zip_dir)])
+    if getattr(args, "skim_sra_accessions", None):
+        cmd.extend(["--skim-sra-accessions", *[str(a) for a in args.skim_sra_accessions]])
+    if getattr(args, "force", False):
+        cmd.append("--force")
     subprocess.run(cmd, check=True)
 
 
@@ -1523,7 +1549,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--db",
         type=Path,
         default=None,
-        help="Optional override path to SQLite database (default: data/packera_pipeline.sqlite).",
+        help="Optional override path to SQLite database (default: data/plantmatics.sqlite).",
     )
     parser.add_argument(
         "--demo",
@@ -1832,6 +1858,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_skim.add_argument("--genomics-dir", type=Path, default=None, help="Flat destination data/genomics/ directory")
     p_skim.add_argument("--nuclear-tree", type=Path, default=None, help="Optional nuclear Newick tree for cytonuclear comparison")
 
+    # Subcommand: download-public-genomics (public NCBI/SRA/Dryad/BOLD staging into flat data/genomics/)
+    p_dl_pub = subparsers.add_parser("download-public-genomics", help="Download public Packera sequences, trees, and SRA manifests into flat data/genomics/")
+    p_dl_pub.add_argument("--genomics-dir", type=Path, default=None, help="Flat destination data/genomics/ directory")
+    p_dl_pub.add_argument("--sources", nargs="+", default=None, help="Public sources to query (ncbi, dryad, bold)")
+    p_dl_pub.add_argument("--dryad-zip-dir", type=Path, default=None, help="Directory holding manually downloaded Dryad .zip archives")
+    p_dl_pub.add_argument("--skim-sra-accessions", nargs="+", default=None, help="SRA/ENA run accessions to stream-skim via skim_offtarget_organellar")
+    p_dl_pub.add_argument("--force", action="store_true", default=False, help="Overwrite existing non-empty public_packera_* files")
+
     # Subcommand: synthesis
     p_synth = subparsers.add_parser("synthesis", aliases=["analyze"], help="Steps 05-07: Spatial RF, Phylogenomics, & Triage Dashboard")
     _add_common_subparser_args(p_synth, include_gpu=True)
@@ -2095,6 +2129,7 @@ def main() -> None:
         "morphometrics": run_morphometrics,
         "genomics": run_genomics_cli,
         "skim-organellar": run_skim_organellar_cli,
+        "download-public-genomics": run_download_public_genomics_cli,
         "synthesis": run_synthesis,
         "analyze": run_synthesis,
         "run-all": run_all,

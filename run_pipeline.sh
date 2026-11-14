@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # Script: run_pipeline.sh
-# Project: Packera Species Delimitation & Morphometrics Pipeline
+# Project: Plantmatics - Packera Species Delimitation & Morphometrics Pipeline
 # Affiliation: University of North Carolina at Chapel Hill Herbarium (NCU)
 #
 # Description:
-#   End-to-end run-scoped orchestrator for the Packera morphometrics pipeline.
+#   End-to-end run-scoped orchestrator for the Plantmatics morphometrics pipeline.
 #   Orchestrates Phases 1 through 8 across transactional SQLite (WAL mode)
-#   database storage (data/packera_pipeline.sqlite) and synchronized CSV snapshots.
+#   database storage (data/plantmatics.sqlite) and synchronized CSV snapshots.
 #   Every execution seeds and records artifacts into a self-contained run directory:
 #       runs/<RUN_ID>/   (default: runs/run_<YYYYMMDD_HHMMSS>/)
 #   while linking shared read-only caches and maintaining Tier A / Tier B relational
@@ -56,6 +56,7 @@ USDA_COUNTY_BUFFER_KM=""
 USDA_EXEMPT_GOLD=""
 SKIP_ENV_DOWNLOAD=false
 FORCE_ENV_DOWNLOAD=false
+DOWNLOAD_PUBLIC_GENOMICS=0
 LIMIT_ARG=()
 DEMO_FLAG=()
 FOCAL_ARGS=()
@@ -75,7 +76,7 @@ Usage: ./run_pipeline.sh [OPTIONS]
 Run & Compute Controls:
   -h, --help                         Show this help message and exit
   --run-id <ID>                      Custom identifier for isolated run directory under runs/<ID>/
-  --db <PATH>                        Override path to SQLite WAL database (default: data/packera_pipeline.sqlite)
+  --db <PATH>                        Override path to SQLite WAL database (default: data/plantmatics.sqlite)
   --start-step <1..7>                Start or resume execution at step <1..7> (step >=2 skips harvest automatically)
   --skip-harvest                     Skip Step 01 network harvest; seed cohort from SQLite / curated_vouchers.csv
   --force                            Force re-execution and overwrite cached artifacts (with --start-step 2, re-segments)
@@ -123,6 +124,7 @@ Geographic Scope & Spatial Sampling:
                                      Toggle Tier_1_Gold exemption for USDA county range filtering (default: true)
   --skip-env-download                Skip automatic preflight verification/download of SOLUS100, SGMC, and 3DEP layers
   --force-env-download               Force re-download of SOLUS100, SGMC, and 3DEP environmental layers
+  --download-public-genomics         Download public Packera sequences and trees into data/genomics/ before Step 06
 EOF
 }
 
@@ -420,6 +422,10 @@ while [[ $# -gt 0 ]]; do
       FORCE_ENV_DOWNLOAD=true
       shift
       ;;
+    --download-public-genomics)
+      DOWNLOAD_PUBLIC_GENOMICS=1
+      shift
+      ;;
     *)
       shift
       ;;
@@ -570,12 +576,15 @@ fi
 
 RUN_DIR="runs/${RUN_ID}"
 export RUN_ID
-export PACKERA_RUN_DIR="${PROJECT_ROOT}/${RUN_DIR}"
+export PLANTMATICS_RUN_DIR="${PROJECT_ROOT}/${RUN_DIR}"
+export PACKERA_RUN_DIR="${PLANTMATICS_RUN_DIR}"
 if [[ ${#DEMO_FLAG[@]} -gt 0 ]]; then
   export PACKERA_DEMO_MODE=1
-  export PACKERA_DB_PATH="${CUSTOM_DB_PATH:-${PROJECT_ROOT}/${RUN_DIR}/data/demo_ephemeral.sqlite}"
+  export PLANTMATICS_DB_PATH="${CUSTOM_DB_PATH:-${PROJECT_ROOT}/${RUN_DIR}/data/demo_ephemeral.sqlite}"
+  export PACKERA_DB_PATH="${PLANTMATICS_DB_PATH}"
 else
-  export PACKERA_DB_PATH="${CUSTOM_DB_PATH:-${PROJECT_ROOT}/data/packera_pipeline.sqlite}"
+  export PLANTMATICS_DB_PATH="${CUSTOM_DB_PATH:-${PROJECT_ROOT}/data/plantmatics.sqlite}"
+  export PACKERA_DB_PATH="${PLANTMATICS_DB_PATH}"
 fi
 
 # 1. Create standardized run-scoped directory hierarchy
@@ -596,10 +605,10 @@ START_TIME="$(date -Iseconds)"
 GIT_SHA="$(git rev-parse HEAD 2>/dev/null || echo 'unknown')"
 
 echo "=============================================================================="
-echo "Packera Morphometrics Pipeline: Run-Scoped Execution"
+echo "Plantmatics Pipeline: Run-Scoped Execution"
 echo "  Run ID          : ${RUN_ID}"
 echo "  Run Directory   : ${RUN_DIR}"
-echo "  SQLite Database : ${PACKERA_DB_PATH}"
+echo "  SQLite Database : ${PLANTMATICS_DB_PATH}"
 echo "  Start Timestamp : ${START_TIME}"
 echo "  Git Commit SHA  : ${GIT_SHA}"
 echo "=============================================================================="
@@ -957,7 +966,7 @@ if focal_std_req:
 # promoted to data/tables/curated_vouchers.csv, so --skip-harvest runs would otherwise silently drop them).
 if requested_taxa and os.environ.get('PACKERA_DEMO_MODE') != '1' and seed_data == root_data:
     from scripts.core.db import get_db_connection as _get_db_conn_sync, reconcile_curated_vouchers_csv_with_db
-    sync_db_path = os.environ.get('PACKERA_DB_PATH') or str(root_data / 'packera_pipeline.sqlite')
+    sync_db_path = os.environ.get('PLANTMATICS_DB_PATH') or os.environ.get('PACKERA_DB_PATH') or str(root_data / 'plantmatics.sqlite')
     if Path(sync_db_path).is_file():
         conn_sync = _get_db_conn_sync(db_path=sync_db_path, init_schema=True, workspace_root=root_data.parent)
         try:
@@ -1030,7 +1039,7 @@ from scripts.core.db import (
     populate_run_active_cohort,
     query_misidentified_vouchers_from_db,
 )
-target_db_path = os.environ.get('PACKERA_DB_PATH') or str(root_data / 'packera_pipeline.sqlite')
+target_db_path = os.environ.get('PLANTMATICS_DB_PATH') or os.environ.get('PACKERA_DB_PATH') or str(root_data / 'plantmatics.sqlite')
 
 misidentified_cats = set()
 if exclude_misidentified:
@@ -1529,8 +1538,12 @@ GENOMIC_STEP07_ARGS=()
 if [[ -s "${RUN_DIR}/outputs/genomics/genomic_assignments.csv" ]]; then
   GENOMIC_STEP07_ARGS=(--genomic-dir "${RUN_DIR}/outputs/genomics")
 fi
-GENOMICS_DIR_EFF="${PACKERA_GENOMICS_DIR:-${PROJECT_ROOT}/data/genomics}"
+GENOMICS_DIR_EFF="${PLANTMATICS_GENOMICS_DIR:-${PACKERA_GENOMICS_DIR:-${PROJECT_ROOT}/data/genomics}}"
 if [[ "${START_STEP}" -le 6 ]]; then
+  if [[ "${DOWNLOAD_PUBLIC_GENOMICS}" -eq 1 ]]; then
+    echo "[Step 06/07] Downloading public Packera sequences and phylogenomic trees into ${GENOMICS_DIR_EFF}..."
+    "${PYTHON_MAIN}" "${PROJECT_ROOT}/main.py" download-public-genomics --genomics-dir "${GENOMICS_DIR_EFF}"
+  fi
   HAS_GENO=0
   if [[ -d "${GENOMICS_DIR_EFF}" ]]; then
     GENOMIC_CHECK_OUT="$("${PYTHON_MAIN}" scripts/data_prep/06_ingest_genetic_data.py --genomics-dir "${GENOMICS_DIR_EFF}" --check-only 2>/dev/null || true)"
@@ -1542,9 +1555,9 @@ if [[ "${START_STEP}" -le 6 ]]; then
     echo "[Step 06/07] Running Independent Genomic Ingestion & Phylogenomic Integration..."
     GENO_IN_DB_ARGS=()
     GENO_R_DB_ARGS=()
-    if [[ -n "${PACKERA_DB_PATH:-}" ]]; then
-      GENO_IN_DB_ARGS=(--db-path "${PACKERA_DB_PATH}")
-      GENO_R_DB_ARGS=(--db "${PACKERA_DB_PATH}")
+    if [[ -n "${PLANTMATICS_DB_PATH:-}" ]]; then
+      GENO_IN_DB_ARGS=(--db-path "${PLANTMATICS_DB_PATH}")
+      GENO_R_DB_ARGS=(--db "${PLANTMATICS_DB_PATH}")
     fi
     "${PYTHON_MAIN}" scripts/data_prep/06_ingest_genetic_data.py \
       --genomics-dir "${GENOMICS_DIR_EFF}" \
