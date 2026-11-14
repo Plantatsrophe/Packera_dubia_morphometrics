@@ -93,13 +93,13 @@ def _read_fasta(path: Path, keep_label: bool = False) -> Dict[str, str]:
                 continue
             if s.startswith(">"):
                 if cur is not None:
-                    out[cur] = "".join(buf).upper()
+                    out[cur] = "".join(buf).replace("-", "").upper()
                 cur = re.sub(r"\s+", "|", s[1:].strip()) if keep_label else s[1:].split()[0]
                 buf = []
             else:
                 buf.append(s)
     if cur is not None:
-        out[cur] = "".join(buf).upper()
+        out[cur] = "".join(buf).replace("-", "").upper()
     return out
 
 
@@ -342,7 +342,7 @@ def _extract_species_from_seed_key(seed_key: str) -> str:
     for syn, canon in _SEED_SYNONYM_TAXA.items():
         if syn in norm:
             return canon
-    if m := re.search(r"\bpackera\s+([a-z]+(?:-[a-z]+)?)(?=\s|$|[0-9])", norm):
+    if m := re.search(r"\bpackera\s+[0-9]*([a-z]+(?:-[a-z]+)?)(?=\s|$|[0-9])", norm):
         ep = m.group(1).strip("-")
         if ep and ep not in _NON_EPITHET_TOKENS:
             return "Packera dubia" if ep == "tomentosa" else f"Packera {ep}"

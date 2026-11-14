@@ -115,7 +115,7 @@ def _normalize_taxon_binomial(text: str) -> str:
     for syn, canon in _SYNONYM_MAP.items():
         if syn in hay:
             return canon
-    if m := re.search(r"\bpackera\s+([a-z-]+)\b", hay):
+    if m := re.search(r"\bpackera\s+[0-9]*([a-z-]+)\b", hay):
         return "Packera_dubia" if m.group(1) == "tomentosa" else f"Packera_{m.group(1)}"
     return "Packera_sp"
 
@@ -260,11 +260,21 @@ def _obtain_dryad_token() -> str:
 
 def _route_dryad_file(src: Path, zip_name: str) -> Optional[str]:
     low, zlow = src.name.lower(), zip_name.lower()
+    if "__macosx" in str(src).lower() or src.name.startswith("._"):
+        return None
     if low in _DRYAD_EXACT_MAP:
         return _DRYAD_EXACT_MAP[low]
-    if ("phytop" in zlow or "phytop" in low) and low.endswith((".tsv", ".csv")):
-        method = "ASTRALPro" if "astralpro" in low else "wASTRAL" if "wastral" in low else "MO" if re.search(r"(^|[^a-z0-9])mo([^a-z0-9]|$)", low) else (re.sub(r"[^A-Za-z0-9_-]+", "_", src.stem).strip("_") or "table")
-        return f"public_packera_PhyTop_{method}.tsv"
+    if ("phytop" in zlow or "phytop" in low) and low.endswith((".tsv", ".csv", ".tree", ".tre", ".nwk")):
+        stem_clean = re.sub(r"_phytop(\.info)?$", "", src.stem, flags=re.IGNORECASE)
+        method = (
+            "ASTRALPro" if ("astralpro" in low or "astral-pro" in low)
+            else "wASTRAL" if "wastral" in low
+            else "HybPiper-df" if "hybpiper" in low
+            else "MO" if re.search(r"(^|[^a-z0-9])mo([^a-z0-9]|$)", low)
+            else (re.sub(r"[^A-Za-z0-9_-]+", "_", stem_clean).strip("_") or "table")
+        )
+        ext = ".tre" if low.endswith((".tree", ".tre", ".nwk")) else ".tsv"
+        return f"public_packera_PhyTop_{method}{ext}"
     if ("reltime" in zlow or "reltime" in low) and low.endswith((".tre", ".nwk", ".tree")):
         return f"public_packera_RelTime_{re.sub(r'[^A-Za-z0-9_.-]+', '_', src.stem).strip('_') or 'tree'}.tre"
     return None

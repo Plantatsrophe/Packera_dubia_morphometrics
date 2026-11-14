@@ -37,11 +37,24 @@
     }
     s <- trimws(gsub("[[:space:]]+", " ", gsub("_+", " ", s)))
     if (grepl("(?i)\\b(Packera|P\\.)\\s+sp\\.?\\s*nov\\b", s, perl = TRUE)) return("Packera sp. nov.")
-    m <- regexec("(?i)\\b(Packera|Senecio|P\\.)\\s+([A-Za-z][A-Za-z0-9.-]*)", s, perl = TRUE)
+    m <- regexec("(?i)\\b(Packera|Senecio|P\\.)\\s+[0-9]*([A-Za-z][A-Za-z0-9.-]*)", s, perl = TRUE)
     reg <- regmatches(s, m)[[1L]]
     if (length(reg) >= 3L) {
+      gen_low <- tolower(reg[2L])
       ep_raw <- sub("[-.].*$", "", reg[3L])
       ep_low <- tolower(ep_raw)
+      sen_map <- c(
+        tomentosus = "dubia", tomentosa = "dubia", aureus = "aurea",
+        anonymus = "anonyma", obovatus = "obovata", pauperculus = "paupercula",
+        schweinitzianus = "schweinitziana", millefolium = "millefolium",
+        antennariifolius = "antennariifolia", glabellus = "glabella",
+        plattensis = "plattensis", pseudaureus = "pseudaurea",
+        indecorus = "indecora", canus = "cana"
+      )
+      if (gen_low == "senecio") {
+        if (ep_low %in% names(sen_map)) return(paste("Packera", sen_map[[ep_low]]))
+        return(paste("Senecio", ep_low))
+      }
       if (ep_low %in% c("tomentosa", "tomentosus")) return("Packera dubia")
       return(paste("Packera", ep_low))
     }
@@ -95,7 +108,16 @@ load_public_packera_backbone <- function(raw_geno_dir) {
   phytop_tables <- list()
   for (pf in pt_files) {
     df_pt <- .read_delim_safe(pf)
-    if (!is.null(df_pt) && nrow(df_pt) > 0L) phytop_tables[[basename(pf)]] <- as.data.frame(df_pt, stringsAsFactors = FALSE)
+    if (!is.null(df_pt) && nrow(df_pt) > 0L) {
+      df_res <- as.data.frame(df_pt, stringsAsFactors = FALSE)
+      tre_p <- sub("\\.(tsv|csv)$", ".tre", pf, ignore.case = TRUE)
+      if (file.exists(tre_p) && requireNamespace("ape", quietly = TRUE)) {
+        pt_tr <- tryCatch(ape::read.tree(tre_p), error = function(e) NULL)
+        if (inherits(pt_tr, "multiPhylo") && length(pt_tr) > 0L) pt_tr <- pt_tr[[1L]]
+        if (!is.null(pt_tr)) attr(df_res, "phytop_tree") <- pt_tr
+      }
+      phytop_tables[[basename(pf)]] <- df_res
+    }
   }
   has_bb <- any(vapply(trees, function(x) !is.null(x), logical(1L)))
   list(has_backbone = isTRUE(has_bb), trees = trees, phytop_tables = phytop_tables, tree_files_found = found_files)
@@ -156,6 +178,35 @@ select_backbone_guided_outgroup <- function(uniq_taxa, p_dist, backbone = NULL) 
       toks <- trimws(unlist(strsplit(kv, "[;,+/|]")))
       any(.normalize_public_packera_taxon(toks) == norm_tx)
     }, logical(1L)))
+    if (length(hits) == 0L) {
+      pt_tr <- attr(df, "phytop_tree")
+      if (!is.null(pt_tr) && length(pt_tr$tip.label) >= 3L && length(pt_tr$node.label) > 0L) {
+        n_tips <- length(pt_tr$tip.label)
+        norm_tips <- .normalize_public_packera_taxon(pt_tr$tip.label)
+        tip_idx <- which(norm_tips == norm_tx)
+        if (length(tip_idx) > 0L) {
+          exact_mask <- grepl(sprintf("^%s$", gsub(" ", "_", norm_tx)),
+                              sub("_[0-9]+", "_", pt_tr$tip.label[tip_idx]), ignore.case = TRUE)
+          if (any(exact_mask)) tip_idx <- tip_idx[exact_mask]
+          matched_labels <- character(0)
+          for (ti in tip_idx) {
+            cur <- ti
+            for (step in seq_len(length(pt_tr$node.label))) {
+              par <- pt_tr$edge[pt_tr$edge[, 2L] == cur, 1L]
+              if (length(par) == 0L) break
+              par <- par[1L]
+              lbl <- if (par > n_tips) as.character(pt_tr$node.label[par - n_tips]) else ""
+              if (nzchar(lbl) && lbl %in% keys) {
+                matched_labels <- c(matched_labels, lbl)
+                break
+              }
+              cur <- par
+            }
+          }
+          if (length(matched_labels) > 0L) hits <- which(keys %in% unique(matched_labels))
+        }
+      }
+    }
     if (length(hits) > 0L) {
       if (!is.na(i_col)) { v <- suppressWarnings(as.numeric(df[[i_col]][hits])); ils_vals <- c(ils_vals, v[is.finite(v)]) }
       if (!is.na(h_col)) { v <- suppressWarnings(as.numeric(df[[h_col]][hits])); ih_vals <- c(ih_vals, v[is.finite(v)]) }
