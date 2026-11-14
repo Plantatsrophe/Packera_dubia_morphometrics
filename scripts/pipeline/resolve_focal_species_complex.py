@@ -251,8 +251,16 @@ def _extract_stage_metrics(
     ]
     eval_rows = focal_rows if focal_rows else triage_rows
 
-    def _count_sub(subtype: str) -> int:
-        return sum(1 for r in eval_rows if str(r.get("taxonomic_treatment_subtype", "")).strip() == subtype)
+    def _count_sub(subtype: str, *, pool: Optional[List[Dict[str, Any]]] = None) -> int:
+        rows_chk = pool if pool is not None else eval_rows
+        if subtype in {"Confirmed_Type_Control", "Type_Synonymy_Candidate"}:
+            return sum(
+                1
+                for r in rows_chk
+                if str(r.get("taxonomic_treatment_subtype", "")).strip() == subtype
+                or str(r.get("taxonomic_status_call", "")).strip() == subtype
+            )
+        return sum(1 for r in rows_chk if str(r.get("taxonomic_treatment_subtype", "")).strip() == subtype)
 
     clusters = {
         str(r.get("gmm_cluster", "")).strip()
@@ -351,8 +359,8 @@ def _extract_stage_metrics(
         "gmm_optimal_k": opt_k if opt_k is not None else "",
         "max_two_delta_bic": f"{max_two_delta_bic:.2f}" if max_two_delta_bic is not None else "",
         "n_confirmed_species": _count_sub("Confirmed_Species"),
-        "n_confirmed_type_control": _count_sub("Confirmed_Type_Control"),
-        "n_type_synonymy_candidate": _count_sub("Type_Synonymy_Candidate"),
+        "n_confirmed_type_control": _count_sub("Confirmed_Type_Control", pool=triage_rows),
+        "n_type_synonymy_candidate": _count_sub("Type_Synonymy_Candidate", pool=triage_rows),
         "n_misidentification_reassign": _count_sub("Misidentification_Reassign"),
         "n_hybrid_introgressant": _count_sub("Hybrid_Introgressant"),
         "hybrid_parent_pairs": "; ".join(
