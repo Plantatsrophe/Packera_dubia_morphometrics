@@ -258,9 +258,10 @@ render_step04_gmm_cda_png <- function(
         level = 0.95, linetype = "dashed", linewidth = 0.55, show.legend = FALSE
       )
     }
+    pal_map_b <- c(pal_map, "__loading__" = "#1F2937")
     p_tmp <- p_tmp +
       ggplot2::geom_point(ggplot2::aes(color = .data$plot_group, shape = .data$plot_group), size = 2.4, stroke = 0.85, alpha = 0.82) +
-      ggplot2::scale_color_manual(values = pal_map, labels = lbl_exprs, name = "Taxon / Group") +
+      ggplot2::scale_color_manual(values = pal_map_b, breaks = names(pal_map), labels = lbl_exprs, name = "Taxon / Group") +
       ggplot2::scale_shape_manual(values = shp_map, labels = lbl_exprs, name = "Taxon / Group") +
       theme_packera_pub() +
       ggplot2::labs(
@@ -271,6 +272,7 @@ render_step04_gmm_cda_png <- function(
       )
 
     # Overlay non-overlapping canonical structure loading vectors across dynamic selected features
+    vec_rep <- NULL
     cand_f <- unique(c(feature_cols, if ("selected_morph_features" %in% names(df)) unlist(strsplit(as.character(stats::na.omit(df$selected_morph_features)), ";")) else character(0)))
     cand_f <- intersect(trimws(cand_f), names(sub_2d))
     cand_f <- cand_f[vapply(cand_f, function(cl) sum(is.finite(suppressWarnings(as.numeric(sub_2d[[cl]])))) >= 3L, logical(1))]
@@ -282,9 +284,11 @@ render_step04_gmm_cda_png <- function(
         mag <- sqrt(rowSums(cor_mat^2))
         ok_v <- which(is.finite(mag) & mag > 0.18)
         if (length(ok_v) > 0L) {
-          top_v <- ok_v[order(mag[ok_v], decreasing = TRUE)[seq_len(min(6L, length(ok_v)))]]
-          rad_x <- 0.72 * max(abs(range(sub_2d$ord1, na.rm = TRUE)))
-          rad_y <- 0.72 * max(abs(range(sub_2d$ord2, na.rm = TRUE)))
+          max_vec <- if (length(active_groups) > 10L) 4L else 6L
+          rad_mult <- if (length(active_groups) > 10L) 0.86 else 0.72
+          top_v <- ok_v[order(mag[ok_v], decreasing = TRUE)[seq_len(min(max_vec, length(ok_v)))]]
+          rad_x <- rad_mult * max(abs(range(sub_2d$ord1, na.rm = TRUE)))
+          rad_y <- rad_mult * max(abs(range(sub_2d$ord2, na.rm = TRUE)))
           vec_df <- data.frame(
             var_raw = rownames(cor_mat)[top_v],
             vx = cor_mat[top_v, 1L] * rad_x,
@@ -303,7 +307,10 @@ render_step04_gmm_cda_png <- function(
               arrow = grid::arrow(length = grid::unit(0.14, "cm")),
               color = "#374151", linewidth = 0.6, inherit.aes = FALSE
             )
-          p_tmp <- add_centroid_repel_labels_gg(p_tmp, vec_df, "vx", "vy", "lbl", size = 2.65)
+          vec_rep <- data.frame(
+            rx = vec_df$vx, ry = vec_df$vy, rlbl = vec_df$lbl,
+            rcol = "__loading__", rface = "plain", stringsAsFactors = FALSE
+          )
         }
       }
     }
@@ -317,11 +324,41 @@ render_step04_gmm_cda_png <- function(
         )
       }
     }
+    cent_rep <- NULL
     if (length(active_groups) > 10L && nrow(sub_2d) > 0L) {
       cent_c <- stats::aggregate(cbind(ord1, ord2) ~ plot_group, data = sub_2d, FUN = stats::median)
       cent_c$lbl <- abbreviate_icn_taxon(cent_c$plot_group, abbreviate_genus = TRUE)
-      p_tmp <- add_centroid_repel_labels_gg(p_tmp, cent_c, "ord1", "ord2", "lbl", color_col = "plot_group") +
-        ggplot2::theme(legend.position = "none")
+      cent_rep <- data.frame(
+        rx = cent_c$ord1, ry = cent_c$ord2, rlbl = cent_c$lbl,
+        rcol = cent_c$plot_group, rface = "italic", stringsAsFactors = FALSE
+      )
+      p_tmp <- p_tmp + ggplot2::theme(legend.position = "none")
+    }
+    all_rep <- rbind(vec_rep, cent_rep)
+    if (!is.null(all_rep) && nrow(all_rep) > 0L) {
+      if (requireNamespace("ggrepel", quietly = TRUE)) {
+        rep_fmls <- names(formals(ggrepel::geom_label_repel))
+        rep_args <- list(
+          data = all_rep,
+          mapping = ggplot2::aes(x = .data$rx, y = .data$ry, label = .data$rlbl, color = .data$rcol, fontface = .data$rface),
+          fill = grDevices::adjustcolor("white", alpha.f = 0.90),
+          size = 2.55,
+          show.legend = FALSE,
+          inherit.aes = FALSE
+        )
+        if ("box.padding" %in% rep_fmls) rep_args$box.padding <- 0.32
+        if ("max.overlaps" %in% rep_fmls) rep_args$max.overlaps <- 60
+        p_tmp <- p_tmp + do.call(ggrepel::geom_label_repel, rep_args)
+      } else {
+        p_tmp <- p_tmp + ggplot2::geom_label(
+          data = all_rep,
+          mapping = ggplot2::aes(x = .data$rx, y = .data$ry, label = .data$rlbl, color = .data$rcol, fontface = .data$rface),
+          fill = grDevices::adjustcolor("white", alpha.f = 0.88),
+          size = 2.55,
+          show.legend = FALSE,
+          inherit.aes = FALSE
+        )
+      }
     }
     p_tmp
   }

@@ -5,6 +5,7 @@ Tests argument parsing, preflight checks, dispatch, and dry-run execution.
 """
 
 import argparse
+import os
 import sys
 import tempfile
 import unittest
@@ -1180,10 +1181,11 @@ REUSE_CANONICAL_DATA="false"
             )
             conn_chk.close()
 
-            # Verify standalone bash ./run_pipeline.sh --purge-runs-only --db <path> exits 0 cleanly
+            # Verify standalone bash ./run_pipeline.sh --purge-runs-only --db <path> exits 0 cleanly (isolated to temp ws)
             res_sh = subprocess.run(
                 ["bash", str(PROJECT_ROOT / "run_pipeline.sh"), "--purge-runs-only", "--db", str(db_file)],
-                cwd=PROJECT_ROOT,
+                cwd=ws,
+                env={**os.environ, "PACKERA_WORKSPACE_ROOT": str(ws)},
                 capture_output=True,
                 text=True,
                 check=False,

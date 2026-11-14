@@ -491,11 +491,14 @@ if [[ "${PURGE_RUNS_ONLY}" == "true" && "${PURGE_SEGMENTS}" != "true" ]]; then
     _PURGE_PY="python3"
   fi
   echo "[Purge] Purging Step 03 to 06 run outputs and Tier B SQLite tables (preserving Step 01 & Step 02 segmentation)..."
+  _PURGE_WS="${PACKERA_WORKSPACE_ROOT:-${PROJECT_ROOT}}"
   "${_PURGE_PY}" -c "
+import sys
 from pathlib import Path
+sys.path.insert(0, '${PROJECT_ROOT}')
 from scripts.core.db import purge_runs_only
 db_override = '${CUSTOM_DB_PATH}' or None
-res = purge_runs_only(workspace_root=Path('${PROJECT_ROOT}'), db_path=db_override, refresh_env_buffers=True, vacuum=True)
+res = purge_runs_only(workspace_root=Path('${_PURGE_WS}'), db_path=db_override, refresh_env_buffers=True, vacuum=True)
 rf = res['removed_files']
 pr = res['purged_db_rows']
 print(f'[Purge] Removed {rf} run/output files and {pr} Tier B SQLite rows (Step 01 vouchers & Step 02 segments preserved).')
@@ -531,12 +534,17 @@ if [[ "${PURGE_SEGMENTS}" == "true" ]]; then
     _PURGE_PY="python3"
   fi
   echo "[Purge] Purging all previous Step 02 to 07 segments, masks, contours, run directories, and SQLite segmentation tables..."
+  _PURGE_WS="${PACKERA_WORKSPACE_ROOT:-${PROJECT_ROOT}}"
   "${_PURGE_PY}" -c "
+import sys
 from pathlib import Path
+sys.path.insert(0, '${PROJECT_ROOT}')
 from scripts.core.db import purge_segments_and_runs
 db_override = '${CUSTOM_DB_PATH}' or None
-res = purge_segments_and_runs(workspace_root=Path('${PROJECT_ROOT}'), db_path=db_override, purge_runs=True, vacuum=True)
-print(f'[Purge] Removed {res[\"removed_files\"]} artifact files and {res[\"purged_db_rows\"]} SQLite rows (Step 01 vouchers & raw images preserved).')
+res = purge_segments_and_runs(workspace_root=Path('${_PURGE_WS}'), db_path=db_override, purge_runs=True, vacuum=True)
+rf = res['removed_files']
+pr = res['purged_db_rows']
+print(f'[Purge] Removed {rf} artifact files and {pr} SQLite rows (Step 01 vouchers & raw images preserved).')
 "
   # If invoked standalone (e.g. ./run_pipeline.sh --purge-segments [--db <path>]), exit cleanly after purge
   _NON_PURGE_ARGS=0

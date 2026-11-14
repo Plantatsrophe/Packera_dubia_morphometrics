@@ -2412,31 +2412,38 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
         stopifnot(res_s1$recommended_determination[9] == "Packera anonyma")
 
         # B. Intraspecific-mode congener_osr_reassign with exact open_set_df = 14 (qchisq(0.90, 14) = 21.064)
+        #    and regression guards ensuring self_morph_df = 12 prevents false OSR when type_morph_mahal_d2 = 14.8 < qchisq(0.95, 12) = 21.026
         df_intra_osr <- data.frame(
-          catalogNumber = c("DUB_CORE_1", "DUB_CORE_2", "DUB_CORE_3", "DUB_ACTUALLY_ANONYMA"),
+          catalogNumber = c("DUB_CORE_1", "DUB_CORE_2", "DUB_CORE_3", "DUB_ACTUALLY_ANONYMA", "DUB_TOLERANT_SELF_DF12", "DUB_CONFIRMED_SELF_DF12"),
           plant_individual_id = 0L,
           institutionCode = "NCU",
           species_raw = "Packera dubia",
           species_standardized = "Packera dubia",
-          determiner_tier = c("Tier_1_Gold", "Tier_1_Gold", "Tier_1_Gold", "Tier_3_Bronze"),
+          determiner_tier = c("Tier_1_Gold", "Tier_1_Gold", "Tier_1_Gold", "Tier_3_Bronze", "Tier_3_Bronze", "Tier_3_Bronze"),
           morph_tier_source = "Basal_Rosette",
           basal_leaf_count = 3L,
-          cda_predicted_taxon = c("Morphotype_K1", "Morphotype_K1", "Morphotype_K1", "Morphotype_K2"),
-          cda_posterior_prob = c(0.95, 0.94, 0.95, 0.88),
-          is_typical_morphotype = c(TRUE, TRUE, TRUE, FALSE),
-          type_morph_mahal_d2 = c(1.1, 1.3, 1.2, 24.5),
-          min_congener_mahal_d2 = c(38.0, 39.5, 37.2, 11.4),
+          cda_predicted_taxon = c("Morphotype_K1", "Morphotype_K1", "Morphotype_K1", "Morphotype_K2", "Morphotype_K1", "Morphotype_K1"),
+          cda_posterior_prob = c(0.95, 0.94, 0.95, 0.88, 0.85, 0.85),
+          is_typical_morphotype = c(TRUE, TRUE, TRUE, FALSE, FALSE, FALSE),
+          self_morph_mahal_d2 = c(1.1, 1.3, 1.2, 24.5, 14.2, 14.2),
+          self_morph_df = c(12L, 12L, 12L, 12L, 12L, 12L),
+          type_morph_mahal_d2 = c(1.1, 1.3, 1.2, 24.5, 14.8, 14.8),
+          min_congener_mahal_d2 = c(38.0, 39.5, 37.2, 11.4, 10.2, 10.2),
           min_congener_taxon = "Packera anonyma",
-          open_set_novelty_p = c(0.0004, 0.0003, 0.0005, 0.654),
+          open_set_novelty_p = c(0.0004, 0.0003, 0.0005, 0.654, 0.85, 0.85),
           open_set_df = 14L,
-          morphometric_outlier_flag = c(FALSE, FALSE, FALSE, TRUE),
-          edaphic_z_score = c(0.4, 0.5, 0.4, 2.3),
-          gmm_cluster = c(1L, 1L, 1L, 2L),
+          morphometric_outlier_flag = c(FALSE, FALSE, FALSE, TRUE, TRUE, FALSE),
+          edaphic_z_score = c(0.4, 0.5, 0.4, 2.3, 0.6, 1.9),
+          gmm_cluster = c(1L, 1L, 1L, 2L, 1L, 1L),
           stringsAsFactors = FALSE
         )
         res_iosr <- apply_taxonomic_decision_matrix(df_intra_osr, intraspecific_mode = TRUE)
         stopifnot(res_iosr$taxonomic_treatment_subtype[4] == "Misidentification_Reassign")
         stopifnot(res_iosr$recommended_determination[4] == "Packera anonyma")
+        stopifnot(res_iosr$taxonomic_treatment_subtype[5] == "Ecophenotypic_Plasticity")
+        stopifnot(res_iosr$recommended_determination[5] == "Packera dubia")
+        stopifnot(res_iosr$taxonomic_treatment_subtype[6] == "Confirmed_Species")
+        stopifnot(res_iosr$recommended_determination[6] == "Packera dubia")
 
         # C. Stage 3: Duplicate exsiccatae collapse, allopatric spatial-cline rejection, and Basionym Resurrection vs sp. nov.
         # Build 60-row intraspecific cohort so full >=5 gathering & >=3 10 km deme cohesion gates execute:

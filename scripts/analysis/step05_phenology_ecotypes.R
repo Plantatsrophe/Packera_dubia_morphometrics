@@ -951,17 +951,61 @@ resolve_analysis_group <- function(
     "azonal_lithology_presence_buffer"
   )
 
+  # Coalesce partial-coverage buffered edaphic NAs onto a working copy (leaving raw df unchanged)
+  # so incomplete buffer coverage never collapses into constant median Dirac spikes
+  df_rag <- df
+  .fill_nonfinite_col <- function(dframe, target_col, fallback_cols) {
+    if (!(target_col %in% names(dframe))) return(dframe)
+    cur <- suppressWarnings(as.numeric(dframe[[target_col]]))
+    for (fc in fallback_cols) {
+      if (fc %in% names(dframe)) {
+        fb <- suppressWarnings(as.numeric(dframe[[fc]]))
+        miss <- !is.finite(cur) & is.finite(fb)
+        if (any(miss)) cur[miss] <- fb[miss]
+      }
+    }
+    dframe[[target_col]] <- cur
+    dframe
+  }
+  df_rag <- .fill_nonfinite_col(df_rag, "min_bedrock_depth_buffer_cm", c("fine_bedrock_depth_cm", "solus_resdept_cm"))
+  df_rag <- .fill_nonfinite_col(df_rag, "ph_q10_buffer", c("fine_soil_ph"))
+  df_rag <- .fill_nonfinite_col(df_rag, "max_cfvo_buffer_pct", c("solus_fragvol_pct", "fine_cfvo_pct"))
+  if (("lithic_outcrop_index" %in% names(df_rag)) && exists("compute_derived_habitat_predictors", mode = "function")) {
+    df_lith <- compute_derived_habitat_predictors(df_rag)
+    if ("lithic_outcrop_index" %in% names(df_lith)) {
+      li_cur <- suppressWarnings(as.numeric(df_rag$lithic_outcrop_index))
+      li_fb <- suppressWarnings(as.numeric(df_lith$lithic_outcrop_index))
+      miss_li <- !is.finite(li_cur) & is.finite(li_fb)
+      if (any(miss_li)) df_rag$lithic_outcrop_index[miss_li] <- li_fb[miss_li]
+    }
+  }
+
+  elig_c <- if ("is_training_eligible_coord" %in% names(df_rag)) as.logical(df_rag$is_training_eligible_coord) else rep(TRUE, n_rows)
+  elig_c[is.na(elig_c)] <- TRUE
+  if ("coordinateUncertaintyInMeters" %in% names(df_rag)) {
+    u_m <- suppressWarnings(as.numeric(df_rag$coordinateUncertaintyInMeters))
+    elig_c <- elig_c & (is.na(u_m) | u_m <= 10000.0)
+  }
+  det_t <- if ("determiner_tier" %in% names(df_rag)) as.character(df_rag$determiner_tier) else rep("Tier_1_Gold", n_rows)
+  det_t[is.na(det_t) | !nzchar(trimws(det_t))] <- "Tier_3_Bronze"
+  is_t_sp <- if ("is_type_specimen" %in% names(df_rag)) as.logical(df_rag$is_type_specimen) else rep(FALSE, n_rows)
+  is_t_sp[is.na(is_t_sp)] <- FALSE
+  anc_mask <- elig_c & (grepl("Tier_0|Tier_1|Gold|Tier_2|Silver", det_t, ignore.case = TRUE) | is_t_sp)
+  if (sum(anc_mask) < 8L) anc_mask <- elig_c
+  if (sum(anc_mask) < 6L) anc_mask <- rep(TRUE, n_rows)
+  anc_idx <- which(anc_mask)
+
   cand_env <- if (!is.null(primary_env_vars) && length(primary_env_vars) > 0L) {
-    setdiff(intersect(as.character(primary_env_vars), names(df)), exclude_cols)
+    setdiff(intersect(as.character(primary_env_vars), names(df_rag)), exclude_cols)
   } else if (exists("discover_candidate_eco_predictors", mode = "function")) {
-    setdiff(discover_candidate_eco_predictors(df, include_pheno = FALSE, min_finite = 3L), exclude_cols)
+    setdiff(discover_candidate_eco_predictors(df_rag, include_pheno = FALSE, min_finite = 3L), exclude_cols)
   } else {
     character(0)
   }
 
   for (buf_c in c("min_bedrock_depth_buffer_cm", "ph_q10_buffer", "max_cfvo_buffer_pct")) {
-    if ((buf_c %in% names(df)) && !(buf_c %in% cand_env)) {
-      vb <- suppressWarnings(as.numeric(df[[buf_c]]))
+    if ((buf_c %in% names(df_rag)) && !(buf_c %in% cand_env)) {
+      vb <- suppressWarnings(as.numeric(df_rag[[buf_c]]))
       if (sum(is.finite(vb)) >= max(4L, ceiling(0.50 * n_rows)) && is.finite(stats::sd(vb, na.rm = TRUE)) && stats::sd(vb, na.rm = TRUE) > 1e-8) {
         cand_env <- c(cand_env, buf_c)
       }
@@ -969,18 +1013,23 @@ resolve_analysis_group <- function(
   }
 
   if (length(cand_env) == 0L) {
-    num_cands <- names(df)[vapply(names(df), function(nm) {
+    num_cands <- names(df_rag)[vapply(names(df_rag), function(nm) {
       if (nm %in% exclude_cols) return(FALSE)
       if (grepl("^(PC[0-9]+|ECT_|Cauline_|can[0-9]+|sym_|asym_|MEM[0-9]+|basal_|petiole_|blade_|plant_height|involucre_|capitula_)", nm)) return(FALSE)
-      is.numeric(df[[nm]]) || is.integer(df[[nm]])
+      is.numeric(df_rag[[nm]]) || is.integer(df_rag[[nm]])
     }, logical(1))]
     cand_env <- num_cands
   }
 
   cand_env <- cand_env[vapply(cand_env, function(cl) {
-    v <- suppressWarnings(as.numeric(df[[cl]]))
+    v <- suppressWarnings(as.numeric(df_rag[[cl]]))
     fin <- is.finite(v)
-    sum(fin) >= max(3L, ceiling(0.40 * n_rows)) && is.finite(stats::sd(v[fin])) && stats::sd(v[fin]) > 1e-8
+    va <- v[anc_idx]
+    fin_a <- is.finite(va)
+    sum(fin) >= max(3L, ceiling(0.40 * n_rows)) &&
+      sum(fin_a) >= max(4L, ceiling(0.75 * length(anc_idx))) &&
+      is.finite(stats::sd(v[fin])) && stats::sd(v[fin]) > 1e-8 &&
+      is.finite(stats::sd(va[fin_a])) && stats::sd(va[fin_a]) > 1e-8
   }, logical(1))]
 
   if (length(cand_env) == 0L || n_rows < 6L) {
@@ -989,27 +1038,12 @@ resolve_analysis_group <- function(
     return(df)
   }
 
-  elig_c <- if ("is_training_eligible_coord" %in% names(df)) as.logical(df$is_training_eligible_coord) else rep(TRUE, n_rows)
-  elig_c[is.na(elig_c)] <- TRUE
-  if ("coordinateUncertaintyInMeters" %in% names(df)) {
-    u_m <- suppressWarnings(as.numeric(df$coordinateUncertaintyInMeters))
-    elig_c <- elig_c & (is.na(u_m) | u_m <= 10000.0)
-  }
-  det_t <- if ("determiner_tier" %in% names(df)) as.character(df$determiner_tier) else rep("Tier_1_Gold", n_rows)
-  det_t[is.na(det_t) | !nzchar(trimws(det_t))] <- "Tier_3_Bronze"
-  is_t_sp <- if ("is_type_specimen" %in% names(df)) as.logical(df$is_type_specimen) else rep(FALSE, n_rows)
-  is_t_sp[is.na(is_t_sp)] <- FALSE
-  anc_mask <- elig_c & (grepl("Tier_0|Tier_1|Gold|Tier_2|Silver", det_t, ignore.case = TRUE) | is_t_sp)
-  if (sum(anc_mask) < 8L) anc_mask <- elig_c
-  if (sum(anc_mask) < 6L) anc_mask <- rep(TRUE, n_rows)
-  anc_idx <- which(anc_mask)
-
   E_raw <- matrix(0.0, nrow = n_rows, ncol = length(cand_env), dimnames = list(NULL, cand_env))
   mu_v <- numeric(length(cand_env))
   sd_v <- numeric(length(cand_env))
   for (j in seq_along(cand_env)) {
     cl <- cand_env[j]
-    vj <- suppressWarnings(as.numeric(df[[cl]]))
+    vj <- suppressWarnings(as.numeric(df_rag[[cl]]))
     va <- vj[anc_idx]
     med_j <- stats::median(va[is.finite(va)], na.rm = TRUE)
     if (!is.finite(med_j)) med_j <- stats::median(vj[is.finite(vj)], na.rm = TRUE)

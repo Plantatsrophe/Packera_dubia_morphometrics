@@ -554,7 +554,9 @@ extract_uncertainty_buffered_predictors <- function(df, env_dir = "data/environm
     )
     lat_v <- suppressWarnings(as.numeric(df$latitude))
     lon_v <- suppressWarnings(as.numeric(df$longitude))
-    valid_pts <- is.finite(lat_v) & is.finite(lon_v) & df$is_edaphic_eligible_coord
+    unc_b <- suppressWarnings(as.numeric(df$coordinateUncertaintyInMeters))
+    valid_pts <- is.finite(lat_v) & is.finite(lon_v) &
+                 (df$is_edaphic_eligible_coord | is.na(unc_b) | (is.finite(unc_b) & unc_b <= 5000.0))
     if (any(valid_pts) && requireNamespace("terra", quietly = TRUE) && (length(pol_files) > 0L || length(sol_files) > 0L)) {
       v_idx <- which(valid_pts)
       pts_v <- tryCatch(
@@ -1706,12 +1708,20 @@ load_and_update_fine_grain_cache <- function(
       }
     }
 
+    lat_c <- suppressWarnings(as.numeric(df$latitude))
+    lon_c <- suppressWarnings(as.numeric(df$longitude))
+    unc_c <- suppressWarnings(as.numeric(df$coordinateUncertaintyInMeters))
+    has_conus_sol <- (if ("solus_resdept_cm" %in% names(df)) is.finite(suppressWarnings(as.numeric(df$solus_resdept_cm))) else rep(FALSE, n)) |
+                     (if ("polaris_ph_30m" %in% names(df)) is.finite(suppressWarnings(as.numeric(df$polaris_ph_30m))) else rep(FALSE, n)) |
+                     (is.finite(lat_c) & lat_c >= 24.0 & lat_c <= 49.5 & is.finite(lon_c) & lon_c >= -125.0 & lon_c <= -66.0)
+    buf_elig_5km <- is.finite(lat_c) & is.finite(lon_c) & has_conus_sol &
+                    (df$is_edaphic_eligible_coord | is.na(unc_c) | (is.finite(unc_c) & unc_c <= 5000.0))
     need_buf_refresh <- !isTRUE(demo) && has_sol_disk && (
       !("min_bedrock_depth_buffer_cm" %in% names(df)) ||
-      any(df$is_edaphic_eligible_coord & is.na(df$min_bedrock_depth_buffer_cm))
+      any(buf_elig_5km & is.na(df$min_bedrock_depth_buffer_cm))
     )
     if (isTRUE(need_buf_refresh)) {
-      b_mask <- df$is_edaphic_eligible_coord & (if ("min_bedrock_depth_buffer_cm" %in% names(df)) is.na(df$min_bedrock_depth_buffer_cm) else rep(TRUE, n))
+      b_mask <- buf_elig_5km & (if ("min_bedrock_depth_buffer_cm" %in% names(df)) is.na(df$min_bedrock_depth_buffer_cm) else rep(TRUE, n))
       if (any(b_mask)) {
         b_sub <- extract_uncertainty_buffered_predictors(df[b_mask, , drop = FALSE], env_dir = env_dir, demo = demo)
         for (bcol in c("ph_q10_buffer", "ph_q90_buffer", "min_bedrock_depth_buffer_cm", "max_cfvo_buffer_pct", "azonal_lithology_presence_buffer")) {

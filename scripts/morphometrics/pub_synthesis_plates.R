@@ -297,11 +297,13 @@ render_focal_revision_synthesis_plate_png <- function(df, out_png, full_df = NUL
   p_a <- ggplot2::ggplot() +
     ggplot2::geom_hline(yintercept = 0, linetype = "dotted", color = "#9CA3AF", linewidth = 0.4) +
     ggplot2::geom_vline(xintercept = 0, linetype = "dotted", color = "#9CA3AF", linewidth = 0.4)
+  nb_cent <- NULL
   if (nrow(nb_df) > 0L) {
     nb_cent <- stats::aggregate(cbind(mx, my) ~ species_standardized, data = nb_df, FUN = stats::median)
+    nb_cnt <- table(nb_df$species_standardized)
+    nb_cent <- nb_cent[order(-as.integer(nb_cnt[nb_cent$species_standardized])), , drop = FALSE]
     nb_cent$lbl <- abbreviate_icn_taxon(nb_cent$species_standardized, abbreviate_genus = TRUE)
     p_a <- p_a + ggplot2::geom_point(data = nb_df, ggplot2::aes(x = .data$mx, y = .data$my), shape = 1, size = 1.6, stroke = 0.55, color = "#94A3B8", alpha = 0.42)
-    p_a <- add_centroid_repel_labels_gg(p_a, utils::head(nb_cent, 8L), "mx", "my", "lbl", size = 2.45)
   }
   p_a <- p_a +
     ggplot2::geom_point(data = foc_m, ggplot2::aes(x = .data$mx, y = .data$my, color = .data$treatment_call, shape = .data$treatment_call), size = 2.4, stroke = 0.9, alpha = 0.88) +
@@ -317,6 +319,9 @@ render_focal_revision_synthesis_plate_png <- function(df, out_png, full_df = NUL
   if ("is_type_specimen" %in% names(foc_m) && any(!is.na(foc_m$is_type_specimen) & as.logical(foc_m$is_type_specimen))) {
     t_m <- foc_m[!is.na(foc_m$is_type_specimen) & as.logical(foc_m$is_type_specimen), , drop = FALSE]
     p_a <- p_a + ggplot2::geom_point(data = t_m, ggplot2::aes(x = .data$mx, y = .data$my), shape = 8, size = 3.8, stroke = 1.2, color = "#111827")
+  }
+  if (!is.null(nb_cent) && nrow(nb_cent) > 0L) {
+    p_a <- add_centroid_repel_labels_gg(p_a, utils::head(nb_cent, 8L), "mx", "my", "lbl", size = 2.50)
   }
 
   # Panel B: EPSG:5070 Geographic Treatment & Type-Control Map
@@ -361,7 +366,7 @@ render_focal_revision_synthesis_plate_png <- function(df, out_png, full_df = NUL
       ggplot2::labs(
         title = "C. Rhizosphere Edaphic & Hopkins Phenology Envelope",
         subtitle = "Focal vouchers vs. complex background along edaphic & phenological axes",
-        x = if (exists("format_step05_predictor_labels", mode = "function")) format_step05_predictor_labels(ed_col) else ed_col,
+        x = if (exists("format_step05_predictor_labels", mode = "function")) format_step05_predictor_labels(ed_col) else if (exists("format_predictor_labels", mode = "function")) format_predictor_labels(ed_col) else ed_col,
         y = if (ph_col == "delta_doy_resid") "Hopkins Phenological Anomaly (Delta DOY, d)" else "Hopkins-Adjusted Anthesis DOY"
       )
   } else {

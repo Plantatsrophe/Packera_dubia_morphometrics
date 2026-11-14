@@ -315,21 +315,24 @@ def rescore_tier_a_leaves(
         upd_contour_json: List[Optional[str]] = [r["contour_xy_json"] for r in qc_results]
 
         # CPU metric margin tick-lattice calibration for uncalibrated vouchers
+        # Skip full-disk ruler re-scan once canonical calibration (>30,000 leaves) is stored
         ruler_tasks: List[Tuple[str, str, Optional[float]]] = []
         seen_cats: set[str] = set()
-        for _, rv in el_df[["catalogNumber", "image_path", "voucher_px_per_mm", "voucher_is_cal"]].drop_duplicates("catalogNumber").iterrows():
-            cat_s = str(rv["catalogNumber"]).strip()
-            if not cat_s or cat_s in seen_cats:
-                continue
-            seen_cats.add(cat_s)
-            is_cal_v = int(rv["voucher_is_cal"]) if pd.notna(rv.get("voucher_is_cal")) else 0
-            if is_cal_v != 0:
-                continue
-            img_f = _resolve_voucher_image_file(rv.get("image_path"), cat_s, eff_data_dir)
-            if img_f is None:
-                continue
-            v_px = float(rv["voucher_px_per_mm"]) if pd.notna(rv.get("voucher_px_per_mm")) else None
-            ruler_tasks.append((cat_s, str(img_f), v_px))
+        skip_ruler_rescan = int((el_df["voucher_is_cal"] == 1).sum()) > 30000
+        if not skip_ruler_rescan:
+            for _, rv in el_df[["catalogNumber", "image_path", "voucher_px_per_mm", "voucher_is_cal"]].drop_duplicates("catalogNumber").iterrows():
+                cat_s = str(rv["catalogNumber"]).strip()
+                if not cat_s or cat_s in seen_cats:
+                    continue
+                seen_cats.add(cat_s)
+                is_cal_v = int(rv["voucher_is_cal"]) if pd.notna(rv.get("voucher_is_cal")) else 0
+                if is_cal_v != 0:
+                    continue
+                img_f = _resolve_voucher_image_file(rv.get("image_path"), cat_s, eff_data_dir)
+                if img_f is None:
+                    continue
+                v_px = float(rv["voucher_px_per_mm"]) if pd.notna(rv.get("voucher_px_per_mm")) else None
+                ruler_tasks.append((cat_s, str(img_f), v_px))
 
         calibrated_scales: Dict[str, float] = {}
         if ruler_tasks:
@@ -407,9 +410,9 @@ def rescore_tier_a_leaves(
             # Reconstruct anatomical frame whenever >= 2 leaves exist (flowering OR sterile)
             if len(grp) >= 2 and p_height is not None:
                 inverted_mount = _is_inverted_mount_group(grp)
-                leaf_recs: List[Dict[str, Any]] = []
+                parsed_rows: List[Tuple[Any, float, float, float, float, float, float]] = []
+                pet_prox_s: List[float] = []
                 for idx_df, r_l in grp.iterrows():
-                    lid_i = int(r_l["leaf_id"])
                     bld_px = float(r_l["blade_length_px"]) if pd.notna(r_l.get("blade_length_px")) and float(r_l["blade_length_px"]) > 0 else 80.0
                     bld_w_px = float(r_l["blade_width_px"]) if pd.notna(r_l.get("blade_width_px")) and float(r_l["blade_width_px"]) > 0 else np.nan
                     pet_px = float(r_l["petiole_length_px"]) if pd.notna(r_l.get("petiole_length_px")) and float(r_l["petiole_length_px"]) >= 0 else 0.0
@@ -419,15 +422,31 @@ def rescore_tier_a_leaves(
                     cy_rel = float(r_l["cy_rel_plant_bbox"]) if pd.notna(r_l.get("cy_rel_plant_bbox")) else np.nan
                     if np.isfinite(cy_rel):
                         s_est = max(0.0, min(1.0, cy_rel if inverted_mount else (1.0 - cy_rel)))
-                        eff_cy_rel = 1.0 - s_est
                     elif np.isfinite(dc_prev):
                         s_est = max(0.0, min(1.0, dc_prev))
-                        eff_cy_rel = 1.0 - s_est
                     else:
                         s_est = 0.0
-                        eff_cy_rel = 1.0
-                    y_tip = cy_eval - s_est * p_height
-                    y_base = y_tip - min(pet_px, 0.35 * p_height)
+                    s_tip = max(0.0, s_est - (0.5 * bld_px + min(pet_px, 0.45 * p_height)) / p_height)
+                    parsed_rows.append((r_l, s_est, bld_px, bld_w_px, pet_px, pet_w_px, pbr_v))
+                    if pbr_v >= 0.22 and s_est <= 0.62:
+                        pet_prox_s.append(s_tip)
+
+                # Shift crown origin up from bbox bottom only when proximal petiolate leaves anchor the caudex
+                s_crown_offset = min(0.22, min(pet_prox_s)) if pet_prox_s else 0.0
+                has_rosette_root = bool(
+                    (cx_cr is not None and cy_cr is not None and len(pet_prox_s) >= 1)
+                    or len(pet_prox_s) >= 2
+                )
+
+                leaf_recs: List[Dict[str, Any]] = []
+                for r_l, s_est, bld_px, bld_w_px, pet_px, pet_w_px, pbr_v in parsed_rows:
+                    lid_i = int(r_l["leaf_id"])
+                    s_adj = max(0.0, s_est - s_crown_offset)
+                    eff_cy_rel = 1.0 - s_adj
+                    y_blade_center = cy_eval - s_adj * p_height
+                    y_base = min(cy_eval, y_blade_center + 0.5 * bld_px)
+                    y_apex = y_blade_center - 0.5 * bld_px
+                    y_tip = min(cy_eval, y_base + min(pet_px, 0.45 * p_height))
                     area_val = float(r_l["area_px"]) if pd.notna(r_l.get("area_px")) and float(r_l["area_px"]) > 0 else 0.0
                     ar_val = float(r_l["aspect_ratio"]) if pd.notna(r_l.get("aspect_ratio")) and float(r_l["aspect_ratio"]) > 0 else 1.5
                     sol_l = float(r_l["solidity"]) if pd.notna(r_l.get("solidity")) else 0.85
@@ -435,7 +454,7 @@ def rescore_tier_a_leaves(
                         "leaf_id": lid_i,
                         "plant_individual_id": int(_pid),
                         "p_base_sheet": (cx_eval, y_base),
-                        "p_apex_sheet": (cx_eval, y_base - bld_px),
+                        "p_apex_sheet": (cx_eval, y_apex),
                         "p_petiole_tip": (cx_eval, y_tip),
                         "blade_length_px": bld_px,
                         "blade_width_px": bld_w_px,
@@ -453,10 +472,16 @@ def rescore_tier_a_leaves(
                     if has_caps
                     else []
                 )
+                root_box = (
+                    [(cy_eval - 20.0, cx_eval - 20.0, cy_eval + 20.0, cx_eval + 20.0)]
+                    if has_rosette_root
+                    else []
+                )
                 z_res = classify_leaf_zone_anatomical(
                     leaf_recs,
                     crowns_by_pid={int(_pid): (cx_eval, cy_eval)},
                     capitula_detections=cap_box,
+                    root_boxes=root_box,
                     is_bent_stem=bool(int(r0.get("is_bent_stem") or 0)),
                 )
                 for _, r_l in grp.iterrows():

@@ -91,7 +91,7 @@ render_step05a_ecological_niche_png <- function(
     imp_top <- utils::head(imp_df, 14L)
     imp_top$domain <- .classify_env_domain(imp_top$var)
     pretty_lbl <- if (exists("format_predictor_labels", mode = "function")) format_predictor_labels(imp_top$var) else gsub("_", " ", imp_top$var)
-    imp_top$lbl <- factor(wrap_clean_label_r(pretty_lbl, width = 32L), levels = rev(unique(wrap_clean_label_r(pretty_lbl, width = 32L))))
+    imp_top$lbl <- factor(wrap_clean_label_r(pretty_lbl, width = 36L), levels = rev(unique(wrap_clean_label_r(pretty_lbl, width = 36L))))
     cv_acc <- if ("spatial_block_cv_acc" %in% names(vdf) && any(is.finite(suppressWarnings(as.numeric(vdf$spatial_block_cv_acc))))) {
       stats::median(suppressWarnings(as.numeric(vdf$spatial_block_cv_acc)), na.rm = TRUE)
     } else NA_real_
@@ -106,7 +106,7 @@ render_step05a_ecological_niche_png <- function(
         name = "Environmental Stream"
       ) +
       theme_packera_pub(base_size = 9.6) +
-      ggplot2::theme(legend.position = "bottom") +
+      ggplot2::theme(legend.position = "bottom", axis.text.y = ggplot2::element_text(size = 7.8, lineheight = 0.88)) +
       ggplot2::labs(
         title = "A. Spatial Block-CV Random Forest Importance",
         subtitle = if (is.finite(cv_acc)) sprintf("Spatial block cross-validation accuracy = %.1f%% (non-MEM predictors)", 100.0 * cv_acc) else "3-block VIF-pruned climatic, rhizosphere pedologic & topographic predictors",
@@ -174,7 +174,7 @@ render_step05a_ecological_niche_png <- function(
       } else NA_real_
       lbl_b <- if (exists("format_predictor_labels", mode = "function")) format_predictor_labels(bv) else bv
       if (is.finite(kw_p)) lbl_b <- sprintf("%s (KW p = %.3g)", lbl_b, kw_p)
-      lbl_b <- paste(strwrap(lbl_b, width = 28L), collapse = "\n")
+      lbl_b <- paste(strwrap(lbl_b, width = 20L), collapse = "\n")
       data.frame(plot_group = vdf$plot_group[ok_b], facet_lbl = lbl_b, val = vv[ok_b], stringsAsFactors = FALSE)
     })
     ed_df <- do.call(rbind, ed_list)
@@ -186,7 +186,7 @@ render_step05a_ecological_niche_png <- function(
       ggplot2::scale_shape_manual(values = shp_map) +
       ggplot2::scale_y_discrete(labels = icn_discrete_labeller(abbreviate_genus = TRUE)) +
       theme_packera_pub(base_size = 9.4) +
-      ggplot2::theme(strip.text = ggplot2::element_text(size = 8.0, face = "bold")) +
+      ggplot2::theme(strip.text = ggplot2::element_text(size = 7.1, face = "bold", lineheight = 0.92, margin = ggplot2::margin(3, 3, 3, 3, unit = "pt"))) +
       ggplot2::labs(title = "C. Rhizosphere Pedologic & Climatic Divergence", x = "Extracted Raster Value (0-15 cm / Bioclim)", y = NULL)
   } else {
     ggplot2::ggplot() + theme_packera_pub() + ggplot2::labs(title = "C. Pedologic & Climatic Divergence")
@@ -207,8 +207,10 @@ render_step05a_ecological_niche_png <- function(
   p_schoener <- if (!is_single_niche && nrow(nsum) > 0L && !is.na(sd_col)) {
     nsum$D_val <- suppressWarnings(as.numeric(nsum[[sd_col]]))
     nsum$p_val <- if (!is.na(pv_col)) suppressWarnings(as.numeric(nsum[[pv_col]])) else rep(NA_real_, nrow(nsum))
-    nsum$t1_short <- abbreviate_icn_taxon(nsum[[t1_col]], abbreviate_genus = TRUE)
-    nsum$t2_short <- abbreviate_icn_taxon(nsum[[t2_col]], abbreviate_genus = TRUE)
+    wrap_ecotype <- function(v) ifelse(grepl("^(Ecotype|Morphotype|Complex|Cluster)", v), wrap_clean_label_r(gsub("_", " ", v), width = 22L), v)
+    nsum$t1_short <- wrap_ecotype(abbreviate_icn_taxon(nsum[[t1_col]], abbreviate_genus = TRUE))
+    nsum$t2_short <- wrap_ecotype(abbreviate_icn_taxon(nsum[[t2_col]], abbreviate_genus = TRUE))
+    d_face <- if (any(grepl("^(Ecotype|Morphotype|Complex|Cluster)", active_groups))) "plain" else "italic"
     nsum$lbl <- ifelse(is.finite(nsum$p_val) & nsum$p_val < 0.05, sprintf("%.2f*", nsum$D_val), sprintf("%.2f", nsum$D_val))
     ggplot2::ggplot(nsum, ggplot2::aes(x = .data$t1_short, y = .data$t2_short, fill = .data$D_val)) +
       ggplot2::geom_tile(color = "white", linewidth = 0.5) +
@@ -219,8 +221,8 @@ render_step05a_ecological_niche_png <- function(
       ) +
       ggplot2::scale_fill_viridis_c(option = "viridis", limits = c(0, 1), name = "Schoener's D") +
       theme_packera_pub(base_size = 9.5) +
-      ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 35, hjust = 1, face = "italic"),
-                     axis.text.y = ggplot2::element_text(face = "italic")) +
+      ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 35, hjust = 1, face = d_face),
+                     axis.text.y = ggplot2::element_text(face = d_face)) +
       ggplot2::labs(
         title = "D. Pairwise PCA-env Niche Overlap (Schoener's D)",
         subtitle = "Broennimann et al. (2012) background-calibrated KDE (* = background test p < 0.05)",
@@ -403,9 +405,10 @@ render_step05b_hopkins_phenology_png <- function(
     ggplot2::scale_fill_manual(values = pal_map) +
     ggplot2::scale_color_manual(values = pal_map) +
     theme_packera_pub(base_size = 9.5) +
+    ggplot2::theme(plot.title.position = "plot", plot.margin = ggplot2::margin(6, 14, 6, 8, unit = "pt")) +
     ggplot2::labs(
-      title = "B. Circular Hopkins-Adjusted Anthesis Clock",
-      subtitle = "Standardized to cohort reference latitude & elevation",
+      title = "B. Circular Anthesis Clock",
+      subtitle = "Hopkins-adjusted to cohort reference\nlatitude & elevation",
       x = NULL, y = "Anthesis Count"
     )
 
@@ -584,9 +587,11 @@ render_step05c_sdm_suitability_png <- function(
   p_multi_grid <- NULL
   n_rows_multi <- 0L
   if (has_multi_sdm) {
+    .fmt_sdm_strip <- function(v) wrap_clean_label_r(gsub("_", " ", abbreviate_icn_taxon(v, abbreviate_genus = TRUE)), width = 22L)
+    strip_face_m <- if (any(grepl("^(Ecotype|Morphotype|Complex|Cluster)", names(multi_rasters)))) "bold" else "bold.italic"
     grid_infos <- lapply(names(multi_rasters), function(tx_nm) {
       ri <- raster_to_proj_df(multi_rasters[[tx_nm]], max_cells = 18000L)
-      if (nrow(ri$df) > 0L) ri$df$taxon_lbl <- abbreviate_icn_taxon(tx_nm, abbreviate_genus = TRUE)
+      if (nrow(ri$df) > 0L) ri$df$taxon_lbl <- .fmt_sdm_strip(tx_nm)
       ri
     })
     proj_multi_ok <- all(vapply(grid_infos, function(ri) nrow(ri$df) == 0L || isTRUE(ri$projected), logical(1))) && !is.null(states_5070)
@@ -595,7 +600,7 @@ render_step05c_sdm_suitability_png <- function(
       pts_ok <- vdf[is.finite(suppressWarnings(as.numeric(vdf$decimalLongitude))) & is.finite(suppressWarnings(as.numeric(vdf$decimalLatitude))), , drop = FALSE]
       pts_ok$lon_num <- suppressWarnings(as.numeric(pts_ok$decimalLongitude))
       pts_ok$lat_num <- suppressWarnings(as.numeric(pts_ok$decimalLatitude))
-      pts_ok$taxon_lbl <- abbreviate_icn_taxon(pts_ok$plot_group, abbreviate_genus = TRUE)
+      pts_ok$taxon_lbl <- .fmt_sdm_strip(pts_ok$plot_group)
       pts_ok <- pts_ok[pts_ok$taxon_lbl %in% unique(grid_all$taxon_lbl), , drop = FALSE]
       n_sp_m <- length(unique(grid_all$taxon_lbl))
       ncol_m <- min(4L, max(2L, ceiling(sqrt(n_sp_m))))
@@ -621,7 +626,7 @@ render_step05c_sdm_suitability_png <- function(
           ggplot2::scale_fill_viridis_c(option = "cividis", limits = c(0, 1), name = "Ensemble\nSuitability") +
           ggplot2::coord_sf(crs = 5070L, xlim = range(grid_all$x), ylim = range(grid_all$y), expand = FALSE) +
           theme_packera_pub(base_size = 9.2) +
-          ggplot2::theme(strip.text = ggplot2::element_text(face = "bold.italic")) +
+          ggplot2::theme(strip.text = ggplot2::element_text(face = strip_face_m, size = 7.6, lineheight = 0.92)) +
           ggplot2::labs(
             title = sprintf("E. Comparative Multi-Taxon Ensemble Habitat Suitability (%d Modeled Taxa, EPSG:5070)", n_sp_m),
             subtitle = "Orange hollow circles mark coordinate-uncertainty-gated herbarium presences",
@@ -640,7 +645,7 @@ render_step05c_sdm_suitability_png <- function(
           ggplot2::scale_fill_viridis_c(option = "cividis", limits = c(0, 1), name = "Ensemble\nSuitability") +
           ggplot2::coord_fixed(ratio = 1.0 / max(0.25, cos_m), expand = FALSE) +
           theme_packera_pub(base_size = 9.2) +
-          ggplot2::theme(strip.text = ggplot2::element_text(face = "bold.italic")) +
+          ggplot2::theme(strip.text = ggplot2::element_text(face = strip_face_m, size = 7.6, lineheight = 0.92)) +
           ggplot2::labs(
             title = sprintf("E. Comparative Multi-Taxon Ensemble Habitat Suitability (%d Modeled Taxa)", n_sp_m),
             subtitle = "Orange hollow circles mark coordinate-uncertainty-gated herbarium presences",
@@ -660,8 +665,9 @@ render_step05c_sdm_suitability_png <- function(
   info_ens <- if (has_focal_sdm) raster_to_proj_df(focal_rasters$ensemble) else list(df = data.frame(), projected = FALSE)
 
   if (nrow(info_max$df) > 0L || nrow(info_ens$df) > 0L) {
-    p_a <- build_suitability_panel(if (nrow(info_max$df) > 0L) info_max else info_ens, pts_f, sprintf("A. MaxEnt (cloglog) Suitability : %s", f_tx), "L1-regularized IPP presence-background model (EPSG:5070)")
-    p_b <- build_suitability_panel(if (nrow(info_ens$df) > 0L) info_ens else info_max, pts_f, sprintf("B. Spatial RF + MaxEnt Ensemble : %s", f_tx), "AUC-weighted ensemble consensus surface (EPSG:5070)")
+    f_tx_disp <- gsub("_", " ", f_tx)
+    p_a <- build_suitability_panel(if (nrow(info_max$df) > 0L) info_max else info_ens, pts_f, sprintf("A. MaxEnt (cloglog) Suitability: %s", f_tx_disp), "L1-regularized IPP presence-background model (EPSG:5070)")
+    p_b <- build_suitability_panel(if (nrow(info_ens$df) > 0L) info_ens else info_max, pts_f, sprintf("B. Spatial RF + MaxEnt Ensemble: %s", f_tx_disp), "AUC-weighted ensemble consensus surface (EPSG:5070)")
 
     p_c <- if (!is.null(resp_df) && is.data.frame(resp_df) && nrow(resp_df) > 0L && all(c("predictor", "x_val", "suitability") %in% names(resp_df))) {
       ggplot2::ggplot(resp_df, ggplot2::aes(x = .data$x_val, y = .data$suitability, color = .data$predictor)) +
@@ -708,7 +714,7 @@ render_step05c_sdm_suitability_png <- function(
       plate_05c <- ((p_a | p_b) / (p_c | p_d) / p_multi_grid) +
         patchwork::plot_layout(heights = c(1.22, 0.92, max(1.15, 0.72 * n_rows_multi))) +
         patchwork::plot_annotation(
-          title = "Step 05 : Ensemble Species Distribution Modeling, Spatial-Block Validation & Multi-Taxon Suitability",
+          title = "Step 05: Ensemble Species Distribution Modeling, Spatial-Block Validation & Multi-Taxon Suitability",
           theme = ggplot2::theme(plot.title = ggplot2::element_text(face = "bold", size = 12.4))
         )
       return(save_packera_png_300(plate_05c, file.path(fdir, "fig05c_sdm_suitability_and_distribution_map.png"), width = 14.2, height = 9.4 + 2.7 * n_rows_multi))
@@ -717,13 +723,13 @@ render_step05c_sdm_suitability_png <- function(
     plate_05c <- ((p_a | p_b) / (p_c | p_d)) +
       patchwork::plot_layout(widths = c(1.1, 1.1), heights = c(1.25, 0.95)) +
       patchwork::plot_annotation(
-        title = "Step 05 : Ensemble Species Distribution Modeling & Spatial Block Validation",
+        title = "Step 05: Ensemble Species Distribution Modeling & Spatial Block Validation",
         theme = ggplot2::theme(plot.title = ggplot2::element_text(face = "bold", size = 12.4))
       )
     return(save_packera_png_300(plate_05c, file.path(fdir, "fig05c_sdm_suitability_and_distribution_map.png"), width = 14.0, height = 9.8))
   }
 
   # Geographic Occurrence & Ecoregion Map when raster layers are absent
-  p_geo <- build_suitability_panel(data.frame(), vdf, "Step 05 : Equal-Area Projected Geographic Distribution (Albers EPSG:5070)", "Hollow markers stratified by taxon; scale bar & north arrow in projected CRS")
+  p_geo <- build_suitability_panel(data.frame(), vdf, "Step 05: Equal-Area Projected Geographic Distribution (Albers EPSG:5070)", "Hollow markers stratified by taxon; scale bar & north arrow in projected CRS")
   save_packera_png_300(p_geo, file.path(fdir, "fig05c_sdm_suitability_and_distribution_map.png"), width = 11.8, height = 8.2)
 }

@@ -998,25 +998,49 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
   cohort_species <- sort(unique(trimws(sp_all_vec[is_binomial_packera(sp_all_vec)])))
   can_evaluate_hybrids <- !is_intra && (length(cohort_species) >= 2L)
 
+  has_any_geo_in_df <- any(nzchar(state_vec_geo)) || any(is.finite(lat_vec_geo) & is.finite(lon_vec_geo))
+  use_ext_geo_db <- nzchar(Sys.getenv("RUN_ID", unset = "")) || nzchar(Sys.getenv("PACKERA_DB_PATH", unset = "")) || has_any_geo_in_df
   usda_states_by_tx <- list()
   db_syntopy_rows <- NULL
-  if (Sys.getenv("PACKERA_DEMO_MODE", unset = "") != "1" && exists("connect_packera_db", mode = "function") && requireNamespace("DBI", quietly = TRUE)) {
+  if (use_ext_geo_db && Sys.getenv("PACKERA_DEMO_MODE", unset = "") != "1" && exists("connect_packera_db", mode = "function") && requireNamespace("DBI", quietly = TRUE)) {
     tryCatch({
       c_geo <- connect_packera_db(read_only = TRUE, demo = FALSE)
       on.exit(tryCatch(if (!is.null(c_geo) && DBI::dbIsValid(c_geo)) DBI::dbDisconnect(c_geo), error = function(e) NULL), add = TRUE)
       if (!is.null(c_geo) && DBI::dbExistsTable(c_geo, "usda_county_ranges")) {
-        u_df <- DBI::dbGetQuery(c_geo, "SELECT DISTINCT canonical_packera, state_norm FROM usda_county_ranges WHERE state_norm IS NOT NULL AND TRIM(state_norm) != '';")
+        u_flds <- tryCatch(DBI::dbListFields(c_geo, "usda_county_ranges"), error = function(e) character(0))
+        u_sym_sel <- if ("usda_symbol" %in% u_flds) ", usda_symbol" else ""
+        u_df <- DBI::dbGetQuery(
+          c_geo,
+          paste0("SELECT DISTINCT canonical_packera, state_norm", u_sym_sel,
+                 " FROM usda_county_ranges WHERE state_norm IS NOT NULL AND TRIM(state_norm) != '';")
+        )
         if (!is.null(u_df) && nrow(u_df) > 0L) {
-          u_tx <- as.character(u_df$canonical_packera)
+          u_tx <- trimws(as.character(u_df$canonical_packera))
           u_st <- .norm_state_str(u_df$state_norm)
-          ok_u <- nzchar(u_tx) & nzchar(u_st)
+          ok_u <- !is.na(u_tx) & nzchar(u_tx) & nzchar(u_st)
+          if ("usda_symbol" %in% names(u_df) && any(ok_u)) {
+            u_sym <- toupper(trimws(ifelse(is.na(u_df$usda_symbol), "", as.character(u_df$usda_symbol))))
+            has_sym_u <- ok_u & nzchar(u_sym)
+            if (any(has_sym_u)) {
+              sym_owners <- tapply(u_tx[has_sym_u], u_sym[has_sym_u], function(v) length(unique(v)))
+              shared_syms <- names(sym_owners)[sym_owners > 1L]
+              if (length(shared_syms) > 0L) {
+                is_shared_u <- has_sym_u & (u_sym %in% shared_syms)
+                ep_pre <- toupper(substr(sub("^Packera\\s+", "", u_tx), 1L, 2L))
+                sym_ok_u <- !is_shared_u | (nchar(u_sym) >= 4L & ep_pre == substr(u_sym, 3L, 4L))
+                ok_u <- ok_u & sym_ok_u
+              }
+            }
+          }
           if (any(ok_u)) usda_states_by_tx <- lapply(split(u_st[ok_u], u_tx[ok_u]), unique)
         }
       }
-      if (can_evaluate_hybrids && (nzchar(Sys.getenv("RUN_ID", unset = "")) || nzchar(Sys.getenv("PACKERA_DB_PATH", unset = ""))) &&
+      if ((can_evaluate_hybrids || is_intra) && (nzchar(Sys.getenv("RUN_ID", unset = "")) || nzchar(Sys.getenv("PACKERA_DB_PATH", unset = ""))) &&
           !is.null(c_geo) && DBI::dbExistsTable(c_geo, "vouchers")) {
+        v_flds <- tryCatch(DBI::dbListFields(c_geo, "vouchers"), error = function(e) character(0))
+        sp_std_sel <- if ("species_standardized" %in% v_flds) "v.species_standardized, " else ""
         q_syn <- paste(
-          "SELECT v.catalogNumber, v.scientificName, v.species_raw, v.determiner_tier,",
+          paste0("SELECT v.catalogNumber, ", sp_std_sel, "v.scientificName, v.species_raw, v.determiner_tier,"),
           "v.stateProvince, v.county, v.decimalLatitude, v.decimalLongitude",
           "FROM vouchers v",
           "WHERE v.determiner_tier IN ('Tier_0_Type_Anchor', 'Tier_1_Gold', 'Tier_2_Silver')",
@@ -1034,22 +1058,58 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
     ok_ll <- r_idx[is.finite(lat_vec_geo[r_idx]) & is.finite(lon_vec_geo[r_idx])]
     anch_coords_by_tx[[tx]] <- if (length(ok_ll) > 0L) cbind(lat = lat_vec_geo[ok_ll], lon = lon_vec_geo[ok_ll]) else NULL
   }
+  if (!is.null(db_syntopy_rows) && nrow(db_syntopy_rows) > 0L) {
+    raw_db_nm <- if ("species_standardized" %in% names(db_syntopy_rows)) {
+      ifelse(!is.na(db_syntopy_rows$species_standardized) & nzchar(trimws(as.character(db_syntopy_rows$species_standardized))),
+             as.character(db_syntopy_rows$species_standardized),
+             ifelse(!is.na(db_syntopy_rows$scientificName) & nzchar(trimws(as.character(db_syntopy_rows$scientificName))),
+                    as.character(db_syntopy_rows$scientificName),
+                    as.character(db_syntopy_rows$species_raw)))
+    } else {
+      ifelse(!is.na(db_syntopy_rows$scientificName) & nzchar(trimws(as.character(db_syntopy_rows$scientificName))),
+             as.character(db_syntopy_rows$scientificName),
+             as.character(db_syntopy_rows$species_raw))
+    }
+    tx_db <- standardize_packera_taxon(raw_db_nm)
+    st_db <- .norm_state_str(db_syntopy_rows$stateProvince)
+    lat_db <- suppressWarnings(as.numeric(db_syntopy_rows$decimalLatitude))
+    lon_db <- suppressWarnings(as.numeric(db_syntopy_rows$decimalLongitude))
+    for (tx_u in unique(tx_db[!is.na(tx_db) & nzchar(tx_db) & tx_db != "Unknown"])) {
+      m_u <- !is.na(tx_db) & (tx_db == tx_u)
+      st_u <- unique(st_db[m_u & nzchar(st_db)])
+      anch_states_by_tx[[tx_u]] <- unique(c(anch_states_by_tx[[tx_u]], st_u, usda_states_by_tx[[tx_u]]))
+      ok_db_ll <- m_u & is.finite(lat_db) & is.finite(lon_db)
+      if (any(ok_db_ll)) {
+        cand_m <- cbind(lat = lat_db[ok_db_ll], lon = lon_db[ok_db_ll])
+        anch_coords_by_tx[[tx_u]] <- if (is.null(anch_coords_by_tx[[tx_u]])) cand_m else rbind(anch_coords_by_tx[[tx_u]], cand_m)
+      }
+    }
+  }
   is_valid_taxon_str <- function(s) !is.null(s) && !is.na(s) && nzchar(s) && s != "Unknown" && (s %in% active_taxa || grepl("^(Packera|P\\.)\\s+", s))
+  has_ext_geo_ref <- (length(usda_states_by_tx) > 0L) || (!is.null(db_syntopy_rows) && nrow(db_syntopy_rows) > 0L)
   .eval_taxon_geo_plausibility <- function(row_i, cand_tx) {
     if (!is_valid_taxon_str(cand_tx)) return(list(plausible = FALSE, weight = 0.0, dist_km = Inf))
     st_i <- state_vec_geo[row_i]; lat_i <- lat_vec_geo[row_i]; lon_i <- lon_vec_geo[row_i]
     has_st_i <- nzchar(st_i); has_ll_i <- is.finite(lat_i) && is.finite(lon_i)
-    if (!has_st_i && !has_ll_i) return(list(plausible = TRUE, weight = 1.0, dist_km = 0.0))
-    known_sts <- unique(c(anch_states_by_tx[[cand_tx]], usda_states_by_tx[[cand_tx]]))
-    if (has_st_i && length(known_sts) > 0L && (st_i %in% known_sts)) {
-      return(list(plausible = TRUE, weight = 1.0, dist_km = 0.0))
+    if (!has_st_i && !has_ll_i) {
+      if (is_intra && has_ext_geo_ref) return(list(plausible = FALSE, weight = 0.10, dist_km = Inf))
+      return(list(plausible = TRUE, weight = 1.0, dist_km = NA_real_))
     }
+    known_sts <- unique(c(anch_states_by_tx[[cand_tx]], usda_states_by_tx[[cand_tx]]))
     c_mat <- anch_coords_by_tx[[cand_tx]]
+    min_km <- NA_real_
     if (has_ll_i && !is.null(c_mat) && nrow(c_mat) > 0L) {
       dlat <- (c_mat[, 1L] - lat_i) * (pi / 180.0)
       dlon <- (c_mat[, 2L] - lon_i) * (pi / 180.0)
       a_hav <- sin(dlat / 2.0)^2 + cos(lat_i * (pi / 180.0)) * cos(c_mat[, 1L] * (pi / 180.0)) * sin(dlon / 2.0)^2
       min_km <- min(6371.0 * 2.0 * atan2(sqrt(pmax(0.0, a_hav)), sqrt(pmax(0.0, 1.0 - a_hav))))
+    }
+    if (has_st_i && length(known_sts) > 0L && (st_i %in% known_sts)) {
+      if (!(has_ll_i && is.finite(min_km) && min_km > 450.0)) {
+        return(list(plausible = TRUE, weight = 1.0, dist_km = if (is.finite(min_km)) min_km else NA_real_))
+      }
+    }
+    if (has_ll_i && is.finite(min_km)) {
       # Allow 450 km geodesic dispersal/disjunct buffer around documented anchors (650 km when <4 total anchors in small test fixtures)
       max_km <- if (nrow(c_mat) >= 4L || length(usda_states_by_tx[[cand_tx]]) > 0L) 450.0 else 650.0
       if (min_km <= max_km) {
@@ -1059,8 +1119,11 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
       w_far <- exp(-0.5 * ((min_km - 200.0) / 200.0)^2)
       return(list(plausible = FALSE, weight = max(0.01, w_far), dist_km = min_km))
     }
-    if (has_st_i && length(usda_states_by_tx[[cand_tx]]) >= 2L && !(st_i %in% known_sts)) {
+    if (has_st_i && length(known_sts) >= 2L && !(st_i %in% known_sts)) {
       return(list(plausible = FALSE, weight = 0.05, dist_km = 800.0))
+    }
+    if (is_intra && has_ext_geo_ref) {
+      return(list(plausible = FALSE, weight = 0.05, dist_km = Inf))
     }
     list(plausible = TRUE, weight = 0.85, dist_km = NA_real_)
   }
@@ -1857,6 +1920,8 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
     } else {
       NA_real_
     }
+    tm_df_i <- self_df_i
+    tm_chisq95_i <- stats::qchisq(0.95, df = tm_df_i)
     outside_self_morph_95 <- !is.finite(self_d2_eff) || (self_d2_eff > stats::qchisq(0.95, df = self_df_i))
 
     cl_floor_i <- if (is.finite(cl_thr_dv[i])) min(0.82, max(0.58, cl_thr_dv[i])) else 0.0
@@ -1868,10 +1933,10 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
     min_cong_d2_i <- min_cong_d2_dv[i]
     osr_df_i <- osr_df_vec[i]
     osr_chisq90 <- osr_chisq90_vec[i]
-    osr_self_outlier <- (is.finite(tm_d2_i) && (tm_d2_i > type_morph_chisq95)) ||
+    osr_self_outlier <- (is.finite(tm_d2_i) && (tm_d2_i > tm_chisq95_i)) ||
                         (is.finite(self_d2_eff) && (self_d2_eff > stats::qchisq(0.95, df = self_df_i)))
     ref_self_d2_norm <- if (is.finite(tm_d2_i) && tm_d2_i > 0) {
-      tm_d2_i / max(1.0, p_type_morph)
+      tm_d2_i / max(1.0, tm_df_i)
     } else if (is.finite(self_d2_eff) && self_d2_eff > 0) {
       self_d2_eff / max(1.0, self_df_i)
     } else {
@@ -1885,7 +1950,9 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
     osr_cda_support <- (!is.null(morph_sp) && morph_is_taxon && morph_sp == min_cong_tx_i && is.finite(eff_cda_prob) && eff_cda_prob >= 0.50) ||
                        (!is.na(nt_m_i) && nzchar(nt_m_i) && nt_m_i == min_cong_tx_i) ||
                        ((is_intra || !morph_is_taxon) && is.finite(min_cong_d2_i) && (min_cong_d2_i <= osr_chisq85_vec[i]))
-    osr_geo_ok <- !is.na(min_cong_tx_i) && isTRUE(.eval_taxon_geo_plausibility(i, min_cong_tx_i)$plausible)
+    geo_osr_res <- if (!is.na(min_cong_tx_i)) .eval_taxon_geo_plausibility(i, min_cong_tx_i) else list(plausible = FALSE, weight = 0.0, dist_km = Inf)
+    osr_geo_ok <- isTRUE(geo_osr_res$plausible) && (!is_intra || (if (has_ext_geo_ref) (is.finite(geo_osr_res$dist_km) && geo_osr_res$dist_km <= 250.0) else (!is.finite(geo_osr_res$dist_km) || geo_osr_res$dist_km <= 250.0)))
+    osr_d2_ceil <- if (is_intra) stats::qchisq(0.50, df = max(1.0, osr_df_i)) else osr_chisq90
     osr_gold_eco_lock <- (det_t == "Tier_1_Gold") && has_obs_edaph_i && in_type_edaphic_env_i &&
                          (is.na(exs_gold_tx_dv[i]) || exs_gold_tx_dv[i] != min_cong_tx_i) &&
                          (!edaph_is_taxon || edaph_sp == given_sp)
@@ -1895,22 +1962,22 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
       is.finite(min_cong_d2_i) &&
       !is.na(min_cong_tx_i) && nzchar(min_cong_tx_i) &&
       (min_cong_tx_i != given_sp) &&
-      (min_cong_d2_i <= osr_chisq90) &&
+      (min_cong_d2_i <= osr_d2_ceil) &&
       osr_self_outlier &&
       osr_strictly_closer &&
       osr_cda_support &&
       osr_geo_ok &&
       (!is_intra || ((is_mo_flag || (is.finite(edaph_z_i) && edaph_z_i > 1.75)) && (det_t != "Tier_1_Gold" || (is.finite(edaph_z_i) && edaph_z_i > 2.0)))) &&
-      (!isTRUE(typ_m_i) || (is.finite(tm_d2_i) && tm_d2_i > type_morph_chisq95))
+      (!isTRUE(typ_m_i) || (is.finite(tm_d2_i) && tm_d2_i > tm_chisq95_i))
 
     # Rule B: Stage 1 Type-Control Consensus Reassignment (type_control_reassign) with 1-Vote-Per-Modality & Posterior Floor
     morph_concordant_self <- (morph_is_taxon && morph_sp == given_sp && is.finite(cda_prob) && cda_prob >= 0.65) ||
-                             (isTRUE(typ_m_i) && is.finite(tm_d2_i) && tm_d2_i <= type_morph_chisq95)
+                             (isTRUE(typ_m_i) && is.finite(tm_d2_i) && tm_d2_i <= tm_chisq95_i)
     vote_morph <- if (morph_concordant_self) {
       given_sp
     } else if (morph_is_taxon && morph_sp != given_sp && is.finite(eff_cda_prob) && eff_cda_prob >= 0.55) {
       morph_sp
-    } else if (!is.na(nt_m_i) && nzchar(nt_m_i) && is.finite(tm_d2_i) && tm_d2_i > type_morph_chisq95) {
+    } else if (!is.na(nt_m_i) && nzchar(nt_m_i) && is.finite(tm_d2_i) && tm_d2_i > tm_chisq95_i) {
       nt_m_i
     } else if (morph_is_taxon && is.finite(eff_cda_prob) && eff_cda_prob >= 0.55) {
       morph_sp
@@ -1930,13 +1997,13 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
     } else {
       rf_vote
     }
-    deviates_from_given_type <- (is.finite(tm_d2_i) && tm_d2_i > type_morph_chisq95) ||
+    deviates_from_given_type <- (is.finite(tm_d2_i) && tm_d2_i > tm_chisq95_i) ||
                                 (is.finite(tm_conc_dv[i]) && tm_conc_dv[i] < 0.25) ||
                                 (is.finite(te_z_i) && te_z_i > 2.0)
     type_control_reassign <- !is_type_specimen_i &&
                              !morph_concordant_self &&
                              outside_self_morph_95 &&
-                             (!isTRUE(typ_m_i) || (is.finite(tm_d2_i) && tm_d2_i > type_morph_chisq95)) &&
+                             (!isTRUE(typ_m_i) || (is.finite(tm_d2_i) && tm_d2_i > tm_chisq95_i)) &&
                              !is.na(vote_morph) && !is.na(vote_edaph) &&
                              (vote_morph == vote_edaph) && (vote_morph != given_sp) &&
                              deviates_from_given_type
