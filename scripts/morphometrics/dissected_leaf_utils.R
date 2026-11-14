@@ -155,7 +155,26 @@ classify_and_partition_leaf_zones <- function(
     }
   }
 
+  leaf_zone_routed <- ifelse(
+    !is.na(leaf_zone) & leaf_zone == "basal" & (!is.finite(zone_conf) | zone_conf >= 0.65),
+    "basal",
+    ifelse(
+      !is.na(leaf_zone) & leaf_zone == "cauline" & (!is.finite(zone_conf) | zone_conf >= 0.65),
+      "cauline",
+      "ambiguous_transitional"
+    )
+  )
+  for (g_idx in idx_by_grp) {
+    has_hi_basal <- any(leaf_zone_routed[g_idx] == "basal", na.rm = TRUE)
+    bas_cand <- g_idx[!is.na(leaf_zone[g_idx]) & leaf_zone[g_idx] == "basal"]
+    if (!has_hi_basal && length(bas_cand) > 0L && !all(is_caul_only_vec[g_idx])) {
+      sc_c <- ifelse(is.finite(zone_conf[bas_cand]), zone_conf[bas_cand], 0.50)
+      leaf_zone_routed[bas_cand[which.max(sc_c)]] <- "basal"
+    }
+  }
+
   fac_df$leaf_zone <- leaf_zone
+  fac_df$leaf_zone_routed <- leaf_zone_routed
   fac_df$leaf_zone_confidence <- zone_conf
   fac_df$dist_from_crown_norm <- d_crown
   fac_df$is_basal_fallback <- is_fallback_vec
@@ -246,6 +265,85 @@ filter_basal_lamina_contours <- function(
       n_fallback_individuals = n_fb_individuals
     )
   )
+}
+
+consolidate_fragmented_sheet_individuals <- function(efa_df) {
+  if (is.null(efa_df) || !is.data.frame(efa_df) || nrow(efa_df) < 2L) return(efa_df)
+  if (!all(c("catalogNumber", "plant_individual_id") %in% names(efa_df))) return(efa_df)
+  cat_s03 <- as.character(efa_df$catalogNumber)
+  pid_s03 <- ifelse(is.na(efa_df$plant_individual_id), 0L, suppressWarnings(as.integer(efa_df$plant_individual_id)))
+  pid_s03[is.na(pid_s03)] <- 0L
+  lz_s03 <- if ("leaf_zone" %in% names(efa_df)) tolower(trimws(as.character(efa_df$leaf_zone))) else rep("basal", nrow(efa_df))
+  lz_s03[is.na(lz_s03) | !(lz_s03 %in% c("basal", "cauline"))] <- "basal"
+  cy_s03 <- if ("cy_rel_plant_bbox" %in% names(efa_df)) suppressWarnings(as.numeric(efa_df$cy_rel_plant_bbox)) else rep(NA_real_, nrow(efa_df))
+  dc_s03 <- if ("dist_from_crown_norm" %in% names(efa_df)) suppressWarnings(as.numeric(efa_df$dist_from_crown_norm)) else rep(NA_real_, nrow(efa_df))
+  pbr_s03 <- if ("petiole_to_blade_ratio" %in% names(efa_df)) suppressWarnings(as.numeric(efa_df$petiole_to_blade_ratio)) else rep(NA_real_, nrow(efa_df))
+  by_cat_s03 <- split(seq_len(nrow(efa_df)), cat_s03)
+  reassigned_s03 <- 0L
+  rezoned_strays_s03 <- 0L
+  for (c_idx_vec in by_cat_s03) {
+    u_pids <- sort(unique(pid_s03[c_idx_vec]))
+    if (length(u_pids) < 2L) next
+    bas_counts <- vapply(u_pids, function(p) sum(pid_s03[c_idx_vec] == p & lz_s03[c_idx_vec] == "basal"), integer(1))
+    tot_counts <- vapply(u_pids, function(p) sum(pid_s03[c_idx_vec] == p), integer(1))
+    hub_mask <- bas_counts >= 2L
+    kept_pids <- if (any(hub_mask)) u_pids[hub_mask] else u_pids[which.max(bas_counts * 1000L + tot_counts)]
+    primary_pid <- kept_pids[which.max(bas_counts[match(kept_pids, u_pids)] * 1000L + tot_counts[match(kept_pids, u_pids)])]
+    prim_bas_rows <- c_idx_vec[pid_s03[c_idx_vec] == primary_pid & lz_s03[c_idx_vec] == "basal"]
+    prim_cy_fin <- cy_s03[prim_bas_rows][is.finite(cy_s03[prim_bas_rows])]
+    min_prim_bas_cy <- if (length(prim_cy_fin) > 0L) min(prim_cy_fin) else NA_real_
+    med_prim_bas_cy <- if (length(prim_cy_fin) > 0L) stats::median(prim_cy_fin) else NA_real_
+    for (k_p in seq_along(u_pids)) {
+      p_cur <- u_pids[k_p]
+      if (p_cur %in% kept_pids) next
+      if (bas_counts[k_p] == 0L || tot_counts[k_p] <= 1L) {
+        hit_rows <- c_idx_vec[pid_s03[c_idx_vec] == p_cur]
+        pid_s03[hit_rows] <- primary_pid
+        reassigned_s03 <- reassigned_s03 + length(hit_rows)
+        for (hr in hit_rows) {
+          if (lz_s03[hr] == "basal" && length(prim_bas_rows) >= 2L) {
+            is_upper_stray <- (is.finite(dc_s03[hr]) && dc_s03[hr] > 0.24) ||
+              (is.finite(cy_s03[hr]) && is.finite(min_prim_bas_cy) && (cy_s03[hr] < (min_prim_bas_cy - 0.12) || (med_prim_bas_cy >= 0.60 && cy_s03[hr] < 0.45))) ||
+              (is.finite(pbr_s03[hr]) && pbr_s03[hr] < 0.08 && (!is.finite(cy_s03[hr]) || (is.finite(med_prim_bas_cy) && cy_s03[hr] < (med_prim_bas_cy - 0.08))))
+            if (isTRUE(is_upper_stray)) {
+              lz_s03[hr] <- "cauline"
+              rezoned_strays_s03 <- rezoned_strays_s03 + 1L
+            }
+          }
+        }
+      }
+    }
+  }
+  if (reassigned_s03 > 0L) {
+    efa_df$plant_individual_id <- pid_s03
+    if ("leaf_zone" %in% names(efa_df) && rezoned_strays_s03 > 0L) efa_df$leaf_zone <- lz_s03
+    if ("leaf_zone_routed" %in% names(efa_df) && rezoned_strays_s03 > 0L) efa_df$leaf_zone_routed <- ifelse(lz_s03 == "cauline", "cauline", as.character(efa_df$leaf_zone_routed))
+    message(sprintf("[Step 03 Multi-Plant Hygiene] Consolidated %d cauline-split / single-leaf stray rows onto primary basal individuals (re-zoned %d upper-stem strays to cauline).", reassigned_s03, rezoned_strays_s03))
+  }
+  efa_df
+}
+
+apply_otu_confidence_routing_tier <- function(specimen_df, closed_leaf_df) {
+  if (is.null(specimen_df) || nrow(specimen_df) == 0L || is.null(closed_leaf_df) || nrow(closed_leaf_df) == 0L) return(specimen_df)
+  if (!("morph_tier_source" %in% names(specimen_df)) || !("leaf_zone_confidence" %in% names(closed_leaf_df))) return(specimen_df)
+  s_keys <- paste0(trimws(as.character(specimen_df$catalogNumber)), "__", ifelse(is.na(specimen_df$plant_individual_id), 0L, as.integer(specimen_df$plant_individual_id)))
+  l_keys <- paste0(trimws(as.character(closed_leaf_df$catalogNumber)), "__", ifelse(is.na(closed_leaf_df$plant_individual_id), 0L, as.integer(closed_leaf_df$plant_individual_id)))
+  lz_l <- if ("leaf_zone" %in% names(closed_leaf_df)) tolower(trimws(as.character(closed_leaf_df$leaf_zone))) else rep("basal", nrow(closed_leaf_df))
+  zc_l <- suppressWarnings(as.numeric(closed_leaf_df$leaf_zone_confidence))
+  grp_l <- split(seq_len(nrow(closed_leaf_df)), l_keys)
+  n_trans <- 0L
+  for (i in seq_len(nrow(specimen_df))) {
+    if (isTRUE(specimen_df$morph_tier_source[i] == "Cauline_Only_Fallback")) next
+    idx_l <- grp_l[[s_keys[i]]]
+    if (is.null(idx_l) || length(idx_l) == 0L) next
+    bas_i <- idx_l[is.na(lz_l[idx_l]) | lz_l[idx_l] == "basal"]
+    if (length(bas_i) >= 1L && all(is.finite(zc_l[bas_i]) & zc_l[bas_i] < 0.65)) {
+      specimen_df$morph_tier_source[i] <- "Transitional_Passive"
+      n_trans <- n_trans + 1L
+    }
+  }
+  if (n_trans > 0L) message(sprintf("[Step 03 Confidence Routing] Flagged %d OTUs with zero high-confidence (conf >= 0.65) basal leaves as Transitional_Passive.", n_trans))
+  specimen_df
 }
 
 .extract_harmonic_opt_from_cal <- function(cal_res, min_h = 6L, max_h = 24L) {

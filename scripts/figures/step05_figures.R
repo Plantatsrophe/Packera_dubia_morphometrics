@@ -174,23 +174,25 @@ render_step05a_ecological_niche_png <- function(
       } else NA_real_
       lbl_b <- if (exists("format_predictor_labels", mode = "function")) format_predictor_labels(bv) else bv
       if (is.finite(kw_p)) lbl_b <- sprintf("%s (KW p = %.3g)", lbl_b, kw_p)
+      lbl_b <- paste(strwrap(lbl_b, width = 28L), collapse = "\n")
       data.frame(plot_group = vdf$plot_group[ok_b], facet_lbl = lbl_b, val = vv[ok_b], stringsAsFactors = FALSE)
     })
     ed_df <- do.call(rbind, ed_list)
     ggplot2::ggplot(ed_df, ggplot2::aes(x = .data$val, y = .data$plot_group)) +
-      ggplot2::geom_boxplot(fill = NA, color = "#4B5563", outlier.shape = NA, width = 0.55, linewidth = 0.45) +
+      ggplot2::geom_boxplot(fill = NA, color = "#4B5563", outlier.shape = NA, width = if (length(active_groups) <= 1L) 0.32 else 0.55, linewidth = 0.45) +
       ggplot2::geom_jitter(ggplot2::aes(color = .data$plot_group, shape = .data$plot_group), height = 0.16, width = 0, size = 1.85, stroke = 0.8, alpha = 0.80, show.legend = FALSE) +
       ggplot2::facet_wrap(~ facet_lbl, scales = "free_x", ncol = length(box_vars)) +
       ggplot2::scale_color_manual(values = pal_map) +
       ggplot2::scale_shape_manual(values = shp_map) +
       ggplot2::scale_y_discrete(labels = icn_discrete_labeller(abbreviate_genus = TRUE)) +
       theme_packera_pub(base_size = 9.4) +
+      ggplot2::theme(strip.text = ggplot2::element_text(size = 8.0, face = "bold")) +
       ggplot2::labs(title = "C. Rhizosphere Pedologic & Climatic Divergence", x = "Extracted Raster Value (0-15 cm / Bioclim)", y = NULL)
   } else {
     ggplot2::ggplot() + theme_packera_pub() + ggplot2::labs(title = "C. Pedologic & Climatic Divergence")
   }
 
-  # Panel D: Full N x N Pairwise Schoener's D Heatmap (or IBE Partial RDA in K=1 mode)
+  # Panel D: Full N x N Pairwise Schoener's D Heatmap (or IBE Partial RDA / Distance-Decay in K=1 mode)
   nsum <- if (!is.null(niche_res) && is.data.frame(niche_res$summary)) niche_res$summary else data.frame()
   ibe_df <- if (!is.null(srf_res) && is.data.frame(srf_res$ibe_summary)) srf_res$ibe_summary else data.frame()
 
@@ -198,7 +200,11 @@ render_step05a_ecological_niche_png <- function(
   t2_col <- intersect(c("Taxon2", "Taxon_2"), names(nsum))[1L]
   sd_col <- intersect(c("Schoener_D", "Schoeners_D", "Warren_D"), names(nsum))[1L]
   pv_col <- intersect(c("p_value_D", "Equivalency_p_value", "p_value"), names(nsum))[1L]
-  p_schoener <- if (nrow(nsum) > 0L && !is.na(t1_col) && !is.na(t2_col) && !is.na(sd_col)) {
+  n_pairs_taxa <- if (nrow(nsum) > 0L && !is.na(t1_col) && !is.na(t2_col)) {
+    length(unique(stats::na.omit(c(as.character(nsum[[t1_col]]), as.character(nsum[[t2_col]])))))
+  } else 0L
+  is_single_niche <- (length(active_groups) < 2L) || (n_pairs_taxa < 2L)
+  p_schoener <- if (!is_single_niche && nrow(nsum) > 0L && !is.na(sd_col)) {
     nsum$D_val <- suppressWarnings(as.numeric(nsum[[sd_col]]))
     nsum$p_val <- if (!is.na(pv_col)) suppressWarnings(as.numeric(nsum[[pv_col]])) else rep(NA_real_, nrow(nsum))
     nsum$t1_short <- abbreviate_icn_taxon(nsum[[t1_col]], abbreviate_genus = TRUE)
@@ -221,19 +227,80 @@ render_step05a_ecological_niche_png <- function(
         x = NULL, y = NULL
       )
   } else if (nrow(ibe_df) > 0L) {
-    comp_c <- intersect(c("Component", "Fraction", "Term"), names(ibe_df))[1L]
-    r2_c <- intersect(c("Adj_R2", "R2", "Variance_Pct"), names(ibe_df))[1L]
-    ibe_df$comp <- as.character(ibe_df[[comp_c]])
-    ibe_df$r2v <- pmax(0.0, suppressWarnings(as.numeric(ibe_df[[r2_c]])))
-    ggplot2::ggplot(ibe_df, ggplot2::aes(x = .data$r2v, y = .data$comp)) +
-      ggplot2::geom_col(fill = "#0072B2", alpha = 0.85, width = 0.6) +
-      theme_packera_pub() +
-      ggplot2::labs(title = "D. Isolation-by-Environment (IBE) vs. IBD Partial RDA", x = "Adjusted R\u00b2", y = NULL)
+    if (all(c("Modality", "Pure_Edaphic_AdjR2", "Pure_Climate_AdjR2", "Pure_Space_MEM_AdjR2") %in% names(ibe_df))) {
+      ibe_long <- rbind(
+        data.frame(Modality = as.character(ibe_df$Modality), Partition = "Pure Edaphic [A|B,C]",
+                   AdjR2 = pmax(0.0, suppressWarnings(as.numeric(ibe_df$Pure_Edaphic_AdjR2))), stringsAsFactors = FALSE),
+        data.frame(Modality = as.character(ibe_df$Modality), Partition = "Pure Climate [B|A,C]",
+                   AdjR2 = pmax(0.0, suppressWarnings(as.numeric(ibe_df$Pure_Climate_AdjR2))), stringsAsFactors = FALSE),
+        data.frame(Modality = as.character(ibe_df$Modality), Partition = "Pure Space MEM [C|A,B]",
+                   AdjR2 = pmax(0.0, suppressWarnings(as.numeric(ibe_df$Pure_Space_MEM_AdjR2))), stringsAsFactors = FALSE)
+      )
+      ibe_long$Modality_lbl <- gsub("_", " ", ibe_long$Modality)
+      min_p_ibe <- if ("Partial_RDA_p" %in% names(ibe_df)) suppressWarnings(min(as.numeric(ibe_df$Partial_RDA_p), na.rm = TRUE)) else NA_real_
+      ggplot2::ggplot(ibe_long, ggplot2::aes(x = .data$AdjR2, y = .data$Partition, fill = .data$Partition)) +
+        ggplot2::geom_col(alpha = 0.88, width = 0.62, show.legend = FALSE) +
+        ggplot2::facet_wrap(~ Modality_lbl, ncol = 1L, scales = "fixed") +
+        ggplot2::scale_fill_manual(values = c(
+          "Pure Edaphic [A|B,C]" = "#009E73",
+          "Pure Climate [B|A,C]" = "#0072B2",
+          "Pure Space MEM [C|A,B]" = "#D55E00"
+        )) +
+        theme_packera_pub(base_size = 9.2) +
+        ggplot2::labs(
+          title = "D. Isolation-by-Environment (IBE) vs. IBD Partial RDA",
+          subtitle = if (is.finite(min_p_ibe)) sprintf("Unimodal (K = 1) partial RDA fractions (min partial RDA p = %.3f)", min_p_ibe) else "Unimodal (K = 1) partial RDA variance partitioning",
+          x = expression("Partial Adjusted " * italic(R)^2),
+          y = NULL
+        )
+    } else {
+      comp_c <- intersect(c("Component", "Fraction", "Term", "Modality"), names(ibe_df))[1L]
+      r2_c <- intersect(c("Adj_R2", "R2", "Variance_Pct", "Total_Explained_AdjR2"), names(ibe_df))[1L]
+      ibe_df$comp <- if (!is.na(comp_c)) as.character(ibe_df[[comp_c]]) else paste0("Row_", seq_len(nrow(ibe_df)))
+      ibe_df$r2v <- if (!is.na(r2_c)) pmax(0.0, suppressWarnings(as.numeric(ibe_df[[r2_c]]))) else rep(0.0, nrow(ibe_df))
+      ggplot2::ggplot(ibe_df, ggplot2::aes(x = .data$r2v, y = .data$comp)) +
+        ggplot2::geom_col(fill = "#0072B2", alpha = 0.85, width = 0.6) +
+        theme_packera_pub() +
+        ggplot2::labs(title = "D. Isolation-by-Environment (IBE) vs. IBD Partial RDA", x = "Adjusted R\u00b2", y = NULL)
+    }
   } else {
-    ggplot2::ggplot() +
-      ggplot2::annotate("text", x = 0.5, y = 0.5, label = "Single-niche or insufficient georeferenced pairs\nfor Schoener's D permutation test", color = "#6B7280", size = 3.3) +
-      theme_packera_pub() +
-      ggplot2::labs(title = "D. Niche Overlap Summary", x = NULL, y = NULL)
+    lon_dd <- if ("decimalLongitude" %in% names(vdf)) suppressWarnings(as.numeric(vdf$decimalLongitude)) else if ("longitude" %in% names(vdf)) suppressWarnings(as.numeric(vdf$longitude)) else rep(NA_real_, nrow(vdf))
+    lat_dd <- if ("decimalLatitude" %in% names(vdf)) suppressWarnings(as.numeric(vdf$decimalLatitude)) else if ("latitude" %in% names(vdf)) suppressWarnings(as.numeric(vdf$latitude)) else rep(NA_real_, nrow(vdf))
+    env_dd_cols <- utils::head(cand_num_env, min(6L, length(cand_num_env)))
+    ok_dd <- is.finite(lon_dd) & is.finite(lat_dd) & length(env_dd_cols) >= 1L
+    if (sum(ok_dd) >= 6L) {
+      idx_dd <- which(ok_dd)
+      if (length(idx_dd) > 75L) idx_dd <- idx_dd[unique(round(seq(1L, length(idx_dd), length.out = 75L)))]
+      E_dd <- as.matrix(vdf[idx_dd, env_dd_cols, drop = FALSE]); storage.mode(E_dd) <- "double"
+      for (jc in seq_len(ncol(E_dd))) {
+        mj <- stats::median(E_dd[, jc], na.rm = TRUE); sj <- stats::sd(E_dd[, jc], na.rm = TRUE)
+        E_dd[!is.finite(E_dd[, jc]), jc] <- ifelse(is.finite(mj), mj, 0.0)
+        E_dd[, jc] <- (E_dd[, jc] - mean(E_dd[, jc])) / max(ifelse(is.finite(sj), sj, 1.0), 1e-6)
+      }
+      d_env <- as.numeric(stats::dist(E_dd))
+      mid_lat_rad <- stats::median(lat_dd[idx_dd], na.rm = TRUE) * pi / 180.0
+      xy_km <- cbind(lon_dd[idx_dd] * 111.32 * cos(mid_lat_rad), lat_dd[idx_dd] * 110.57)
+      d_geo <- as.numeric(stats::dist(xy_km))
+      ok_pr <- is.finite(d_env) & is.finite(d_geo)
+      dd_df <- data.frame(d_geo = d_geo[ok_pr], d_env = d_env[ok_pr])
+      if (nrow(dd_df) > 600L) dd_df <- dd_df[unique(round(seq(1L, nrow(dd_df), length.out = 600L))), , drop = FALSE]
+      rho_ibe <- suppressWarnings(stats::cor(dd_df$d_geo, dd_df$d_env, method = "spearman", use = "complete.obs"))
+      ggplot2::ggplot(dd_df, ggplot2::aes(x = .data$d_geo, y = .data$d_env)) +
+        ggplot2::geom_point(shape = 1, size = 1.6, stroke = 0.6, color = "#0072B2", alpha = 0.45) +
+        ggplot2::geom_smooth(method = "lm", formula = y ~ x, color = "#D55E00", linewidth = 0.85, se = TRUE, alpha = 0.14) +
+        theme_packera_pub(base_size = 9.5) +
+        ggplot2::labs(
+          title = "D. Unimodal IBE Distance Decay (K = 1 Regime)",
+          subtitle = sprintf("Standardized environmental vs. geographic distance (Spearman rho = %+.3f)", ifelse(is.finite(rho_ibe), rho_ibe, 0.0)),
+          x = "Pairwise Geographic Distance (km)",
+          y = "Standardized Environmental Distance"
+        )
+    } else {
+      ggplot2::ggplot() +
+        ggplot2::annotate("text", x = 0.5, y = 0.5, label = "Single-niche unimodal envelope (K = 1)\nwith insufficient georeferenced pairs", color = "#6B7280", size = 3.3) +
+        theme_packera_pub() +
+        ggplot2::labs(title = "D. Niche Distance Decay Summary", x = NULL, y = NULL)
+    }
   }
 
   dyn_h_05a <- max(10.0, 6.0 + 0.28 * length(active_groups))
@@ -313,7 +380,16 @@ render_step05b_hopkins_phenology_png <- function(
   } else {
     ggplot2::ggplot() + theme_packera_pub() + ggplot2::labs(title = "A. Anthesis DOY vs. Latitude", subtitle = "Insufficient georeferenced anthesis latitudes")
   }
-  if (length(active_groups) > 10L) p_lat <- p_lat + ggplot2::theme(legend.position = "none")
+  if (length(active_groups) > 15L) {
+    p_lat <- p_lat + ggplot2::theme(legend.position = "none")
+  } else if (length(active_groups) >= 2L) {
+    p_lat <- p_lat +
+      ggplot2::theme(legend.position = "bottom", legend.text = ggplot2::element_text(face = "italic", size = 7.6)) +
+      ggplot2::guides(
+        color = ggplot2::guide_legend(ncol = min(3L, length(active_groups)), byrow = TRUE),
+        shape = ggplot2::guide_legend(ncol = min(3L, length(active_groups)), byrow = TRUE)
+      )
+  }
 
   # Panel B: Circular Polar Rose Histogram of Hopkins-Adjusted DOY (Pewsey et al. 2013)
   sub_p$hop_clean <- ifelse(is.finite(sub_p$hop_doy), ((sub_p$hop_doy - 1.0) %% 365.25) + 1.0, sub_p$doy_num)
@@ -341,7 +417,7 @@ render_step05b_hopkins_phenology_png <- function(
   sub_dd <- sub_p[is.finite(sub_p$ddoy), , drop = FALSE]
   p_resid <- ggplot2::ggplot(sub_dd, ggplot2::aes(x = .data$ddoy, y = .data$plot_group)) +
     ggplot2::geom_vline(xintercept = c(-21, 0, 21), linetype = c("dashed", "dotted", "dashed"), color = c("#D55E00", "#9CA3AF", "#D55E00"), linewidth = 0.55) +
-    ggplot2::geom_boxplot(fill = NA, color = "#4B5563", outlier.shape = NA, width = 0.55, linewidth = 0.45) +
+    ggplot2::geom_boxplot(fill = NA, color = "#4B5563", outlier.shape = NA, width = if (length(active_groups) <= 1L) 0.32 else 0.55, linewidth = 0.45) +
     ggplot2::geom_jitter(ggplot2::aes(color = .data$plot_group, shape = .data$plot_group), height = 0.16, width = 0, size = 2.0, stroke = 0.8, alpha = 0.82, show.legend = FALSE) +
     ggplot2::scale_color_manual(values = pal_map) +
     ggplot2::scale_shape_manual(values = shp_map) +
@@ -400,47 +476,88 @@ render_step05c_sdm_suitability_png <- function(
   lbl_exprs <- format_icn_label_vec(active_groups, abbreviate_genus = TRUE, counts_map = cnt_map)
   names(lbl_exprs) <- active_groups
 
-  raster_to_lonlat_df <- function(r_obj, max_cells = 45000L) {
-    if (is.null(r_obj) || !requireNamespace("terra", quietly = TRUE)) return(data.frame())
+  raster_to_proj_df <- function(r_obj, max_cells = 45000L, target_crs = "EPSG:5070") {
+    if (is.null(r_obj) || !requireNamespace("terra", quietly = TRUE)) return(list(df = data.frame(), projected = FALSE))
     tryCatch({
       r_use <- if (terra::ncell(r_obj) > max_cells) {
         agg_f <- max(2L, ceiling(sqrt(terra::ncell(r_obj) / max_cells)))
         terra::aggregate(r_obj, fact = agg_f, fun = "mean", na.rm = TRUE)
       } else r_obj
-      d_r <- as.data.frame(r_use, xy = TRUE, na.rm = TRUE)
-      if (ncol(d_r) < 3L || nrow(d_r) == 0L) return(data.frame())
-      names(d_r)[1:3] <- c("lon", "lat", "suitability")
-      d_r[is.finite(d_r$suitability), c("lon", "lat", "suitability"), drop = FALSE]
-    }, error = function(e) data.frame())
-  }
-
-  # Helper to build a conformal/projected suitability + hollow occurrence map
-  build_suitability_panel <- function(r_df, pts_sub, title_txt, sub_txt = "") {
-    if (nrow(r_df) > 0L) {
-      cos_l <- cos(mean(range(r_df$lat, na.rm = TRUE)) * pi / 180.0)
-      p_m <- ggplot2::ggplot() +
-        ggplot2::geom_raster(data = r_df, ggplot2::aes(x = .data$lon, y = .data$lat, fill = .data$suitability), alpha = 0.90) +
-        ggplot2::scale_fill_viridis_c(option = "cividis", limits = c(0, 1), name = "Suitability")
-      if (requireNamespace("maps", quietly = TRUE)) {
-        st_d <- tryCatch(ggplot2::map_data("state"), error = function(e) NULL)
-        if (!is.null(st_d)) {
-          p_m <- p_m + ggplot2::geom_path(data = st_d, ggplot2::aes(x = .data$long, y = .data$lat, group = .data$group), color = "#E5E7EB", linewidth = 0.25)
+      is_proj <- FALSE
+      r_out <- r_use
+      if (requireNamespace("sf", quietly = TRUE)) {
+        if (!nzchar(terra::crs(r_use))) terra::crs(r_use) <- "EPSG:4326"
+        r_tmp <- tryCatch(terra::project(r_use, target_crs, method = "bilinear"), error = function(e) NULL)
+        if (!is.null(r_tmp) && terra::ncell(r_tmp) > 0L) {
+          d_chk <- as.data.frame(r_tmp, xy = TRUE, na.rm = TRUE)
+          if (ncol(d_chk) >= 3L && nrow(d_chk) > 0L && any(is.finite(d_chk[[3]]))) {
+            r_out <- r_tmp; is_proj <- TRUE
+          }
         }
       }
+      d_r <- as.data.frame(r_out, xy = TRUE, na.rm = TRUE)
+      if (ncol(d_r) < 3L || nrow(d_r) == 0L) return(list(df = data.frame(), projected = FALSE))
+      names(d_r)[1:3] <- c("x", "y", "suitability")
+      d_r <- d_r[is.finite(d_r$suitability), c("x", "y", "suitability"), drop = FALSE]
+      list(df = d_r, projected = is_proj)
+    }, error = function(e) list(df = data.frame(), projected = FALSE))
+  }
+
+  states_5070 <- if (requireNamespace("sf", quietly = TRUE) && requireNamespace("maps", quietly = TRUE)) {
+    tryCatch({
+      m_usa <- maps::map("state", plot = FALSE, fill = TRUE)
+      sf_u <- sf::st_as_sf(m_usa)
+      sf::st_crs(sf_u) <- 4326
+      sf::st_transform(sf::st_make_valid(sf_u), 5070L)
+    }, error = function(e) NULL)
+  } else NULL
+
+  # Helper to build a projected Albers Equal Area (EPSG:5070) suitability + hollow occurrence map
+  build_suitability_panel <- function(r_info, pts_sub, title_txt, sub_txt = "") {
+    r_df <- if (is.list(r_info) && is.data.frame(r_info$df)) r_info$df else data.frame()
+    is_proj <- is.list(r_info) && isTRUE(r_info$projected) && !is.null(states_5070)
+    if (nrow(r_df) > 0L) {
+      pts_ok_s <- data.frame()
       if (nrow(pts_sub) > 0L) {
         pts_sub$lon_num <- suppressWarnings(as.numeric(pts_sub$decimalLongitude))
         pts_sub$lat_num <- suppressWarnings(as.numeric(pts_sub$decimalLatitude))
         pts_ok_s <- pts_sub[is.finite(pts_sub$lon_num) & is.finite(pts_sub$lat_num), , drop = FALSE]
+      }
+      if (is_proj && requireNamespace("sf", quietly = TRUE)) {
+        p_m <- ggplot2::ggplot() +
+          ggplot2::geom_raster(data = r_df, ggplot2::aes(x = .data$x, y = .data$y, fill = .data$suitability), alpha = 0.92) +
+          ggplot2::scale_fill_viridis_c(option = "cividis", limits = c(0, 1), name = "Suitability") +
+          ggplot2::geom_sf(data = states_5070, fill = NA, color = "#E5E7EB", linewidth = 0.28, inherit.aes = FALSE)
         if (nrow(pts_ok_s) > 0L) {
-          p_m <- p_m + ggplot2::geom_point(
-            data = pts_ok_s,
-            ggplot2::aes(x = .data$lon_num, y = .data$lat_num),
-            shape = 1, size = 2.0, stroke = 0.8, color = "#FF6B00", alpha = 0.88
-          )
+          xy_pts <- tryCatch(sf::st_coordinates(sf::st_transform(sf::st_as_sf(pts_ok_s, coords = c("lon_num", "lat_num"), crs = 4326), 5070L)), error = function(e) NULL)
+          if (!is.null(xy_pts) && nrow(xy_pts) == nrow(pts_ok_s)) {
+            pts_ok_s$px <- xy_pts[, 1L]; pts_ok_s$py <- xy_pts[, 2L]
+            p_m <- p_m + ggplot2::geom_point(
+              data = pts_ok_s, ggplot2::aes(x = .data$px, y = .data$py),
+              shape = 1, size = 2.0, stroke = 0.8, color = "#FF6B00", alpha = 0.88, inherit.aes = FALSE
+            )
+          }
         }
+        return(
+          p_m +
+            ggplot2::coord_sf(crs = 5070L, xlim = range(r_df$x), ylim = range(r_df$y), expand = FALSE) +
+            theme_packera_pub(base_size = 9.5) +
+            ggplot2::labs(title = title_txt, subtitle = sub_txt, x = "Longitude (EPSG:5070)", y = "Latitude (EPSG:5070)")
+        )
+      }
+      cos_l <- cos(mean(range(r_df$y, na.rm = TRUE)) * pi / 180.0)
+      p_m <- ggplot2::ggplot() +
+        ggplot2::geom_raster(data = r_df, ggplot2::aes(x = .data$x, y = .data$y, fill = .data$suitability), alpha = 0.90) +
+        ggplot2::scale_fill_viridis_c(option = "cividis", limits = c(0, 1), name = "Suitability")
+      if (requireNamespace("maps", quietly = TRUE)) {
+        st_d <- tryCatch(ggplot2::map_data("state"), error = function(e) NULL)
+        if (!is.null(st_d)) p_m <- p_m + ggplot2::geom_path(data = st_d, ggplot2::aes(x = .data$long, y = .data$lat, group = .data$group), color = "#E5E7EB", linewidth = 0.25)
+      }
+      if (nrow(pts_ok_s) > 0L) {
+        p_m <- p_m + ggplot2::geom_point(data = pts_ok_s, ggplot2::aes(x = .data$lon_num, y = .data$lat_num), shape = 1, size = 2.0, stroke = 0.8, color = "#FF6B00", alpha = 0.88)
       }
       p_m +
-        ggplot2::coord_fixed(ratio = 1.0 / max(0.25, cos_l), xlim = range(r_df$lon), ylim = range(r_df$lat), expand = FALSE) +
+        ggplot2::coord_fixed(ratio = 1.0 / max(0.25, cos_l), xlim = range(r_df$x), ylim = range(r_df$y), expand = FALSE) +
         theme_packera_pub(base_size = 9.5) +
         ggplot2::labs(title = title_txt, subtitle = sub_txt, x = "Longitude (\u00b0E)", y = "Latitude (\u00b0N)")
     } else {
@@ -467,12 +584,13 @@ render_step05c_sdm_suitability_png <- function(
   p_multi_grid <- NULL
   n_rows_multi <- 0L
   if (has_multi_sdm) {
-    grid_dfs <- lapply(names(multi_rasters), function(tx_nm) {
-      d_tx <- raster_to_lonlat_df(multi_rasters[[tx_nm]], max_cells = 18000L)
-      if (nrow(d_tx) > 0L) d_tx$taxon_lbl <- abbreviate_icn_taxon(tx_nm, abbreviate_genus = TRUE)
-      d_tx
+    grid_infos <- lapply(names(multi_rasters), function(tx_nm) {
+      ri <- raster_to_proj_df(multi_rasters[[tx_nm]], max_cells = 18000L)
+      if (nrow(ri$df) > 0L) ri$df$taxon_lbl <- abbreviate_icn_taxon(tx_nm, abbreviate_genus = TRUE)
+      ri
     })
-    grid_all <- do.call(rbind, grid_dfs)
+    proj_multi_ok <- all(vapply(grid_infos, function(ri) nrow(ri$df) == 0L || isTRUE(ri$projected), logical(1))) && !is.null(states_5070)
+    grid_all <- do.call(rbind, lapply(grid_infos, function(ri) ri$df))
     if (!is.null(grid_all) && nrow(grid_all) > 0L) {
       pts_ok <- vdf[is.finite(suppressWarnings(as.numeric(vdf$decimalLongitude))) & is.finite(suppressWarnings(as.numeric(vdf$decimalLatitude))), , drop = FALSE]
       pts_ok$lon_num <- suppressWarnings(as.numeric(pts_ok$decimalLongitude))
@@ -482,24 +600,53 @@ render_step05c_sdm_suitability_png <- function(
       n_sp_m <- length(unique(grid_all$taxon_lbl))
       ncol_m <- min(4L, max(2L, ceiling(sqrt(n_sp_m))))
       n_rows_multi <- as.integer(ceiling(n_sp_m / ncol_m))
-      cos_m <- cos(mean(range(grid_all$lat, na.rm = TRUE)) * pi / 180.0)
-      p_multi_grid <- ggplot2::ggplot(grid_all, ggplot2::aes(x = .data$lon, y = .data$lat)) +
-        ggplot2::geom_raster(ggplot2::aes(fill = .data$suitability)) +
-        ggplot2::geom_point(
-          data = pts_ok,
-          ggplot2::aes(x = .data$lon_num, y = .data$lat_num),
-          shape = 1, size = 1.35, stroke = 0.65, color = "#FF6B00", alpha = 0.80, inherit.aes = FALSE
-        ) +
-        ggplot2::facet_wrap(~ taxon_lbl, ncol = ncol_m) +
-        ggplot2::scale_fill_viridis_c(option = "cividis", limits = c(0, 1), name = "Ensemble\nSuitability") +
-        ggplot2::coord_fixed(ratio = 1.0 / max(0.25, cos_m), expand = FALSE) +
-        theme_packera_pub(base_size = 9.2) +
-        ggplot2::theme(strip.text = ggplot2::element_text(face = "bold.italic")) +
-        ggplot2::labs(
-          title = sprintf("E. Comparative Multi-Taxon Ensemble Habitat Suitability (%d Modeled Taxa)", n_sp_m),
-          subtitle = "Orange hollow circles mark coordinate-uncertainty-gated herbarium presences",
-          x = "Longitude (\u00b0E)", y = "Latitude (\u00b0N)"
-        )
+      if (proj_multi_ok && requireNamespace("sf", quietly = TRUE)) {
+        if (nrow(pts_ok) > 0L) {
+          xy_p <- tryCatch(sf::st_coordinates(sf::st_transform(sf::st_as_sf(pts_ok, coords = c("lon_num", "lat_num"), crs = 4326), 5070L)), error = function(e) NULL)
+          if (!is.null(xy_p) && nrow(xy_p) == nrow(pts_ok)) {
+            pts_ok$px <- xy_p[, 1L]; pts_ok$py <- xy_p[, 2L]
+          } else {
+            pts_ok <- pts_ok[0L, , drop = FALSE]
+          }
+        }
+        p_multi_grid <- ggplot2::ggplot(grid_all, ggplot2::aes(x = .data$x, y = .data$y)) +
+          ggplot2::geom_raster(ggplot2::aes(fill = .data$suitability)) +
+          ggplot2::geom_sf(data = states_5070, fill = NA, color = "#E5E7EB", linewidth = 0.22, inherit.aes = FALSE) +
+          ggplot2::geom_point(
+            data = pts_ok,
+            ggplot2::aes(x = .data$px, y = .data$py),
+            shape = 1, size = 1.35, stroke = 0.65, color = "#FF6B00", alpha = 0.80, inherit.aes = FALSE
+          ) +
+          ggplot2::facet_wrap(~ taxon_lbl, ncol = ncol_m) +
+          ggplot2::scale_fill_viridis_c(option = "cividis", limits = c(0, 1), name = "Ensemble\nSuitability") +
+          ggplot2::coord_sf(crs = 5070L, xlim = range(grid_all$x), ylim = range(grid_all$y), expand = FALSE) +
+          theme_packera_pub(base_size = 9.2) +
+          ggplot2::theme(strip.text = ggplot2::element_text(face = "bold.italic")) +
+          ggplot2::labs(
+            title = sprintf("E. Comparative Multi-Taxon Ensemble Habitat Suitability (%d Modeled Taxa, EPSG:5070)", n_sp_m),
+            subtitle = "Orange hollow circles mark coordinate-uncertainty-gated herbarium presences",
+            x = "Longitude (EPSG:5070)", y = "Latitude (EPSG:5070)"
+          )
+      } else {
+        cos_m <- cos(mean(range(grid_all$y, na.rm = TRUE)) * pi / 180.0)
+        p_multi_grid <- ggplot2::ggplot(grid_all, ggplot2::aes(x = .data$x, y = .data$y)) +
+          ggplot2::geom_raster(ggplot2::aes(fill = .data$suitability)) +
+          ggplot2::geom_point(
+            data = pts_ok,
+            ggplot2::aes(x = .data$lon_num, y = .data$lat_num),
+            shape = 1, size = 1.35, stroke = 0.65, color = "#FF6B00", alpha = 0.80, inherit.aes = FALSE
+          ) +
+          ggplot2::facet_wrap(~ taxon_lbl, ncol = ncol_m) +
+          ggplot2::scale_fill_viridis_c(option = "cividis", limits = c(0, 1), name = "Ensemble\nSuitability") +
+          ggplot2::coord_fixed(ratio = 1.0 / max(0.25, cos_m), expand = FALSE) +
+          theme_packera_pub(base_size = 9.2) +
+          ggplot2::theme(strip.text = ggplot2::element_text(face = "bold.italic")) +
+          ggplot2::labs(
+            title = sprintf("E. Comparative Multi-Taxon Ensemble Habitat Suitability (%d Modeled Taxa)", n_sp_m),
+            subtitle = "Orange hollow circles mark coordinate-uncertainty-gated herbarium presences",
+            x = "Longitude (\u00b0E)", y = "Latitude (\u00b0N)"
+          )
+      }
     }
   }
 
@@ -509,12 +656,12 @@ render_step05c_sdm_suitability_png <- function(
     active_groups[1L]
   }
   pts_f <- if (has_focal_sdm && f_tx %in% vdf$plot_group) vdf[vdf$plot_group == f_tx, , drop = FALSE] else vdf
-  df_max <- if (has_focal_sdm) raster_to_lonlat_df(focal_rasters$maxent) else data.frame()
-  df_ens <- if (has_focal_sdm) raster_to_lonlat_df(focal_rasters$ensemble) else data.frame()
+  info_max <- if (has_focal_sdm) raster_to_proj_df(focal_rasters$maxent) else list(df = data.frame(), projected = FALSE)
+  info_ens <- if (has_focal_sdm) raster_to_proj_df(focal_rasters$ensemble) else list(df = data.frame(), projected = FALSE)
 
-  if (nrow(df_max) > 0L || nrow(df_ens) > 0L) {
-    p_a <- build_suitability_panel(if (nrow(df_max) > 0L) df_max else df_ens, pts_f, sprintf("A. MaxEnt (cloglog) Suitability : %s", f_tx), "L1-regularized IPP presence-background model")
-    p_b <- build_suitability_panel(if (nrow(df_ens) > 0L) df_ens else df_max, pts_f, sprintf("B. Spatial RF + MaxEnt Ensemble : %s", f_tx), "AUC-weighted ensemble consensus surface")
+  if (nrow(info_max$df) > 0L || nrow(info_ens$df) > 0L) {
+    p_a <- build_suitability_panel(if (nrow(info_max$df) > 0L) info_max else info_ens, pts_f, sprintf("A. MaxEnt (cloglog) Suitability : %s", f_tx), "L1-regularized IPP presence-background model (EPSG:5070)")
+    p_b <- build_suitability_panel(if (nrow(info_ens$df) > 0L) info_ens else info_max, pts_f, sprintf("B. Spatial RF + MaxEnt Ensemble : %s", f_tx), "AUC-weighted ensemble consensus surface (EPSG:5070)")
 
     p_c <- if (!is.null(resp_df) && is.data.frame(resp_df) && nrow(resp_df) > 0L && all(c("predictor", "x_val", "suitability") %in% names(resp_df))) {
       ggplot2::ggplot(resp_df, ggplot2::aes(x = .data$x_val, y = .data$suitability, color = .data$predictor)) +

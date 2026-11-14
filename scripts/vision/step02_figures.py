@@ -714,12 +714,36 @@ def export_taxon_ect_exemplars(
 
     if "leaf_zone" in df_work.columns:
         lz_norm = df_work["leaf_zone"].astype(str).str.strip().str.lower()
+        zc_num = (
+            pd.to_numeric(df_work["leaf_zone_confidence"], errors="coerce").fillna(1.0)
+            if "leaf_zone_confidence" in df_work.columns
+            else pd.Series(1.0, index=df_work.index)
+        )
+        pbr_num = (
+            pd.to_numeric(df_work["petiole_to_blade_ratio"], errors="coerce")
+            if "petiole_to_blade_ratio" in df_work.columns
+            else pd.Series(np.nan, index=df_work.index)
+        )
         if zone_clean == "cauline":
             df_zone = df_work[lz_norm == "cauline"].copy()
+            if len(df_zone) >= 2:
+                hi_c = df_zone[
+                    (zc_num.loc[df_zone.index] >= 0.72)
+                    & (pbr_num.loc[df_zone.index].isna() | (pbr_num.loc[df_zone.index] <= 0.30))
+                ]
+                if len(hi_c) >= 1:
+                    df_zone = hi_c.copy()
         else:
             df_zone = df_work[lz_norm.isin({"basal", "", "nan", "none"})].copy()
             if len(df_zone) == 0:
                 df_zone = df_work.copy()
+            if len(df_zone) >= 2:
+                hi_b = df_zone[
+                    (zc_num.loc[df_zone.index] >= 0.72)
+                    & (pbr_num.loc[df_zone.index].isna() | (pbr_num.loc[df_zone.index] >= 0.15))
+                ]
+                if len(hi_b) >= 1:
+                    df_zone = hi_b.copy()
     else:
         df_zone = df_work.iloc[0:0].copy() if zone_clean == "cauline" else df_work.copy()
 
@@ -1484,8 +1508,18 @@ def generate_step02_publication_figures(
                 dtype=bool,
             )
             basal_pool = sp_basal_only[(~sp_basal_only["cat_clean"].isin(misid_cats | outlier_cats)) & empty_mask_flags]
+        if len(basal_pool) >= 2 and "leaf_zone_confidence" in basal_pool.columns:
+            zc_b = pd.to_numeric(basal_pool["leaf_zone_confidence"], errors="coerce").fillna(1.0)
+            hi_bp = basal_pool[zc_b >= 0.72]
+            if len(hi_bp) >= 2:
+                basal_pool = hi_bp
 
         cauline_pool = sp_clean[sp_clean["zone_clean"] == "cauline"]
+        if len(cauline_pool) >= 2 and "leaf_zone_confidence" in cauline_pool.columns:
+            zc_c = pd.to_numeric(cauline_pool["leaf_zone_confidence"], errors="coerce").fillna(1.0)
+            hi_cp = cauline_pool[zc_c >= 0.72]
+            if len(hi_cp) >= 2:
+                cauline_pool = hi_cp
 
         if not has_cauline_any:
             q_rows = _pick_distinct_quantile_rows(basal_pool, [0.24, 0.50, 0.80])
@@ -1533,7 +1567,7 @@ def generate_step02_publication_figures(
             if row_sel is None:
                 ax.set_facecolor("#f9fafb")
                 ax.text(0.5, 0.5, "No clean organ\nin cohort", ha="center", va="center", fontsize=7.5, color="#9ca3af", transform=ax.transAxes)
-                ax.set_title(f"{top_tag}\n—", fontsize=7.4, color="#6b7280", pad=3)
+                ax.set_title(f"{top_tag}\nN/A", fontsize=7.4, color="#6b7280", pad=3)
                 continue
 
             cat_lbl = str(row_sel.get("cat_clean", row_sel.get("catalogNumber", "")))
@@ -1573,7 +1607,7 @@ def generate_step02_publication_figures(
             ax.set_title(f"{top_tag}\n{cat_lbl} ({stat_s})", fontsize=7.3, color="#1f2937", pad=3)
 
     fig_a.suptitle(
-        "Step 02 — Native LeafMachine3 Organ Silhouettes, Pose Landmarks & Radial ECT Exemplars",
+        "Step 02: Native LeafMachine3 Organ Silhouettes, Pose Landmarks & Radial ECT Exemplars",
         fontsize=11.5,
         fontweight="bold",
     )
@@ -1673,8 +1707,8 @@ def generate_step02_publication_figures(
     ax_qc.set_xlim(0, 108)
     ax_qc.set_xlabel("Percentage of Extracted Leaves (%)", fontsize=9)
     n_fail_sheets = len(failed_df) if failed_df is not None else 0
-    ax_qc.set_title(f"B. Ruler Calibration & Clean LM3 Gate Yield (Failed: {n_fail_sheets})", fontsize=10, fontweight="bold", loc="left", pad=18)
-    ax_qc.legend(loc="lower center", bbox_to_anchor=(0.5, 1.005), ncol=3, fontsize=7.0, frameon=False)
+    ax_qc.set_title(f"B. Ruler Calibration & Clean LM3 Gate Yield (Failed: {n_fail_sheets})", fontsize=10, fontweight="bold", loc="left", pad=36)
+    ax_qc.legend(loc="lower center", bbox_to_anchor=(0.5, 1.01), ncol=3, fontsize=7.0, frameon=False)
     ax_qc.grid(True, axis="x", linestyle=":", linewidth=0.5, alpha=0.55)
 
     # Panels C & D allocated in clean half-width columns above
@@ -1781,13 +1815,13 @@ def generate_step02_publication_figures(
         ax_pheno.invert_yaxis()
         ax_pheno.set_xlim(0, 100)
         ax_pheno.set_xlabel("Voucher Proportion (%)", fontsize=8.8)
-        ax_pheno.legend(loc="lower center", bbox_to_anchor=(0.5, 1.005), ncol=2, fontsize=6.9, frameon=False)
+        ax_pheno.legend(loc="lower center", bbox_to_anchor=(0.5, 1.01), ncol=2, fontsize=6.9, frameon=False)
         ax_pheno.grid(True, axis="x", linestyle=":", linewidth=0.5, alpha=0.55)
     else:
         ax_pheno.text(0.5, 0.5, "No capitulum phenology\nrecords in cohort", ha="center", va="center", fontsize=8.5, color="#6b7280", transform=ax_pheno.transAxes)
         ax_pheno.set_xticks([])
         ax_pheno.set_yticks([])
-    ax_pheno.set_title("D. Cyme Phenophase Stratification", fontsize=10, fontweight="bold", loc="left", pad=22)
+    ax_pheno.set_title("D. Cyme Phenophase Stratification", fontsize=10, fontweight="bold", loc="left", pad=36)
 
     if ax_het is not None:
         # Panel E: Basal vs. Cauline Organ Counts & Heteroblastic Solidity Shift per Taxon
@@ -1805,7 +1839,7 @@ def generate_step02_publication_figures(
         ax_het.grid(True, axis="x", linestyle=":", linewidth=0.5, alpha=0.55)
 
     fig_b.suptitle(
-        "Step 02 — Segmentation Quality Control, Ruler Calibration & Reproductive Traits",
+        "Step 02: Segmentation Quality Control, Ruler Calibration & Reproductive Traits",
         fontsize=11.5,
         fontweight="bold",
     )

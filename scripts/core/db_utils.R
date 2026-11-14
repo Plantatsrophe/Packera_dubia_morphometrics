@@ -585,25 +585,25 @@ db_table_exists_safe <- function(conn, table_name) {
   isTRUE(tryCatch(DBI::dbExistsTable(conn, table_name), error = function(e) FALSE))
 }
 
-ensure_pipeline_run_r <- function(conn, run_id = resolve_packera_run_id(), focal_taxon = NULL, intraspecific_mode = FALSE) {
+ensure_pipeline_run_r <- function(conn, run_id = resolve_packera_run_id(), focal_taxon = NULL, intraspecific_mode = NULL) {
   if (is.null(conn) || !db_table_exists_safe(conn, "pipeline_runs")) return(invisible(FALSE))
   rid <- resolve_packera_run_id(run_id)
   now_iso <- format(Sys.time(), "%Y-%m-%dT%H:%M:%S%z")
   rdir <- Sys.getenv("PACKERA_RUN_DIR", unset = NA_character_)
   if (!is.na(rdir) && !nzchar(rdir)) rdir <- NA_character_
   ft <- if (!is.null(focal_taxon) && nzchar(trimws(focal_taxon))) trimws(focal_taxon) else NA_character_
-  im <- if (isTRUE(intraspecific_mode)) 1L else 0L
+  im <- if (is.null(intraspecific_mode) || is.na(intraspecific_mode)) NA_integer_ else if (isTRUE(intraspecific_mode)) 1L else 0L
 
   tryCatch(
     DBI::dbExecute(
       conn,
       paste0(
         "INSERT INTO pipeline_runs (run_id, run_dir, start_timestamp, focal_taxon, intraspecific_mode) ",
-        "VALUES ($1, $2, $3, $4, $5) ",
+        "VALUES ($1, $2, $3, $4, COALESCE($5, 0)) ",
         "ON CONFLICT(run_id) DO UPDATE SET ",
         "run_dir = COALESCE(excluded.run_dir, pipeline_runs.run_dir), ",
         "focal_taxon = COALESCE(excluded.focal_taxon, pipeline_runs.focal_taxon), ",
-        "intraspecific_mode = COALESCE(excluded.intraspecific_mode, pipeline_runs.intraspecific_mode);"
+        "intraspecific_mode = COALESCE($5, pipeline_runs.intraspecific_mode);"
       ),
       params = list(rid, rdir, now_iso, ft, im)
     ),

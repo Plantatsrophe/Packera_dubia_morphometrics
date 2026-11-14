@@ -120,8 +120,8 @@ resolve_taxon_or_rank_vector <- function(df, group_col = NULL) {
   base_v[is.na(base_v) | !nzchar(trimws(base_v))] <- "Unknown"
   base_v <- trimws(base_v)
 
-  # Append infraspecific rank (var. / subsp. / f.) when column is populated and distinct from species epithet
-  if ("infraspecific_taxon" %in% names(df) && (is.null(group_col) || group_col %in% c("species_standardized", "scientificName"))) {
+  # Append infraspecific rank (var. / subsp. / f.) ONLY when explicitly requested via group_col = "infraspecific_taxon"
+  if ("infraspecific_taxon" %in% names(df) && identical(group_col, "infraspecific_taxon")) {
     inf_v <- trimws(as.character(df$infraspecific_taxon))
     has_inf <- !is.na(inf_v) & nzchar(inf_v) & !(tolower(inf_v) %in% c("na", "none", "null", "unknown"))
     if (any(has_inf)) {
@@ -489,4 +489,43 @@ read_png_raster_grob_safe <- function(png_path) {
   arr <- tryCatch(png::readPNG(png_path), error = function(e) NULL)
   if (is.null(arr)) return(NULL)
   grid::rasterGrob(arr, interpolate = TRUE)
+}
+
+PACKERA_MORPH_TRAIT_LABEL_DICT <- c(
+  "ect_lobe_complexity"            = "Topological ECT Lobe Complexity",
+  "solidity"                       = "Lamina Solidity (Area / Convex Hull)",
+  "q25_solidity"                   = "Lower-Quartile Lamina Solidity (Q25)",
+  "dissection_index"               = "Perimeter Dissection Ratio",
+  "blade_cie_l_norm"               = "Normalized Lamina Brightness (CIE L*)",
+  "blade_cie_l_sd"                 = "Lamina Brightness Dispersion (SD L*)",
+  "petiole_to_blade_ratio"         = "Petiole-to-Blade Length Ratio",
+  "scape_to_basal_leaf_ratio"      = "Scape-to-Basal Leaf Ratio",
+  "AR_inv"                         = "Inverse Leaf Aspect Ratio (W / L)",
+  "aspect_ratio"                   = "Leaf Aspect Ratio (L / W)",
+  "log1p_capitulum_count"          = "Capitulum Count (log1p)",
+  "basal_vs_cauline_length_ratio"  = "Basal-to-Cauline Blade Length Ratio",
+  "basal_vs_cauline_solidity_delta"= "Basal-to-Cauline Solidity Shift",
+  "heteroblasty_efa_distance"      = "Basal-to-Cauline EFA Divergence",
+  "heteroblasty_ect_distance"      = "Within-Voucher Basal-to-Cauline ECT Divergence",
+  "within_rosette_efa_dispersion"  = "Within-Rosette EFA Shape Dispersion",
+  "cauline_heteroblasty_pc1"       = "Cauline Heteroblasty PC1",
+  "log_leaf_area_mm2"              = "Leaf Lamina Area (log mm^2)",
+  "foliar_variance"                = "Within-Individual Foliar Variance"
+)
+
+format_morph_trait_labels <- function(var_names) {
+  vapply(as.character(var_names), function(nm) {
+    if (is.na(nm) || !nzchar(trimws(nm))) return("")
+    base_nm <- sub("_(std|scaled)$", "", trimws(nm))
+    if (base_nm %in% names(PACKERA_MORPH_TRAIT_LABEL_DICT)) {
+      return(PACKERA_MORPH_TRAIT_LABEL_DICT[[base_nm]])
+    }
+    if (grepl("^ECT_PC[0-9]+$", base_nm)) {
+      return(sub("^ECT_PC([0-9]+)$", "Topological ECT PC\\1", base_nm))
+    }
+    if (grepl("^PC[0-9]+$", base_nm)) {
+      return(sub("^PC([0-9]+)$", "EFA Morphometric PC\\1", base_nm))
+    }
+    tools::toTitleCase(gsub("_", " ", base_nm))
+  }, character(1), USE.NAMES = FALSE)
 }

@@ -533,12 +533,15 @@ compute_continuous_boyce_index <- function(suitability_all, suitability_pres, n_
               if (is.finite(v_med) && v_med > 90.0) scale_div <- 10.0
             } else if (grepl("^fragvol_5_cm", bn)) {
               mapped_nm <- "fine_cfvo_pct"
+              if (is.null(raw_aux_rasters[["cfvo"]])) raw_aux_rasters[["cfvo"]] <- .crop_resample_to_tmpl(r_t[[li]], "cfvo", 1.0)
             } else if (grepl("cfvo.*5-15|cfvo.*5_15", paste(bn, tolower(lnm)))) {
               mapped_nm <- if ("fine_cfvo_pct" %in% kept_vars && !("fine_cfvo_pct" %in% names(loaded_layers))) "fine_cfvo_pct" else "soil_cfvo"
               v_med <- stats::median(terra::values(r_t[[li]]), na.rm = TRUE)
               if (is.finite(v_med) && v_med > 105.0) scale_div <- 10.0
+              if (is.null(raw_aux_rasters[["cfvo"]])) raw_aux_rasters[["cfvo"]] <- .crop_resample_to_tmpl(r_t[[li]], "cfvo", scale_div)
             } else if (grepl("^anylithicdpt|^resdept", bn)) {
               mapped_nm <- "fine_bedrock_depth_cm"
+              if (is.null(raw_aux_rasters[["bedrock"]])) raw_aux_rasters[["bedrock"]] <- .crop_resample_to_tmpl(r_t[[li]], "bedrock", 1.0)
             } else if (grepl("^sandtotal_5_cm|sand.*5-15|sand.*5_15", paste(bn, tolower(lnm)))) {
               raw_aux_rasters[["sand"]] <- .crop_resample_to_tmpl(r_t[[li]], "sand", if (grepl("sandtotal", bn)) 1.0 else { vm <- stats::median(terra::values(r_t[[li]]), na.rm = TRUE); if (is.finite(vm) && vm > 105) 10.0 else 1.0 })
             } else if (grepl("^claytotal_5_cm|clay.*5-15|clay.*5_15", paste(bn, tolower(lnm)))) {
@@ -574,11 +577,35 @@ compute_continuous_boyce_index <- function(suitability_all, suitability_pres, n_
     }
   }
 
+  # Derive continuous lithic_outcrop_index raster from cached bedrock (+ optional cfvo) rasters
+  if ("lithic_outcrop_index" %in% kept_vars && !("lithic_outcrop_index" %in% names(loaded_layers)) && !is.null(raw_aux_rasters[["bedrock"]])) {
+    bd_v <- pmin(pmax(as.numeric(terra::values(raw_aux_rasters[["bedrock"]])[, 1]), 0.0), 150.0)
+    cfvo_mult <- if (!is.null(raw_aux_rasters[["cfvo"]])) {
+      cv_v <- pmin(pmax(as.numeric(terra::values(raw_aux_rasters[["cfvo"]])[, 1]), 0.0), 100.0)
+      ifelse(is.finite(cv_v), 0.7 + 0.3 * (cv_v / 100.0), 1.0)
+    } else rep(1.0, length(bd_v))
+    loi_v <- 100.0 * pmax(0.0, 1.0 - bd_v / 150.0) * cfvo_mult
+    r_loi <- terra::rast(tmpl_rast); terra::values(r_loi) <- loi_v; names(r_loi) <- "lithic_outcrop_index"
+    loaded_layers[["lithic_outcrop_index"]] <- r_loi
+  }
+
   # Enforce domain-coverage integrity when demo == FALSE: never fabricate continental rasters via point IDW!
   if (!isTRUE(demo)) {
     if (length(loaded_layers) == 0L) {
       warning("Skipping Step 05 continuous SDM raster map projection: zero real GeoTIFF layers matched kept_vars in env_dir (IDW raster fabrication is disabled when demo == FALSE).")
       return(NULL)
+    }
+    bio_nms <- names(loaded_layers)[grepl("^bio[0-9]+_", names(loaded_layers))]
+    if (length(bio_nms) > 0L) {
+      land_ref <- loaded_layers[[bio_nms[1L]]]
+      for (nm_l in setdiff(names(loaded_layers), bio_nms)) {
+        rl_f <- tryCatch({
+          rf <- terra::focal(loaded_layers[[nm_l]], w = 5, fun = mean, na.rm = TRUE, na.policy = "only")
+          names(rf) <- nm_l
+          terra::mask(rf, land_ref)
+        }, error = function(e) NULL)
+        if (!is.null(rl_f)) loaded_layers[[nm_l]] <- rl_f
+      }
     }
     cov_counts <- vapply(loaded_layers, function(rl) sum(is.finite(terra::values(rl)[, 1])), integer(1))
     ref_land_cells <- max(cov_counts, 1L)
@@ -699,7 +726,7 @@ fit_and_project_maxent_sdm_maps <- function(
 
   # Identify top climatic and edaphic predictors
   imp_df <- if (!is.null(srf_res) && is.data.frame(srf_res$importance)) srf_res$importance else NULL
-  edaph_rx <- "^(fine_|ilr_texture_|ssurgo_|polaris_|solus_|topo_|soil_|sgmc_|is_azonal)"
+  edaph_rx <- "^(fine_|ilr_texture_|ssurgo_|polaris_|solus_|topo_|soil_|sgmc_|is_azonal|lithic_outcrop|min_bedrock|ph_q|max_cfvo)"
   clim_cand <- if (!is.null(primary_clim_vars) && length(intersect(primary_clim_vars, kept_vars)) > 0L) {
     intersect(primary_clim_vars, kept_vars)
   } else {
@@ -716,7 +743,7 @@ fit_and_project_maxent_sdm_maps <- function(
     if (length(edaph_cand) > 1L) edaph_cand <- edaph_cand[order(ifelse(edaph_cand %in% names(imp_map), imp_map[edaph_cand], -Inf), decreasing = TRUE)]
   }
   top_clim_pred <- if (length(clim_cand) > 0L) clim_cand[1L] else kept_vars[1L]
-  top_edaph_pred <- if (length(edaph_cand) > 0L) edaph_cand[1L] else kept_vars[min(2L, length(kept_vars))]
+  top_edaph_pred <- if (length(edaph_cand) > 0L) edaph_cand[1L] else "None_Retained"
 
   # Resolve authority prior weights (preserving 0.0 on unpromoted Tier_3_Bronze & Cleanlab noise!)
   raw_auth_w <- if ("Combined_Prior_Weight" %in% names(df)) {
@@ -766,7 +793,8 @@ fit_and_project_maxent_sdm_maps <- function(
   if (!is.null(env_stack) && length(intersect(kept_vars, names(env_stack))) >= 2L) {
     kept_vars <- intersect(kept_vars, names(env_stack))
     if (!(top_clim_pred %in% kept_vars)) top_clim_pred <- kept_vars[1L]
-    if (!(top_edaph_pred %in% kept_vars)) top_edaph_pred <- kept_vars[min(2L, length(kept_vars))]
+    edaph_in_stack <- intersect(edaph_cand, kept_vars)
+    top_edaph_pred <- if (length(edaph_in_stack) > 0L) edaph_in_stack[1L] else if (length(edaph_cand) > 0L) edaph_cand[1L] else "None_Retained"
   }
 
   # Generate supplemental random background cells from env_stack so target-group + random background >= 1,000 points
@@ -1014,7 +1042,7 @@ fit_and_project_maxent_sdm_maps <- function(
     .ensure_step05_fig_modules()
     dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
     if (!is.null(focal_artifacts) && !is.null(focal_artifacts$rast_mx) && !is.null(focal_artifacts$rast_ens)) {
-      resp_vars <- unique(c(top_clim_pred, top_edaph_pred, clim_cand, edaph_cand, kept_vars))
+      resp_vars <- intersect(unique(c(top_clim_pred, top_edaph_pred, clim_cand, edaph_cand, kept_vars)), colnames(focal_artifacts$X_comb))
       resp_vars <- resp_vars[seq_len(min(3L, length(resp_vars)))]
       resp_lbls <- format_step05_predictor_labels(resp_vars)
 

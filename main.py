@@ -128,7 +128,7 @@ def _sync_run_cohort_in_db(
     focal_taxon, intraspecific_mode = (
         _resolve_focal_and_intraspecific(args, cfg or {})
         if args is not None
-        else (None, False)
+        else (None, None)
     )
     try:
         conn = get_db_connection(init_schema=True, workspace_root=PROJECT_ROOT)

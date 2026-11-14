@@ -148,7 +148,7 @@
   if (n == 0L) return(logical(0))
   if ("morph_tier_source" %in% names(df)) {
     mts <- trimws(as.character(df$morph_tier_source))
-    is_t1 <- is.na(mts) | !nzchar(mts) | !(mts %in% c("Cauline_Only_Fallback", "No_Leaves"))
+    is_t1 <- is.na(mts) | !nzchar(mts) | !(mts %in% c("Cauline_Only_Fallback", "Transitional_Passive", "No_Leaves"))
   } else {
     is_t1 <- rep(TRUE, n)
   }
@@ -1567,6 +1567,10 @@ compute_empirical_bayes_authority_weights <- function(
   } else {
     is_type_mask | (det_tier %in% c("Tier_1_Gold", "Tier_2_Silver")) | is_promoted
   }
+  if (mode == "active_passive" && target_modality %in% c("all", "morph") && "morph_tier_source" %in% names(df)) {
+    mts_eb <- trimws(as.character(df$morph_tier_source))
+    act_mask[!is.na(mts_eb) & (mts_eb %in% c("Cauline_Only_Fallback", "Transitional_Passive", "No_Leaves")) & !is_type_mask] <- FALSE
+  }
 
   if (mode == "active_passive" && !any(act_mask)) {
     return(rep(0.0, n))
@@ -2895,20 +2899,24 @@ compute_type_specimen_morph_control <- function(
       eval_db_space <- function(cand_cols, require_same_run = FALSE) {
         if (length(cand_cols) < 2L) return(NULL)
         db_df <- NULL
+        v_geo_tbl <- if (DBI::dbExistsTable(con, "vouchers")) "vouchers" else if (DBI::dbExistsTable(con, "specimens")) "specimens" else ""
+        has_geo_v <- nzchar(v_geo_tbl) && all(c("catalogNumber", "decimalLatitude", "decimalLongitude") %in% DBI::dbListFields(con, v_geo_tbl))
         if (DBI::dbExistsTable(con, "otu_morphometrics")) {
           flds <- DBI::dbListFields(con, "otu_morphometrics")
           use_c <- intersect(cand_cols, flds)
           if (length(use_c) >= 2L && "species_standardized" %in% flds) {
-            q_cols <- paste(c("species_standardized", use_c), collapse = ", ")
-            where_parts <- c("species_standardized LIKE 'Packera %'")
-            if ("authority_weight" %in% flds) where_parts <- c(where_parts, "COALESCE(authority_weight, 1.0) > 0")
-            if ("morph_tier_source" %in% flds) where_parts <- c(where_parts, "COALESCE(morph_tier_source, 'Basal_Rosette') != 'Cauline_Only_Fallback'")
+            geo_sel <- if (has_geo_v && "catalogNumber" %in% flds) ", v_geo.decimalLatitude AS _osr_lat, v_geo.decimalLongitude AS _osr_lon" else ""
+            geo_join <- if (has_geo_v && "catalogNumber" %in% flds) sprintf(" LEFT JOIN %s v_geo ON o.catalogNumber = v_geo.catalogNumber", v_geo_tbl) else ""
+            q_cols <- paste0(paste(c("o.species_standardized", paste0("o.", use_c)), collapse = ", "), geo_sel)
+            where_parts <- c("o.species_standardized LIKE 'Packera %'")
+            if ("authority_weight" %in% flds) where_parts <- c(where_parts, "COALESCE(o.authority_weight, 1.0) > 0")
+            if ("morph_tier_source" %in% flds) where_parts <- c(where_parts, "COALESCE(o.morph_tier_source, 'Basal_Rosette') NOT IN ('Cauline_Only_Fallback', 'Transitional_Passive')")
             if (isTRUE(require_same_run) && "run_id" %in% flds) {
               if (!nzchar(active_rid)) return(NULL)
-              sql <- sprintf("SELECT %s FROM otu_morphometrics WHERE %s AND run_id = $1", q_cols, paste(where_parts, collapse = " AND "))
+              sql <- sprintf("SELECT %s FROM otu_morphometrics o%s WHERE %s AND o.run_id = $1", q_cols, geo_join, paste(where_parts, collapse = " AND "))
               db_df <- DBI::dbGetQuery(con, sql, params = list(active_rid))
             } else if (!isTRUE(require_same_run)) {
-              sql <- sprintf("SELECT %s FROM otu_morphometrics WHERE %s", q_cols, paste(where_parts, collapse = " AND "))
+              sql <- sprintf("SELECT %s FROM otu_morphometrics o%s WHERE %s", q_cols, geo_join, paste(where_parts, collapse = " AND "))
               db_df <- DBI::dbGetQuery(con, sql)
             }
           }
@@ -2920,7 +2928,8 @@ compute_type_specimen_morph_control <- function(
           flds_v <- DBI::dbListFields(con, v_tbl)
           use_c <- intersect(cand_cols, flds_h)
           if (length(use_c) >= 2L && "species_standardized" %in% flds_v) {
-            q_cols <- paste(paste0("h.", use_c), collapse = ", ")
+            geo_sel_h <- if (all(c("decimalLatitude", "decimalLongitude") %in% flds_v)) ", v.decimalLatitude AS _osr_lat, v.decimalLongitude AS _osr_lon" else ""
+            q_cols <- paste0(paste(paste0("h.", use_c), collapse = ", "), geo_sel_h)
             lz_clause <- if ("leaf_zone" %in% flds_h) " AND COALESCE(LOWER(h.leaf_zone), 'basal') != 'cauline'" else ""
             db_df <- DBI::dbGetQuery(con, sprintf(
               "SELECT v.species_standardized, %s FROM leaf_efa_harmonics h JOIN %s v ON h.catalogNumber = v.catalogNumber WHERE v.species_standardized LIKE 'Packera %%'%s",
@@ -2935,6 +2944,16 @@ compute_type_specimen_morph_control <- function(
         cc <- stats::complete.cases(db_df[, use_c, drop = FALSE])
         db_df <- db_df[cc & !is.na(db_df$species_standardized) & grepl("^Packera\\s+", db_df$species_standardized), , drop = FALSE]
         focal_sp <- unique(sp_raw[!is.na(sp_raw) & grepl("^Packera\\s+", sp_raw)])
+        if (all(c("_osr_lat", "_osr_lon") %in% names(db_df)) && all(c("decimalLatitude", "decimalLongitude") %in% names(df))) {
+          d_lat <- suppressWarnings(as.numeric(df$decimalLatitude)); d_lon <- suppressWarnings(as.numeric(df$decimalLongitude))
+          act_g <- is.finite(d_lat) & is.finite(d_lon) & (abs(d_lat) <= 90) & (abs(d_lon) <= 180)
+          if (sum(act_g) >= 3L) {
+            lat_b <- range(d_lat[act_g]) + c(-12.0, 12.0); lon_b <- range(d_lon[act_g]) + c(-15.0, 15.0)
+            b_lat <- suppressWarnings(as.numeric(db_df[["_osr_lat"]])); b_lon <- suppressWarnings(as.numeric(db_df[["_osr_lon"]]))
+            in_box <- is.finite(b_lat) & is.finite(b_lon) & b_lat >= lat_b[1] & b_lat <= lat_b[2] & b_lon >= lon_b[1] & b_lon <= lon_b[2]
+            if (length(setdiff(unique(db_df$species_standardized[in_box]), focal_sp)) >= 2L) db_df <- db_df[in_box, , drop = FALSE]
+          }
+        }
         oth_sp <- setdiff(unique(db_df$species_standardized), focal_sp)
         if (length(oth_sp) < 2L) return(NULL)
         X_loc_raw <- as.matrix(df[, use_c, drop = FALSE]); storage.mode(X_loc_raw) <- "double"
@@ -3637,4 +3656,51 @@ reconcile_step03_basal_otu_medians <- function(specimen_df, closed_leaf_df, all_
   }
   attr(morpho_df, "allometry_corrected_scalars") <- TRUE
   morpho_df
+}
+
+# Institutional Batch-Effect Audit (Taxon-Adjusted Marginal ANCOVA, Partial R-Squared & BH FDR)
+audit_institutional_batch_effects <- function(morpho_df, output_csv = "outputs/reports/institutional_batch_effect_audit.csv", min_obs = 15, selected_features = NULL) {
+  if (!("institutionCode" %in% names(morpho_df))) return(NULL)
+  dyn_sel <- if (!is.null(selected_features) && length(selected_features) > 0L) intersect(as.character(selected_features), names(morpho_df)) else discover_sorted_morph_cols(morpho_df, "^PC[0-9]+$")
+  test_feats <- unique(c(intersect(c("PC1", "PC2"), names(morpho_df)), dyn_sel))
+  test_feats <- test_feats[vapply(test_feats, function(fc) is.numeric(morpho_df[[fc]]) && sum(is.finite(morpho_df[[fc]])) >= 10L, logical(1))]
+  valid_df <- morpho_df[!is.na(morpho_df$institutionCode) & trimws(morpho_df$institutionCode) != "", , drop = FALSE]
+  clean_b <- (!("authority_weight" %in% names(valid_df)) | (!is.na(valid_df$authority_weight) & valid_df$authority_weight > 0)) &
+    (!("is_passive" %in% names(valid_df)) | is.na(valid_df$is_passive) | !as.logical(valid_df$is_passive)) &
+    (!("morph_tier_source" %in% names(valid_df)) | is.na(valid_df$morph_tier_source) | !(valid_df$morph_tier_source %in% c("Cauline_Only_Fallback", "Transitional_Passive")))
+  if (sum(clean_b, na.rm = TRUE) >= 10L && length(unique(valid_df$institutionCode[clean_b])) >= 2L) valid_df <- valid_df[clean_b, , drop = FALSE]
+  if (nrow(valid_df) < 10 || length(test_feats) == 0L) return(NULL)
+  inst_counts <- table(valid_df$institutionCode); rep_insts <- names(inst_counts[inst_counts >= min_obs])
+  audit_subset <- if (length(rep_insts) >= 2) valid_df[valid_df$institutionCode %in% rep_insts, , drop = FALSE] else valid_df
+  audit_subset$institutionCode <- droplevels(factor(audit_subset$institutionCode))
+  if (!("species_standardized" %in% names(audit_subset))) audit_subset$species_standardized <- if ("scientificName" %in% names(audit_subset)) audit_subset$scientificName else "Unassigned_Packera"
+  audit_subset$species_standardized <- droplevels(factor(audit_subset$species_standardized))
+  if (nlevels(audit_subset$institutionCode) < 2) return(NULL)
+  fits <- list(); rows_out <- list(); raw_ps <- numeric(0)
+  for (feat in test_feats) {
+    sub_f <- audit_subset[is.finite(audit_subset[[feat]]), , drop = FALSE]; sub_f$institutionCode <- droplevels(sub_f$institutionCode); sub_f$species_standardized <- droplevels(sub_f$species_standardized)
+    if (nrow(sub_f) < 6L || nlevels(sub_f$institutionCode) < 2L || stats::var(sub_f[[feat]], na.rm = TRUE) <= 1e-12) next
+    fml <- if (nlevels(sub_f$species_standardized) >= 2L) stats::as.formula(paste(feat, "~ species_standardized + institutionCode")) else stats::as.formula(paste(feat, "~ institutionCode"))
+    w_bf <- (if ("authority_weight" %in% names(sub_f)) suppressWarnings(as.numeric(sub_f$authority_weight)) else rep(1.0, nrow(sub_f))) * (if ("spatial_balance_weight" %in% names(sub_f)) suppressWarnings(as.numeric(sub_f$spatial_balance_weight)) else rep(1.0, nrow(sub_f))); w_bf[!is.finite(w_bf) | w_bf <= 0] <- 1.0
+    fit_f <- stats::lm(fml, data = sub_f, weights = w_bf); s_f <- summary(fit_f); aov_f <- stats::anova(fit_f)
+    ii <- which(rownames(aov_f) == "institutionCode")[1]; ri <- which(rownames(aov_f) == "Residuals")[1]; if (is.na(ii) || is.na(ri)) next
+    r2_f <- aov_f$`Sum Sq`[ii] / max(aov_f$`Sum Sq`[ii] + aov_f$`Sum Sq`[ri], 1e-12); pv_f <- as.numeric(aov_f$`Pr(>F)`[ii])
+    fits[[feat]] <- fit_f; raw_ps <- c(raw_ps, pv_f)
+    rows_out[[length(rows_out) + 1L]] <- data.frame(
+      Response = c(feat, feat), Term = c("institutionCode", "Residuals"), Df = c(aov_f$Df[ii], aov_f$Df[ri]),
+      Sum_Sq = round(c(aov_f$`Sum Sq`[ii], aov_f$`Sum Sq`[ri]), 4), Mean_Sq = round(c(aov_f$`Mean Sq`[ii], aov_f$`Mean Sq`[ri]), 4),
+      F_value = c(round(aov_f$`F value`[ii], 4), NA), p_value = c(signif(pv_f, 4), NA), P_value = c(signif(pv_f, 4), NA), p_value_bh = c(NA_real_, NA_real_),
+      R_squared = round(c(r2_f, NA), 4), Adj_R_squared = round(c(s_f$adj.r.squared, NA), 4),
+      Batch_Effect_Status = c(ifelse(r2_f < 0.05, "Pass (<0.05)", "Exceeds 0.05"), NA), stringsAsFactors = FALSE)
+  }
+  if (length(rows_out) == 0L) return(NULL)
+  anova_df <- do.call(rbind, rows_out); anova_df$p_value_bh[anova_df$Term == "institutionCode"] <- signif(stats::p.adjust(raw_ps, method = "BH"), 4)
+  if (!is.null(output_csv) && nzchar(output_csv)) { dir.create(dirname(output_csv), recursive = TRUE, showWarnings = FALSE); tmp_ba <- paste0(output_csv, ".", Sys.getpid(), ".tmp"); write.csv(anova_df, file = tmp_ba, row.names = FALSE); file.rename(tmp_ba, output_csv) }
+  return(invisible(list(lm_pc1 = fits[["PC1"]], lm_pc2 = fits[["PC2"]], models = fits, anova_table = anova_df)))
+}
+
+# Publication-Quality 2D CDA & 2D GMM Biplot Renderer Hook
+generate_cda_biplot_pdf <- function(audit_df, cda_res, gmm_res, output_pdf, feature_cols = NULL, manova_res = NULL) {
+  if (!exists("render_cda_biplot_4panel_pdf", mode = "function") && file.exists("scripts/morphometrics/pub_figures_utils.R")) source("scripts/morphometrics/pub_figures_utils.R")
+  if (exists("render_cda_biplot_4panel_pdf", mode = "function")) render_cda_biplot_4panel_pdf(audit_df, cda_res, gmm_res, output_pdf, feature_cols, manova_res = manova_res)
 }

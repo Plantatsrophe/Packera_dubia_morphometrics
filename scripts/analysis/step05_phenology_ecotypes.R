@@ -1033,17 +1033,26 @@ resolve_analysis_group <- function(
 
   # Deduplicate within-domain collinear predictors (|r| > 0.75) before PCA/k-means
   # so redundant lithic/climatic rasters do not inflate single-axis microsite splits
+  prio_mech_vars <- c(
+    "lithic_outcrop_index", "min_bedrock_depth_buffer_cm", "ssurgo_rock_outcrop_pct",
+    "fine_bedrock_depth_cm", "fine_soil_ph", "ilr_texture_1",
+    "summer_moisture_deficit_idx", "maritime_continentality_idx",
+    "topo_slope_deg", "topo_twi_30m", "bio4_temp_seasonality", "bio15_precip_seasonality"
+  )
   keep_idx <- integer(0)
   for (dm in sort(unique(dom_full))) {
     dm_idx <- which(dom_full == dm)
     if (length(dm_idx) <= 1L) {
       keep_idx <- c(keep_idx, dm_idx)
     } else {
-      iqr_sc <- vapply(dm_idx, function(jj) {
+      is_prio_dm <- cand_env[dm_idx] %in% prio_mech_vars
+      spread_sc <- vapply(dm_idx, function(jj) {
         zj <- Z_full[anc_idx, jj]
-        as.numeric(stats::quantile(zj, 0.75, na.rm = TRUE, names = FALSE) - stats::quantile(zj, 0.25, na.rm = TRUE, names = FALSE))
+        iqr_v <- as.numeric(stats::quantile(zj, 0.75, na.rm = TRUE, names = FALSE) - stats::quantile(zj, 0.25, na.rm = TRUE, names = FALSE))
+        q90_10_v <- as.numeric(stats::quantile(zj, 0.90, na.rm = TRUE, names = FALSE) - stats::quantile(zj, 0.10, na.rm = TRUE, names = FALSE))
+        0.5 * iqr_v + 0.5 * q90_10_v
       }, numeric(1))
-      ord_dm <- dm_idx[order(-iqr_sc, dm_idx)]
+      ord_dm <- dm_idx[order(-as.integer(is_prio_dm), -spread_sc, dm_idx)]
       sel_dm <- integer(0)
       for (jj in ord_dm) {
         if (length(sel_dm) == 0L) {
@@ -1053,7 +1062,7 @@ resolve_analysis_group <- function(
             r_val <- suppressWarnings(stats::cor(Z_full[anc_idx, jj], Z_full[anc_idx, ss], use = "complete.obs"))
             if (is.finite(r_val)) abs(r_val) else 0.0
           }, numeric(1))
-          if (all(cors_j <= 0.75)) sel_dm <- c(sel_dm, jj)
+          if (all(cors_j <= 0.80)) sel_dm <- c(sel_dm, jj)
         }
       }
       keep_idx <- c(keep_idx, sort(sel_dm))
@@ -1084,9 +1093,9 @@ resolve_analysis_group <- function(
     if (!is.null(pca_e) && ncol(pca_e$rotation) >= 1L) {
       ev <- pca_e$sdev^2
       cum_ev <- cumsum(ev) / max(sum(ev), 1e-12)
-      k_pc <- which(cum_ev >= 0.92)[1L]
+      k_pc <- which(cum_ev >= 0.85)[1L]
       if (is.na(k_pc)) k_pc <- ncol(pca_e$rotation)
-      k_pc <- max(1L, min(5L, k_pc, ncol(pca_e$rotation)))
+      k_pc <- max(min(2L, ncol(pca_e$rotation)), min(8L, k_pc, ncol(pca_e$rotation)))
       rot_e <- pca_e$rotation[, seq_len(k_pc), drop = FALSE]
       S_anc <- sweep(Z_anc, 2L, pca_e$center, "-") %*% rot_e
       S_all <- sweep(Z_bal, 2L, pca_e$center, "-") %*% rot_e
@@ -1106,7 +1115,7 @@ resolve_analysis_group <- function(
     return(df)
   }
 
-  min_cl_n <- if (n_anc >= 60L) max(6L, as.integer(floor(0.06 * n_anc))) else if (n_anc >= 20L) 4L else 3L
+  min_cl_n <- if (n_anc >= 60L) max(6L, as.integer(floor(0.045 * n_anc))) else if (n_anc >= 20L) 4L else 3L
   max_k_cand <- min(4L, as.integer(floor(n_anc / max(min_cl_n, 2L))))
   if (max_k_cand < 2L) {
     df$analysis_group <- rep(base_taxon, n_rows)
@@ -1119,19 +1128,31 @@ resolve_analysis_group <- function(
   on.exit({ if (!is.null(.old_seed_rag)) assign(".Random.seed", .old_seed_rag, envir = .GlobalEnv) }, add = TRUE)
 
   d_anc_mat <- as.matrix(stats::dist(S_anc))
-  calc_mean_sil <- function(cl_int) {
+  calc_mean_sil <- function(cl_int, dist_mat = d_anc_mat) {
     u_c <- sort(unique(cl_int))
     if (length(u_c) < 2L) return(0.0)
     s_vals <- numeric(length(cl_int))
     for (ii in seq_along(cl_int)) {
       same_i <- which(cl_int == cl_int[ii] & seq_along(cl_int) != ii)
-      a_i <- if (length(same_i) > 0L) mean(d_anc_mat[ii, same_i]) else 0.0
-      b_i <- min(vapply(setdiff(u_c, cl_int[ii]), function(ck) mean(d_anc_mat[ii, cl_int == ck]), numeric(1)))
+      a_i <- if (length(same_i) > 0L) mean(dist_mat[ii, same_i]) else 0.0
+      b_i <- min(vapply(setdiff(u_c, cl_int[ii]), function(ck) mean(dist_mat[ii, cl_int == ck]), numeric(1)))
       denom_i <- max(a_i, b_i, 1e-9)
       s_vals[ii] <- (b_i - a_i) / denom_i
     }
     mean(s_vals, na.rm = TRUE)
   }
+
+  # Precompute B = 20 parametric unimodal Gaussian null draws N(0, cov(S_anc))
+  d_s <- ncol(S_anc)
+  cov_s <- if (n_anc > 2L) stats::cov(S_anc) else diag(1.0, nrow = d_s, ncol = d_s)
+  cov_s <- 0.5 * (cov_s + t(cov_s))
+  eig_s <- eigen(cov_s, symmetric = TRUE)
+  L_s <- eig_s$vectors %*% diag(sqrt(pmax(eig_s$values, 0.0)), nrow = d_s, ncol = d_s)
+  null_draws <- lapply(seq_len(20L), function(b_i) {
+    S_b <- matrix(stats::rnorm(n_anc * d_s), nrow = n_anc, ncol = d_s) %*% t(L_s)
+    tot_b <- sum(sweep(S_b, 2L, colMeans(S_b), "-")^2)
+    list(S_b = S_b, dist_b = as.matrix(stats::dist(S_b)), tot_b = tot_b)
+  })
 
   active_doms <- unique(dom_vec)
   cand_fits <- list()
@@ -1140,19 +1161,35 @@ resolve_analysis_group <- function(
     if (is.null(km)) next
     cl_tab <- table(km$cluster)
     if (length(cl_tab) < k_try || any(cl_tab < min_cl_n)) next
-    sil_k <- calc_mean_sil(km$cluster)
+    sil_k <- calc_mean_sil(km$cluster, d_anc_mat)
     var_red_k <- 1.0 - (km$tot.withinss / max(tot_ss, 1e-9))
 
-    # Pairwise pooled-SD separation (Ashman's D / Cohen's d, Ashman et al. 1994):
-    # Slicing a unimodal Gaussian N(0,1) at its median yields theoretical d = 2.647,
-    # whereas genuine multimodal ecological regime transitions exceed d >= 3.2.
+    null_combos <- vapply(null_draws, function(nd) {
+      km_b <- tryCatch(stats::kmeans(nd$S_b, centers = k_try, nstart = 10L, iter.max = 40L), error = function(e) NULL)
+      if (is.null(km_b)) return(NA_real_)
+      tab_b <- table(km_b$cluster)
+      if (length(tab_b) < k_try || any(tab_b < min_cl_n)) return(NA_real_)
+      sil_b <- calc_mean_sil(km_b$cluster, nd$dist_b)
+      vr_b <- 1.0 - (km_b$tot.withinss / max(nd$tot_b, 1e-9))
+      sil_b + 0.35 * vr_b
+    }, numeric(1))
+    fin_null <- null_combos[is.finite(null_combos)]
+    null_q95_combo <- if (length(fin_null) > 0L) as.numeric(stats::quantile(fin_null, probs = 0.95, na.rm = TRUE, names = FALSE)) else 0.0
+
+    # Pooled within-cluster regularized Mahalanobis separation in S_anc alongside univariate separation
+    u_cls <- sort(unique(km$cluster))
+    resid_s <- S_anc - km$centers[km$cluster, , drop = FALSE]
+    sigma_pool <- crossprod(resid_s) / max(n_anc - length(u_cls), 1L) + diag(0.08, nrow = d_s, ncol = d_s)
+    pair_min_mahal_d <- Inf
     pair_min_best_d <- Inf
     var_max_pair_d <- rep(0.0, length(cand_env))
-    u_cls <- sort(unique(km$cluster))
     for (ia in seq_len(length(u_cls) - 1L)) {
       for (ib in (ia + 1L):length(u_cls)) {
         ca <- u_cls[ia]
         cb <- u_cls[ib]
+        diff_mu <- as.numeric(km$centers[ca, ] - km$centers[cb, ])
+        mahal_ab <- tryCatch(sqrt(max(0.0, as.numeric(crossprod(diff_mu, solve(sigma_pool, diff_mu))))), error = function(e) 0.0)
+        if (is.finite(mahal_ab) && mahal_ab < pair_min_mahal_d) pair_min_mahal_d <- mahal_ab
         best_ab_d <- 0.0
         for (j in seq_along(cand_env)) {
           ga <- Z_std[anc_idx[km$cluster == ca], j]
@@ -1196,7 +1233,7 @@ resolve_analysis_group <- function(
     }
     f_stats[!is.finite(f_stats)] <- 0.0
 
-    sig_mask_k <- is.finite(kw_q) & (kw_q < 0.005) & (eta2_vec >= 0.25) & (var_max_pair_d >= 3.2)
+    sig_mask_k <- is.finite(kw_q) & (kw_q < 0.005) & (eta2_vec >= 0.20) & (var_max_pair_d >= 2.15)
     sig_vars_k <- cand_env[sig_mask_k]
     n_sig_vars <- length(sig_vars_k)
     n_sig_doms <- length(unique(dom_vec[sig_mask_k]))
@@ -1204,19 +1241,23 @@ resolve_analysis_group <- function(
     req_sig_vars <- if (length(cand_env) >= 4L) 2L else 1L
     req_sig_doms <- min(2L, length(active_doms))
     pass_eco_gate <- (
-      is.finite(sil_k) && sil_k >= 0.28 &&
+      is.finite(sil_k) && sil_k >= 0.26 &&
       is.finite(var_red_k) && var_red_k >= (0.30 + 0.05 * (k_try - 2L)) &&
-      is.finite(pair_min_best_d) && pair_min_best_d >= 3.2 &&
+      is.finite(pair_min_mahal_d) && pair_min_mahal_d >= 2.05 &&
+      is.finite(pair_min_best_d) && pair_min_best_d >= 1.60 &&
+      (sil_k + 0.35 * var_red_k) > null_q95_combo &&
       n_sig_vars >= req_sig_vars &&
       n_sig_doms >= req_sig_doms
     )
 
-    score_k <- sil_k + 0.35 * var_red_k + 0.05 * min(n_sig_doms, 4L) + 0.02 * min(pair_min_best_d, 6.0) - 0.02 * (k_try - 2L)
+    score_k <- sil_k + 0.35 * var_red_k + 0.05 * min(n_sig_doms, 4L) + 0.02 * min(pair_min_mahal_d, 6.0) - 0.02 * (k_try - 2L)
     cand_fits[[as.character(k_try)]] <- list(
       k = k_try,
       km = km,
       sil = sil_k,
       var_red = var_red_k,
+      null_q95_combo = null_q95_combo,
+      pair_min_mahal_d = pair_min_mahal_d,
       f_stats = stats::setNames(f_stats, cand_env),
       n_sig_vars = n_sig_vars,
       n_sig_doms = n_sig_doms,

@@ -650,26 +650,20 @@ build_taxon_morphotype_subclusters <- function(morph_df, min_vouchers = 5L) {
   if (nrow(morph_df) < 2L * min_vouchers && !within_sp_gmm && n_sp < 2L) {
     return(list(morph_df = morph_df, subcluster_mode = FALSE))
   }
-  k_vec <- if (has_gmm) ifelse(is.na(morph_df$gmm_cluster), 1L, as.integer(morph_df$gmm_cluster)) else rep(1L, nrow(morph_df))
-  short_sp <- sub("^Packera\\s+", "P. ", raw_sp); cand_lbl <- sprintf("%s [K%d]", short_sp, k_vec)
-  if (sum(table(cand_lbl) >= min_vouchers) < 3L && nrow(morph_df) >= 3L * min_vouchers) {
-    fcols <- resolve_step06_complex_morph_features(morph_df, morph_df, max(2L, n_sp))
-    if (length(fcols) == 0L) fcols <- intersect(c("can1", "can2", "can3"), names(morph_df))
-    if (length(fcols) >= 1L) {
-      X_m <- scale(as.matrix(morph_df[, fcols, drop = FALSE])); X_m[!is.finite(X_m)] <- 0.0
-      k_vec <- .with_preserved_rng_seed(42L, function() {
-        kv <- k_vec
-        for (sp in u_sp) {
-          idx_s <- which(raw_sp == sp)
-          k_s <- if (n_sp == 1L) min(3L, max(2L, floor(length(idx_s) / min_vouchers))) else min(2L, max(1L, floor(length(idx_s) / min_vouchers)))
-          if (k_s >= 2L && length(unique(kv[idx_s])) < k_s && length(idx_s) > k_s) {
-            km <- tryCatch(stats::kmeans(X_m[idx_s, , drop = FALSE], centers = k_s, nstart = 10L), error = function(e) NULL)
-            if (!is.null(km)) kv[idx_s] <- as.integer(km$cluster)
-          }
-        }
-        kv})
-      cand_lbl <- sprintf("%s [K%d]", short_sp, k_vec)
+  if (n_sp == 1L && !within_sp_gmm) {
+    eco_col <- if ("ecotype_regime" %in% names(morph_df) && any(!is.na(morph_df$ecotype_regime) & nzchar(trimws(morph_df$ecotype_regime)))) {
+      trimws(as.character(morph_df$ecotype_regime))
+    } else if ("analysis_group" %in% names(morph_df)) {
+      trimws(as.character(morph_df$analysis_group))
+    } else {
+      character(0)
     }
+    eco_ok <- length(eco_col) == nrow(morph_df) && sum(table(eco_col[!is.na(eco_col) & nzchar(eco_col)]) >= min_vouchers) >= 2L
+    if (!eco_ok) return(list(morph_df = morph_df, subcluster_mode = FALSE))
+    cand_lbl <- ifelse(!is.na(eco_col) & nzchar(eco_col), eco_col, raw_sp)
+  } else {
+    k_vec <- if (has_gmm) ifelse(is.na(morph_df$gmm_cluster), 1L, as.integer(morph_df$gmm_cluster)) else rep(1L, nrow(morph_df))
+    short_sp <- sub("^Packera\\s+", "P. ", raw_sp); cand_lbl <- sprintf("%s [K%d]", short_sp, k_vec)
   }
   tab_c <- table(cand_lbl); valid_c <- names(tab_c)[tab_c >= min_vouchers]
   if (length(valid_c) < 2L) {

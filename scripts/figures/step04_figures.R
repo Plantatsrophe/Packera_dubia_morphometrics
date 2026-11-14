@@ -158,16 +158,21 @@ render_step04_gmm_cda_png <- function(
     format_manova_pillai_subtitle(manova_res, group_pattern = "Species|Morphotype")
   } else ""
 
-  # Panel A: Unsupervised GMM 2*Delta*BIC Model Selection Curve
-  bic_tb <- if (!is.null(gmm_res) && is.data.frame(gmm_res$bic_table)) gmm_res$bic_table else data.frame(K = 1:3, BIC = c(-10, -8, -12), Two_Delta_BIC = c(0, 4, -8))
+  # Panel A: Unsupervised GMM Stepwise 2*Delta*BIC Model Selection Curve
+  bic_tb <- if (!is.null(gmm_res) && is.data.frame(gmm_res$bic_table)) gmm_res$bic_table else data.frame(K = 1:3, BIC = c(-10, -8, -12), Delta_BIC_prev = c(0, 2, -4), Two_Delta_BIC = c(0, 2, -2))
   bic_tb$K_num <- suppressWarnings(as.numeric(bic_tb$K))
-  bic_tb$y_val <- if ("Two_Delta_BIC" %in% names(bic_tb) && any(is.finite(suppressWarnings(as.numeric(bic_tb$Two_Delta_BIC))))) {
+  bic_tb <- bic_tb[order(bic_tb$K_num), , drop = FALSE]
+  bic_tb$y_val <- if ("Delta_BIC_prev" %in% names(bic_tb) && any(is.finite(suppressWarnings(as.numeric(bic_tb$Delta_BIC_prev))))) {
+    suppressWarnings(as.numeric(bic_tb$Delta_BIC_prev))
+  } else if ("BIC" %in% names(bic_tb) && nrow(bic_tb) >= 2L) {
+    c(0.0, diff(suppressWarnings(as.numeric(bic_tb$BIC))))
+  } else if ("Two_Delta_BIC" %in% names(bic_tb)) {
     suppressWarnings(as.numeric(bic_tb$Two_Delta_BIC))
-  } else if ("BIC" %in% names(bic_tb)) {
-    suppressWarnings(as.numeric(bic_tb$BIC))
   } else rep(0.0, nrow(bic_tb))
   bic_tb$y_val[!is.finite(bic_tb$y_val)] <- 0.0
   best_k <- if (!is.null(gmm_res) && !is.null(gmm_res$best_k) && is.finite(gmm_res$best_k)) as.integer(gmm_res$best_k) else 1L
+  is_merged_k1 <- (best_k == 1L) && (any(bic_tb$y_val[bic_tb$K_num >= 2] >= 10, na.rm = TRUE) ||
+                   ("Evidence" %in% names(bic_tb) && any(grepl("Merged", as.character(bic_tb$Evidence), ignore.case = TRUE))))
 
   p_bic <- ggplot2::ggplot(bic_tb, ggplot2::aes(x = .data$K_num, y = .data$y_val)) +
     ggplot2::geom_hline(yintercept = c(0, 6, 10), linetype = c("solid", "dotted", "dashed"), color = c("#9CA3AF", "#6B7280", "#D55E00"), linewidth = 0.45) +
@@ -178,10 +183,19 @@ render_step04_gmm_cda_png <- function(
     theme_packera_pub() +
     ggplot2::labs(
       title = sprintf("A. Unsupervised GMM Selection (Selected K* = %d)", best_k),
-      subtitle = "Deviance-scale Kass & Raftery threshold (2*Delta*BIC >= 6 strong, >= 10 decisive)",
+      subtitle = "Deviance-scale Kass & Raftery threshold (stepwise 2*Delta*BIC >= 6 strong, >= 10 decisive)",
       x = "Number of Mixture Components (K)",
       y = "Stepwise 2 * Delta BIC (vs. K - 1)"
     )
+  if (is_merged_k1) {
+    mid_k <- mean(range(bic_tb$K_num, na.rm = TRUE))
+    mid_y <- 0.55 * max(bic_tb$y_val, 12.0, na.rm = TRUE)
+    p_bic <- p_bic + ggplot2::annotate(
+      "label", x = mid_k, y = mid_y,
+      label = "Hennig (2010) unimodal ridgeline\nmerging -> K* = 1 retained",
+      size = 2.75, color = "#0072B2", fill = grDevices::adjustcolor("white", alpha.f = 0.92)
+    )
+  }
 
   # Panel B: Shrinkage CDA Ordination (2D Can1 vs Can2 when G >= 3; 1D Can1 density + hollow raincloud when G == 2)
   c1 <- if ("can1" %in% names(df)) suppressWarnings(as.numeric(df$can1)) else if ("PC1" %in% names(df)) suppressWarnings(as.numeric(df$PC1)) else rep(NA_real_, nrow(df))
@@ -203,13 +217,14 @@ render_step04_gmm_cda_png <- function(
     stats::median(suppressWarnings(as.numeric(df$loocv_accuracy)), na.rm = TRUE)
   } else NA_real_
   loocv_tag_s04 <- if (is.finite(loocv_val)) sprintf("Deme-blocked CV accuracy = %.1f%%", 100.0 * loocv_val) else "Descriptive Post-GMM Ordination"
-  cda_sub_line <- paste(
+  cda_sub_raw <- paste(
     c(
       loocv_tag_s04,
       if (isTRUE(nzchar(manova_sub))) manova_sub else NULL
     ),
     collapse = " | "
   )
+  cda_sub_line <- if (nzchar(cda_sub_raw)) paste(strwrap(cda_sub_raw, width = 72L), collapse = "\n") else ""
 
   p_cda <- if (length(active_groups) == 2L && sum(is.finite(df$ord1)) >= 3L && !has_2d_can) {
     # Standard Koutecky (2015) MorphoTools2 G = 2 protocol: 1D Canonical Axis Density + Hollow Raincloud
@@ -276,7 +291,11 @@ render_step04_gmm_cda_png <- function(
             vy = cor_mat[top_v, 2L] * rad_y,
             stringsAsFactors = FALSE
           )
-          vec_df$lbl <- if (exists("format_cda_loading_labels", mode = "function")) format_cda_loading_labels(vec_df$var_raw) else gsub("_std$", "", vec_df$var_raw)
+          vec_df$lbl <- if (exists("format_morph_trait_labels", mode = "function")) {
+            format_morph_trait_labels(vec_df$var_raw)
+          } else if (exists("format_cda_loading_labels", mode = "function")) {
+            format_cda_loading_labels(vec_df$var_raw)
+          } else gsub("_std$", "", vec_df$var_raw)
           p_tmp <- p_tmp +
             ggplot2::geom_segment(
               data = vec_df,
@@ -317,7 +336,7 @@ render_step04_gmm_cda_png <- function(
       ok_t <- is.finite(vv)
       data.frame(
         plot_group = df$plot_group[ok_t],
-        trait = if (exists("format_cda_loading_labels", mode = "function")) format_cda_loading_labels(tc) else tc,
+        trait = paste(strwrap(if (exists("format_morph_trait_labels", mode = "function")) format_morph_trait_labels(tc) else if (exists("format_cda_loading_labels", mode = "function")) format_cda_loading_labels(tc) else tc, width = 28L), collapse = "\n"),
         val = vv[ok_t],
         stringsAsFactors = FALSE
       )
@@ -336,38 +355,64 @@ render_step04_gmm_cda_png <- function(
     ggplot2::ggplot() + theme_packera_pub() + ggplot2::labs(title = "C. Diagnostic Traits")
   }
 
-  # Panel D: Taxon x Unsupervised GMM Cluster Contingency Matrix (scales cleanly to 60+ taxa)
-  cl_vec <- if ("gmm_cluster" %in% names(df)) as.character(df$gmm_cluster) else rep("1", nrow(df))
-  cl_vec[is.na(cl_vec) | !nzchar(cl_vec)] <- "Unassigned"
-  tab_df <- as.data.frame(table(Taxon = df$plot_group, Cluster = paste0("G", cl_vec)), stringsAsFactors = FALSE)
-  row_tots <- stats::ave(tab_df$Freq, tab_df$Taxon, FUN = function(x) max(sum(x), 1L))
-  tab_df$Pct <- 100.0 * tab_df$Freq / row_tots
+  # Panel D: Taxon x Unsupervised GMM Matrix (multi-group/K >= 2) or OSR / Self-Mahalanobis D^2 Tail Audit (K* = 1)
   n_noise <- if ("is_confident_label_noise" %in% names(df)) sum(!is.na(df$is_confident_label_noise) & as.logical(df$is_confident_label_noise)) else 0L
   n_osr <- if ("open_set_novelty_p" %in% names(df)) sum(suppressWarnings(as.numeric(df$open_set_novelty_p)) < 0.01, na.rm = TRUE) else 0L
-
-  tab_pos <- tab_df[tab_df$Freq > 0, , drop = FALSE]
-  if (nrow(tab_pos) > 0L) tab_pos$lbl <- sprintf("%d\n(%.0f%%)", tab_pos$Freq, tab_pos$Pct)
-  p_cont <- ggplot2::ggplot(tab_df, ggplot2::aes(x = .data$Cluster, y = .data$Taxon, fill = .data$Pct)) +
-    ggplot2::geom_tile(color = "white", linewidth = 0.5)
-  if (nrow(tab_pos) > 0L) {
-    p_cont <- p_cont + ggplot2::geom_text(
-      data = tab_pos,
-      ggplot2::aes(x = .data$Cluster, y = .data$Taxon, label = .data$lbl),
-      size = if (length(active_groups) > 15L) 2.2 else 2.7,
-      color = ifelse(tab_pos$Pct > 55, "white", "#111827"),
-      inherit.aes = FALSE
-    )
+  d2_col <- intersect(c("self_morph_mahal_d2", "type_morph_d2", "open_set_min_congener_d2", "min_congener_mahal_d2"), names(df))[1L]
+  p_cont <- if (length(active_groups) == 1L && best_k <= 1L && !is.na(d2_col) && sum(is.finite(suppressWarnings(as.numeric(df[[d2_col]])))) >= 5L) {
+    d2_vals <- suppressWarnings(as.numeric(df[[d2_col]]))
+    d2_vals <- d2_vals[is.finite(d2_vals) & d2_vals >= 0]
+    df_chi <- if ("self_morph_df" %in% names(df) && any(is.finite(suppressWarnings(as.numeric(df$self_morph_df))))) {
+      stats::median(suppressWarnings(as.numeric(df$self_morph_df)), na.rm = TRUE)
+    } else if ("open_set_df" %in% names(df) && any(is.finite(suppressWarnings(as.numeric(df$open_set_df))))) {
+      stats::median(suppressWarnings(as.numeric(df$open_set_df)), na.rm = TRUE)
+    } else 6.0
+    df_chi <- max(1.0, df_chi)
+    chi95 <- stats::qchisq(0.95, df = df_chi)
+    n_tail <- sum(d2_vals > chi95)
+    d2_df <- data.frame(d2 = d2_vals)
+    ggplot2::ggplot(d2_df, ggplot2::aes(x = .data$d2)) +
+      ggplot2::geom_histogram(ggplot2::aes(y = ggplot2::after_stat(density)), bins = 24L, fill = "#E2E8F0", color = "#334155", linewidth = 0.4) +
+      ggplot2::geom_density(color = "#0072B2", linewidth = 0.9) +
+      ggplot2::geom_vline(xintercept = chi95, linetype = "dashed", color = "#D55E00", linewidth = 0.75) +
+      ggplot2::annotate("label", x = chi95, y = Inf, vjust = 1.4, hjust = 0.05, label = sprintf("chi^2_0.95 (df=%g) = %.1f", df_chi, chi95), size = 2.65, color = "#D55E00", fill = "white") +
+      theme_packera_pub(base_size = 9.5) +
+      ggplot2::labs(
+        title = "D. Unimodal Self-Mahalanobis D^2 & OSR Tail Audit (K* = 1)",
+        subtitle = sprintf("95%% ellipsoid outliers = %d / %d | Confident label-noise = %d | OSR (p < 0.01) = %d", n_tail, length(d2_vals), n_noise, n_osr),
+        x = sprintf("Morphometric Squared Mahalanobis Distance (%s)", gsub("_", " ", d2_col)),
+        y = "Kernel Density"
+      )
+  } else {
+    cl_vec <- if ("gmm_cluster" %in% names(df)) as.character(df$gmm_cluster) else rep("1", nrow(df))
+    cl_vec[is.na(cl_vec) | !nzchar(cl_vec)] <- "Unassigned"
+    tab_df <- as.data.frame(table(Taxon = df$plot_group, Cluster = paste0("G", cl_vec)), stringsAsFactors = FALSE)
+    row_tots <- stats::ave(tab_df$Freq, tab_df$Taxon, FUN = function(x) max(sum(x), 1L))
+    tab_df$Pct <- 100.0 * tab_df$Freq / row_tots
+    tab_pos <- tab_df[tab_df$Freq > 0, , drop = FALSE]
+    if (nrow(tab_pos) > 0L) tab_pos$lbl <- sprintf("%d\n(%.0f%%)", tab_pos$Freq, tab_pos$Pct)
+    pt <- ggplot2::ggplot(tab_df, ggplot2::aes(x = .data$Cluster, y = .data$Taxon, fill = .data$Pct)) +
+      ggplot2::geom_tile(color = "white", linewidth = 0.5)
+    if (nrow(tab_pos) > 0L) {
+      pt <- pt + ggplot2::geom_text(
+        data = tab_pos,
+        ggplot2::aes(x = .data$Cluster, y = .data$Taxon, label = .data$lbl),
+        size = if (length(active_groups) > 15L) 2.2 else 2.7,
+        color = ifelse(tab_pos$Pct > 55, "white", "#111827"),
+        inherit.aes = FALSE
+      )
+    }
+    pt +
+      ggplot2::scale_fill_viridis_c(option = "cividis", limits = c(0, 100), name = "Row %") +
+      ggplot2::scale_y_discrete(labels = icn_discrete_labeller(abbreviate_genus = TRUE)) +
+      theme_packera_pub(base_size = 9.6) +
+      ggplot2::labs(
+        title = "D. Taxon x GMM Cluster Concordance",
+        subtitle = sprintf("Confident label-noise flags = %d | Open-set novelty (p < 0.01) = %d", n_noise, n_osr),
+        x = "Unsupervised Gaussian Mixture Cluster",
+        y = NULL
+      )
   }
-  p_cont <- p_cont +
-    ggplot2::scale_fill_viridis_c(option = "cividis", limits = c(0, 100), name = "Row %") +
-    ggplot2::scale_y_discrete(labels = icn_discrete_labeller(abbreviate_genus = TRUE)) +
-    theme_packera_pub(base_size = 9.6) +
-    ggplot2::labs(
-      title = "D. Taxon x GMM Cluster Concordance",
-      subtitle = sprintf("Confident label-noise flags = %d | Open-set novelty (p < 0.01) = %d", n_noise, n_osr),
-      x = "Unsupervised Gaussian Mixture Cluster",
-      y = NULL
-    )
 
   dyn_h_04b <- max(10.2, 6.2 + 0.28 * length(active_groups))
   plate_04b <- ((p_bic | p_cda) / (p_box | p_cont)) +
@@ -443,9 +488,23 @@ render_step04_ecoregion_batch_png <- function(
         y = if (has_ec2) "Ecoregion Canonical Variate 2" else "Morphometric PC2"
       )
     if (length(eco_lvls) > 10L && nrow(s2) > 0L) {
-      cent_er <- stats::aggregate(cbind(ec1, ec2) ~ eco_group, data = s2, FUN = stats::median)
-      p_t <- add_centroid_repel_labels_gg(p_t, cent_er, "ec1", "ec2", "eco_group", color_col = "eco_group") +
-        ggplot2::theme(legend.position = "none")
+      tab_er <- sort(table(s2$eco_group), decreasing = TRUE)
+      top_er <- names(tab_er[tab_er >= 5L])
+      if (length(top_er) == 0L) top_er <- names(tab_er)
+      top_er <- utils::head(top_er, 10L)
+      cent_er <- stats::aggregate(cbind(ec1, ec2) ~ eco_group, data = s2[s2$eco_group %in% top_er, , drop = FALSE], FUN = stats::median)
+      if (requireNamespace("ggrepel", quietly = TRUE) && nrow(cent_er) > 0L) {
+        p_t <- p_t + ggrepel::geom_label_repel(
+          data = cent_er,
+          ggplot2::aes(x = .data$ec1, y = .data$ec2, label = .data$eco_group, color = .data$eco_group),
+          fill = grDevices::adjustcolor("white", alpha.f = 0.88),
+          size = 2.65, max.overlaps = 14L, box.padding = 0.45, force = 3.0,
+          show.legend = FALSE, inherit.aes = FALSE
+        ) + ggplot2::theme(legend.position = "none")
+      } else {
+        p_t <- add_centroid_repel_labels_gg(p_t, cent_er, "ec1", "ec2", "eco_group", color_col = "eco_group") +
+          ggplot2::theme(legend.position = "none")
+      }
     }
     p_t
   } else {
@@ -486,10 +545,11 @@ render_step04_ecoregion_batch_png <- function(
     } else bdf <- data.frame()
     if (nrow(bdf) > 0L) {
       bdf$sig <- ifelse(!is.na(bdf$qval) & bdf$qval < 0.05 & bdf$r2 >= 0.05, "Flagged (R2 >= 0.05, q < 0.05)", "Negligible Batch Effect")
-      bdf$feat <- factor(bdf$feat, levels = unique(bdf$feat[order(bdf$r2)]))
-      ggplot2::ggplot(bdf, ggplot2::aes(x = .data$r2, y = .data$feat, color = .data$sig)) +
+      bdf$feat_lbl <- if (exists("format_morph_trait_labels", mode = "function")) format_morph_trait_labels(bdf$feat) else bdf$feat
+      bdf$feat_lbl <- factor(bdf$feat_lbl, levels = unique(bdf$feat_lbl[order(bdf$r2)]))
+      ggplot2::ggplot(bdf, ggplot2::aes(x = .data$r2, y = .data$feat_lbl, color = .data$sig)) +
         ggplot2::geom_vline(xintercept = 0.05, linetype = "dashed", color = "#D55E00", linewidth = 0.65) +
-        ggplot2::geom_segment(ggplot2::aes(x = 0, xend = .data$r2, y = .data$feat, yend = .data$feat), linewidth = 0.75) +
+        ggplot2::geom_segment(ggplot2::aes(x = 0, xend = .data$r2, y = .data$feat_lbl, yend = .data$feat_lbl), linewidth = 0.75) +
         ggplot2::geom_point(shape = 1, size = 2.8, stroke = 1.0) +
         ggplot2::scale_color_manual(values = c("Negligible Batch Effect" = "#0072B2", "Flagged (R2 >= 0.05, q < 0.05)" = "#D55E00"), name = "Batch Audit") +
         theme_packera_pub() +

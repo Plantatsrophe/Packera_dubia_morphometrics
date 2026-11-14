@@ -1900,6 +1900,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
       osr_strictly_closer &&
       osr_cda_support &&
       osr_geo_ok &&
+      (!is_intra || ((is_mo_flag || (is.finite(edaph_z_i) && edaph_z_i > 1.75)) && (det_t != "Tier_1_Gold" || (is.finite(edaph_z_i) && edaph_z_i > 2.0)))) &&
       (!isTRUE(typ_m_i) || (is.finite(tm_d2_i) && tm_d2_i > type_morph_chisq95))
 
     # Rule B: Stage 1 Type-Control Consensus Reassignment (type_control_reassign) with 1-Vote-Per-Modality & Posterior Floor
@@ -3027,6 +3028,7 @@ build_triage_queue <- function(opts) {
   }
 
   can_eval_hyb_attr <- attr(vouchers, "can_evaluate_hybrids")
+  full_complex_df <- vouchers
   if (!is.null(opts$focal_taxon) && nzchar(trimws(opts$focal_taxon))) {
     f_std <- standardize_packera_taxon(opts$focal_taxon)
     rec_det_v <- if ("recommended_determination" %in% names(vouchers)) as.character(vouchers$recommended_determination) else rep(NA_character_, nrow(vouchers))
@@ -3043,6 +3045,9 @@ build_triage_queue <- function(opts) {
   vouchers$prio_rank <- NULL
   if (!is.null(comp_res)) attr(vouchers, "complex_discovery") <- comp_res
   if (!is.null(can_eval_hyb_attr)) attr(vouchers, "can_evaluate_hybrids") <- can_eval_hyb_attr
+  if (!is.null(full_complex_df) && length(unique(stats::na.omit(as.character(full_complex_df$species_standardized)))) >= 2L) {
+    attr(vouchers, "full_complex_df") <- full_complex_df
+  }
 
   .write_triage_fast <- function(d, p, na_str = "NA") {
     if (requireNamespace("data.table", quietly = TRUE)) data.table::fwrite(d, file = p, na = na_str, quote = "auto", logical01 = FALSE) else readr::write_csv(d, p, na = na_str)
@@ -3073,16 +3078,33 @@ load_and_merge_modalities <- build_triage_queue
   list(taxon = f_std, slug = f_slug)
 }
 
-render_synthesis_figure_pdf <- function(df, out_pdf, cda_summary = NULL, focal_taxon = "") {
+render_synthesis_figure_pdf <- function(df, out_pdf, cda_summary = NULL, focal_taxon = "", output_complex_plot = NULL) {
   if (!exists("render_step06_synthesis_plate_pdf", mode = "function") && file.exists("scripts/morphometrics/pub_figures_utils.R")) source("scripts/morphometrics/pub_figures_utils.R")
+  if (!exists("render_focal_revision_synthesis_plate_png", mode = "function") && file.exists("scripts/morphometrics/pub_synthesis_plates.R")) source("scripts/morphometrics/pub_synthesis_plates.R")
   out_png <- if (!is.null(out_pdf) && nzchar(out_pdf)) sub("\\.pdf$", ".png", out_pdf, ignore.case = TRUE) else "outputs/figures/fig06a_integrative_taxonomic_synthesis.png"
+  full_df <- if (!is.null(attr(df, "full_complex_df"))) attr(df, "full_complex_df") else df
   if (exists("render_step06_synthesis_plate_pdf", mode = "function")) {
-    render_step06_synthesis_plate_pdf(df, out_png, cda_summary = cda_summary, focal_taxon = focal_taxon)
+    render_step06_synthesis_plate_pdf(full_df, out_png, cda_summary = cda_summary, focal_taxon = focal_taxon)
   }
   f_info <- .resolve_focal_taxon_slug(focal_taxon)
-  if (nzchar(f_info$taxon) && nzchar(f_info$slug) && nzchar(out_png) && file.exists(out_png)) {
+  if (nzchar(f_info$taxon) && nzchar(f_info$slug) && nzchar(out_png)) {
     focal_png <- file.path(dirname(out_png), sprintf("Figure_Integrative_%s_Revision.png", f_info$slug))
-    .copy_focal_taxon_artifact(out_png, focal_png)
+    if (exists("render_focal_revision_synthesis_plate_png", mode = "function")) {
+      render_focal_revision_synthesis_plate_png(df, focal_png, full_df = full_df, focal_taxon = f_info$taxon)
+    } else if (file.exists(out_png)) {
+      .copy_focal_taxon_artifact(out_png, focal_png)
+    }
+  }
+  if (is.null(attr(df, "complex_discovery")) && !identical(Sys.getenv("PACKERA_SKIP_FIGURES", unset = ""), "1") &&
+      exists("render_step06b_complex_network_png", mode = "function")) {
+    c_out <- if (!is.null(output_complex_plot) && nzchar(output_complex_plot)) sub("\\.pdf$", ".png", output_complex_plot, ignore.case = TRUE) else file.path(dirname(out_png), "fig06b_taxon_complex_delimitation_network.png")
+    c_lbl <- if (nzchar(f_info$taxon)) f_info$taxon else as.character(df$species_standardized[1L])
+    tryCatch(render_step06b_complex_network_png(
+      complexes_df = data.frame(species_standardized = c_lbl, consensus_complex_id = 1L, n_vouchers = nrow(df), stringsAsFactors = FALSE),
+      affinity_mat = matrix(1.0, nrow = 1L, ncol = 1L, dimnames = list(c_lbl, c_lbl)),
+      out_complex_path = c_out,
+      voucher_df = df
+    ), error = function(e) warning("Single-taxon deme network render warning: ", e$message))
   }
   invisible(out_png)
 }
@@ -3330,7 +3352,9 @@ generate_taxonomic_revision_report <- function(df, opts) {
     out_png_rep <- if (!is.null(opts$output_plot) && nzchar(opts$output_plot)) sub("\\.pdf$", ".png", opts$output_plot, ignore.case = TRUE) else ""
     if (nzchar(out_png_rep) && file.exists(out_png_rep)) {
       focal_png <- file.path(dirname(out_png_rep), sprintf("Figure_Integrative_%s_Revision.png", f_info$slug))
-      .copy_focal_taxon_artifact(out_png_rep, focal_png)
+      if (!file.exists(focal_png) || file.info(focal_png)$size < 1024) {
+        .copy_focal_taxon_artifact(out_png_rep, focal_png)
+      }
     }
   }
 }
@@ -3408,6 +3432,11 @@ generate_interactive_triage_html <- function(df, html_path, focal_taxon = "", op
   hp2_h   <- get_c("hybrid_parent_2", "")
   hcoh_h  <- ifelse(isTRUE(df$hybrid_zone_cohesion_pass) | (!is.null(df$hybrid_zone_cohesion_pass) & !is.na(df$hybrid_zone_cohesion_pass) & as.logical(df$hybrid_zone_cohesion_pass)), "TRUE", "FALSE")
   if (length(hcoh_h) != n) hcoh_h <- rep("FALSE", n)
+  mts_v   <- get_c("morph_tier_source", "Unknown")
+  bc_v    <- if ("basal_leaf_count" %in% names(df)) ifelse(is.finite(suppressWarnings(as.numeric(df$basal_leaf_count))), as.character(as.integer(df$basal_leaf_count)), "0") else rep("0", n)
+  cc_v    <- if ("cauline_leaf_count" %in% names(df)) ifelse(is.finite(suppressWarnings(as.numeric(df$cauline_leaf_count))), as.character(as.integer(df$cauline_leaf_count)), "0") else rep("0", n)
+  bcp_v   <- paste0(bc_v, "/", cc_v)
+  eco_v   <- if ("ecotype_regime" %in% names(df) && any(nzchar(trimws(get_c("ecotype_regime", ""))))) get_c("ecotype_regime", "") else get_c("analysis_group", "")
 
   json_rows <- if (n > 0L) {
     paste0(
@@ -3431,7 +3460,10 @@ generate_interactive_triage_html <- function(df, html_path, focal_taxon = "", op
       .json_escape_vec(rat_v), ",",
       .json_escape_vec(hp1_h), ",",
       .json_escape_vec(hp2_h), ",",
-      .json_escape_vec(hcoh_h),
+      .json_escape_vec(hcoh_h), ",",
+      .json_escape_vec(mts_v), ",",
+      .json_escape_vec(bcp_v), ",",
+      .json_escape_vec(eco_v),
       "]",
       collapse = ",\n"
     )
@@ -3472,6 +3504,13 @@ generate_interactive_triage_html <- function(df, html_path, focal_taxon = "", op
     ".p-CRITICAL{background:#D55E00;}.p-HIGH{background:#E69F00;color:#111;}.p-MEDIUM{background:#CC79A7;}.p-LOW{background:#56B4E9;color:#111;}.p-RESOLVED{background:#009E73;}",
     ".sci{font-style:italic;}",
     ".rat{max-width:360px;color:#334155;font-size:0.79rem;}",
+    ".cat-btn{background:none;border:0;padding:0;color:var(--accent);font-weight:700;cursor:pointer;text-decoration:underline;font-size:inherit;}",
+    ".modal{display:none;position:fixed;inset:0;background:rgba(15,23,42,0.72);z-index:999;align-items:center;justify-content:center;padding:18px;}",
+    ".modal.open{display:flex;}",
+    ".modal-card{background:#fff;border-radius:10px;max-width:920px;width:100%;max-height:92vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 50px rgba(0,0,0,0.35);}",
+    ".modal-hdr{display:flex;justify-content:space-between;align-items:center;padding:10px 14px;border-bottom:1px solid var(--border);background:#f8fafc;gap:8px;}",
+    ".modal-body{padding:12px;overflow:auto;text-align:center;background:#0f172a;}",
+    ".modal-body img{max-width:100%;max-height:76vh;object-fit:contain;border-radius:4px;}",
     "</style>",
     "</head>",
     "<body>",
@@ -3543,7 +3582,7 @@ generate_interactive_triage_html <- function(df, html_path, focal_taxon = "", op
     "<section class=\"toolbar\">",
     "<input type=\"search\" id=\"qSearch\" placeholder=\"Search catalogNumber, collector, herbarium, taxon, rationale...\">",
     "<select id=\"qPrio\"><option value=\"ALL\">All Priorities</option><option value=\"CRITICAL\">CRITICAL</option><option value=\"HIGH\">HIGH</option><option value=\"MEDIUM\">MEDIUM</option><option value=\"LOW\">LOW</option><option value=\"RESOLVED\">RESOLVED</option></select>",
-    "<select id=\"qSub\"><option value=\"ALL\">All Treatments</option><option value=\"Misidentification_Reassign\">Misidentification_Reassign</option><option value=\"Putative_Cryptic_Species\">Putative_Cryptic_Species</option><option value=\"Hybrid_Introgressant\">Hybrid_Introgressant</option><option value=\"Subspecies_Ecotype\">Subspecies_Ecotype</option><option value=\"Ecophenotypic_Plasticity\">Ecophenotypic_Plasticity</option><option value=\"Confirmed_Species\">Confirmed_Species</option></select>",
+    "<select id=\"qSub\"><option value=\"ALL\">All Treatments</option><option value=\"Misidentification_Reassign\">Misidentification_Reassign</option><option value=\"Putative_Cryptic_Species\">Putative_Cryptic_Species</option><option value=\"Hybrid_Introgressant\">Hybrid_Introgressant</option><option value=\"Subspecies_Ecotype\">Subspecies_Ecotype</option><option value=\"Ecophenotypic_Plasticity\">Ecophenotypic_Plasticity</option><option value=\"Confirmed_Species\">Confirmed_Species</option><option value=\"Confirmed_Type_Control\">Confirmed_Type_Control</option><option value=\"Type_Synonymy_Candidate\">Type_Synonymy_Candidate</option></select>",
     sprintf("<select id=\"qTaxon\">%s</select>", taxon_opts),
     "<button type=\"button\" id=\"btnExport\">Export Filtered CSV</button>",
     "</section>",
@@ -3551,14 +3590,29 @@ generate_interactive_triage_html <- function(df, html_path, focal_taxon = "", op
     "<th data-col=\"0\">Catalog #</th><th data-col=\"1\">Ind</th><th data-col=\"2\">Herb.</th><th data-col=\"4\">Tier</th>",
     "<th data-col=\"5\">Recorded Taxon</th><th data-col=\"6\">Recommended Determination</th><th data-col=\"7\">Priority</th>",
     "<th data-col=\"8\">Treatment Subtype</th><th data-col=\"9\">CDA Pred (p)</th><th data-col=\"11\">Edaphic Fit (z)</th>",
-    "<th data-col=\"13\">&Delta;DOY (d)</th><th data-col=\"14\">Consensus</th><th data-col=\"16\">Synthesis Rationale</th>",
+    "<th data-col=\"13\">&Delta;DOY (d)</th><th data-col=\"14\">Consensus</th><th data-col=\"20\">Morph Source (B/C)</th><th data-col=\"22\">Ecotype Regime</th><th data-col=\"16\">Synthesis Rationale</th>",
     "</tr></thead><tbody id=\"triBody\"></tbody></table></div>",
+    "<div id=\"sheetModal\" class=\"modal\" role=\"dialog\" aria-modal=\"true\"><div class=\"modal-card\"><div class=\"modal-hdr\"><strong id=\"modalTitle\">Specimen Sheet</strong><div><button type=\"button\" id=\"btnToggleScan\" style=\"margin-right:8px;padding:4px 10px;\">Show Raw Scan</button><button type=\"button\" id=\"btnCloseModal\" style=\"padding:4px 10px;\">Close</button></div></div><div class=\"modal-body\"><img id=\"modalImg\" alt=\"Herbarium specimen sheet preview\"><div id=\"modalMsg\" style=\"color:#cbd5e1;font-size:0.85rem;margin-top:8px;display:none;\"></div></div></div></div>",
     "<script>",
     paste0("const ROWS = [\n", json_rows, "\n];"),
     "const PRIO_RANK = {CRITICAL:1,HIGH:2,MEDIUM:3,LOW:4,RESOLVED:5};",
-    "let sortCol = 7, sortAsc = true, filtered = ROWS.slice();",
+    "let sortCol = 7, sortAsc = true, filtered = ROWS.slice(), modalCat = '', modalRaw = false;",
     "function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\"/g,'&quot;');}",
     "function fmtSci(s){const t=esc(s);return /^Packera\\s+/i.test(t)?'<span class=\"sci\">'+t+'</span>':t;}",
+    "function loadModalImg(){",
+    "  const img=document.getElementById('modalImg'), msg=document.getElementById('modalMsg'), btn=document.getElementById('btnToggleScan');",
+    "  msg.style.display='none'; img.style.display='inline-block';",
+    "  const ov='../figures/lm3_sheet_overlays/'+encodeURIComponent(modalCat)+'.png';",
+    "  const rw='../../../data/raw_vouchers/'+encodeURIComponent(modalCat)+'.webp';",
+    "  btn.textContent = modalRaw ? 'Show LM3 Overlay' : 'Show Raw Scan';",
+    "  img.onerror = function(){ if(!modalRaw){ modalRaw=true; btn.textContent='Show LM3 Overlay'; img.onerror=function(){ img.style.display='none'; msg.textContent='Sheet preview image not found locally for '+modalCat; msg.style.display='block'; }; img.src=rw; } else { img.style.display='none'; msg.textContent='Raw voucher scan not found locally for '+modalCat; msg.style.display='block'; } };",
+    "  img.src = modalRaw ? rw : ov;",
+    "}",
+    "function openModal(cat){ modalCat=cat; modalRaw=false; document.getElementById('modalTitle').textContent='Herbarium Voucher: '+cat; document.getElementById('sheetModal').classList.add('open'); loadModalImg(); }",
+    "document.getElementById('btnToggleScan').addEventListener('click',()=>{ modalRaw=!modalRaw; loadModalImg(); });",
+    "document.getElementById('btnCloseModal').addEventListener('click',()=>document.getElementById('sheetModal').classList.remove('open'));",
+    "document.getElementById('sheetModal').addEventListener('click',e=>{ if(e.target.id==='sheetModal') document.getElementById('sheetModal').classList.remove('open'); });",
+    "document.addEventListener('keydown',e=>{ if(e.key==='Escape') document.getElementById('sheetModal').classList.remove('open'); });",
     "function applyFilter(){",
     "  const q=document.getElementById('qSearch').value.trim().toLowerCase();",
     "  const pr=document.getElementById('qPrio').value;",
@@ -3578,14 +3632,15 @@ generate_interactive_triage_html <- function(df, html_path, focal_taxon = "", op
     "    if(va<vb) return sortAsc?-1:1; if(va>vb) return sortAsc?1:-1; return 0;",
     "  });",
     "  const html = filtered.map(r=>'<tr>'+",
-    "    '<td><strong>'+esc(r[0])+'</strong></td><td>'+esc(r[1])+'</td><td>'+esc(r[2])+'</td><td>'+esc(r[4])+'</td>'+",
+    "    '<td><button type=\"button\" class=\"cat-btn\" data-cat=\"'+esc(r[0])+'\">'+esc(r[0])+'</button></td><td>'+esc(r[1])+'</td><td>'+esc(r[2])+'</td><td>'+esc(r[4])+'</td>'+",
     "    '<td>'+fmtSci(r[5])+'</td><td>'+fmtSci(r[6])+'</td>'+",
     "    '<td><span class=\"badge p-'+esc(r[7])+'\">'+esc(r[7])+'</span></td>'+",
     "    '<td>'+esc(r[8])+'</td>'+",
     "    '<td>'+fmtSci(r[9])+(r[10]!=='NA'?' ('+esc(r[10])+')':'')+'</td>'+",
     "    '<td>'+fmtSci(r[11])+(r[12]!=='NA'?' (z='+esc(r[12])+')':'')+'</td>'+",
-    "    '<td>'+esc(r[13])+'</td><td>'+esc(r[14])+'</td><td class=\"rat\">'+esc(r[16])+'</td></tr>').join('');",
+    "    '<td>'+esc(r[13])+'</td><td>'+esc(r[14])+'</td><td>'+esc(r[20])+' ('+esc(r[21])+')</td><td>'+fmtSci(r[22])+'</td><td class=\"rat\">'+esc(r[16])+'</td></tr>').join('');",
     "  document.getElementById('triBody').innerHTML = html;",
+    "  document.querySelectorAll('#triBody .cat-btn').forEach(b=>b.addEventListener('click',()=>openModal(b.getAttribute('data-cat'))));",
     "  document.getElementById('shownCount').textContent = 'Showing '+filtered.length+' of '+ROWS.length+' vouchers';",
     "}",
     "document.querySelectorAll('#triTable th').forEach(th=>th.addEventListener('click',()=>{",
@@ -3593,7 +3648,7 @@ generate_interactive_triage_html <- function(df, html_path, focal_taxon = "", op
     "}));",
     "['qSearch','qPrio','qSub','qTaxon'].forEach(id=>document.getElementById(id).addEventListener('input',applyFilter));",
     "document.getElementById('btnExport').addEventListener('click',()=>{",
-    "  const hdr=['catalogNumber','plant_individual_id','institutionCode','recordedBy','determiner_tier','species_standardized','recommended_determination','synthesis_triage_priority','taxonomic_treatment_subtype','cda_predicted_taxon','cda_posterior_prob','edaphic_best_fit_taxon','edaphic_z_score','delta_doy_resid','probabilistic_consensus_score','synthesis_triage_action','synthesis_rationale','hybrid_parent_1','hybrid_parent_2','hybrid_zone_cohesion_pass'];",
+    "  const hdr=['catalogNumber','plant_individual_id','institutionCode','recordedBy','determiner_tier','species_standardized','recommended_determination','synthesis_triage_priority','taxonomic_treatment_subtype','cda_predicted_taxon','cda_posterior_prob','edaphic_best_fit_taxon','edaphic_z_score','delta_doy_resid','probabilistic_consensus_score','synthesis_triage_action','synthesis_rationale','hybrid_parent_1','hybrid_parent_2','hybrid_zone_cohesion_pass','morph_tier_source','basal_cauline_leaves','ecotype_regime'];",
     "  const csv=[hdr.join(',')].concat(filtered.map(r=>r.map(v=>'\"'+String(v||'').replace(/\"/g,'\"\"')+'\"').join(','))).join('\\n');",
     "  const blob=new Blob([csv],{type:'text/csv;charset=utf-8;'});",
     "  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='triage_queue_filtered.csv'; a.click(); URL.revokeObjectURL(a.href);",
@@ -3618,7 +3673,7 @@ main <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
   opts <- parse_args_robust(cli_args)
   message("=== Starting Step 06 Triage Dashboard & Taxonomic Synthesis ===")
   triage_df <- build_triage_queue(opts)
-  render_synthesis_figure_pdf(triage_df, opts$output_plot, cda_summary = opts$cda_summary, focal_taxon = opts$focal_taxon)
+  render_synthesis_figure_pdf(triage_df, opts$output_plot, cda_summary = opts$cda_summary, focal_taxon = opts$focal_taxon, output_complex_plot = opts$output_complex_plot)
   tryCatch({
     if (!exists("generate_step06_pub_figures", mode = "function") && file.exists("scripts/morphometrics/pub_figures_utils.R")) {
       source("scripts/morphometrics/pub_figures_utils.R")

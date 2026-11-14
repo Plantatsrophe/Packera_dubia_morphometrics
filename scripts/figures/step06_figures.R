@@ -127,7 +127,8 @@ render_step06a_integrative_synthesis_png <- function(
     ggplot2::scale_y_discrete(labels = icn_discrete_labeller(abbreviate_genus = TRUE, counts_map = cnt_tx)) +
     ggplot2::scale_fill_manual(values = PACKERA_TREATMENT_PALETTE, labels = function(x) gsub("_", " ", x), name = "5-Stage Call", drop = TRUE) +
     theme_packera_pub(base_size = 9.5) +
-    ggplot2::theme(legend.position = "none") +
+    ggplot2::theme(legend.position = "bottom", legend.text = ggplot2::element_text(size = 8.0)) +
+    ggplot2::guides(fill = ggplot2::guide_legend(nrow = 2L, title = "5-Stage Call")) +
     ggplot2::labs(
       title = "C. Hierarchical 5-Stage Treatment Outcomes",
       subtitle = "Proportion of specimens per taxon across integrative categories",
@@ -222,7 +223,9 @@ render_step06a_integrative_synthesis_png <- function(
     )
 
   dyn_h_06a <- max(10.2, 6.2 + 0.28 * length(active_taxa))
-  hdr_title <- if (nzchar(trimws(as.character(focal_taxon)))) {
+  hdr_title <- if (length(active_taxa) >= 2L && nzchar(trimws(as.character(focal_taxon)))) {
+    sprintf("Step 06: Integrative Species Delimitation Across Packera Complexes (%s Focus, N = %d Taxa)", trimws(as.character(focal_taxon)), length(active_taxa))
+  } else if (nzchar(trimws(as.character(focal_taxon)))) {
     sprintf("Step 06: Integrative Species Delimitation & Curatorial Synthesis (%s)", trimws(as.character(focal_taxon)))
   } else {
     sprintf("Step 06: Integrative Species Delimitation Across Packera Complexes (N = %d Taxa)", length(active_taxa))
@@ -251,7 +254,8 @@ render_step06b_complex_network_png <- function(
   complexes_df,
   affinity_mat,
   out_complex_path = "outputs/figures/fig06b_taxon_complex_delimitation_network.png",
-  min_affinity = 0.03
+  min_affinity = 0.03,
+  voucher_df = NULL
 ) {
   if (!requireNamespace("ggplot2", quietly = TRUE) || !requireNamespace("patchwork", quietly = TRUE)) {
     return(invisible(""))
@@ -267,6 +271,61 @@ render_step06b_complex_network_png <- function(
 
   cdf <- as.data.frame(complexes_df, stringsAsFactors = FALSE)
   W <- as.matrix(affinity_mat)
+  is_deme_net <- FALSE
+  if ((nrow(cdf) <= 1L || nrow(W) <= 1L) && !is.null(voucher_df) && is.data.frame(voucher_df) && nrow(voucher_df) >= 6L) {
+    vdf_d <- voucher_df
+    deme_v <- if ("population_deme_id" %in% names(vdf_d) && sum(!is.na(vdf_d$population_deme_id) & nzchar(as.character(vdf_d$population_deme_id))) >= 6L) {
+      as.character(vdf_d$population_deme_id)
+    } else if ("stateProvince" %in% names(vdf_d) && length(unique(stats::na.omit(as.character(vdf_d$stateProvince)))) >= 2L) {
+      as.character(vdf_d$stateProvince)
+    } else {
+      lat_d <- suppressWarnings(as.numeric(if ("decimalLatitude" %in% names(vdf_d)) vdf_d$decimalLatitude else vdf_d$latitude))
+      lon_d <- suppressWarnings(as.numeric(if ("decimalLongitude" %in% names(vdf_d)) vdf_d$decimalLongitude else vdf_d$longitude))
+      ifelse(is.finite(lat_d) & is.finite(lon_d), sprintf("%.1f,%.1f", round(lat_d, 1), round(lon_d, 1)), NA_character_)
+    }
+    vdf_d$.deme_lbl <- trimws(deme_v)
+    vdf_d <- vdf_d[!is.na(vdf_d$.deme_lbl) & nzchar(vdf_d$.deme_lbl) & vdf_d$.deme_lbl != "NA", , drop = FALSE]
+    d_tab <- sort(table(vdf_d$.deme_lbl), decreasing = TRUE)
+    top_demes <- names(d_tab[d_tab >= 2L])
+    if (length(top_demes) < 3L) top_demes <- names(d_tab)
+    top_demes <- utils::head(top_demes, 12L)
+    m_cols <- intersect(c("PC1", "PC2", "PC3", "ECT_PC1", "AR_inv", "solidity", "can1", "can2"), names(vdf_d))
+    m_cols <- m_cols[vapply(m_cols, function(cl) sum(is.finite(suppressWarnings(as.numeric(vdf_d[[cl]])))) >= 4L, logical(1))]
+    if (length(top_demes) >= 3L && length(m_cols) >= 1L) {
+      vdf_d <- vdf_d[vdf_d$.deme_lbl %in% top_demes, , drop = FALSE]
+      M_d <- do.call(cbind, lapply(m_cols, function(cl) {
+        vv <- suppressWarnings(as.numeric(vdf_d[[cl]])); vv[!is.finite(vv)] <- stats::median(vv, na.rm = TRUE)
+        s_v <- stats::sd(vv); if (!is.finite(s_v) || s_v <= 1e-6) s_v <- 1.0
+        (vv - mean(vv)) / s_v
+      }))
+      cent_mat <- do.call(rbind, lapply(top_demes, function(dm) colMeans(M_d[vdf_d$.deme_lbl == dm, , drop = FALSE], na.rm = TRUE)))
+      rownames(cent_mat) <- top_demes
+      D_m <- as.matrix(stats::dist(cent_mat))
+      sig_m <- max(stats::median(D_m[upper.tri(D_m)], na.rm = TRUE), 0.5)
+      lon_c <- suppressWarnings(as.numeric(if ("decimalLongitude" %in% names(vdf_d)) vdf_d$decimalLongitude else vdf_d$longitude))
+      lat_c <- suppressWarnings(as.numeric(if ("decimalLatitude" %in% names(vdf_d)) vdf_d$decimalLatitude else vdf_d$latitude))
+      geo_cent <- do.call(rbind, lapply(top_demes, function(dm) {
+        idx_dm <- which(vdf_d$.deme_lbl == dm)
+        c(stats::median(lon_c[idx_dm], na.rm = TRUE), stats::median(lat_c[idx_dm], na.rm = TRUE))
+      }))
+      W_geo <- matrix(1.0, nrow = length(top_demes), ncol = length(top_demes))
+      if (all(is.finite(geo_cent))) {
+        mid_l <- stats::median(geo_cent[, 2L], na.rm = TRUE) * pi / 180.0
+        D_km <- as.matrix(stats::dist(cbind(geo_cent[, 1L] * 111.32 * cos(mid_l), geo_cent[, 2L] * 110.57)))
+        W_geo <- exp(-D_km / 600.0)
+      }
+      W <- exp(-(D_m^2) / (2.0 * sig_m^2)) * (0.5 + 0.5 * W_geo)
+      dimnames(W) <- list(top_demes, top_demes)
+      cdf <- data.frame(
+        species_standardized = top_demes,
+        consensus_complex_id = rep(1L, length(top_demes)),
+        n_vouchers = as.integer(d_tab[top_demes]),
+        silhouette_width = NA_real_,
+        stringsAsFactors = FALSE
+      )
+      is_deme_net <- TRUE
+    }
+  }
   if (nrow(cdf) == 0L || nrow(W) == 0L) return(invisible(""))
   taxa <- rownames(W)
   if (is.null(taxa)) taxa <- as.character(cdf$species_standardized)
@@ -308,8 +367,14 @@ render_step06b_complex_network_png <- function(
     theme_packera_pub(base_size = 9.4) +
     ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 40, hjust = 1, face = "italic")) +
     ggplot2::labs(
-      title = sprintf("A. Ward.D2 Multimodal Affinity Matrix (%d Complexes)", n_comp),
-      subtitle = if (is.finite(sil_mean)) sprintf("Mean consensus silhouette width = %.3f", sil_mean) else "Morphometric + Ecological KDE + Circular Hopkins affinity",
+      title = sprintf("A. Ward.D2 Multimodal Affinity Matrix (%d %s)", n_comp, if (n_comp == 1L) "Complex" else "Complexes"),
+      subtitle = if (is_deme_net) {
+        "Spatial-deme morphometric + geographic affinity (unimodal K* = 1)"
+      } else if (is.finite(sil_mean)) {
+        sprintf("Mean consensus silhouette width = %.3f", sil_mean)
+      } else {
+        "Morphometric + Ecological KDE + Circular Hopkins affinity"
+      },
       x = NULL, y = NULL
     )
   if (n_t <= 12L) {
@@ -360,8 +425,8 @@ render_step06b_complex_network_png <- function(
   }
   node_df <- data.frame(
     taxon = taxa,
-    lbl = abbreviate_icn_taxon(taxa, abbreviate_genus = TRUE),
-    complex = comp_lbls,
+    lbl = if (is_deme_net) paste0(taxa, " (n=", n_vouch, ")") else abbreviate_icn_taxon(taxa, abbreviate_genus = TRUE),
+    complex = if (is_deme_net) rep("Single Species (K* = 1)", n_t) else comp_lbls,
     n_vouchers = n_vouch,
     pt_sz = pt_sz,
     x = as.numeric(coords[, 1L]),
@@ -400,7 +465,7 @@ render_step06b_complex_network_png <- function(
         pn <- pn + ggplot2::geom_segment(
           data = e_inter,
           ggplot2::aes(x = .data$x, y = .data$y, xend = .data$xend, yend = .data$yend),
-          linewidth = e_inter$lw, linetype = "dotted", color = "#9CA3AF", alpha = 0.65,
+          linewidth = e_inter$lw, linetype = "dotted", color = "#9CA3AF", alpha = 0.35,
           show.legend = FALSE, inherit.aes = FALSE
         )
       }
@@ -408,7 +473,7 @@ render_step06b_complex_network_png <- function(
         pn <- pn + ggplot2::geom_segment(
           data = e_intra,
           ggplot2::aes(x = .data$x, y = .data$y, xend = .data$xend, yend = .data$yend),
-          linewidth = e_intra$lw, linetype = "solid", color = "#64748B", alpha = 0.78,
+          linewidth = e_intra$lw, linetype = "solid", color = "#64748B", alpha = 0.35,
           show.legend = FALSE, inherit.aes = FALSE
         )
       }

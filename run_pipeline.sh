@@ -1120,8 +1120,13 @@ if exclude_misidentified:
 
 if target_tier and 'determiner_tier' in df.columns:
     before_tier_n = len(df)
-    df = df[df['determiner_tier'].astype(str).str.strip() == target_tier].copy()
-    print(f'[Preflight: Determiner Tier] Filtered strictly to determiner_tier == {target_tier!r}: retained {len(df)} / {before_tier_n} vouchers.')
+    tier_vals = df['determiner_tier'].astype(str).str.strip()
+    if target_tier == 'Tier_1_Gold':
+        is_type_col = df['is_type_specimen'].fillna(False).astype(bool) if 'is_type_specimen' in df.columns else False
+        df = df[tier_vals.isin(['Tier_1_Gold', 'Tier_0_Type']) | is_type_col].copy()
+    else:
+        df = df[tier_vals == target_tier].copy()
+    print(f'[Preflight: Determiner Tier] Filtered to determiner_tier == {target_tier!r} (+ types when Tier_1_Gold): retained {len(df)} / {before_tier_n} vouchers.')
 
 if exclude_taxa:
     before_n = len(df)
@@ -1250,7 +1255,12 @@ else:
     subset_df = df
 
 if target_tier and 'determiner_tier' in subset_df.columns:
-    subset_df = subset_df[subset_df['determiner_tier'].astype(str).str.strip() == target_tier].copy()
+    sub_tiers = subset_df['determiner_tier'].astype(str).str.strip()
+    if target_tier == 'Tier_1_Gold':
+        sub_types = subset_df['is_type_specimen'].fillna(False).astype(bool) if 'is_type_specimen' in subset_df.columns else False
+        subset_df = subset_df[sub_tiers.isin(['Tier_1_Gold', 'Tier_0_Type']) | sub_types].copy()
+    else:
+        subset_df = subset_df[sub_tiers == target_tier].copy()
 if exclude_misidentified and misidentified_cats:
     subset_df = subset_df[~subset_df['catalogNumber'].astype(str).str.strip().isin(misidentified_cats)].copy()
 

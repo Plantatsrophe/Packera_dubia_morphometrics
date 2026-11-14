@@ -2301,6 +2301,7 @@ class SegmentAndExtractPipeline:
             pose_inputs,
             root_boxes=root_detections,
             rosette_centroids=rosette_centroids_by_pid,
+            return_by_plant=True,
         )
         if (
             _spec_mask_sheet is None

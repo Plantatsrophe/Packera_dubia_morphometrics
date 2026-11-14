@@ -147,6 +147,7 @@ def build_four_stage_commands(
         r2,
         "--spatial-thin-km",
         f"{spatial_thin_km:g}",
+        "--gold-only",
         *common_tail,
     ]
     stages.append(("Stage_4_Spatially_Thinned", r4, cmd4))
@@ -240,6 +241,7 @@ def _extract_stage_metrics(
 
     gmm_rows = _read_csv_rows(run_dir / "outputs" / "reports" / "gmm_bayes_factors_summary.csv")
     srf_rows = _read_csv_rows(run_dir / "outputs" / "reports" / "multimodal_spatial_rf_summary.csv")
+    warren_rows = _read_csv_rows(run_dir / "outputs" / "reports" / "warren_niche_identity_summary.csv")
     batch_rows = _read_csv_rows(run_dir / "outputs" / "reports" / "institutional_batch_effect_audit.csv")
 
     focal_rows = [
@@ -266,14 +268,16 @@ def _extract_stage_metrics(
     opt_k: Optional[int] = None
     max_two_delta_bic: Optional[float] = None
     for gr in gmm_rows:
-        for k_col in ("optimal_K", "optimal_k", "G_opt", "best_K", "K"):
+        for k_col in ("optimal_K", "optimal_k", "G_opt", "best_K"):
             kv = _safe_float(gr.get(k_col))
             if kv is not None and opt_k is None:
                 opt_k = int(round(kv))
-        for b_col in ("two_delta_BIC", "delta_bic_2x", "bayes_factor_2lnB", "delta_BIC"):
-            bv = _safe_float(gr.get(b_col))
-            if bv is not None:
-                max_two_delta_bic = bv if max_two_delta_bic is None else max(max_two_delta_bic, bv)
+        k_row = _safe_float(gr.get("K"))
+        if k_row is None or k_row >= 2.0:
+            for b_col in ("Two_Delta_BIC", "two_delta_BIC", "delta_bic_2x", "bayes_factor_2lnB", "delta_BIC"):
+                bv = _safe_float(gr.get(b_col))
+                if bv is not None:
+                    max_two_delta_bic = bv if max_two_delta_bic is None else max(max_two_delta_bic, bv)
     if opt_k is None and clusters:
         opt_k = len(clusters)
 
@@ -283,6 +287,13 @@ def _extract_stage_metrics(
         for v in (_safe_float(sr.get("D_edaph")),)
         if v is not None
     ]
+    if not d_edaph_vals:
+        d_edaph_vals = [
+            v
+            for wr in (warren_rows or srf_rows)
+            for v in (_safe_float(wr.get("Schoener_D")),)
+            if v is not None
+        ]
     min_d_edaph = min(d_edaph_vals) if d_edaph_vals else None
 
     doy_vals = [
@@ -296,7 +307,7 @@ def _extract_stage_metrics(
     eta_vals = [
         v
         for br in batch_rows
-        for v in (_safe_float(br.get("partial_eta_sq")),)
+        for v in (_safe_float(br.get("partial_eta_sq")) if _safe_float(br.get("partial_eta_sq")) is not None else _safe_float(br.get("R_squared")),)
         if v is not None
     ]
     max_eta = max(eta_vals) if eta_vals else None

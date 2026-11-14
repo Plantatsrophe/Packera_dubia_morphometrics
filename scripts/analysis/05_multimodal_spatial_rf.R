@@ -136,6 +136,16 @@ STEP05_PREDICTOR_LABEL_DICT <- c(
   "bio17_precip_driest_qtr"          = "Driest-Quarter Precip (BIO17, mm)",
   "bio18_precip_warmest_qtr"         = "Warmest-Quarter Precip (BIO18, mm)",
   "bio19_precip_coldest_qtr"         = "Coldest-Quarter Precip (BIO19, mm)",
+  "lithic_outcrop_index"             = "Lithic Outcrop Exposure Index (0-100)",
+  "summer_moisture_deficit_idx"      = "Summer Moisture Deficit Index",
+  "maritime_continentality_idx"      = "Maritime Continentality Index",
+  "min_bedrock_depth_buffer_cm"      = "Min Buffered Bedrock Depth (cm)",
+  "ph_q10_buffer"                    = "Buffered Soil pH 10th Pct",
+  "ph_q90_buffer"                    = "Buffered Soil pH 90th Pct",
+  "max_cfvo_buffer_pct"              = "Max Buffered Coarse Fragments (%)",
+  "azonal_lithology_presence_buffer" = "Buffered Azonal Lithology Presence",
+  "fine_soil_soc"                    = "Soil Organic Carbon (g/kg, 0-15cm)",
+  "topo_elev_m"                      = "30m Elevation (m a.s.l.)",
   "delta_doy"                        = "Hopkins Phenological Anomaly (Delta DOY)"
 )
 

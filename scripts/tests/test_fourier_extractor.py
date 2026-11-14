@@ -1171,8 +1171,9 @@ class TestFourierExtractor(unittest.TestCase):
         self.assertIn("non_jordan_mask", s03_txt)
         self.assertIn("ENCLOSED_INTERLOBE_VOID", s03_txt)
         self.assertIn("enclosed_void_frac", s03_txt)
-        self.assertIn("min_prim_bas_cy - 0.12", s03_txt)
-        self.assertIn("rezoned_strays_s03", s03_txt)
+        self.assertIn("consolidate_fragmented_sheet_individuals", s03_txt)
+        self.assertIn("min_prim_bas_cy - 0.12", s03_txt + "\n" + dlu_txt)
+        self.assertIn("rezoned_strays_s03", s03_txt + "\n" + dlu_txt)
 
         if not rscript_available():
             return

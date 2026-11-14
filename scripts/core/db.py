@@ -1460,13 +1460,15 @@ def ensure_pipeline_run(
     git_commit_sha: Optional[str] = None,
     cli_arguments: Optional[Sequence[str]] = None,
     focal_taxon: Optional[str] = None,
-    intraspecific_mode: bool = False,
+    intraspecific_mode: Optional[bool] = None,
 ) -> None:
     """Register or update a run record inside `pipeline_runs`."""
     rid = str(run_id).strip() or "canonical"
     rdir_str = str(run_dir) if run_dir is not None else None
     cli_json = json.dumps(list(cli_arguments)) if cli_arguments is not None else None
     now_iso = datetime.now(timezone.utc).isoformat()
+    im_ins = 1 if intraspecific_mode else 0
+    im_opt = None if intraspecific_mode is None else (1 if intraspecific_mode else 0)
 
     with conn:
         conn.execute(
@@ -1482,7 +1484,7 @@ def ensure_pipeline_run(
                 git_commit_sha = COALESCE(excluded.git_commit_sha, pipeline_runs.git_commit_sha),
                 cli_arguments_json = COALESCE(excluded.cli_arguments_json, pipeline_runs.cli_arguments_json),
                 focal_taxon = COALESCE(excluded.focal_taxon, pipeline_runs.focal_taxon),
-                intraspecific_mode = COALESCE(excluded.intraspecific_mode, pipeline_runs.intraspecific_mode);
+                intraspecific_mode = CASE WHEN ? IS NOT NULL THEN ? ELSE pipeline_runs.intraspecific_mode END;
             """,
             (
                 rid,
@@ -1492,7 +1494,9 @@ def ensure_pipeline_run(
                 git_commit_sha,
                 cli_json,
                 _to_str(focal_taxon),
-                1 if intraspecific_mode else 0,
+                im_ins,
+                im_opt,
+                im_opt,
             ),
         )
 

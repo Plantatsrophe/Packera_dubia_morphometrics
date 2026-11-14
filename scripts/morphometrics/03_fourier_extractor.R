@@ -615,7 +615,10 @@ run_fourier_extraction <- function(opts) {
   if (length(complete_idx) >= 2L) {
     clean_idx <- if (length(complete_idx) >= 10 && sum(!efa_df$is_contour_outlier[complete_idx]) >= 5) complete_idx[!efa_df$is_contour_outlier[complete_idx]] else complete_idx
     lz_f <- if ("leaf_zone" %in% names(efa_df)) tolower(trimws(as.character(efa_df$leaf_zone[clean_idx]))) else rep("basal", length(clean_idx))
-    bas_idx <- clean_idx[is.na(lz_f) | lz_f == "basal"]
+    zc_f <- if ("leaf_zone_confidence" %in% names(efa_df)) suppressWarnings(as.numeric(efa_df$leaf_zone_confidence[clean_idx])) else rep(NA_real_, length(clean_idx))
+    lz_r <- if ("leaf_zone_routed" %in% names(efa_df)) tolower(trimws(as.character(efa_df$leaf_zone_routed[clean_idx]))) else lz_f
+    hi_bas_idx <- clean_idx[(is.na(lz_r) | lz_r == "basal") & (is.na(zc_f) | zc_f >= 0.65)]
+    bas_idx <- if (length(hi_bas_idx) >= 2L) hi_bas_idx else clean_idx[is.na(lz_f) | lz_f == "basal"]
     base_fit_idx <- if (length(bas_idx) >= 2L) bas_idx else clean_idx
     base_mask <- seq_len(nrow(efa_df)) %in% base_fit_idx
     if (isTRUE(opts$symmetrize_efa_harmonics) && !is.null(sym_res$active_ref_mask) &&
@@ -686,58 +689,7 @@ run_fourier_extraction <- function(opts) {
 
   # Consolidate false Step 02 single-plant DBSCAN splits (cauline-only upper stems & 1-leaf strays)
   # onto the sheet's primary basal rosette individual while re-zoning upper-stem strays to cauline
-  if (all(c("catalogNumber", "plant_individual_id") %in% names(efa_df)) && nrow(efa_df) >= 2L) {
-    cat_s03 <- as.character(efa_df$catalogNumber)
-    pid_s03 <- ifelse(is.na(efa_df$plant_individual_id), 0L, as.integer(efa_df$plant_individual_id))
-    lz_s03 <- if ("leaf_zone" %in% names(efa_df)) tolower(trimws(as.character(efa_df$leaf_zone))) else rep("basal", nrow(efa_df))
-    lz_s03[is.na(lz_s03) | !(lz_s03 %in% c("basal", "cauline"))] <- "basal"
-    cy_s03 <- if ("cy_rel_plant_bbox" %in% names(efa_df)) suppressWarnings(as.numeric(efa_df$cy_rel_plant_bbox)) else rep(NA_real_, nrow(efa_df))
-    dc_s03 <- if ("dist_from_crown_norm" %in% names(efa_df)) suppressWarnings(as.numeric(efa_df$dist_from_crown_norm)) else rep(NA_real_, nrow(efa_df))
-    pbr_s03 <- if ("petiole_to_blade_ratio" %in% names(efa_df)) suppressWarnings(as.numeric(efa_df$petiole_to_blade_ratio)) else rep(NA_real_, nrow(efa_df))
-    by_cat_s03 <- split(seq_len(nrow(efa_df)), cat_s03)
-    reassigned_s03 <- 0L
-    rezoned_strays_s03 <- 0L
-    for (c_idx_vec in by_cat_s03) {
-      u_pids <- sort(unique(pid_s03[c_idx_vec]))
-      if (length(u_pids) < 2L) next
-      bas_counts <- vapply(u_pids, function(p) sum(pid_s03[c_idx_vec] == p & lz_s03[c_idx_vec] == "basal"), integer(1))
-      tot_counts <- vapply(u_pids, function(p) sum(pid_s03[c_idx_vec] == p), integer(1))
-      hub_mask <- bas_counts >= 2L
-      kept_pids <- if (any(hub_mask)) u_pids[hub_mask] else u_pids[which.max(bas_counts * 1000L + tot_counts)]
-      primary_pid <- kept_pids[which.max(bas_counts[match(kept_pids, u_pids)] * 1000L + tot_counts[match(kept_pids, u_pids)])]
-      prim_bas_rows <- c_idx_vec[pid_s03[c_idx_vec] == primary_pid & lz_s03[c_idx_vec] == "basal"]
-      prim_cy_fin <- cy_s03[prim_bas_rows][is.finite(cy_s03[prim_bas_rows])]
-      min_prim_bas_cy <- if (length(prim_cy_fin) > 0L) min(prim_cy_fin) else NA_real_
-      med_prim_bas_cy <- if (length(prim_cy_fin) > 0L) stats::median(prim_cy_fin) else NA_real_
-      for (k_p in seq_along(u_pids)) {
-        p_cur <- u_pids[k_p]
-        if (p_cur %in% kept_pids) next
-        if (bas_counts[k_p] == 0L || tot_counts[k_p] <= 1L) {
-          hit_rows <- c_idx_vec[pid_s03[c_idx_vec] == p_cur]
-          pid_s03[hit_rows] <- primary_pid
-          reassigned_s03 <- reassigned_s03 + length(hit_rows)
-          for (hr in hit_rows) {
-            if (lz_s03[hr] == "basal" && length(prim_bas_rows) >= 2L) {
-              is_upper_stray <- (is.finite(dc_s03[hr]) && dc_s03[hr] > 0.24) ||
-                (is.finite(cy_s03[hr]) && is.finite(min_prim_bas_cy) && (cy_s03[hr] < (min_prim_bas_cy - 0.12) || (med_prim_bas_cy >= 0.60 && cy_s03[hr] < 0.45))) ||
-                (is.finite(pbr_s03[hr]) && pbr_s03[hr] < 0.08 && (!is.finite(cy_s03[hr]) || (is.finite(med_prim_bas_cy) && cy_s03[hr] < (med_prim_bas_cy - 0.08))))
-              if (isTRUE(is_upper_stray)) {
-                lz_s03[hr] <- "cauline"
-                rezoned_strays_s03 <- rezoned_strays_s03 + 1L
-              }
-            }
-          }
-        }
-      }
-    }
-    if (reassigned_s03 > 0L) {
-      efa_df$plant_individual_id <- pid_s03
-      if ("leaf_zone" %in% names(efa_df) && rezoned_strays_s03 > 0L) {
-        efa_df$leaf_zone <- lz_s03
-      }
-      message(sprintf("[Step 03 Multi-Plant Hygiene] Consolidated %d cauline-split / single-leaf stray rows onto primary basal individuals (re-zoned %d upper-stem strays to cauline).", reassigned_s03, rezoned_strays_s03))
-    }
-  }
+  if (exists("consolidate_fragmented_sheet_individuals", mode = "function")) efa_df <- consolidate_fragmented_sheet_individuals(efa_df)
 
   # 5a. Export Disaggregated Individual Leaf Harmonics Archive (Atomic write-then-replace)
   if (!is.null(opts$output_individual) && nzchar(opts$output_individual)) {
@@ -773,6 +725,7 @@ run_fourier_extraction <- function(opts) {
     }))
   }
   if (exists("compute_separate_cauline_otu_track", mode = "function")) specimen_df <- compute_separate_cauline_otu_track(efa_df, specimen_df, sym_names)
+  if (exists("apply_otu_confidence_routing_tier", mode = "function")) specimen_df <- apply_otu_confidence_routing_tier(specimen_df, closed_leaf_df)
   spec_ect_attrs <- attributes(specimen_df)[c("ect_basal_var_exp", "ect_cauline_var_exp")]
   specimen_df$efd_harmonic_opt <- as.integer(h_opt); specimen_df$efd_k95_pcs <- as.integer(k_95)
   otu_h_cols <- intersect(if (exists("active_full_cols") && length(active_full_cols) >= 1L) active_full_cols else sym_names, names(specimen_df))
@@ -780,12 +733,14 @@ run_fourier_extraction <- function(opts) {
   for (p in seq_len(k_export)) specimen_df[[paste0("PC", p)]] <- NA_real_
   # Fit OTU-level ordination on Empirical Bayes active reference anchors (with Adaptive Anchor Promotion for 0-Gold/Silver taxa)
   specimen_df$is_type_specimen <- if (exists(".identify_type_specimen_vec", mode = "function")) .identify_type_specimen_vec(specimen_df)$is_type_specimen else rep(FALSE, nrow(specimen_df))
-  otu_base_mask <- otu_has_efa & (specimen_df$morph_tier_source != "Cauline_Only_Fallback") & (!as.logical(specimen_df$is_contour_outlier) | as.logical(specimen_df$is_type_specimen))
+  otu_base_mask <- otu_has_efa & !(specimen_df$morph_tier_source %in% c("Cauline_Only_Fallback", "Transitional_Passive")) & (!as.logical(specimen_df$is_contour_outlier) | as.logical(specimen_df$is_type_specimen))
   if (sum(otu_base_mask, na.rm = TRUE) < 2L) otu_base_mask <- otu_has_efa
   otu_ref_mask <- if (sum(otu_base_mask, na.rm = TRUE) >= 2L && length(otu_h_cols) >= 1L) prune_within_taxon_mahalanobis(as.matrix(specimen_df[, otu_h_cols, drop = FALSE]), specimen_df, otu_base_mask, q = 0.95) else otu_base_mask
   specimen_df$is_promoted_bronze <- if (!is.null(attr(otu_ref_mask, "is_promoted_bronze"))) as.logical(attr(otu_ref_mask, "is_promoted_bronze")) else rep(FALSE, nrow(specimen_df))
   specimen_df$anchor_tier_source <- if (!is.null(attr(otu_ref_mask, "anchor_tier_source"))) attr(otu_ref_mask, "anchor_tier_source") else ifelse(specimen_df$is_type_specimen, "Tier_0_Type_Anchor", "Passive_Unpromoted")
   specimen_df$authority_weight <- compute_authority_precision_weights(specimen_df, active_mask = otu_ref_mask)
+  non_basal_passive <- !is.na(specimen_df$morph_tier_source) & (specimen_df$morph_tier_source %in% c("Cauline_Only_Fallback", "Transitional_Passive")) & !as.logical(specimen_df$is_type_specimen)
+  if (any(non_basal_passive)) specimen_df$authority_weight[non_basal_passive] <- 0.0
   specimen_df$is_passive <- !(is.finite(specimen_df$authority_weight) & specimen_df$authority_weight > 0.0)
   if (sum(otu_ref_mask, na.rm = TRUE) < 2L) otu_ref_mask <- otu_base_mask
   specimen_df$spatial_balance_weight <- if (exists("compute_spatial_balance_weights", mode = "function")) round(compute_spatial_balance_weights(specimen_df, active_mask = otu_ref_mask, recompute = TRUE), 6) else rep(1.0, nrow(specimen_df))

@@ -478,7 +478,10 @@ flag_coordinate_uncertainty <- function(
                                   ((is.na(unc_raw) | !is.finite(unc_raw)) & modern_gps_fallback)
   df$edaphic_coord_weight <- ifelse(
     is.finite(unc_raw) & unc_raw > 0,
-    ifelse(unc_raw <= 500.0, 1.0, ifelse(unc_raw <= as.numeric(max_edaphic_uncertainty_m), 0.70, 0.0)),
+    ifelse(
+      unc_raw <= 500.0, 1.0,
+      ifelse(unc_raw <= 2000.0, 0.70, ifelse(unc_raw <= as.numeric(max_edaphic_uncertainty_m), 0.45, 0.0))
+    ),
     ifelse(modern_gps_fallback, 0.60, 0.0)
   )
   df$buffer_radius_m <- compute_uncertainty_buffer_radius(
@@ -559,7 +562,7 @@ extract_uncertainty_buffered_predictors <- function(df, env_dir = "data/environm
         error = function(e) NULL
       )
       buf_v <- if (!is.null(pts_v)) {
-        tryCatch(terra::buffer(pts_v, width = pmax(100.0, pmin(1000.0, as.numeric(df$buffer_radius_m[v_idx])))), error = function(e) NULL)
+        tryCatch(terra::buffer(pts_v, width = pmax(100.0, pmin(1500.0, as.numeric(df$buffer_radius_m[v_idx])))), error = function(e) NULL)
       } else NULL
 
       if (!is.null(buf_v)) {
@@ -2421,7 +2424,9 @@ evaluate_multiclass_substrate_contingency <- function(
       CI_Lower = round(ft_bin$ci_lower, 3),
       CI_Upper = round(ft_bin$ci_upper, 3),
       P_Value = signif(ft_bin$p_value, 5),
-      P_Value_BH = best_q_bh,
+      P_Value_BH = signif(ft_bin$p_value, 5),
+      Outcrop_Fisher_P = signif(ft_bin$p_value, 5),
+      Top_Substrate_P_Value_BH = signif(ifelse(is.finite(best_q_bh), best_q_bh, 1.0), 5),
       Dominant_Lithology_Class = dom_lith,
       Dominant_Substrate_Class = dom_sub,
       Top_Enriched_Lithology = top_enr_lith,
@@ -2442,14 +2447,14 @@ evaluate_multiclass_substrate_contingency <- function(
   bin_p_bh <- stats::p.adjust(raw_bin_p, method = "BH")
   for (r_i in seq_len(nrow(sp_df))) {
     tx_i <- sp_df$Taxon[r_i]
-    q_cand <- c(sp_df$P_Value_BH[r_i], bin_p_bh[[tx_i]])
-    q_cand <- q_cand[is.finite(q_cand)]
-    sp_df$P_Value_BH[r_i] <- signif(if (length(q_cand) > 0L) min(q_cand) else 1.0, 5)
+    q_bin <- bin_p_bh[[tx_i]]
+    sp_df$P_Value_BH[r_i] <- signif(if (is.finite(q_bin)) q_bin else 1.0, 5)
   }
 
   # Omnibus contingency test across active groups
   omnibus_fisher <- NULL
   omnibus_p <- 1.0
+  p_bin_omni <- as.numeric(sp_df$Outcrop_Fisher_P[1])
   if (!single_group_mode) {
     # Test multi-group contingency across both binary outcrop/azonal and multi-class lithology/outcrop tables
     tab_bin <- table(factor(grp_vec, levels = active_groups), factor(ifelse(is_outcrop_azonal, "Outcrop_Azonal", "Matrix"), levels = c("Outcrop_Azonal", "Matrix")))
@@ -2491,6 +2496,7 @@ evaluate_multiclass_substrate_contingency <- function(
   omni_lo <- sp_df$CI_Lower[best_bin_idx]
   omni_hi <- max(sp_df$CI_Upper[best_bin_idx], omni_or, na.rm = TRUE)
   omni_q  <- min(c(sp_df$P_Value_BH, omnibus_p), na.rm = TRUE)
+  omni_top_sub_q <- if (any(is.finite(sp_df$Top_Substrate_P_Value_BH))) as.numeric(sp_df$Top_Substrate_P_Value_BH[top_sp_idx]) else 1.0
 
   summary_row <- data.frame(
     Taxon = "Omnibus_Substrate_Contingency_Across_Active_Groups",
@@ -2503,6 +2509,8 @@ evaluate_multiclass_substrate_contingency <- function(
     CI_Upper = round(omni_hi, 3),
     P_Value = signif(omnibus_p, 5),
     P_Value_BH = signif(omni_q, 5),
+    Outcrop_Fisher_P = signif(if (is.finite(p_bin_omni)) p_bin_omni else omnibus_p, 5),
+    Top_Substrate_P_Value_BH = signif(if (is.finite(omni_top_sub_q)) omni_top_sub_q else 1.0, 5),
     Dominant_Lithology_Class = sp_df$Dominant_Lithology_Class[top_sp_idx],
     Dominant_Substrate_Class = sp_df$Dominant_Substrate_Class[top_sp_idx],
     Top_Enriched_Lithology = sp_df$Top_Enriched_Lithology[top_sp_idx],

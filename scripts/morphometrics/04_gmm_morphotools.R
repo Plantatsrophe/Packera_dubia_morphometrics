@@ -72,7 +72,7 @@ test_and_correct_allometry <- function(morpho_df, correct_mode = "auto", permuta
   valid_idx <- which(cal_mask & !is.na(morpho_df$log_centsize) & is.finite(morpho_df$log_centsize) & complete.cases(morpho_df[, sym_names]))
   if (length(valid_idx) < 10) return(list(morpho_matrix = NULL, corrected = FALSE, anova_table = NULL, df = morpho_df))
   sub_df <- morpho_df[valid_idx, , drop = FALSE]; sub_df$scientificName <- factor(standardize_packera_taxon(as.character(if ("species_standardized" %in% names(sub_df)) sub_df$species_standardized else sub_df$scientificName)))
-  is_tier1_pure <- if ("morph_tier_source" %in% names(sub_df)) (is.na(sub_df$morph_tier_source) | sub_df$morph_tier_source != "Cauline_Only_Fallback") else rep(TRUE, nrow(sub_df))
+  is_tier1_pure <- if ("morph_tier_source" %in% names(sub_df)) (is.na(sub_df$morph_tier_source) | !(sub_df$morph_tier_source %in% c("Cauline_Only_Fallback", "Transitional_Passive"))) else rep(TRUE, nrow(sub_df))
   anc_allom <- select_adaptive_reference_anchors(sub_df, feature_matrix = as.matrix(sub_df[, sym_names[seq_len(min(4L, length(sym_names)))], drop = FALSE]), taxon_col = "scientificName")
   sub_df$is_promoted_bronze <- anc_allom$is_promoted_bronze; sub_df$authority_weight <- compute_authority_precision_weights(sub_df)
   gold_mask <- anc_allom$active_mask & !is.na(sub_df$scientificName) & is_tier1_pure
@@ -187,7 +187,7 @@ run_gmm_cluster_analysis <- function(df, feature_cols, max_k = 8, use_clustvarse
                 selected_features = feature_cols, bic_table = data.frame(K = seq_len(max_k), BIC = NA_real_, Two_Delta_BIC = NA_real_, Evidence = "Inconclusive")))
   }
   sub_v <- df[valid_rows, , drop = FALSE]
-  is_tier1_pure <- if ("morph_tier_source" %in% names(sub_v)) (is.na(sub_v$morph_tier_source) | sub_v$morph_tier_source != "Cauline_Only_Fallback") else rep(TRUE, N_valid)
+  is_tier1_pure <- if ("morph_tier_source" %in% names(sub_v)) (is.na(sub_v$morph_tier_source) | !(sub_v$morph_tier_source %in% c("Cauline_Only_Fallback", "Transitional_Passive"))) else rep(TRUE, N_valid)
   anc_gmm <- select_adaptive_reference_anchors(sub_v, feature_matrix = as.matrix(sub_v[, req_cols, drop = FALSE]), taxon_col = "species_standardized")
   ref_cand <- anc_gmm$active_mask & !anc_gmm$is_confident_label_noise & is_tier1_pure
   if (sum(ref_cand, na.rm = TRUE) < 6L) ref_cand <- if (sum(is_tier1_pure) >= 6L) is_tier1_pure else rep(TRUE, N_valid)
@@ -250,7 +250,7 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
   feature_cols <- intersect(as.character(feature_cols), names(df))
   df$authority_weight <- compute_authority_precision_weights(df)
   authority_weight <- df$authority_weight
-  is_tier1_pure <- if ("morph_tier_source" %in% names(df)) (is.na(df$morph_tier_source) | df$morph_tier_source != "Cauline_Only_Fallback") else rep(TRUE, nrow(df))
+  is_tier1_pure <- if ("morph_tier_source" %in% names(df)) (is.na(df$morph_tier_source) | !(df$morph_tier_source %in% c("Cauline_Only_Fallback", "Transitional_Passive"))) else rep(TRUE, nrow(df))
   is_intra <- isTRUE(intraspecific_mode) || (length(unique(stats::na.omit(df$species_standardized))) < 2)
   pc_req <- grep("^PC[0-9]+$", feature_cols, value = TRUE)
   has_pcs <- complete.cases(df[, if (length(pc_req) > 0) pc_req else feature_cols, drop = FALSE])
@@ -460,7 +460,7 @@ audit_misidentifications <- function(df, cda_res, gmm_res = NULL, selected_featu
   osr_df_audit <- ifelse(!is.na(df$open_set_df) & df$open_set_df >= 1L, as.integer(df$open_set_df), p_audit)
   is_type_audit <- as.logical(df$is_type_specimen); is_type_audit[is.na(is_type_audit)] <- FALSE
   is_osr_novel <- !is.na(df$open_set_novelty_p) & (df$open_set_novelty_p < 0.01)
-  is_cauline_fb_audit <- ("morph_tier_source" %in% names(df)) & !is.na(df$morph_tier_source) & (as.character(df$morph_tier_source) == "Cauline_Only_Fallback")
+  is_cauline_fb_audit <- ("morph_tier_source" %in% names(df)) & !is.na(df$morph_tier_source) & (as.character(df$morph_tier_source) %in% c("Cauline_Only_Fallback", "Transitional_Passive"))
   cauline_high_conf <- !is_cauline_fb_audit | (!is.na(cda_res$posterior_prob) & cda_res$posterior_prob >= 0.85)
   misid_flags <- !is_type_audit & cauline_high_conf & ((!is_intra_audit & flags & !is_osr_novel) | (is_intra_audit & is.finite(df$min_congener_mahal_d2) & is.finite(df$type_morph_mahal_d2) & (df$min_congener_mahal_d2 < stats::qchisq(0.95, df = osr_df_audit)) & (df$type_morph_mahal_d2 > stats::qchisq(0.99, df = p_audit))))
   outlier_flags <- !is_type_audit & (is_osr_novel | mahal_out | (!is.na(df$type_morph_mahal_d2) & (df$type_morph_mahal_d2 > stats::qchisq(0.995, df = p_audit)) & !misid_flags))
@@ -487,52 +487,7 @@ audit_misidentifications <- function(df, cda_res, gmm_res = NULL, selected_featu
   return(df)
 }
 
-# 5b. Institutional Batch-Effect Audit (Taxon-Adjusted Marginal ANCOVA, Partial R-Squared & BH FDR)
-audit_institutional_batch_effects <- function(morpho_df, output_csv = "outputs/reports/institutional_batch_effect_audit.csv", min_obs = 15, selected_features = NULL) {
-  if (!("institutionCode" %in% names(morpho_df))) return(NULL)
-  dyn_sel <- if (!is.null(selected_features) && length(selected_features) > 0L) intersect(as.character(selected_features), names(morpho_df)) else discover_sorted_morph_cols(morpho_df, "^PC[0-9]+$")
-  test_feats <- unique(c(intersect(c("PC1", "PC2"), names(morpho_df)), dyn_sel))
-  test_feats <- test_feats[vapply(test_feats, function(fc) is.numeric(morpho_df[[fc]]) && sum(is.finite(morpho_df[[fc]])) >= 10L, logical(1))]
-  valid_df <- morpho_df[!is.na(morpho_df$institutionCode) & trimws(morpho_df$institutionCode) != "", , drop = FALSE]
-  clean_b <- (!("authority_weight" %in% names(valid_df)) | (!is.na(valid_df$authority_weight) & valid_df$authority_weight > 0)) & (!("morph_tier_source" %in% names(valid_df)) | is.na(valid_df$morph_tier_source) | valid_df$morph_tier_source == "Basal_Rosette")
-  if (sum(clean_b, na.rm = TRUE) >= 10L && length(unique(valid_df$institutionCode[clean_b])) >= 2L) valid_df <- valid_df[clean_b, , drop = FALSE]
-  if (nrow(valid_df) < 10 || length(test_feats) == 0L) return(NULL)
-  inst_counts <- table(valid_df$institutionCode); rep_insts <- names(inst_counts[inst_counts >= min_obs])
-  audit_subset <- if (length(rep_insts) >= 2) valid_df[valid_df$institutionCode %in% rep_insts, , drop = FALSE] else valid_df
-  audit_subset$institutionCode <- droplevels(factor(audit_subset$institutionCode))
-  if (!("species_standardized" %in% names(audit_subset))) audit_subset$species_standardized <- if ("scientificName" %in% names(audit_subset)) audit_subset$scientificName else "Unassigned_Packera"
-  audit_subset$species_standardized <- droplevels(factor(audit_subset$species_standardized))
-  if (nlevels(audit_subset$institutionCode) < 2) return(NULL)
-  fits <- list(); rows_out <- list(); raw_ps <- numeric(0)
-  for (feat in test_feats) {
-    sub_f <- audit_subset[is.finite(audit_subset[[feat]]), , drop = FALSE]; sub_f$institutionCode <- droplevels(sub_f$institutionCode); sub_f$species_standardized <- droplevels(sub_f$species_standardized)
-    if (nrow(sub_f) < 6L || nlevels(sub_f$institutionCode) < 2L || stats::var(sub_f[[feat]], na.rm = TRUE) <= 1e-12) next
-    fml <- if (nlevels(sub_f$species_standardized) >= 2L) stats::as.formula(paste(feat, "~ species_standardized + institutionCode")) else stats::as.formula(paste(feat, "~ institutionCode"))
-    w_bf <- (if ("authority_weight" %in% names(sub_f)) suppressWarnings(as.numeric(sub_f$authority_weight)) else rep(1.0, nrow(sub_f))) * (if ("spatial_balance_weight" %in% names(sub_f)) suppressWarnings(as.numeric(sub_f$spatial_balance_weight)) else rep(1.0, nrow(sub_f))); w_bf[!is.finite(w_bf) | w_bf <= 0] <- 1.0
-    fit_f <- stats::lm(fml, data = sub_f, weights = w_bf); s_f <- summary(fit_f); aov_f <- stats::anova(fit_f)
-    ii <- which(rownames(aov_f) == "institutionCode")[1]; ri <- which(rownames(aov_f) == "Residuals")[1]; if (is.na(ii) || is.na(ri)) next
-    r2_f <- aov_f$`Sum Sq`[ii] / max(aov_f$`Sum Sq`[ii] + aov_f$`Sum Sq`[ri], 1e-12); pv_f <- as.numeric(aov_f$`Pr(>F)`[ii])
-    fits[[feat]] <- fit_f; raw_ps <- c(raw_ps, pv_f)
-    rows_out[[length(rows_out) + 1L]] <- data.frame(
-      Response = c(feat, feat), Term = c("institutionCode", "Residuals"), Df = c(aov_f$Df[ii], aov_f$Df[ri]),
-      Sum_Sq = round(c(aov_f$`Sum Sq`[ii], aov_f$`Sum Sq`[ri]), 4), Mean_Sq = round(c(aov_f$`Mean Sq`[ii], aov_f$`Mean Sq`[ri]), 4),
-      F_value = c(round(aov_f$`F value`[ii], 4), NA), p_value = c(signif(pv_f, 4), NA), P_value = c(signif(pv_f, 4), NA), p_value_bh = c(NA_real_, NA_real_),
-      R_squared = round(c(r2_f, NA), 4), Adj_R_squared = round(c(s_f$adj.r.squared, NA), 4),
-      Batch_Effect_Status = c(ifelse(r2_f < 0.05, "Pass (<0.05)", "Exceeds 0.05"), NA), stringsAsFactors = FALSE)
-  }
-  if (length(rows_out) == 0L) return(NULL)
-  anova_df <- do.call(rbind, rows_out); anova_df$p_value_bh[anova_df$Term == "institutionCode"] <- signif(stats::p.adjust(raw_ps, method = "BH"), 4)
-  if (!is.null(output_csv) && nzchar(output_csv)) { dir.create(dirname(output_csv), recursive = TRUE, showWarnings = FALSE); tmp_ba <- paste0(output_csv, ".", Sys.getpid(), ".tmp"); write.csv(anova_df, file = tmp_ba, row.names = FALSE); file.rename(tmp_ba, output_csv) }
-  return(invisible(list(lm_pc1 = fits[["PC1"]], lm_pc2 = fits[["PC2"]], models = fits, anova_table = anova_df)))
-}
-
-# 6. Publication-Quality 2D CDA & 2D GMM Biplot Vector Graphic (PDF)
-generate_cda_biplot_pdf <- function(audit_df, cda_res, gmm_res, output_pdf, feature_cols = NULL, manova_res = NULL) {
-  if (!exists("render_cda_biplot_4panel_pdf", mode = "function") && file.exists("scripts/morphometrics/pub_figures_utils.R")) source("scripts/morphometrics/pub_figures_utils.R")
-  if (exists("render_cda_biplot_4panel_pdf", mode = "function")) render_cda_biplot_4panel_pdf(audit_df, cda_res, gmm_res, output_pdf, feature_cols, manova_res = manova_res)
-}
-
-# 7. Main Workflow Orchestrator
+# 6. Main Workflow Orchestrator (batch audit and biplot hook sourced from authority_weighting_utils.R)
 .read_csv_s04 <- function(p) if (requireNamespace("data.table", quietly = TRUE) && isTRUE(file.info(p)$size > 1048576)) as.data.frame(data.table::fread(p, data.table = FALSE, showProgress = FALSE)) else read.csv(p, stringsAsFactors = FALSE)
 .write_csv_s04 <- function(d, p, na = "NA") if (requireNamespace("data.table", quietly = TRUE)) data.table::fwrite(d, file = p, na = na, quote = "auto", logical01 = FALSE) else write.csv(d, file = p, row.names = FALSE, na = na)
 run_gmm_morphotools_pipeline <- function(opts) {
@@ -653,7 +608,7 @@ run_gmm_morphotools_pipeline <- function(opts) {
     }
   }
   if (!isTRUE(opts$outline_only)) {
-    dis_cands <- filter_biologically_variable_dissection_scalars(closed_df, intersect(c("solidity_std", "q25_solidity_std", "dissection_index_std", "within_rosette_efa_dispersion_std", "blade_cie_l_norm_std", "blade_cie_l_sd_std", "ECT_PC1_std", "ECT_PC2_std", "ECT_PC3_std", "ect_lobe_complexity_std", paste0(caul_het_raw, "_std")), names(closed_df)), active_mask = (closed_df$authority_weight > 0))
+    dis_cands <- filter_biologically_variable_dissection_scalars(closed_df, intersect(c("solidity_std", "q25_solidity_std", "dissection_index_std", "within_rosette_efa_dispersion_std", "blade_cie_l_norm_std", "ECT_PC1_std", "ECT_PC2_std", "ECT_PC3_std", "ect_lobe_complexity_std", paste0(caul_het_raw, "_std")), names(closed_df)), active_mask = (closed_df$authority_weight > 0))
     kept_dis <- prune_collinear_dissection_scalars(closed_df, base_cols = feature_cols, cand_scalars = dis_cands, active_mask = (closed_df$authority_weight > 0), group_vec = NULL, max_r = 0.75)
     if (length(kept_dis) > 0L) feature_cols <- unique(c(feature_cols, kept_dis))
   }
@@ -662,7 +617,7 @@ run_gmm_morphotools_pipeline <- function(opts) {
   is_intra_mode <- isTRUE(opts$intraspecific_mode) || (length(target_taxa) < 2L)
   if (exists("merge_voucher_phenophase_covariates", mode = "function")) closed_df <- merge_voucher_phenophase_covariates(closed_df, opts$harmonics, opts$vouchers)
   std_plast_cols <- setdiff(grep("_std$", names(closed_df), value = TRUE), c("log_centsize_std", "petiole_length_mm_std", "plant_height_cm_std"))
-  if (exists("residualize_ontogenetic_phenophase_plasticity", mode = "function")) closed_df <- residualize_ontogenetic_phenophase_plasticity(closed_df, target_cols = unique(c(if (is_intra_mode) pca_cols else character(0), std_plast_cols)), ref_mask = (closed_df$authority_weight > 0) & (is.na(closed_df$morph_tier_source) | closed_df$morph_tier_source != "Cauline_Only_Fallback"), intraspecific_mode = is_intra_mode)
+  if (exists("residualize_ontogenetic_phenophase_plasticity", mode = "function")) closed_df <- residualize_ontogenetic_phenophase_plasticity(closed_df, target_cols = unique(c(if (is_intra_mode) pca_cols else character(0), std_plast_cols)), ref_mask = (closed_df$authority_weight > 0) & (is.na(closed_df$morph_tier_source) | !(closed_df$morph_tier_source %in% c("Cauline_Only_Fallback", "Transitional_Passive"))), intraspecific_mode = is_intra_mode)
   gmm_res <- run_gmm_cluster_analysis(closed_df, feature_cols, max_k = opts$max_k, use_clustvarsel = isTRUE(opts$use_clustvarsel), intraspecific_mode = is_intra_mode, seed = opts$seed)
   dir.create(dirname(opts$output_report), recursive = TRUE, showWarnings = FALSE); tmp_bic <- paste0(opts$output_report, ".", Sys.getpid(), ".tmp"); write.csv(gmm_res$bic_table, file = tmp_bic, row.names = FALSE); file.rename(tmp_bic, opts$output_report)
   veg_cda <- if (!isTRUE(opts$outline_only)) prune_collinear_dissection_scalars(closed_df, base_cols = feature_cols, cand_scalars = intersect(c("aspect_ratio_std"), names(closed_df)), active_mask = (closed_df$authority_weight > 0), group_vec = NULL, max_r = 0.75) else character(0)

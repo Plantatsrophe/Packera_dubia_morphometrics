@@ -86,7 +86,22 @@ render_step03_figures_suite <- function(
   cum_pow <- 100.0 * cumsum(pow_vec) / max(sum(pow_vec), 1e-12)
   hp_df <- data.frame(harmonic = seq_len(max_h), cum_power = cum_pow)
 
-  asym_med <- if ("pct_asymmetry" %in% names(spec_df)) stats::median(suppressWarnings(as.numeric(spec_df$pct_asymmetry)), na.rm = TRUE) else NA_real_
+  asym_med <- NA_real_
+  for (acol in c("bilateral_asymmetry", "asym_power_pct", "pct_asymmetry")) {
+    for (src_df in list(efa_df, spec_df)) {
+      if (!is.null(src_df) && is.data.frame(src_df) && (acol %in% names(src_df))) {
+        av <- suppressWarnings(as.numeric(src_df[[acol]]))
+        av <- av[is.finite(av)]
+        if (length(av) > 0L) {
+          m_av <- stats::median(av, na.rm = TRUE)
+          if (m_av <= 1.0 && max(av, na.rm = TRUE) <= 1.0 && !grepl("power_pct", acol)) m_av <- 100.0 * m_av
+          asym_med <- m_av
+          break
+        }
+      }
+    }
+    if (is.finite(asym_med)) break
+  }
   asym_sub <- if (is.finite(asym_med)) sprintf("Calibrated H_opt = %d (>=99%% power) | Median bilateral asymmetry = %.1f%%", h_opt_val, asym_med) else sprintf("Calibrated H_opt = %d (>=99%% Fourier power)", h_opt_val)
 
   p03a_power <- ggplot2::ggplot(hp_df, ggplot2::aes(x = .data$harmonic, y = .data$cum_power)) +
@@ -94,7 +109,8 @@ render_step03_figures_suite <- function(
     ggplot2::geom_vline(xintercept = h_opt_val, linetype = "dotted", color = "#D55E00", linewidth = 0.7) +
     ggplot2::geom_line(color = "#0072B2", linewidth = 0.9) +
     ggplot2::geom_point(shape = 1, size = 2.4, stroke = 0.9, color = "#0072B2") +
-    ggplot2::annotate("label", x = h_opt_val, y = 84, label = sprintf("H_opt = %d", h_opt_val), size = 2.9, color = "#D55E00", fill = "white") +
+    ggplot2::annotate("label", x = h_opt_val, y = 84, label = sprintf("H_opt = %d", h_opt_val), hjust = if (h_opt_val >= max_h - 1L) 1.05 else 0.5, size = 2.9, color = "#D55E00", fill = "white") +
+    ggplot2::scale_x_continuous(limits = c(1, max_h + 1.3), breaks = pretty(c(1, max_h))) +
     ggplot2::scale_y_continuous(limits = c(min(50, min(cum_pow)), 101)) +
     theme_packera_pub() +
     ggplot2::labs(title = "A. Fourier Harmonic Power Calibration", subtitle = asym_sub, x = "Harmonic Order (n)", y = "Cumulative Shape Power (%)")
@@ -207,20 +223,18 @@ render_step03_figures_suite <- function(
     pct_var = var_pcts[seq_len(k_show)],
     cum_var = cumsum(var_pcts[seq_len(k_show)])
   )
-  scree_scale_max <- max(scree_df$pct_var, na.rm = TRUE)
-  if (!is.finite(scree_scale_max) || scree_scale_max <= 0) scree_scale_max <- 1.0
-  scree_df$scaled_cum <- scree_df$cum_var * scree_scale_max / 100.0
+  scree_df$bar_vjust <- ifelse(scree_df$pct_var >= 22, 1.45, -0.35)
   p03a_scree <- ggplot2::ggplot(scree_df, ggplot2::aes(x = .data$pc_lbl, y = .data$pct_var)) +
     ggplot2::geom_col(fill = "#E5E7EB", color = "#374151", width = 0.65, linewidth = 0.5) +
-    ggplot2::geom_line(ggplot2::aes(x = .data$pc_idx, y = .data$scaled_cum), color = "#009E73", linewidth = 0.85) +
-    ggplot2::geom_point(ggplot2::aes(x = .data$pc_idx, y = .data$scaled_cum), shape = 2, size = 2.2, stroke = 0.85, color = "#009E73") +
-    ggplot2::geom_text(ggplot2::aes(label = sprintf("%.1f%%", .data$pct_var)), vjust = -0.35, size = 2.6, color = "#1F2937") +
-    ggplot2::scale_y_continuous(expand = ggplot2::expansion(mult = c(0, 0.16))) +
+    ggplot2::geom_line(ggplot2::aes(x = .data$pc_idx, y = .data$cum_var), color = "#009E73", linewidth = 0.85) +
+    ggplot2::geom_point(ggplot2::aes(x = .data$pc_idx, y = .data$cum_var), shape = 2, size = 2.2, stroke = 0.85, color = "#009E73") +
+    ggplot2::geom_text(ggplot2::aes(label = sprintf("%.1f%%", .data$pct_var), vjust = .data$bar_vjust), size = 2.6, color = "#1F2937") +
+    ggplot2::scale_y_continuous(limits = c(0, 108), expand = ggplot2::expansion(mult = c(0, 0.03))) +
     theme_packera_pub() +
     ggplot2::theme(axis.text.x = ggplot2::element_text(angle = if (k_show > 8L) 35 else 0, hjust = if (k_show > 8L) 1 else 0.5)) +
     ggplot2::labs(
       title = sprintf("C. Dynamic Subspace Variance Spectrum (PC1..PC%d)", k_show),
-      subtitle = sprintf("Cumulative variance across %d exported PCs = %.1f%%", k_show, max(scree_df$cum_var, na.rm = TRUE)),
+      subtitle = sprintf("Green curve = cumulative variance (PC1 = %.1f%% to PC%d = %.1f%%)", scree_df$pct_var[1L], k_show, max(scree_df$cum_var, na.rm = TRUE)),
       x = "Principal Component Axis",
       y = "Variance Explained (%)"
     )
@@ -297,7 +311,7 @@ render_step03_figures_suite <- function(
       ggplot2::scale_color_manual(values = pal_map) +
       ggplot2::scale_shape_manual(values = shp_map) +
       theme_packera_pub() +
-      ggplot2::labs(title = "B. Topological ECT_PC1 vs. Foliar Dissection Index", x = "Lamina Dissection Index (1 - Solidity)", y = "Basal ECT_PC1")
+      ggplot2::labs(title = "B. Topological ECT_PC1 vs. Foliar Dissection Index", x = "Perimeter Dissection Ratio (P / [2 * sqrt(pi * Area)])", y = "Basal ECT_PC1")
   }
 
   # Panel C: ECT Lobe Complexity (or Dissection Index) Boxplots + Hollow Jitter
@@ -345,7 +359,7 @@ render_step03_figures_suite <- function(
       theme_packera_pub() +
       ggplot2::labs(
         title = if (has_cauline) "D. Basal-to-Cauline Heteroblastic Divergence" else "D. Within-Rosette Foliar Shape Dispersion",
-        x = gsub("_", " ", het_col),
+        x = if (het_col == "heteroblasty_ect_distance") "Within-Voucher Basal-to-Cauline ECT Divergence" else if (exists("format_morph_trait_labels", mode = "function")) format_morph_trait_labels(het_col) else gsub("_", " ", het_col),
         y = NULL
       )
   } else {
