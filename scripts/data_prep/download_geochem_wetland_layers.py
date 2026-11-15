@@ -2,7 +2,7 @@
 """USGS DS-801 soil geochemistry, USFWS NWI wetland/seep, and USACE NWPL provisioner."""
 from __future__ import annotations
 
-import argparse, csv, io, json, math, os, re, sqlite3, sys, threading, zipfile
+import argparse, csv, http.client, io, json, math, os, re, sqlite3, sys, threading, zipfile
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
@@ -10,9 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
+if str(PROJECT_ROOT) not in sys.path: sys.path.insert(0, str(PROJECT_ROOT))
 from scripts.core.io_utils import atomic_write_csv_rows, default_http_get, to_text
 
 _UA = "Plantmatics/1.0 (https://github.com/plantmatics; mailto:plantmatics@users.noreply.github.com)"
@@ -22,12 +20,11 @@ _NWI_QUERY_URL = "https://fwspublicservices.wim.usgs.gov/wetlandsmapservice/rest
 _NWPL_STATIC_BASE = "https://wetland-plants.sec.usace.army.mil/nwpl_static/v34"
 _EASTERN_NWPL_REGIONS = {"EMP", "NCNE", "AGCP", "MW"}
 _NWPL_SCORES = {"OBL": 1.00, "FACW": 0.75, "FAC": 0.50, "FACU": 0.25, "UPL": 0.00}
+_NWI_TLS = threading.local()
+_USDA_REGIONS = {"eastern mountains and piedmont": "EMP", "northcentral and northeast": "NCNE", "atlantic and gulf coastal plain": "AGCP", "midwest": "MW"}
 _DS801_COLS = ("site_id", "latitude", "longitude", "horizon", "ca_pct", "mg_pct", "ni_ppm", "cr_ppm", "c_inorg_pct", "c_tot_pct")
 _NWPL_COLS = ("species_standardized", "nwpl_indicator_code", "nwpl_wetland_score", "nwpl_region")
-_ENV_GEOCHEM_DDL = (
-    ("soil_ca_mg_molar_ratio", "REAL"), ("soil_ultramafic_ni_cr_index", "REAL"), ("soil_carbonate_c_pct", "REAL"),
-    ("is_nwi_wetland", "INTEGER"), ("nwi_wetland_system", "TEXT"), ("nwi_wetland_dist_m", "REAL"),
-)
+_ENV_GEOCHEM_DDL = (("soil_ca_mg_molar_ratio", "REAL"), ("soil_ultramafic_ni_cr_index", "REAL"), ("soil_carbonate_c_pct", "REAL"), ("is_nwi_wetland", "INTEGER"), ("nwi_wetland_system", "TEXT"), ("nwi_wetland_dist_m", "REAL"))
 
 
 def _resolve_target_genus() -> str:
@@ -123,10 +120,13 @@ def compute_idw_soil_geochem(
 
 def _parse_ds801_table(text: str, default_horizon: str = "A") -> List[Dict[str, Any]]:
     lines = text.splitlines()
+    hdr_idx = next((i for i, ln in enumerate(lines[:25]) if "latitude" in ln.lower() and "longitude" in ln.lower() and ("\t" in ln or "," in ln)), 0)
+    lines = lines[hdr_idx:]
     delim = "\t" if (lines and "\t" in lines[0]) else ","
     out: List[Dict[str, Any]] = []
     for row in csv.DictReader(lines, delimiter=delim):
-        low = {str(k).strip().lower(): v for k, v in row.items() if k is not None}
+        raw_low = {str(k).strip().lower(): v for k, v in row.items() if k is not None}
+        low = {**{re.sub(r"^(?:top5|a|c)_", "", k): v for k, v in raw_low.items()}, **raw_low}
         sid = next((str(low[k]).strip() for k in ("site_id", "siteid", "lab_id", "labid", "field_id", "id") if low.get(k)), "")
         try:
             lat = float(next((low[k] for k in ("latitude", "lat_nad83", "lat") if low.get(k) not in (None, "")), ""))
@@ -162,8 +162,7 @@ def ensure_usgs_ds801_soils(
     links: List[Tuple[str, str]] = []
     try:
         sb = json.loads(to_text(getter(_DS801_SB_URL, timeout=25)))
-        links.extend((str(f.get("name", "")), str(f["url"])) for f in (sb.get("files") or [])
-                     if isinstance(f, dict) and f.get("url") and str(f.get("name", "")).lower().endswith((".csv", ".txt", ".zip")))
+        links.extend((str(f.get("name", "")), str(f["url"])) for f in (sb.get("files") or []) if isinstance(f, dict) and f.get("url") and str(f.get("name", "")).lower().endswith((".csv", ".txt", ".zip")))
     except Exception:
         pass
     try:
@@ -171,14 +170,13 @@ def ensure_usgs_ds801_soils(
         links.extend((Path(h).name, urllib.parse.urljoin(_DS801_INDEX_URL, h)) for h in re.findall(r'href=["\']([^"\']+\.(?:csv|txt|zip))["\']', html, re.I))
     except Exception:
         pass
-    links.sort(key=lambda item: (0 if any(k in item[0].lower() for k in ("top5", "a_horizon")) else (2 if "c_horizon" in item[0].lower() else 1), item[0]))
+    links.sort(key=lambda item: (0 if any(k in item[0].lower() for k in ("ahorizon", "a_horizon")) else (1 if "top5" in item[0].lower() else (3 if any(k in item[0].lower() for k in ("chorizon", "c_horizon")) else 2)), item[0]))
     by_site: Dict[str, Dict[str, Any]] = {}
     for name, url in links[:6]:
         try:
             raw = getter(url, timeout=60)
             payload = raw.encode("utf-8") if isinstance(raw, str) else raw
-        except Exception:
-            continue
+        except Exception: continue
         texts: List[Tuple[str, str]] = []
         if payload[:2] == b"PK":
             with zipfile.ZipFile(io.BytesIO(payload)) as zf:
@@ -190,18 +188,12 @@ def ensure_usgs_ds801_soils(
         for hor, txt in texts:
             for rec in _parse_ds801_table(txt, default_horizon=hor):
                 prev = by_site.get(rec["site_id"])
-                if prev is None or _horizon_rank(rec["horizon"]) < _horizon_rank(prev["horizon"]):
-                    by_site[rec["site_id"]] = rec
-        if by_site:
-            break
+                if prev is None or _horizon_rank(rec["horizon"]) < _horizon_rank(prev["horizon"]): by_site[rec["site_id"]] = rec
+        if by_site: break
     if not by_site:
         print("[WARN] USGS DS-801 geochemistry unavailable offline; skipping DS-801 staging.", file=sys.stderr)
         return []
-    atomic_write_csv_rows(
-        csv_path,
-        _DS801_COLS,
-        ({k: ("" if rec.get(k) is None else rec[k]) for k in _DS801_COLS} for rec in by_site.values()),
-    )
+    atomic_write_csv_rows(csv_path, _DS801_COLS, ({k: ("" if rec.get(k) is None else rec[k]) for k in _DS801_COLS} for rec in by_site.values()))
     return list(by_site.values())
 
 
@@ -230,6 +222,24 @@ def _point_to_rings_dist_m(lat: float, lon: float, rings: Sequence[Sequence[Sequ
     return min_d
 
 
+def _nwi_get_json(q_str: str) -> Dict[str, Any]:
+    parts = urllib.parse.urlsplit(_NWI_QUERY_URL)
+    for attempt in range(2):
+        qs = q_str if attempt == 0 else q_str.replace("returnGeometry=true", "returnGeometry=false")
+        conn = getattr(_NWI_TLS, "conn", None)
+        if conn is None:
+            conn = _NWI_TLS.conn = http.client.HTTPSConnection(parts.netloc, timeout=8.0)
+        try:
+            conn.request("GET", f"{parts.path}?{qs}", headers={"User-Agent": _UA, "Connection": "keep-alive"})
+            resp = conn.getresponse(); body = resp.read()
+            if resp.status >= 400: raise OSError(f"HTTP {resp.status}")
+            return json.loads(to_text(body))
+        except Exception:
+            conn.close(); _NWI_TLS.conn = None
+            if attempt == 1: raise
+    return {}
+
+
 def query_nwi_point_or_cache(
     lat: float, lon: float, cache_map: Dict[str, Dict[str, Any]], cache_path: Path,
     cache_lock: Optional[threading.Lock] = None, skip_network: bool = False,
@@ -241,15 +251,14 @@ def query_nwi_point_or_cache(
         return cache_map[key]
     if not (24.0 <= lat <= 50.0 and -125.0 <= lon <= -66.0) or skip_network:
         return {"lat_lon_key": key, "is_nwi_wetland": None, "nwi_wetland_system": None, "nwi_wetland_dist_m": None}
-    getter = http_get_fn or _default_http_get
     dlat, dlon = 250.0 / 111320.0, 250.0 / (111320.0 * max(math.cos(math.radians(lat)), 0.1))
     params = urllib.parse.urlencode({
-        "geometry": f"{lon - dlon:.6f},{lat - dlat:.6f},{lon + dlon:.6f},{lat + dlat:.6f}",
+        "geometry": f"{lon - dlon:.6f},{lat - dlat:.6f},{lon + dlon:.6f},{lat + dlat:.6f}", "where": "Shape_Area < 50000000",
         "geometryType": "esriGeometryEnvelope", "inSR": "4326", "outSR": "4326",
         "spatialRel": "esriSpatialRelIntersects", "outFields": "ATTRIBUTE,WETLAND_TYPE", "returnGeometry": "true", "f": "json",
     })
     try:
-        payload = json.loads(to_text(getter(f"{_NWI_QUERY_URL}?{params}", timeout=20)))
+        payload = json.loads(to_text(http_get_fn(f"{_NWI_QUERY_URL}?{params}", timeout=20))) if http_get_fn is not None else _nwi_get_json(params)
     except Exception as exc:
         print(f"[WARN] NWI REST query failed at {key}: {exc}", file=sys.stderr)
         return {"lat_lon_key": key, "is_nwi_wetland": None, "nwi_wetland_system": None, "nwi_wetland_dist_m": None}
@@ -272,6 +281,30 @@ def query_nwi_point_or_cache(
         with open(cache_path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(res) + "\n")
     return res
+
+
+def _fetch_usda_nwpl_species(genus: str, by_sp: Dict[str, List[Tuple[str, float]]]) -> None:
+    try:
+        from scripts.core.usda_plants_ranges import load_or_fetch_plantlst_index
+        sp_map = (load_or_fetch_plantlst_index(allow_network=True) or {}).get("species_map") or {}
+    except Exception:
+        return
+    syms = [(sp, syms[0]) for sp, syms in sorted(sp_map.items()) if sp.startswith(f"{genus.lower()} ") and syms]
+    def _one(item: Tuple[str, str]) -> List[Tuple[str, str, str]]:
+        sp_low, sym = item
+        sp_std = f"{sp_low.split()[0].capitalize()} {sp_low.split()[1].lower()}"
+        try:
+            prof = json.loads(to_text(_default_http_get(f"https://plantsservices.sc.egov.usda.gov/api/PlantProfile?symbol={urllib.parse.quote(sym)}", timeout=15)))
+            if not (isinstance(prof, dict) and prof.get("HasWetlandData") and prof.get("Id")): return []
+            wlist = json.loads(to_text(_default_http_get(f"https://plantsservices.sc.egov.usda.gov/api/PlantWetland/{prof['Id']}", timeout=15)))
+            desigs = (wlist[0] if isinstance(wlist, list) and wlist else (wlist if isinstance(wlist, dict) else {})).get("WetlandDesignations") or []
+            return [(sp_std, _USDA_REGIONS.get(str(d.get("Region") or "").replace("&", "and").strip().lower(), str(d.get("Region") or "EAST").strip().upper()), str(d.get("WetlandCode") or "").strip().upper().rstrip("+-*")) for d in desigs]
+        except Exception:
+            return []
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        for res in pool.map(_one, syms):
+            for sp_std, reg, code in res:
+                if code in _NWPL_SCORES: by_sp.setdefault(sp_std, []).append((reg, _NWPL_SCORES[code]))
 
 
 def fetch_nwpl_wetland_ratings(
@@ -297,27 +330,21 @@ def fetch_nwpl_wetland_ratings(
             except Exception:
                 continue
             for item in (obj if isinstance(obj, list) else (obj.get("data") or obj.get("species") or obj.get("records") or [])):
-                if not isinstance(item, dict):
-                    continue
+                if not isinstance(item, dict): continue
                 toks = str(item.get("scientificName") or item.get("ScientificName") or item.get("species") or "").replace("_", " ").split()
-                if len(toks) < 2 or toks[0].lower() != genus.lower():
-                    continue
+                if len(toks) < 2 or toks[0].lower() != genus.lower(): continue
                 reg = str(item.get("region") or item.get("regionCode") or item.get("nwplRegion") or "EAST").strip().upper()
                 code = str(item.get("indicatorStatus") or item.get("wetlandIndicator") or item.get("rating") or "").strip().upper().rstrip("+-")
                 if code in _NWPL_SCORES:
                     by_sp.setdefault(f"{toks[0].capitalize()} {toks[1].lower()}", []).append((reg or "EAST", _NWPL_SCORES[code]))
-            if by_sp:
-                break
+            if by_sp: break
+        if not by_sp and http_get_fn is None:
+            _fetch_usda_nwpl_species(genus, by_sp)
         for sp, entries in sorted(by_sp.items()):
             east = [sc for r, sc in entries if r in _EASTERN_NWPL_REGIONS]
             vals = east or [sc for _, sc in entries]
             mean_sc = round(sum(vals) / len(vals), 4)
-            ratings[sp] = {
-                "species_standardized": sp,
-                "nwpl_indicator_code": min(_NWPL_SCORES.items(), key=lambda kv: abs(kv[1] - mean_sc))[0],
-                "nwpl_wetland_score": mean_sc,
-                "nwpl_region": ";".join(sorted({r for r, _ in entries if not east or r in _EASTERN_NWPL_REGIONS})) or "EAST",
-            }
+            ratings[sp] = {"species_standardized": sp, "nwpl_indicator_code": min(_NWPL_SCORES.items(), key=lambda kv: abs(kv[1] - mean_sc))[0], "nwpl_wetland_score": mean_sc, "nwpl_region": ";".join(sorted({r for r, _ in entries if not east or r in _EASTERN_NWPL_REGIONS})) or "EAST"}
         if ratings:
             atomic_write_csv_rows(out_csv, _NWPL_COLS, ratings.values())
         else:
@@ -325,10 +352,7 @@ def fetch_nwpl_wetland_ratings(
     if conn is not None and ratings and conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='taxon_backbone_profiles'").fetchone():
         cols = {r[1] for r in conn.execute("PRAGMA table_info(taxon_backbone_profiles)").fetchall()}
         if {"species_standardized", "nwpl_indicator_code", "nwpl_wetland_score"}.issubset(cols):
-            conn.executemany(
-                "UPDATE taxon_backbone_profiles SET nwpl_indicator_code = ?, nwpl_wetland_score = ? WHERE species_standardized = ?",
-                [(r["nwpl_indicator_code"], r["nwpl_wetland_score"], r["species_standardized"]) for r in ratings.values()],
-            )
+            conn.executemany("UPDATE taxon_backbone_profiles SET nwpl_indicator_code = ?, nwpl_wetland_score = ? WHERE species_standardized = ?", [(r["nwpl_indicator_code"], r["nwpl_wetland_score"], r["species_standardized"]) for r in ratings.values()])
             conn.commit()
     return ratings
 
@@ -338,22 +362,18 @@ def _collect_points(vouchers_csv: Optional[Path], conn: Optional[sqlite3.Connect
     def _add(lat_v: Any, lon_v: Any) -> None:
         try:
             lat, lon = float(lat_v), float(lon_v)
-            if math.isfinite(lat) and math.isfinite(lon):
-                pts[_lat_lon_key(lat, lon)] = (lat, lon)
-        except (TypeError, ValueError):
-            pass
+            if math.isfinite(lat) and math.isfinite(lon): pts[_lat_lon_key(lat, lon)] = (lat, lon)
+        except (TypeError, ValueError): pass
     if vouchers_csv is not None and Path(vouchers_csv).is_file():
         with open(vouchers_csv, encoding="utf-8", errors="replace") as fh:
-            for r in csv.DictReader(fh):
-                _add(r.get("decimalLatitude") or r.get("latitude"), r.get("decimalLongitude") or r.get("longitude"))
+            for r in csv.DictReader(fh): _add(r.get("decimalLatitude") or r.get("latitude"), r.get("decimalLongitude") or r.get("longitude"))
     if conn is not None:
         for tbl in ("vouchers", "environmental_cache"):
             if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (tbl,)).fetchone():
                 cols = {r[1] for r in conn.execute(f"PRAGMA table_info({tbl})").fetchall()}
                 lc, rc = ("decimalLatitude" if "decimalLatitude" in cols else "latitude"), ("decimalLongitude" if "decimalLongitude" in cols else "longitude")
                 if lc in cols and rc in cols:
-                    for row in conn.execute(f"SELECT {lc}, {rc} FROM {tbl} WHERE {lc} IS NOT NULL AND {rc} IS NOT NULL"):
-                        _add(row[0], row[1])
+                    for row in conn.execute(f"SELECT {lc}, {rc} FROM {tbl} WHERE {lc} IS NOT NULL AND {rc} IS NOT NULL"): _add(row[0], row[1])
     return pts
 
 
@@ -371,19 +391,17 @@ def download_geochem_wetland_layers(
         ds801_sites = ensure_usgs_ds801_soils(env_dir, force=force, http_get_fn=http_get_fn)
         nwpl = fetch_nwpl_wetland_ratings(env_dir, target_genus, conn=conn, force=force, http_get_fn=http_get_fn)
         cache_path, cache_map = env_dir / "nwi_point_cache.jsonl", {}
-        for k in (k for k in (cache_path,) if cache_path.is_file() and not force):
-            for ln in k.read_text(encoding="utf-8", errors="replace").splitlines():
+        if cache_path.is_file() and not force:
+            for ln in cache_path.read_text(encoding="utf-8", errors="replace").splitlines():
                 if ln.strip().startswith("{"):
                     try:
                         obj = json.loads(ln)
-                        if obj.get("lat_lon_key"):
-                            cache_map[str(obj["lat_lon_key"])] = obj
-                    except Exception:
-                        pass
+                        if obj.get("lat_lon_key"): cache_map[str(obj["lat_lon_key"])] = obj
+                    except Exception: pass
         pts, nwi_results = _collect_points(vouchers_csv, conn), {}
         if pts:
             lock = threading.Lock()
-            with ThreadPoolExecutor(max_workers=6) as pool:
+            with ThreadPoolExecutor(max_workers=20) as pool:
                 nwi_results = {k: fut.result() for k, fut in {k: pool.submit(query_nwi_point_or_cache, lat, lon, cache_map, cache_path, lock, skip_nwi_network, http_get_fn) for k, (lat, lon) in pts.items()}.items()}
         n_upserted = 0
         if conn is not None and pts and conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='environmental_cache'").fetchone():
@@ -412,12 +430,7 @@ def download_geochem_wetland_layers(
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     p = argparse.ArgumentParser(description="Provision USGS DS-801 geochemistry, USFWS NWI, and USACE NWPL layers.")
-    p.add_argument("--env-dir", type=Path, default=PROJECT_ROOT / "data" / "environmental")
-    p.add_argument("--vouchers", type=Path, default=None)
-    p.add_argument("--db", type=Path, default=_default_db_path())
-    p.add_argument("--genus", default=_resolve_target_genus())
-    p.add_argument("--skip-nwi-network", action="store_true", default=False)
-    p.add_argument("--force", action="store_true", default=False)
+    for flg, kw in (("--env-dir", {"type": Path, "default": PROJECT_ROOT / "data" / "environmental"}), ("--vouchers", {"type": Path, "default": None}), ("--db", {"type": Path, "default": _default_db_path()}), ("--genus", {"default": _resolve_target_genus()}), ("--skip-nwi-network", {"action": "store_true", "default": False}), ("--force", {"action": "store_true", "default": False})): p.add_argument(flg, **kw)
     a = p.parse_args(list(argv) if argv is not None else None)
     print(f"[INFO] Geochem/wetland summary: {json.dumps(download_geochem_wetland_layers(a.env_dir, a.vouchers, a.db, a.genus, bool(a.skip_nwi_network), bool(a.force)))}")
     return 0
