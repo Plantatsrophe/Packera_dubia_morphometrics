@@ -5,8 +5,8 @@ Phylogenomic Evidence Stream) and Step 07 (Integrative Synthesis & Triage).
 
 Covers:
   1. `.gitignore` tracking of `!data/genomics/.gitkeep` and flat payload ignores.
-  2. SQLite WAL schema migrations (`20261121 -> 20261126`, `20261122 -> 20261126`,
-     `20261123 -> 20261126`, `20261124 -> 20261126`, and `PLANTMATICS_SCHEMA_USER_VERSION - 1 -> 20261126`),
+  2. SQLite WAL schema migrations (`20261121 -> 20261127`, `20261122 -> 20261127`,
+     `20261123 -> 20261127`, `20261124 -> 20261127`, `20261126 -> 20261127`, and `PLANTMATICS_SCHEMA_USER_VERSION - 1 -> 20261127`),
      all Phase 2 and public-reference columns in `genomic_samples`, `genetic_lineage_assignments`,
      `curation_triage`, and `v_integrative_triage_master` cardinality (`plant_individuals` preserved),
      plus `purge --runs-only` Tier A preservation vs Tier B cleanup.
@@ -153,8 +153,8 @@ class TestGenomicIntegration(unittest.TestCase):
                 self.assertEqual(res_ign.returncode, 0, f"Genomic payload not ignored by git: {probe}")
 
     def test_schema_migration_master_cardinality_and_purge_runs_only(self) -> None:
-        self.assertEqual(PLANTMATICS_SCHEMA_USER_VERSION, 20261126)
-        self.assertEqual(PACKERA_SCHEMA_USER_VERSION, 20261126)
+        self.assertEqual(PLANTMATICS_SCHEMA_USER_VERSION, 20261127)
+        self.assertEqual(PACKERA_SCHEMA_USER_VERSION, 20261127)
 
         expected_gs_phase2 = {
             "hdplot_retained_loci",
@@ -300,7 +300,7 @@ class TestGenomicIntegration(unittest.TestCase):
 
                 migrate_database_schema(conn)
                 uv_after = conn.execute("PRAGMA user_version;").fetchone()[0]
-                self.assertEqual(uv_after, 20261126)
+                self.assertEqual(uv_after, 20261127)
                 init_db_schema(conn)
 
                 gs_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(genomic_samples);").fetchall()}

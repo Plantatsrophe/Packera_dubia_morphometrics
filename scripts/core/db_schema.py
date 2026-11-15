@@ -118,6 +118,12 @@ ENVIRONMENTAL_CACHE_COLUMNS: Tuple[str, ...] = (
     "soil_silt_soilgrids",
     "soil_cfvo_soilgrids",
     "soil_bulk_density_soilgrids",
+    "soil_ca_mg_molar_ratio",
+    "soil_ultramafic_ni_cr_index",
+    "soil_carbonate_c_pct",
+    "is_nwi_wetland",
+    "nwi_wetland_system",
+    "nwi_wetland_dist_m",
 )
 
 ENVIRONMENTAL_TEXT_COLS: Set[str] = {
@@ -129,6 +135,7 @@ ENVIRONMENTAL_TEXT_COLS: Set[str] = {
     "taxgreatgroup",
     "outcrop_class",
     "sgmc_lithology_class",
+    "nwi_wetland_system",
 }
 ENVIRONMENTAL_BOOL_COLS: Set[str] = {
     "is_rock_outcrop",
@@ -138,6 +145,7 @@ ENVIRONMENTAL_BOOL_COLS: Set[str] = {
     "is_clim_eligible_coord",
     "is_edaphic_eligible_coord",
     "azonal_lithology_presence_buffer",
+    "is_nwi_wetland",
 }
 
 
@@ -413,6 +421,15 @@ def _build_master_view_ddl() -> str:
         ct.taxon_reported_cytotypes AS taxon_reported_cytotypes,
         ct.is_multi_cytotype_taxon AS is_multi_cytotype_taxon,
         ct.cytotype_reproductive_barrier_pass AS cytotype_reproductive_barrier_pass,
+        ct.hydro_edaphic_niche_regime AS hydro_edaphic_niche_regime,
+        ct.wetland_fidelity_concordance AS wetland_fidelity_concordance,
+        ct.basionym_synonymy_type AS basionym_synonymy_type,
+        -- Tier A Taxonomic Backbone & NWPL Wetland Indicator
+        tbp.basionym_name AS backbone_basionym_name,
+        tbp.protologue_url AS protologue_url,
+        tbp.natureserve_global_rank AS natureserve_global_rank,
+        tbp.nwpl_indicator_code AS nwpl_indicator_code,
+        tbp.nwpl_wetland_score AS nwpl_wetland_score,
         -- Step 06 Genomic Phylogenomics (1-to-1 per run_id, catalogNumber)
         geno_v.genetic_sample_id AS genetic_sample_id,
         geno_v.geno_population_id AS geno_population_id,
@@ -633,7 +650,9 @@ def _build_master_view_ddl() -> str:
         WHERE _geno_rn = 1
     ) geno_v
         ON geno_v.run_id = rac.run_id
-       AND geno_v.catalogNumber = rac.catalogNumber;
+       AND geno_v.catalogNumber = rac.catalogNumber
+    LEFT JOIN taxon_backbone_profiles tbp
+        ON tbp.species_standardized = COALESCE(rac.species_standardized, om.species_standardized, v.species_standardized);
     """
 
 
@@ -960,6 +979,46 @@ def _build_schema_ddl() -> str:
         breeding_system_summary TEXT
     );
 
+    -- 9. Taxonomic & Protologue Backbone (CoL/POWO/BHL + NatureServe Global Rank + NWPL Indicator)
+    CREATE TABLE IF NOT EXISTS taxon_backbone_profiles (
+        species_standardized TEXT PRIMARY KEY,
+        target_genus TEXT NOT NULL DEFAULT 'Packera',
+        accepted_scientific_name TEXT,
+        accepted_authorship TEXT,
+        basionym_name TEXT,
+        basionym_authorship TEXT,
+        homotypic_synonyms_json TEXT,
+        heterotypic_synonyms_json TEXT,
+        is_hybrid_taxon INTEGER DEFAULT 0,
+        hybrid_formula TEXT,
+        publication_citation TEXT,
+        publication_year INTEGER,
+        protologue_url TEXT,
+        locus_classicus_text TEXT,
+        tdwg_native_codes_json TEXT,
+        tdwg_introduced_codes_json TEXT,
+        natureserve_element_id TEXT,
+        natureserve_global_rank TEXT,
+        nwpl_indicator_code TEXT,
+        nwpl_wetland_score REAL,
+        backbone_source TEXT,
+        updated_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_tbp_target_genus ON taxon_backbone_profiles(target_genus);
+
+    -- 10. NatureServe Subnational US State / Canadian Province Ranges
+    CREATE TABLE IF NOT EXISTS natureserve_subnational_ranges (
+        species_standardized TEXT NOT NULL,
+        country_code TEXT NOT NULL,
+        subnation_code TEXT NOT NULL,
+        s_rank TEXT,
+        is_native INTEGER DEFAULT 1,
+        is_exotic INTEGER DEFAULT 0,
+        is_historical_or_extirpated INTEGER DEFAULT 0,
+        PRIMARY KEY (species_standardized, country_code, subnation_code)
+    );
+    CREATE INDEX IF NOT EXISTS idx_ns_ranges_taxon_sub ON natureserve_subnational_ranges(species_standardized, subnation_code);
+
     -- =========================================================================
     -- TIER B: RUN-SCOPED ANALYTICAL TABLES & MASTER VIEW
     -- =========================================================================
@@ -1239,6 +1298,9 @@ def _build_schema_ddl() -> str:
         taxon_reported_cytotypes TEXT,
         is_multi_cytotype_taxon INTEGER,
         cytotype_reproductive_barrier_pass INTEGER,
+        hydro_edaphic_niche_regime TEXT,
+        wetland_fidelity_concordance REAL,
+        basionym_synonymy_type TEXT,
         PRIMARY KEY (run_id, catalogNumber, plant_individual_id),
         FOREIGN KEY (run_id) REFERENCES pipeline_runs(run_id) ON DELETE CASCADE
     );
@@ -1491,6 +1553,38 @@ _DYNAMIC_TABLE_MIGRATION_SPECS: Dict[str, Tuple[Tuple[str, str], ...]] = {
         ("taxon_reported_cytotypes", "TEXT"),
         ("is_multi_cytotype_taxon", "INTEGER"),
         ("cytotype_reproductive_barrier_pass", "INTEGER"),
+        ("hydro_edaphic_niche_regime", "TEXT"),
+        ("wetland_fidelity_concordance", "REAL"),
+        ("basionym_synonymy_type", "TEXT"),
+    ),
+    "taxon_backbone_profiles": (
+        ("target_genus", "TEXT NOT NULL DEFAULT 'Packera'"),
+        ("accepted_scientific_name", "TEXT"),
+        ("accepted_authorship", "TEXT"),
+        ("basionym_name", "TEXT"),
+        ("basionym_authorship", "TEXT"),
+        ("homotypic_synonyms_json", "TEXT"),
+        ("heterotypic_synonyms_json", "TEXT"),
+        ("is_hybrid_taxon", "INTEGER DEFAULT 0"),
+        ("hybrid_formula", "TEXT"),
+        ("publication_citation", "TEXT"),
+        ("publication_year", "INTEGER"),
+        ("protologue_url", "TEXT"),
+        ("locus_classicus_text", "TEXT"),
+        ("tdwg_native_codes_json", "TEXT"),
+        ("tdwg_introduced_codes_json", "TEXT"),
+        ("natureserve_element_id", "TEXT"),
+        ("natureserve_global_rank", "TEXT"),
+        ("nwpl_indicator_code", "TEXT"),
+        ("nwpl_wetland_score", "REAL"),
+        ("backbone_source", "TEXT"),
+        ("updated_at", "TEXT"),
+    ),
+    "natureserve_subnational_ranges": (
+        ("s_rank", "TEXT"),
+        ("is_native", "INTEGER DEFAULT 1"),
+        ("is_exotic", "INTEGER DEFAULT 0"),
+        ("is_historical_or_extirpated", "INTEGER DEFAULT 0"),
     ),
     "genomic_samples": (
         ("catalogNumber", "TEXT NULL"),
@@ -1579,6 +1673,7 @@ _MASTER_VIEW_REQUIRED_TABLES: Tuple[str, ...] = (
     "curation_triage",
     "genomic_samples",
     "genetic_lineage_assignments",
+    "taxon_backbone_profiles",
 )
 
 
@@ -1595,7 +1690,7 @@ def _migrate_vouchers_schema_columns(conn: sqlite3.Connection) -> None:
             existing_cols.add(col_name)
 
 
-PLANTMATICS_SCHEMA_USER_VERSION: int = 20261126
+PLANTMATICS_SCHEMA_USER_VERSION: int = 20261127
 PACKERA_SCHEMA_USER_VERSION: int = PLANTMATICS_SCHEMA_USER_VERSION
 
 
@@ -1957,6 +2052,8 @@ def _migrate_dynamic_schema_columns(
         or "genetic_lineage_assignments" not in existing_tables
         or "cytological_records" not in existing_tables
         or "taxon_cytology_summary" not in existing_tables
+        or "taxon_backbone_profiles" not in existing_tables
+        or "natureserve_subnational_ranges" not in existing_tables
     ):
         conn.executescript(SCHEMA_DDL)
         # Ensure master view stays dropped until subsequent table rebuilds finish.
@@ -1967,6 +2064,8 @@ def _migrate_dynamic_schema_columns(
                 "genetic_lineage_assignments",
                 "cytological_records",
                 "taxon_cytology_summary",
+                "taxon_backbone_profiles",
+                "natureserve_subnational_ranges",
             }
         )
 
@@ -1997,6 +2096,8 @@ def _migrate_dynamic_schema_columns(
             "cytology_linkage_tier", "voucher_sporophytic_2n",
             "voucher_ploidy_level", "taxon_reported_cytotypes",
             "is_multi_cytotype_taxon", "cytotype_reproductive_barrier_pass",
+            "hydro_edaphic_niche_regime", "wetland_fidelity_concordance",
+            "basionym_synonymy_type",
         )
         if ct_cols_now and (
             ct_cols_now != set(canon_ct_cols) or cur_uv < PLANTMATICS_SCHEMA_USER_VERSION
@@ -2007,8 +2108,8 @@ def _migrate_dynamic_schema_columns(
             shared_ct = [c for c in canon_ct_cols if c in ct_pre_rebuild_cols]
             conn.executescript(
                 """
-                DROP TABLE IF EXISTS _curation_triage_v20261126;
-                CREATE TABLE _curation_triage_v20261126 (
+                DROP TABLE IF EXISTS _curation_triage_v20261127;
+                CREATE TABLE _curation_triage_v20261127 (
                     run_id TEXT NOT NULL,
                     catalogNumber TEXT NOT NULL,
                     plant_individual_id INTEGER NOT NULL DEFAULT 0,
@@ -2047,6 +2148,9 @@ def _migrate_dynamic_schema_columns(
                     taxon_reported_cytotypes TEXT,
                     is_multi_cytotype_taxon INTEGER,
                     cytotype_reproductive_barrier_pass INTEGER,
+                    hydro_edaphic_niche_regime TEXT,
+                    wetland_fidelity_concordance REAL,
+                    basionym_synonymy_type TEXT,
                     PRIMARY KEY (run_id, catalogNumber, plant_individual_id),
                     FOREIGN KEY (run_id) REFERENCES pipeline_runs(run_id) ON DELETE CASCADE
                 );
@@ -2055,12 +2159,12 @@ def _migrate_dynamic_schema_columns(
             if shared_ct:
                 cols_csv = ", ".join(shared_ct)
                 conn.execute(
-                    f"INSERT OR REPLACE INTO _curation_triage_v20261126 ({cols_csv}) SELECT {cols_csv} FROM curation_triage;"
+                    f"INSERT OR REPLACE INTO _curation_triage_v20261127 ({cols_csv}) SELECT {cols_csv} FROM curation_triage;"
                 )
             conn.executescript(
                 """
                 DROP TABLE curation_triage;
-                ALTER TABLE _curation_triage_v20261126 RENAME TO curation_triage;
+                ALTER TABLE _curation_triage_v20261127 RENAME TO curation_triage;
                 """
             )
 
@@ -2095,6 +2199,8 @@ def init_db_schema(conn: sqlite3.Connection) -> None:
             "extracted_leaves",
             "cytological_records",
             "taxon_cytology_summary",
+            "taxon_backbone_profiles",
+            "natureserve_subnational_ranges",
             "pipeline_runs",
             "leaf_efa_harmonics",
             "taxon_complexes",
@@ -2107,7 +2213,7 @@ def init_db_schema(conn: sqlite3.Connection) -> None:
             el_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(extracted_leaves);").fetchall()}
             om_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(otu_morphometrics);").fetchall()}
             mv_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(v_integrative_triage_master);").fetchall()}
-            req_mv_cols = {"is_passive", "scale_source", "AR_inv_std", "log1p_capitulum_count", "blade_cie_l_norm", "nearest_type_basionym", "reproductive_trait_status", "ecoregion_can1", "ecoregion_can2", "hybrid_zone_cohesion_pass", "hybrid_parent_1", "hybrid_parent_2", "cda_oof_posterior_prob", "self_morph_mahal_d2", "open_set_df", "cryptic_non_clinal_pass", "resurrection_basionym", "w_geno_kappa", "geno_predicted_taxon", "geno_linkage_tier", "is_geno_admixed", "coalescent_gdi", "hybrid_generation_class", "cytonuclear_discordant", "public_plastome_match", "public_its_match", "waxy_lineage_match", "public_backbone_clade", "public_phytop_ils_index", "public_phytop_ih_index", "genomic_propagation_tier", "cluster_propagated_gdi", "cytology_linkage_tier", "voucher_sporophytic_2n", "voucher_ploidy_level", "taxon_reported_cytotypes", "is_multi_cytotype_taxon", "cytotype_reproductive_barrier_pass"}
+            req_mv_cols = {"is_passive", "scale_source", "AR_inv_std", "log1p_capitulum_count", "blade_cie_l_norm", "nearest_type_basionym", "reproductive_trait_status", "ecoregion_can1", "ecoregion_can2", "hybrid_zone_cohesion_pass", "hybrid_parent_1", "hybrid_parent_2", "cda_oof_posterior_prob", "self_morph_mahal_d2", "open_set_df", "cryptic_non_clinal_pass", "resurrection_basionym", "w_geno_kappa", "geno_predicted_taxon", "geno_linkage_tier", "is_geno_admixed", "coalescent_gdi", "hybrid_generation_class", "cytonuclear_discordant", "public_plastome_match", "public_its_match", "waxy_lineage_match", "public_backbone_clade", "public_phytop_ils_index", "public_phytop_ih_index", "genomic_propagation_tier", "cluster_propagated_gdi", "cytology_linkage_tier", "voucher_sporophytic_2n", "voucher_ploidy_level", "taxon_reported_cytotypes", "is_multi_cytotype_taxon", "cytotype_reproductive_barrier_pass", "soil_ca_mg_molar_ratio", "soil_ultramafic_ni_cr_index", "soil_carbonate_c_pct", "is_nwi_wetland", "nwi_wetland_system", "nwi_wetland_dist_m", "hydro_edaphic_niche_regime", "wetland_fidelity_concordance", "basionym_synonymy_type", "backbone_basionym_name", "protologue_url", "natureserve_global_rank", "nwpl_indicator_code", "nwpl_wetland_score"}
             if (
                 "leaf_zone" not in el_cols
                 or "area_mm2" not in el_cols

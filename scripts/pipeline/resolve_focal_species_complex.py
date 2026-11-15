@@ -131,6 +131,7 @@ def build_four_stage_commands(
         *(["--triage-source", r1] if has_discovery_override else []),
         "--gold-anchors",
         str(gold_anchors),
+        "--skip-backbone-download",
         *common_tail,
     ]
     stages.append(("Stage_2_Complex_Triage", r2, cmd2))
@@ -147,6 +148,7 @@ def build_four_stage_commands(
         "--exclude-misidentified",
         "--triage-source",
         r2,
+        "--skip-backbone-download",
         *common_tail,
     ]
     stages.append(("Stage_3_Intraspecific_Clean", r3, cmd3))
@@ -167,6 +169,7 @@ def build_four_stage_commands(
         "--spatial-thin-km",
         f"{spatial_thin_km:g}",
         "--gold-only",
+        "--skip-backbone-download",
         *common_tail,
     ]
     stages.append(("Stage_4_Spatially_Thinned", r4, cmd4))

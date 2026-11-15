@@ -499,8 +499,16 @@ data/genomics/**
 *.mcmc.txt
 *.out
 
-# 16. Staged public cytological records and flat CSV caches
+# 16. Staged public cytological records, taxonomic backbone, and flat CSV/JSON caches
 data/cytology/*
 data/cytology/**
 !data/cytology/.gitkeep
+
+data/taxonomy/*.csv
+data/taxonomy/*.json
+!data/taxonomy/.gitkeep
+
+data/environmental/usgs_ds801_soils.csv
+data/environmental/nwi_point_cache.jsonl
+data/environmental/usace_nwpl_ratings.csv
 

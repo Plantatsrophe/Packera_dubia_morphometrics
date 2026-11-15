@@ -705,10 +705,15 @@ fit_and_project_maxent_sdm_maps <- function(
     }
   }
   kept_vars <- intersect(kept_vars[!grepl("^MEM", kept_vars)], names(df))
-  if (length(kept_vars) > 14L) {
-    kv_clim <- kept_vars[grepl("^bio[0-9]+", kept_vars)]
+  if (length(kept_vars) > 12L) {
+    kv_clim <- kept_vars[grepl("^(bio[0-9]+|summer_moisture_|maritime_continentality_)", kept_vars)]
     kv_edaph <- setdiff(kept_vars, kv_clim)
-    kept_vars <- c(utils::head(kv_clim, 7L), utils::head(kv_edaph, 7L))
+    n_c_keep <- min(length(kv_clim), 6L)
+    n_e_keep <- min(length(kv_edaph), 12L - n_c_keep)
+    if ((n_c_keep + n_e_keep) < 12L && length(kv_clim) > n_c_keep) {
+      n_c_keep <- min(length(kv_clim), 12L - n_e_keep)
+    }
+    kept_vars <- c(utils::head(kv_clim, n_c_keep), utils::head(kv_edaph, n_e_keep))
   }
   if (length(kept_vars) == 0L) {
     kept_vars <- intersect(c("bio1_temp_mean", "bio12_precip_annual", "fine_soil_ph", "soil_ph", "fine_soil_sand", "soil_sand"), names(df))
@@ -726,7 +731,7 @@ fit_and_project_maxent_sdm_maps <- function(
 
   # Identify top climatic and edaphic predictors
   imp_df <- if (!is.null(srf_res) && is.data.frame(srf_res$importance)) srf_res$importance else NULL
-  edaph_rx <- "^(fine_|ilr_texture_|ssurgo_|polaris_|solus_|topo_|soil_|sgmc_|is_azonal|lithic_outcrop|min_bedrock|ph_q|max_cfvo)"
+  edaph_rx <- "^(fine_|ilr_texture_|ssurgo_|polaris_|solus_|topo_|soil_|sgmc_|is_azonal|lithic_outcrop|min_bedrock|ph_q|max_cfvo|ultramafic_calcareous|wetland_seepage)"
   clim_cand <- if (!is.null(primary_clim_vars) && length(intersect(primary_clim_vars, kept_vars)) > 0L) {
     intersect(primary_clim_vars, kept_vars)
   } else {

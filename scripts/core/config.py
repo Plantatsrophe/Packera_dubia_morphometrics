@@ -368,6 +368,8 @@ class TaxaConfig:
     target_species: List[str] = field(default_factory=list)
     synonyms: Dict[str, List[str]] = field(default_factory=dict)
     outgroups: List[str] = field(default_factory=list)
+    target_genus: str = "Packera"
+    target_family: str = "Asteraceae"
 
     @property
     def target_taxa(self) -> List[str]:
@@ -660,10 +662,22 @@ class PipelineConfig:
 
         taxa_dict = raw_cfg.get("taxa", {}) or {}
         legacy_taxa = (raw_cfg.get("taxonomy") or {}).get("target_taxa", [])
+        target_genus_val = (
+            os.environ.get("PLANTMATICS_TARGET_GENUS", "").strip()
+            or str(taxa_dict.get("target_genus", "") or "").strip()
+            or "Packera"
+        )
+        target_family_val = (
+            os.environ.get("PLANTMATICS_TARGET_FAMILY", "").strip()
+            or str(taxa_dict.get("target_family", "") or "").strip()
+            or "Asteraceae"
+        )
         taxa = TaxaConfig(
             target_species=list(taxa_dict.get("target_species", legacy_taxa) or []),
             synonyms=dict(taxa_dict.get("synonyms", {}) or {}),
             outgroups=list(taxa_dict.get("outgroups", []) or []),
+            target_genus=target_genus_val,
+            target_family=target_family_val,
         )
 
         thresh_dict = raw_cfg.get("thresholds", {})
@@ -1076,3 +1090,62 @@ def resolve_gpu_batch_size(
     if default is not None:
         return max(1, int(default))
     return max(1, int(default_cuda) if use_cuda else int(default_cpu))
+
+
+def _resolve_taxa_string(
+    explicit: Optional[str],
+    env_key: str,
+    cfg: Optional[PipelineConfig],
+    attr_name: str,
+    default: str,
+) -> str:
+    """Resolve a target taxonomic rank via explicit -> env -> config/YAML -> default."""
+    if explicit is not None and str(explicit).strip():
+        return str(explicit).strip()
+    env_val = os.environ.get(env_key, "").strip()
+    if env_val:
+        return env_val
+    if cfg is not None:
+        cfg_val = str(getattr(cfg.taxa, attr_name, "") or "").strip()
+        if cfg_val:
+            return cfg_val
+    if DEFAULT_CONFIG_PATH.is_file():
+        try:
+            with DEFAULT_CONFIG_PATH.open("r", encoding="utf-8") as fh:
+                raw_cfg = yaml.safe_load(fh) or {}
+            yaml_val = str(((raw_cfg.get("taxa") or {}).get(attr_name, "")) or "").strip()
+            if yaml_val:
+                return yaml_val
+        except (OSError, yaml.YAMLError):
+            pass
+    default_cfg_val = str(getattr(_DEFAULT_CONFIG.taxa, attr_name, "") or "").strip()
+    return default_cfg_val or default
+
+
+def resolve_target_genus(
+    cfg: Optional[PipelineConfig] = None,
+    explicit_genus: Optional[str] = None,
+) -> str:
+    """Resolve the active target genus with explicit, environment, YAML, and default fallback."""
+    return _resolve_taxa_string(
+        explicit=explicit_genus,
+        env_key="PLANTMATICS_TARGET_GENUS",
+        cfg=cfg,
+        attr_name="target_genus",
+        default="Packera",
+    )
+
+
+def resolve_target_family(
+    cfg: Optional[PipelineConfig] = None,
+    explicit_family: Optional[str] = None,
+) -> str:
+    """Resolve the active target family with explicit, environment, YAML, and default fallback."""
+    return _resolve_taxa_string(
+        explicit=explicit_family,
+        env_key="PLANTMATICS_TARGET_FAMILY",
+        cfg=cfg,
+        attr_name="target_family",
+        default="Asteraceae",
+    )
+

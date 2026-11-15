@@ -1019,11 +1019,13 @@ def _maybe_ensure_environmental_layers(
     env_dir: Path,
     vouchers_csv: Optional[Path] = None,
 ) -> None:
-    """Ensure SOLUS100, USGS SGMC, and 30 m DEM layers exist before Step 05 unless in demo/test mode."""
+    """Ensure SOLUS100, USGS SGMC, 30 m DEM, DS-801, and NWI/NWPL layers exist before Step 05 unless in demo/test mode."""
     if (
         getattr(args, "demo", False)
         or getattr(args, "skip_env_download", False)
+        or os.environ.get("PLANTMATICS_DEMO_MODE") == "1"
         or os.environ.get("PACKERA_DEMO_MODE") == "1"
+        or os.environ.get("PLANTMATICS_SKIP_ENV_DOWNLOAD") == "1"
         or os.environ.get("PACKERA_SKIP_ENV_DOWNLOAD") == "1"
         or "PYTEST_CURRENT_TEST" in os.environ
         or getattr(subprocess.run, "__module__", "") != "subprocess"
@@ -1040,6 +1042,18 @@ def _maybe_ensure_environmental_layers(
         )
     except Exception as exc:
         logger.warning(f"Environmental layer preflight check could not complete: {exc}")
+    try:
+        from scripts.data_prep.download_geochem_wetland_layers import download_geochem_wetland_layers
+        download_geochem_wetland_layers(
+            env_dir=env_dir,
+            vouchers_csv=vouchers_csv,
+            db_path=getattr(args, "db", None),
+            genus=getattr(args, "genus", None),
+            skip_nwi_network=bool(getattr(args, "skip_nwi_network", False) or os.environ.get("PLANTMATICS_SKIP_NWI_NETWORK") == "1"),
+            force=bool(getattr(args, "force_env_download", False)),
+        )
+    except Exception as exc:
+        logger.warning(f"Geochemistry/wetland layer preflight check could not complete: {exc}")
 
 
 def _maybe_ensure_cytology_records(args: argparse.Namespace) -> None:
@@ -1078,8 +1092,49 @@ def _maybe_ensure_cytology_records(args: argparse.Namespace) -> None:
         logger.warning(f"Cytology preflight check could not complete: {exc}")
 
 
+def _maybe_ensure_taxonomic_backbone(args: argparse.Namespace) -> None:
+    """Ensure flat data/taxonomy/ taxonomic backbone exists and is synced unless skipped or in demo/test mode."""
+    if (
+        getattr(args, "demo", False)
+        or getattr(args, "skip_backbone_download", False)
+        or os.environ.get("PLANTMATICS_DEMO_MODE") == "1"
+        or os.environ.get("PACKERA_DEMO_MODE") == "1"
+        or os.environ.get("PLANTMATICS_SKIP_BACKBONE_DOWNLOAD") == "1"
+        or os.environ.get("PACKERA_SKIP_BACKBONE_DOWNLOAD") == "1"
+        or "PYTEST_CURRENT_TEST" in os.environ
+        or getattr(subprocess.run, "__module__", "") != "subprocess"
+    ):
+        return
+    dl_script = PROJECT_ROOT / "scripts" / "data_prep" / "download_taxonomic_backbone.py"
+    if not dl_script.is_file():
+        return
+    try:
+        tax_dir = Path(
+            os.environ.get("PLANTMATICS_TAXONOMY_DIR")
+            or os.environ.get("PACKERA_TAXONOMY_DIR")
+            or (PROJECT_ROOT / "data" / "taxonomy")
+        )
+        script_txt = dl_script.read_text(encoding="utf-8", errors="ignore")
+        force_dl = bool(getattr(args, "force_backbone_download", False))
+        cmd = [sys.executable, str(dl_script)]
+        if getattr(args, "db", None) and "--db" in script_txt:
+            cmd.extend(["--db", str(args.db)])
+        if force_dl and "--force" in script_txt:
+            cmd.append("--force")
+        elif any(tax_dir.glob("*.csv")) or any(tax_dir.glob("*.json")):
+            if "--sync-db-only" in script_txt:
+                cmd.append("--sync-db-only")
+            elif "--sync-only" in script_txt:
+                cmd.append("--sync-only")
+            else:
+                return
+        subprocess.run(cmd, check=False)
+    except Exception as exc:
+        logger.warning(f"Taxonomic backbone preflight check could not complete: {exc}")
+
+
 def run_download_env(args: argparse.Namespace, cfg: Optional[PipelineConfig] = None) -> None:
-    """Verify or download SOLUS100, USGS SGMC, and 3DEP 30 m DEM layers."""
+    """Verify or download SOLUS100, USGS SGMC, 3DEP 30 m DEM, DS-801, and NWI/NWPL layers."""
     _ = cfg
     from scripts.data_prep.download_environmental_layers import ensure_environmental_layers
     env_dir = Path(getattr(args, "env_dir", None) or (PROJECT_ROOT / "data" / "environmental"))
@@ -1092,6 +1147,19 @@ def run_download_env(args: argparse.Namespace, cfg: Optional[PipelineConfig] = N
         force=bool(getattr(args, "force", False)),
         demo=bool(getattr(args, "demo", False)),
     )
+    if not getattr(args, "demo", False) and os.environ.get("PLANTMATICS_DEMO_MODE") != "1" and os.environ.get("PACKERA_DEMO_MODE") != "1":
+        try:
+            from scripts.data_prep.download_geochem_wetland_layers import download_geochem_wetland_layers
+            download_geochem_wetland_layers(
+                env_dir=env_dir,
+                vouchers_csv=vouchers_csv,
+                db_path=getattr(args, "db", None),
+                genus=getattr(args, "genus", None),
+                skip_nwi_network=bool(getattr(args, "skip_nwi_network", False)),
+                force=bool(getattr(args, "force", False)),
+            )
+        except Exception as exc:
+            logger.warning(f"Geochemistry/wetland layer download could not complete: {exc}")
 
 
 def run_genomics_stream(
@@ -1244,9 +1312,45 @@ def run_download_public_genomics_cli(args: argparse.Namespace, cfg: PipelineConf
         cmd.extend(["--sources", *[str(s) for s in args.sources]])
     if getattr(args, "dryad_zip_dir", None):
         cmd.extend(["--dryad-zip-dir", str(args.dryad_zip_dir)])
+    if getattr(args, "genus", None):
+        cmd.extend(["--genus", str(args.genus)])
+    if getattr(args, "family", None):
+        cmd.extend(["--family", str(args.family)])
     if getattr(args, "skim_sra_accessions", None):
         cmd.extend(["--skim-sra-accessions", *[str(a) for a in args.skim_sra_accessions]])
     if getattr(args, "force", False):
+        cmd.append("--force")
+    subprocess.run(cmd, check=True)
+
+
+def run_download_taxonomic_backbone_cli(args: argparse.Namespace, cfg: PipelineConfig) -> None:
+    """CLI entrypoint for downloading dynamic taxonomic backbone profiles into data/taxonomy/."""
+    _ = cfg
+    dl_script = PROJECT_ROOT / "scripts" / "data_prep" / "download_taxonomic_backbone.py"
+    verify_file_exists(dl_script, "Taxonomic Backbone Downloader Python script")
+    script_txt = dl_script.read_text(encoding="utf-8", errors="ignore")
+    cmd = [sys.executable, str(dl_script)]
+    if getattr(args, "taxonomy_dir", None):
+        if "--taxonomy-dir" in script_txt:
+            cmd.extend(["--taxonomy-dir", str(args.taxonomy_dir)])
+        elif "--out-dir" in script_txt:
+            cmd.extend(["--out-dir", str(args.taxonomy_dir)])
+    if getattr(args, "genus", None) and "--genus" in script_txt:
+        cmd.extend(["--genus", str(args.genus)])
+    if getattr(args, "family", None) and "--family" in script_txt:
+        cmd.extend(["--family", str(args.family)])
+    if getattr(args, "sources", None) and "--sources" in script_txt:
+        cmd.extend(["--sources", *[str(s) for s in args.sources]])
+    if getattr(args, "sync_only", False):
+        if "--sync-only" in script_txt:
+            cmd.append("--sync-only")
+        elif "--sync-db-only" in script_txt:
+            cmd.append("--sync-db-only")
+    if getattr(args, "db", None) and "--db" in script_txt:
+        cmd.extend(["--db", str(args.db)])
+    if getattr(args, "no_db", False) and "--no-db" in script_txt:
+        cmd.append("--no-db")
+    if getattr(args, "force", False) and "--force" in script_txt:
         cmd.append("--force")
     subprocess.run(cmd, check=True)
 
@@ -1325,6 +1429,7 @@ def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     env_dir = Path(getattr(args, "env_dir", None) or "data/environmental")
     _maybe_ensure_environmental_layers(args, env_dir=env_dir, vouchers_csv=vouchers_csv)
     _maybe_ensure_cytology_records(args)
+    _maybe_ensure_taxonomic_backbone(args)
     reports_dir_s05 = (
         run_dir / "outputs" / "reports"
         if run_dir is not None
@@ -1766,6 +1871,8 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common_subparser_args(p_env, include_gpu=False)
     p_env.add_argument("--env-dir", type=Path, default=None, help="Target environmental directory (default: data/environmental)")
     p_env.add_argument("--vouchers", type=Path, default=None, help="Optional curated_vouchers.csv to scope 30 m DEM tiles")
+    p_env.add_argument("--genus", type=str, default=None, help="Target genus for USACE NWPL wetland ratings")
+    p_env.add_argument("--skip-nwi-network", action="store_true", default=False, help="Reuse cached NWI points without REST queries")
     p_env.add_argument("--force", action="store_true", default=False, help="Force re-download even if cached layers exist")
 
     # Subcommand: harvest
@@ -1932,7 +2039,9 @@ def build_parser() -> argparse.ArgumentParser:
     # Subcommand: download-public-genomics (public NCBI/SRA/Dryad/BOLD staging into flat data/genomics/)
     p_dl_pub = subparsers.add_parser("download-public-genomics", help="Download public Packera sequences, trees, and SRA manifests into flat data/genomics/")
     p_dl_pub.add_argument("--genomics-dir", type=Path, default=None, help="Flat destination data/genomics/ directory")
-    p_dl_pub.add_argument("--sources", nargs="+", default=None, help="Public sources to query (ncbi, dryad, bold)")
+    p_dl_pub.add_argument("--sources", nargs="+", default=None, help="Public sources to query (ncbi, dryad, bold, paraloss)")
+    p_dl_pub.add_argument("--genus", type=str, default=None, help="Target genus for dynamic ENA taxon-tree SRA discovery")
+    p_dl_pub.add_argument("--family", type=str, default=None, help="Target family for Compositae-ParaLoss-1272 metadata")
     p_dl_pub.add_argument("--dryad-zip-dir", type=Path, default=None, help="Directory holding manually downloaded Dryad .zip archives")
     p_dl_pub.add_argument("--skim-sra-accessions", nargs="+", default=None, help="SRA/ENA run accessions to stream-skim via skim_offtarget_organellar")
     p_dl_pub.add_argument("--force", action="store_true", default=False, help="Overwrite existing non-empty public_packera_* files")
@@ -1945,6 +2054,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_dl_cyto.add_argument("--sync-db-only", action="store_true", default=False, help="Skip network downloads and re-sync existing flat CSVs and label remarks into SQLite")
     p_dl_cyto.add_argument("--no-db", action="store_true", default=False, help="Write flat CSV/JSON artifacts without updating SQLite")
     p_dl_cyto.add_argument("--force", action="store_true", default=False, help="Overwrite existing non-empty public_packera_cytology_* files")
+
+    # Subcommand: download-taxonomic-backbone
+    p_dl_backbone = subparsers.add_parser("download-taxonomic-backbone", help="Download dynamic taxonomic backbone profiles and synonymy into flat data/taxonomy/")
+    p_dl_backbone.add_argument("--taxonomy-dir", type=Path, default=None, help="Flat destination data/taxonomy/ directory")
+    p_dl_backbone.add_argument("--genus", type=str, default=None, help="Target genus for taxonomic backbone discovery")
+    p_dl_backbone.add_argument("--family", type=str, default=None, help="Target botanical family filter")
+    p_dl_backbone.add_argument("--sources", nargs="+", default=None, help="Optional taxonomic backbone sources")
+    p_dl_backbone.add_argument("--sync-only", "--sync-db-only", dest="sync_only", action="store_true", default=False, help="Skip network downloads and sync cached backbone into SQLite")
+    p_dl_backbone.add_argument("--db", type=Path, default=None, help="Optional override path to SQLite database")
+    p_dl_backbone.add_argument("--no-db", action="store_true", default=False, help="Write flat CSV/JSON artifacts without updating SQLite")
+    p_dl_backbone.add_argument("--force", action="store_true", default=False, help="Overwrite existing taxonomic backbone cache files")
 
     # Subcommand: synthesis
     p_synth = subparsers.add_parser("synthesis", aliases=["analyze"], help="Steps 05-07: Spatial RF, Phylogenomics, & Triage Dashboard")
@@ -1962,6 +2082,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_synth.add_argument("--force-env-download", action="store_true", default=False, help="Force re-download of SOLUS100, SGMC, and 3DEP layers")
     p_synth.add_argument("--skip-cytology-download", action="store_true", default=False, help="Skip preflight public cytology download and sync check")
     p_synth.add_argument("--force-cytology-download", action="store_true", default=False, help="Force fresh public cytology download before Steps 06-07")
+    p_synth.add_argument("--skip-backbone-download", action="store_true", default=False, help="Skip preflight taxonomic backbone download and sync check")
+    p_synth.add_argument("--force-backbone-download", action="store_true", default=False, help="Force fresh taxonomic backbone download before synthesis")
     p_synth.add_argument("--ssurgo-batch-size", type=int, default=None, help="Batch size for USDA SDA SSURGO queries")
     p_synth.add_argument("--ssurgo-table", type=Path, default=None, help=argparse.SUPPRESS)
     p_synth.add_argument("--contingency-table", type=Path, default=None, help=argparse.SUPPRESS)
@@ -2110,6 +2232,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_all.add_argument("--force-env-download", action="store_true", default=False, help="Force re-download of SOLUS100, SGMC, and 3DEP layers")
     p_all.add_argument("--skip-cytology-download", action="store_true", default=False, help="Skip preflight public cytology download and sync check")
     p_all.add_argument("--force-cytology-download", action="store_true", default=False, help="Force fresh public cytology download before Steps 06-07")
+    p_all.add_argument("--skip-backbone-download", action="store_true", default=False, help="Skip preflight taxonomic backbone download and sync check")
+    p_all.add_argument("--force-backbone-download", action="store_true", default=False, help="Force fresh taxonomic backbone download before synthesis")
     p_all.add_argument("--export-figures", action="store_true", default=True, help="Export diagnostic figures")
     p_all.add_argument("--no-export-figures", dest="export_figures", action="store_false", help="Disable figure export")
     p_all.add_argument("--focal-taxon", type=str, default=None, help="Optional focal Packera taxon for targeted revision synthesis")
@@ -2215,6 +2339,7 @@ def main() -> None:
         "skim-organellar": run_skim_organellar_cli,
         "download-public-genomics": run_download_public_genomics_cli,
         "download-public-cytology": run_download_public_cytology_cli,
+        "download-taxonomic-backbone": run_download_taxonomic_backbone_cli,
         "synthesis": run_synthesis,
         "analyze": run_synthesis,
         "run-all": run_all,

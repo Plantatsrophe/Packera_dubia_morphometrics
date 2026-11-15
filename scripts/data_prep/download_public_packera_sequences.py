@@ -16,7 +16,23 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 _UA = "Plantmatics/1.0 (https://github.com/plantmatics; mailto:plantmatics@users.noreply.github.com)"
 _DRYAD_DOI = "doi%3A10.5061%2Fdryad.bg79cnppn"
 _DRYAD_ZIPS = ("speciestree_files.zip", "PhyTop_results.zip", "RelTime_trees.zip", "alignment_files.zip")
-_SRA_BIOPROJECTS = ("PRJNA907383", "PRJNA978568", "PRJNA540287", "PRJNA516161")
+_SRA_BIOPROJECTS = ("PRJNA907383", "PRJNA978568", "PRJNA540287", "PRJNA516161", "PRJNA1046046")
+
+try:
+    from scripts.data_prep.ena_paraloss_discovery import SRA_MANIFEST_COLS, fetch_compositae_paraloss1272_catalog, fetch_ena_tax_tree_sra_rows
+except ImportError:
+    from ena_paraloss_discovery import SRA_MANIFEST_COLS, fetch_compositae_paraloss1272_catalog, fetch_ena_tax_tree_sra_rows  # type: ignore[no-redef]
+
+
+def _resolve_target_meta(attr: str, env_key: str, default: str) -> str:
+    try:
+        from scripts.core import config as _cfg
+        fn = getattr(_cfg, attr, None)
+        if callable(fn) and (val := str(fn()).strip()):
+            return val
+    except Exception:
+        pass
+    return (os.environ.get(f"PLANTMATICS_{env_key}") or os.environ.get(f"PACKERA_{env_key}") or default).strip() or default
 _NCBI_TERM = (
     '("Packera"[Organism] OR "Senecio tomentosus"[Organism] OR "Senecio aureus"[Organism] OR '
     '"Senecio anonymus"[Organism] OR "Senecio pauperculus"[Organism] OR "Senecio schweinitzianus"[Organism] OR '
@@ -173,44 +189,14 @@ def _fetch_ncbi_nuccore(genomics_dir: Path, force: bool) -> Dict[str, int]:
     return counts
 
 
-def _fetch_sra_manifest(genomics_dir: Path, tmpd: Path, force: bool) -> List[Dict[str, str]]:
-    cols = ("bioproject", "run_accession", "sample_accession", "scientific_name", "library_name", "fastq_ftp", "fastq_bytes")
-    rows, seen = [], set()
-    for prj in _SRA_BIOPROJECTS:
-        prj_rows: List[Dict[str, str]] = []
-        try:
-            ena_url = f"https://www.ebi.ac.uk/ena/portal/api/filereport?accession={prj}&result=read_run&fields=run_accession,sample_accession,scientific_name,library_name,fastq_ftp,fastq_bytes&format=tsv"
-            tsv = _http_request(ena_url, timeout=45).decode("utf-8", errors="replace")
-            prj_rows = [{"bioproject": prj, **{k: str(r.get(k) or "").strip() for k in cols[1:]}}
-                        for r in csv.DictReader(tsv.splitlines(), delimiter="\t") if r.get("run_accession")]
-        except Exception as exc:
-            print(f"[INFO] ENA query failed for {prj} ({exc}); falling back to NCBI SRA.", file=sys.stderr)
-        if not prj_rows:
-            try:
-                es = json.loads(_ncbi_get("esearch.fcgi", {"db": "sra", "term": f"{prj}[BioProject]", "retmax": 400, "usehistory": "y", "retmode": "json"}).decode("utf-8", errors="replace")).get("esearchresult", {})
-                ids = [str(x) for x in (es.get("idlist") or [])]
-                ef_p: Dict[str, Any] = {"db": "sra", "rettype": "runinfo", "retmode": "text"}
-                if ids:
-                    ef_p["id"] = ",".join(ids[:400])
-                elif es.get("webenv") and es.get("querykey"):
-                    ef_p.update({"WebEnv": es["webenv"], "query_key": es["querykey"], "retmax": 400})
-                if "id" in ef_p or "WebEnv" in ef_p:
-                    for r in csv.DictReader(_ncbi_get("efetch.fcgi", ef_p).decode("utf-8", errors="replace").splitlines()):
-                        if acc := str(r.get("Run") or r.get("run_accession") or "").strip():
-                            prj_rows.append({"bioproject": str(r.get("BioProject") or prj).strip(), "run_accession": acc,
-                                             "sample_accession": str(r.get("Sample") or r.get("BioSample") or "").strip(),
-                                             "scientific_name": str(r.get("ScientificName") or "").strip(), "library_name": str(r.get("LibraryName") or "").strip(),
-                                             "fastq_ftp": str(r.get("fastq_ftp") or r.get("download_path") or "").strip(), "fastq_bytes": str(r.get("fastq_bytes") or r.get("size_MB") or "").strip()})
-            except Exception as exc:
-                print(f"[WARN] NCBI SRA fallback failed for {prj}: {exc}", file=sys.stderr)
-        for r in prj_rows:
-            if (r["bioproject"], r["run_accession"]) not in seen:
-                seen.add((r["bioproject"], r["run_accession"]))
-                rows.append(r)
-
+def _fetch_sra_manifest(genomics_dir: Path, tmpd: Path, force: bool, target_genus: Optional[str] = None) -> List[Dict[str, str]]:
+    genus = str(target_genus or _resolve_target_genus()).strip() or "Packera"
+    rows = fetch_ena_tax_tree_sra_rows(
+        genus, _SRA_BIOPROJECTS, http_get_fn=_http_request, ncbi_get_fn=_ncbi_get,
+    )
     tmp_csv = tmpd / "sra_runs.csv"
     with open(tmp_csv, "w", encoding="utf-8", newline="") as fh:
-        wr = csv.DictWriter(fh, fieldnames=list(cols))
+        wr = csv.DictWriter(fh, fieldnames=list(SRA_MANIFEST_COLS))
         wr.writeheader()
         wr.writerows(rows)
     _atomic_save(genomics_dir, "public_packera_sra_runs.csv", tmp_csv, force=force)
@@ -425,14 +411,17 @@ def _fetch_bold(genomics_dir: Path, force: bool) -> int:
 
 def download_public_packera_sequences(
     genomics_dir: Path, sources: Sequence[str] = ("ncbi", "dryad", "bold"),
-    dryad_zip_dir: Optional[Path] = None, skim_sra_accessions: Optional[Sequence[str]] = None, force: bool = False,
+    dryad_zip_dir: Optional[Path] = None, skim_sra_accessions: Optional[Sequence[str]] = None,
+    force: bool = False, target_genus: Optional[str] = None, target_family: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Download public Packera reference sequences and phylogenomic trees into flat `genomics_dir`."""
+    """Download public reference sequences, ENA taxon-tree SRA manifests, and ParaLoss-1272 loci into `genomics_dir`."""
     _load_dotenv_defaults()
     genomics_dir = Path(genomics_dir)
     genomics_dir.mkdir(parents=True, exist_ok=True)
+    genus = str(target_genus or _resolve_target_meta("resolve_target_genus", "TARGET_GENUS", "Packera")).strip() or "Packera"
+    family = str(target_family or _resolve_target_meta("resolve_target_family", "TARGET_FAMILY", "Asteraceae")).strip() or "Asteraceae"
     src_list = [s.strip().lower() for raw in sources for s in str(raw).split(",") if s.strip()] or ["ncbi", "dryad", "bold"]
-    counts = {"nuccore_plastid": 0, "nuccore_its": 0, "nuccore_waxy": 0, "sra_runs": 0, "dryad_files": 0, "bold_records": 0, "sra_skimmed_fastqs": 0}
+    counts = {"nuccore_plastid": 0, "nuccore_its": 0, "nuccore_waxy": 0, "sra_runs": 0, "paraloss1272_loci": 0, "dryad_files": 0, "bold_records": 0, "sra_skimmed_fastqs": 0}
     dryad_status = "skipped"
     prev_sources: List[str] = []
     manifest_path = genomics_dir / "public_packera_sources_manifest.json"
@@ -454,8 +443,11 @@ def download_public_packera_sequences(
                 counts.update(_fetch_ncbi_nuccore(genomics_dir, force=force))
             except Exception as exc:
                 print(f"[WARN] NCBI nuccore fetch failed: {exc}", file=sys.stderr)
-            sra_rows = _fetch_sra_manifest(genomics_dir, tmpd, force=force)
+        if "ncbi" in src_list or "sra" in src_list:
+            sra_rows = _fetch_sra_manifest(genomics_dir, tmpd, force=force, target_genus=genus)
             counts["sra_runs"] = len(sra_rows)
+        if "ncbi" in src_list or "paraloss" in src_list:
+            counts["paraloss1272_loci"] = fetch_compositae_paraloss1272_catalog(genomics_dir, family, _atomic_save, http_get_fn=_http_request, force=force)
         if skim_sra_accessions:
             counts["sra_skimmed_fastqs"] = _skim_sra_accessions([a.strip() for raw in skim_sra_accessions for a in str(raw).split(",") if a.strip()], sra_rows, genomics_dir, tmpd)
         if "dryad" in src_list:
@@ -463,7 +455,7 @@ def download_public_packera_sequences(
         if "bold" in src_list:
             counts["bold_records"] = _fetch_bold(genomics_dir, force=force)
     files_meta = {p.name: {"size_bytes": p.stat().st_size} for p in sorted(genomics_dir.iterdir()) if p.is_file() and p.name.startswith("public_packera_") and p.name != "public_packera_sources_manifest.json"}
-    summary: Dict[str, Any] = {"timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "genomics_dir": str(genomics_dir), "sources_run": list(dict.fromkeys([*prev_sources, *src_list])), "dryad_status": dryad_status, "counts": counts, "files": files_meta}
+    summary: Dict[str, Any] = {"timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "genomics_dir": str(genomics_dir), "target_genus": genus, "target_family": family, "sources_run": list(dict.fromkeys([*prev_sources, *src_list])), "dryad_status": dryad_status, "counts": counts, "files": files_meta}
     _atomic_save(genomics_dir, "public_packera_sources_manifest.json", json.dumps(summary, indent=2).encode("utf-8"), force=True)
     return summary
 
@@ -471,12 +463,14 @@ def download_public_packera_sequences(
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Download flat public Packera reference sequences into data/genomics/.")
     parser.add_argument("--genomics-dir", type=Path, default=Path(__file__).resolve().parents[2] / "data" / "genomics")
-    parser.add_argument("--sources", nargs="+", default=["ncbi", "dryad", "bold"], help="Sources to query (ncbi, dryad, bold)")
+    parser.add_argument("--sources", nargs="+", default=["ncbi", "dryad", "bold"], help="Sources to query (ncbi, dryad, bold, paraloss)")
+    parser.add_argument("--genus", default=_resolve_target_meta("resolve_target_genus", "TARGET_GENUS", "Packera"), help="Target genus for dynamic ENA taxon-tree SRA discovery")
+    parser.add_argument("--family", default="Asteraceae", help="Target botanical family for Compositae-ParaLoss-1272 locus weighting")
     parser.add_argument("--dryad-zip-dir", type=Path, default=None, help="Directory with manually downloaded Dryad .zip archives")
     parser.add_argument("--skim-sra-accessions", nargs="+", default=None, help="SRA/ENA run accessions to stream-skim via skim_offtarget_organellar")
     parser.add_argument("--force", action="store_true", default=False, help="Overwrite existing non-empty public_packera_* files")
     args = parser.parse_args(list(argv) if argv is not None else None)
-    summary = download_public_packera_sequences(args.genomics_dir, sources=args.sources, dryad_zip_dir=args.dryad_zip_dir, skim_sra_accessions=args.skim_sra_accessions, force=bool(args.force))
+    summary = download_public_packera_sequences(args.genomics_dir, sources=args.sources, dryad_zip_dir=args.dryad_zip_dir, skim_sra_accessions=args.skim_sra_accessions, force=bool(args.force), target_genus=args.genus, target_family=args.family)
     print(f"[INFO] Public Packera download summary: {json.dumps({'dryad_status': summary.get('dryad_status'), 'counts': summary.get('counts')})}")
     return 0
 

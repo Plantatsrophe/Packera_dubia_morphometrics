@@ -1,7 +1,7 @@
 # Environmental, Pedological, and Geospatial Data Sources (`UNC-BOT-SOP-2026-04-REV5`)
 
-**Provisioning Script:** `scripts/data_prep/download_environmental_layers.py`
-**Extraction & Harmonization Modules:** `scripts/analysis/edaphic_fine_grain_utils.R`, `scripts/core/epa_ecoregions.py`, and `scripts/core/usda_plants_ranges.py`
+**Provisioning Scripts:** `scripts/data_prep/download_environmental_layers.py` and `scripts/data_prep/download_geochem_wetland_layers.py`
+**Extraction & Harmonization Modules:** `scripts/analysis/edaphic_fine_grain_utils.R` and `scripts/analysis/edaphic_geochem_wetland_utils.R` alongside `scripts/core/epa_ecoregions.py` and `scripts/core/usda_plants_ranges.py`
 
 ## 1. Why Rhizosphere Scale and Uncertainty Gates Matter in *Packera*
 
@@ -97,7 +97,22 @@ Every download streams into a temporary `.part` file, validates GDAL/GeoPackage 
 ### 4.7 US EPA Level III Ecoregions and USDA PLANTS County Distributions
 
 * **US EPA Level III Ecoregions (`scripts/core/epa_ecoregions.py`):** Omernik, J. M., and G. E. Griffith. 2014. Ecoregions of the conterminous United States: evolution of a hierarchical spatial framework. *Environmental Management* 54: 1249 to 1266, `doi: 10.1007/s00267-014-0364-1`. Cached in `data/environmental/epa_ecoregions_l3/`, assigning `regional_group` via exact point-in-polygon intersection for georeferenced sheets or $\ge 95\%$ single-ecoregion county-area dominance for un-georeferenced historical vouchers.
-* **USDA PLANTS County Ranges (`scripts/core/usda_plants_ranges.py`):** USDA-NRCS PLANTS Database (`https://plants.usda.gov`, `CC0 1.0`). Resolves accepted symbols and evaluates each georeferenced collection against county distributions with a `50 km` county-border buffer (`usda_county_status` in `{'in_range', 'buffered_50km', 'out_of_range', 'state_only_match', 'unverified'}`). By default (`strict_usda_range_filter: false`), out-of-range vouchers remain in the cohort as high-value curatorial audit candidates rather than being silently dropped, as novel range extensions and misfiled folder sheets both appear outside historical county maps.
+* **USDA PLANTS County Ranges & NatureServe Fallback (`scripts/core/usda_plants_ranges.py`):** USDA-NRCS PLANTS Database (`https://plants.usda.gov`, `CC0 1.0`) paired with NatureServe Explorer subnational `S`-ranks (`natureserve_subnational_ranges`). Resolves accepted symbols via `resolve_target_genus()`, evaluates each georeferenced collection against county distributions with a `50 km` county-border buffer (`usda_county_status` in `{'in_range', 'buffered_50km', 'out_of_range', 'state_only_match', 'unverified'}`), and falls back automatically to SQLite `natureserve_subnational_ranges` for post-2000 segregates or Canadian provinces (`natureserve_state_in_range`, `natureserve_exotic_or_waif`, `out_of_range`). By default (`strict_usda_range_filter: false`), out-of-range vouchers remain in the cohort as high-value curatorial audit candidates rather than being silently dropped, as novel range extensions and misfiled folder sheets both appear outside historical county maps.
+
+### 4.8 USGS `DS-801` Soil Geochemistry (`Ca:Mg`, Ultramafic Ni/Cr, and Carbonate C)
+
+* **Provider & Citation:** Smith, D. B., W. F. Cannon, L. G. Woodruff, F. Solano, J. E. Kilburn, and D. L. Fey. 2013. Geochemical and mineralogical data for soils of the conterminous United States. U.S. Geological Survey Data Series 801 (`USGS DS-801`, `https://pubs.usgs.gov/ds/801/`).
+* **Provisioning & Staging (`scripts/data_prep/download_geochem_wetland_layers.py`):** Stages `data/environmental/usgs_ds801_soils.csv` and runs Inverse Distance Weighting (`compute_idw_soil_geochem()`) from A-horizon/topsoil geochemistry stations onto voucher coordinates before Step 05 ingestion.
+* **Derived Geochemical Predictors (`environmental_cache` and `edaphic_geochem_wetland_utils.R`):**
+  * `soil_ca_mg_molar_ratio`: Topsoil molar calcium-to-magnesium ratio separating ultramafic serpentine barrens (`Ca:Mg < 0.7`, e.g., *Packera serpenticola*) from calcareous dolomitic glades (`Ca:Mg > 2.5`) and non-ultramafic siliceous rocks.
+  * `soil_ultramafic_ni_cr_index`: Composite normalized A-horizon nickel and chromium enrichment score flagging ultramafic parent material independently of mapped lithology polygons.
+  * `soil_carbonate_c_pct`: Topsoil inorganic carbonate carbon percentage separating calcareous cedar/limestone barrens from acidic granitic flatrocks.
+
+### 4.9 USFWS National Wetlands Inventory (NWI) & USACE National Wetland Plant List (NWPL)
+
+* **Providers & Citations:** U.S. Fish and Wildlife Service National Wetlands Inventory (`NWI` ArcGIS FeatureServer, `https://www.fws.gov/program/national-wetlands-inventory`) and U.S. Army Corps of Engineers National Wetland Plant List (`NWPL`; Lichvar et al. 2016).
+* **Provisioning & Caching (`download_geochem_wetland_layers.py`):** Queries NWI wetland polygons by coordinate (`query_nwi_point_or_cache()` backed by `data/environmental/nwi_point_cache.jsonl`) to populate `is_nwi_wetland`, `nwi_wetland_system`, and `nwi_wetland_dist_m` inside `environmental_cache`, while `fetch_nwpl_wetland_ratings()` caches `data/environmental/usace_nwpl_ratings.csv` and updates `taxon_backbone_profiles` with regional indicator statuses (`nwpl_indicator_code`: `OBL`, `FACW`, `FAC`, `FACU`, `UPL`) and numeric moisture fidelity scores (`nwpl_wetland_score`, `1.0` to `5.0`).
+* **Step 07 Hydro-Edaphic Concordance and Composite ENM Routing (`edaphic_geochem_wetland_utils.R`):** `enrich_geochem_wetland_predictors()` merges USGS `DS-801` and NWI/NWPL covariates into Step 05 dataframes and computes `ultramafic_calcareous_gradient` paired with `wetland_seepage_index`. Only those two mechanistic composites enter continuous `X_env` and `PCA-env` under cross-block `VIF <= 5.0` screening and anchor-count EPV budgeting (`floor(N_anchors / 5)`), whereas raw `DS-801` and `NWI`/`NWPL` fields remain in SQLite strictly for Fisher contingency tables and `evaluate_step07_hydro_edaphic_and_basionym_guards()` (`hydro_edaphic_niche_regime` alongside `wetland_fidelity_concordance`).
 
 ## 5. Literature Cited
 
@@ -106,7 +121,9 @@ Every download streams into a temporary `.part` file, validates GDAL/GeoPackage 
 3. Egozcue, J. J., V. Pawlowsky-Glahn, G. Mateu-Figueras, and C. Barceló-Vidal. 2003. Isometric logratio transformations for compositional data analysis. *Mathematical Geology* 35: 279 to 300, `doi: 10.1023/A:1023818214614`.
 4. Fick, S. E., and R. J. Hijmans. 2017. WorldClim 2: new 1-km spatial resolution climate surfaces for global land areas. *International Journal of Climatology* 37: 4302 to 4315, `doi: 10.1002/joc.5086`.
 5. Horton, J. D., C. A. San Juan, and D. B. Stoeser. 2017. The State Geologic Map Compilation (`SGMC`) geodatabase of the conterminous United States (ver. 1.1). U.S. Geological Survey Data Series 1052, `doi: 10.5066/F7WH2N65`.
-6. McCune, B., and D. Keon. 2002. Equations for potential annual direct incident radiation and heat load. *Journal of Vegetation Science* 13: 603 to 606, `doi: 10.1111/j.1654-1103.2002.tb02087.x`.
-7. Nauman, T. W., et al. 2024. Soil Landscapes of the United States 100-meter (`SOLUS100`) soil property maps. Ag Data Commons, USDA-NRCS, `doi: 10.15482/USDA.ADC/25033856`.
-8. Omernik, J. M., and G. E. Griffith. 2014. Ecoregions of the conterminous United States: evolution of a hierarchical spatial framework. *Environmental Management* 54: 1249 to 1266, `doi: 10.1007/s00267-014-0364-1`.
-9. Turland, N. J., et al. 2018. *International Code of Nomenclature for algae, fungi, and plants (Shenzhen Code)*. Regnum Vegetabile 159. Koeltz Botanical Books, Glashütten, `doi: 10.12705/Code.2018`.
+6. Lichvar, R. W., D. L. Banks, W. N. Kirchner, and N. C. Melvin. 2016. The National Wetland Plant List: 2016 wetland ratings. *Phytoneuron* 2016-30: 1 to 17.
+7. McCune, B., and D. Keon. 2002. Equations for potential annual direct incident radiation and heat load. *Journal of Vegetation Science* 13: 603 to 606, `doi: 10.1111/j.1654-1103.2002.tb02087.x`.
+8. Nauman, T. W., et al. 2024. Soil Landscapes of the United States 100-meter (`SOLUS100`) soil property maps. Ag Data Commons, USDA-NRCS, `doi: 10.15482/USDA.ADC/25033856`.
+9. Omernik, J. M., and G. E. Griffith. 2014. Ecoregions of the conterminous United States: evolution of a hierarchical spatial framework. *Environmental Management* 54: 1249 to 1266, `doi: 10.1007/s00267-014-0364-1`.
+10. Smith, D. B., W. F. Cannon, L. G. Woodruff, F. Solano, J. E. Kilburn, and D. L. Fey. 2013. Geochemical and mineralogical data for soils of the conterminous United States. U.S. Geological Survey Data Series 801, `doi: 10.3133/ds801`.
+11. Turland, N. J., et al. 2018. *International Code of Nomenclature for algae, fungi, and plants (Shenzhen Code)*. Regnum Vegetabile 159. Koeltz Botanical Books, Glashütten, `doi: 10.12705/Code.2018`.

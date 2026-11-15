@@ -311,9 +311,10 @@ class TestCodeHygiene(unittest.TestCase):
         )
 
     def test_new_public_genomics_modules_respect_500_line_ceiling(self):
-        """Verify public Packera genomics, cytology, and monograph modules stay within line ceilings."""
+        """Verify public Packera genomics, cytology, taxonomy, geochemistry, and monograph modules stay within line ceilings."""
         bounded_paths = (
             PROJECT_ROOT / "scripts" / "data_prep" / "download_public_packera_sequences.py",
+            PROJECT_ROOT / "scripts" / "data_prep" / "ena_paraloss_discovery.py",
             PROJECT_ROOT / "scripts" / "analysis" / "step06_public_backbone.R",
             PROJECT_ROOT / "scripts" / "data_prep" / "skim_offtarget_organellar.py",
             PROJECT_ROOT / "scripts" / "analysis" / "step07_genomic_propagation.R",
@@ -323,11 +324,21 @@ class TestCodeHygiene(unittest.TestCase):
             PROJECT_ROOT / "scripts" / "data_prep" / "download_public_cytology.py",
             PROJECT_ROOT / "scripts" / "analysis" / "step07_cytology_integration.R",
             PROJECT_ROOT / "scripts" / "tests" / "test_public_cytology_integration.py",
+            PROJECT_ROOT / "scripts" / "data_prep" / "download_taxonomic_backbone.py",
+            PROJECT_ROOT / "scripts" / "data_prep" / "download_geochem_wetland_layers.py",
+            PROJECT_ROOT / "scripts" / "analysis" / "edaphic_geochem_wetland_utils.R",
+            PROJECT_ROOT / "scripts" / "tests" / "test_external_data_sources.py",
         )
         strict_ceilings = {
+            PROJECT_ROOT / "scripts" / "data_prep" / "download_public_packera_sequences.py": 500,
+            PROJECT_ROOT / "scripts" / "data_prep" / "ena_paraloss_discovery.py": 300,
             PROJECT_ROOT / "scripts" / "data_prep" / "download_public_cytology.py": 450,
             PROJECT_ROOT / "scripts" / "analysis" / "step07_cytology_integration.R": 380,
             PROJECT_ROOT / "scripts" / "tests" / "test_public_cytology_integration.py": 380,
+            PROJECT_ROOT / "scripts" / "data_prep" / "download_taxonomic_backbone.py": 450,
+            PROJECT_ROOT / "scripts" / "data_prep" / "download_geochem_wetland_layers.py": 450,
+            PROJECT_ROOT / "scripts" / "analysis" / "edaphic_geochem_wetland_utils.R": 320,
+            PROJECT_ROOT / "scripts" / "tests" / "test_external_data_sources.py": 420,
         }
         for mod_path in bounded_paths:
             self.assertTrue(mod_path.exists(), f"Missing expected bounded module: {mod_path}")
@@ -351,6 +362,14 @@ class TestCodeHygiene(unittest.TestCase):
         self.assertTrue(cytology_dir.is_dir(), f"Missing expected cytology directory: {cytology_dir}")
         subdirs = [p.name for p in cytology_dir.iterdir() if p.is_dir()]
         self.assertEqual(subdirs, [], f"data/cytology/ must remain flat with zero subdirectories: {subdirs}")
+
+    def test_data_taxonomy_directory_stays_flat(self):
+        """Verify `data/taxonomy/` contains zero nested subdirectories when present."""
+        taxonomy_dir = PROJECT_ROOT / "data" / "taxonomy"
+        if taxonomy_dir.exists():
+            self.assertTrue(taxonomy_dir.is_dir(), f"Expected directory at {taxonomy_dir}")
+            subdirs = [p.name for p in taxonomy_dir.iterdir() if p.is_dir()]
+            self.assertEqual(subdirs, [], f"data/taxonomy/ must remain flat with zero subdirectories: {subdirs}")
 
     def test_no_hardcoded_workstation_legacy_repo_path(self):
         """Scan all active .py, .R, and .sh files and assert zero hardcoded workstation legacy repo paths."""

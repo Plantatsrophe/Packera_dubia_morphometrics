@@ -1,13 +1,13 @@
-# Relational Schema and Output Data Dictionary (`PLANTMATICS_SCHEMA_USER_VERSION = 20261126`)
+# Relational Schema and Output Data Dictionary (`PLANTMATICS_SCHEMA_USER_VERSION = 20261127`)
 
 **Standard Operating Procedure:** [`docs/TAXONOMIC_SOP.md`](TAXONOMIC_SOP.md) (`UNC-BOT-SOP-2026-04-REV5`)
 **Authoritative Schema Definitions:** `scripts/core/db_schema.py` and `scripts/core/db_utils.R`
 
 ## 1. Architectural Conventions and Key Invariants
 
-Herbarium sheets frequently carry multiple pressed plants (`ramets`) mounted under a single barcode, whereas repeated exploratory runs over different species subsets or authority filters must never overwrite raw computer vision extractions. I therefore split pipeline storage across two transactional tiers inside `data/plantmatics.sqlite` (Write-Ahead Logging mode, `PRAGMA user_version = 20261126`, supporting automatic zero-loss atomic rename migration from legacy `data/packera_pipeline.sqlite` with `-wal` and `-shm` sidecars) paired with atomic CSV snapshots on disk. Environment overrides use `PLANTMATICS_DB_PATH`, `PLANTMATICS_RUN_DIR`, and `PLANTMATICS_GENOMICS_DIR` while preserving `PACKERA_*` fallbacks.
+Herbarium sheets frequently carry multiple pressed plants (`ramets`) mounted under a single barcode, whereas repeated exploratory runs over different species subsets or authority filters must never overwrite raw computer vision extractions. I therefore split pipeline storage across two transactional tiers inside `data/plantmatics.sqlite` (Write-Ahead Logging mode, `PRAGMA user_version = 20261127`, supporting automatic zero-loss atomic rename migration from legacy `data/packera_pipeline.sqlite` with `-wal` and `-shm` sidecars) paired with atomic CSV snapshots on disk. Environment overrides use `PLANTMATICS_DB_PATH`, `PLANTMATICS_RUN_DIR`, `PLANTMATICS_GENOMICS_DIR`, `PLANTMATICS_CYTOLOGY_DIR`, and `PLANTMATICS_TAXONOMY_DIR` while preserving `PACKERA_*` fallbacks.
 
-Tier A (`data/`) stores invariant specimen metadata, full-sheet WebP scans, segmented leaf masks, 120-vertex contours, $32 \times 360$ Euler Characteristic Transform (ECT) matrices, spatially cached environmental extractions, staged genomic sample metadata paired with `HDplot` locus retention and inferred cytotype records (`genomic_samples`), and curated public plus voucher-linked cytological registries (`cytological_records` and `taxon_cytology_summary`). Tier B (`runs/<RUN_ID>/` and `runs/latest`) isolates run-specific cohort memberships, Elliptic Fourier harmonics, canonical Gaussian Mixture Models, Ledoit-Wolf shrinkage discriminant scores, Spatial Random Forest posteriors, Step 06 phylogenomic and coalescent delimitation metrics (`genetic_lineage_assignments`), and five-stage curatorial triage calls.
+Tier A (`data/`) stores invariant specimen metadata, full-sheet WebP scans, segmented leaf masks, 120-vertex contours, $32 \times 360$ Euler Characteristic Transform (ECT) matrices, spatially cached environmental plus USGS `DS-801` geochemical and USFWS NWI wetland extractions, flat `data/taxonomy/` CoL WCVP `2232` alongside BHL API v3 and NatureServe Explorer taxonomic backbones (`taxon_backbone_profiles` and `natureserve_subnational_ranges`), staged genomic sample metadata paired with `HDplot`/`Compositae-ParaLoss-1272` locus weights and inferred cytotype records (`genomic_samples`), plus curated public and voucher-linked cytological registries (`cytological_records` and `taxon_cytology_summary`). Tier B (`runs/<RUN_ID>/` and `runs/latest`) isolates run-specific cohort memberships, Elliptic Fourier harmonics, canonical Gaussian Mixture Models, Ledoit-Wolf shrinkage discriminant scores, Spatial Random Forest posteriors, Step 06 phylogenomic and coalescent delimitation metrics (`genetic_lineage_assignments`), and five-stage curatorial triage calls.
 
 Three cross-language invariants govern every column documented below:
 
@@ -176,7 +176,7 @@ Three cross-language invariants govern every column documented below:
 ### 2.7 `environmental_cache` and `environmental_rtree` (Tier A Spatial Extraction Cache)
 
 **Primary Key:** `lat_lon_key` (`%.5f_%.5f` rounded WGS84 coordinate pair, $\sim 1.1\text{ m}$ precision) paired with virtual R*Tree index `environmental_rtree(id, min_lon, max_lon, min_lat, max_lat)` maintained automatically by `INSERT`, `UPDATE`, and `DELETE` SQLite triggers.
-**Populated By:** `scripts/analysis/edaphic_fine_grain_utils.R` and `scripts/analysis/05_multimodal_spatial_rf.R`
+**Populated By:** `scripts/analysis/edaphic_fine_grain_utils.R` alongside `scripts/data_prep/download_geochem_wetland_layers.py`, `scripts/analysis/edaphic_geochem_wetland_utils.R`, and `scripts/analysis/05_multimodal_spatial_rf.R`
 
 | Column Group | Column Names | SQLite Type | Units / Domain | Description |
 | :--- | :--- | :---: | :--- | :--- |
@@ -190,6 +190,8 @@ Three cross-language invariants govern every column documented below:
 | **3DEP Micro-Topography (`30 m`)** | `elevation_m`, `topo_slope_deg`, `topo_tpi_30m`, `topo_hli_30m`, `topo_twi_30m` | `REAL` | `m`, `deg`, `m`, $[0, 1]$, $\ln(a/\tan\beta)$ | Elevation, slope, Topographic Position Index (`TPI`), McCune-Keon Heat Load Index (`HLI`), and D8 Topographic Wetness Index (`TWI`). |
 | **USGS SGMC Bedrock** | `sgmc_lithology_class`, `is_azonal_lithology` | `TEXT` / `INTEGER` | 6-class enum / `{0, 1}` | Standardized bedrock class (`Ultramafic_Serpentine`, `Mafic_Igneous_Metamorphic`, `Carbonate_Calcareous`, `Felsic_Granitic_Gneiss`, `Siliciclastic_Consolidated`, `Unconsolidated_Sedimentary`) and azonal indicator (`1` for ultramafic, mafic, or carbonate). |
 | **WorldClim v2.1 (`1 km`)** | `bio1_temp_mean` through `bio19_precip_coldest_qtr` | `REAL` | $^\circ\text{C}$, `%`, `mm` | All 19 standard bioclimatic temperature and precipitation rasters (`bio1` to `bio19`) gated at `<= 10000 m`. |
+| **USGS `DS-801` Soil Geochemistry** | `soil_ca_mg_molar_ratio`, `soil_ultramafic_ni_cr_index`, `soil_carbonate_c_pct` | `REAL` | Molar ratio / Index / `%` | Topsoil A-horizon IDW geochemistry distinguishing ultramafic serpentine barrens (`Ca:Mg < 0.7`, high `Ni`/`Cr`) from calcareous dolomitic glades (`Ca:Mg > 2.5`, elevated carbonate carbon). |
+| **USFWS NWI Wetlands** | `is_nwi_wetland`, `nwi_wetland_system`, `nwi_wetland_dist_m` | `INTEGER` / `TEXT` / `REAL` | `{0, 1}` / System / `m` | National Wetlands Inventory intersection indicator, Cowardin wetland system class (`Palustrine`, `Riverine`, `Upland`), and Euclidean distance (`m`) to nearest mapped wetland polygon. |
 | **Coarse Fallbacks** | `soil_ph`, `soil_cec`, `soil_sand`, `soil_clay`, `soil_silt`, `soil_cfvo`, `soil_bulk_density`, `soil_ph_soilgrids` through `soil_bulk_density_soilgrids` | `REAL` | Standard pedological units | Coarse SoilGrids and legacy compatibility columns retained for non-CONUS occurrences outside SSURGO and SOLUS100 coverage. |
 
 ### 2.8 `genomic_samples` (Tier A Staged Sequencing Metadata & Polyploid QC Registry)
@@ -236,6 +238,32 @@ Three cross-language invariants govern every column documented below:
 | `reported_cytotypes`, `is_multi_cytotype_taxon` | `TEXT` / `INTEGER` | Set / `{0, 1}` | Sorted comma-separated cytotype series (such as `2x, 4x`) and flag equal to `1` when two or more ploidy levels or dysploid base numbers occur. |
 | `has_dysploid_series`, `has_odd_polyploid_or_apomixis` | `INTEGER` | `{0, 1}` | Flags set to `1` when multiple base $x$ numbers (`x = 22` vs `x = 23`) or triploid/odd-ploid/apomictic records appear within the taxon. |
 | `mean_2c_pg`, `breeding_system_summary` | `REAL` / `TEXT` | `pg` / Summary | Arithmetic mean `2C` genome size in picograms and concatenated breeding-system annotations. |
+
+### 2.11 `taxon_backbone_profiles` (Tier A Taxonomic Backbone, Protologue, and NWPL Wetland Registry)
+
+**Primary Key:** `species_standardized` | **Populated By:** `scripts/data_prep/download_taxonomic_backbone.py` and `scripts/data_prep/download_geochem_wetland_layers.py`
+**Companion Exports:** `data/taxonomy/public_taxon_backbone_profiles.csv` and `data/taxonomy/public_taxonomic_backbone_manifest.json`
+
+| Column Group | Column Names | SQLite Type | Units / Domain | Description |
+| :--- | :--- | :---: | :--- | :--- |
+| **Identity & Nomenclature** | `species_standardized`, `target_genus`, `accepted_scientific_name`, `accepted_authorship` | `TEXT` | Botanical binomial | Standardized binomial primary key paired with configured `TaxaConfig.target_genus`, accepted CoL WCVP `2232` name, and full authorship string. |
+| **Basionym & Synonymy** | `basionym_name`, `basionym_authorship`, `homotypic_synonyms_json`, `heterotypic_synonyms_json` | `TEXT` | Binomial / JSON array | Protologue basionym plus authorship paired with JSON lists partitioning homotypic (nomenclatural) versus heterotypic (taxonomic) synonyms. |
+| **Hybrid Formula** | `is_hybrid_taxon`, `hybrid_formula` | `INTEGER` / `TEXT` | `{0, 1}` / Formula | Named nothotaxon flag alongside parsed parent-cross hybrid formula when documented in CoL WCVP `2232`. |
+| **Protologue & Type** | `publication_citation`, `publication_year`, `protologue_url`, `locus_classicus_text` | `TEXT` / `INTEGER` | Citation / Year / URL | Protologue bibliography, priority publication year, Biodiversity Heritage Library API v3 deep-link URL, and transcribed *locus classicus* string. |
+| **Distribution & Status** | `tdwg_native_codes_json`, `tdwg_introduced_codes_json`, `natureserve_element_id`, `natureserve_global_rank` | `TEXT` | JSON / Element / `G`-rank | TDWG Level-3 native alongside introduced country/state codes plus NatureServe Explorer global conservation rank (`G1` through `G5`). |
+| **Wetland Indicator & Audit** | `nwpl_indicator_code`, `nwpl_wetland_score`, `backbone_source`, `updated_at` | `TEXT` / `REAL` | NWPL code / `1..5` / ISO | USACE National Wetland Plant List indicator (`OBL`, `FACW`, `FAC`, `FACU`, `UPL`) paired with numeric wetland fidelity score, provenance string, and UTC sync timestamp. |
+
+### 2.12 `natureserve_subnational_ranges` (Tier A NatureServe State & Province Range Table)
+
+**Primary Key:** `(species_standardized, country_code, subnation_code)` | **Populated By:** `scripts/data_prep/download_taxonomic_backbone.py`
+**Companion Export:** `data/taxonomy/public_natureserve_subnational_ranges.csv`
+
+| Column | SQLite Type | Units / Domain | Description |
+| :--- | :---: | :--- | :--- |
+| `species_standardized` | `TEXT` | Composite PK | Accepted standardized species binomial matching `taxon_backbone_profiles`. |
+| `country_code`, `subnation_code` | `TEXT` | ISO-2 / State-Prov | Two-letter country (`US` / `CA`) paired with state or Canadian province postal code (`NC`, `VA`, `ON`, `QC`). |
+| `s_rank` | `TEXT` | NatureServe `S`-rank | Subnational conservation rank (`S1` through `S5`, `SNA`, `SH`, `SX`, or `SNR`). |
+| `is_native`, `is_exotic`, `is_historical_or_extirpated` | `INTEGER` | `{0, 1}` | Subnational native residency flag paired with introduced/waif flag (`natureserve_exotic_or_waif`) and historical/extirpated flag queried by `filter_vouchers_by_usda_county_range()`. |
 
 ## 3. Tier B Run-Scoped SQLite Tables (`runs/<RUN_ID>/` & SQLite)
 
@@ -314,7 +342,7 @@ Three cross-language invariants govern every column documented below:
 
 ### 3.6 `curation_triage` (Step 07 Five-Stage Integrative Synthesis)
 
-**Primary Key:** `(run_id, catalogNumber, plant_individual_id)` | **Populated By:** `scripts/analysis/07_triage_dashboard_synthesis.R` and `scripts/analysis/step07_genomic_propagation.R`
+**Primary Key:** `(run_id, catalogNumber, plant_individual_id)` | **Populated By:** `scripts/analysis/07_triage_dashboard_synthesis.R`, `scripts/analysis/step07_genomic_propagation.R`, and `scripts/analysis/edaphic_geochem_wetland_utils.R`
 
 | Column | SQLite Type | Units / Domain | Description |
 | :--- | :---: | :--- | :--- |
@@ -329,7 +357,7 @@ Three cross-language invariants govern every column documented below:
 | `taxonomic_treatment_subtype` | `TEXT` | Canonical 8-state enum | Five-stage biological determination: `Confirmed_Species`, `Confirmed_Type_Control`, `Type_Synonymy_Candidate`, `Misidentification_Reassign`, `Hybrid_Introgressant`, `Putative_Cryptic_Species`, `Subspecies_Ecotype`, or `Ecophenotypic_Plasticity`. |
 | `cryptic_cluster_cohesion_pass` | `INTEGER` | `{0, 1}` | Equals `1` only when a non-core morphocluster ($g_{\text{cl}} > 1$) satisfies exsiccatae-deduplicated gathering cohesion ($\ge 5$ gatherings across $\ge 3$ 10 km spatial demes and $\ge 2$ collectors or herbaria), exact `open_set_df` congener rejection, multimodal barrier congruence, and `cryptic_non_clinal_pass == 1` (gated by `coalescent_gdi >= 0.20` or `cluster_propagated_gdi >= 0.20` when sequenced or cluster-governed). |
 | `cryptic_non_clinal_pass` | `INTEGER` | `{0, 1}` | Equals `1` when a secondary morphocluster is maintained across parapatric contact ($\le 50\text{ km}$), Hopkins reproductive allochrony, or azonal lithology rather than a smooth allopatric geographic cline ($R^2 < 0.60$). |
-| `resurrection_basionym` | `TEXT` | Basionym / `NULL` | Unstandardized heterotypic nomenclatural basionym matched within $\chi^2_{0.95, p}$ for Stage 3 `Taxonomic_Resurrection_Candidate` lineages (`NULL` for unnamed *de novo* cryptic candidates and all other stages). |
+| `resurrection_basionym` | `TEXT` | Basionym / `NULL` | Unstandardized heterotypic nomenclatural basionym matched within $\chi^2_{0.95, p}$ for Stage 3 `Taxonomic_Resurrection_Candidate` lineages (`NULL` for unnamed *de novo* cryptic candidates, cleared automatically to `NA`/`NULL` by `evaluate_step07_hydro_edaphic_and_basionym_guards()` whenever `basionym_synonymy_type == "Homotypic"`). |
 | `hybrid_zone_cohesion_pass` | `INTEGER` | `{0, 1}` | Equals `1` only when a multi-species specimen satisfies all five Conservative Contact-Zone Hybrid Swarm Gates (local two-parent syntopy within `15 km`, co-flowering within `21 d`, pairwise Mahalanobis chord intermediacy $t_{AB} \in [0.22, 0.78]$ with bounded $d^2_{\perp}$, multi-organ corroboration, and $\ge 2$ admixed vouchers in the local contact zone; always `0` in single-taxon `--intraspecific-mode` unless directly supported by F1 genomic $(h, Q_{12})$). |
 | `hybrid_parent_1`, `hybrid_parent_2` | `TEXT` | *Packera* binomial / `NULL` | Recorded maternal/baseline parent (`given_sp`) and verified sympatric congener parent for confirmed `Hybrid_Introgressant` swarm vouchers (`NULL` for all non-hybrid calls and in single-taxon `--intraspecific-mode`). |
 | `synthesis_triage_priority` | `TEXT` | `{'CRITICAL','HIGH','MEDIUM','LOW','RESOLVED'}` | Physical herbarium loan and annotation priority (`CRITICAL` for cohesive cryptic candidates and type synonymy conflicts; `HIGH` for confident misidentifications and hybrids; `RESOLVED` for concordant anchors). |
@@ -347,6 +375,9 @@ Three cross-language invariants govern every column documented below:
 | `taxon_reported_cytotypes` | `TEXT` | Series string or `NULL` | Comma-separated cytotype series documented for the sheet's standardized taxon across curated cytological summaries and typed cohort vouchers. |
 | `is_multi_cytotype_taxon` | `INTEGER` | `{0, 1}` or `NULL` | Equals `1` when the taxon exhibits multiple ploidy levels or dysploid base numbers so Step 07 gates cross-cytotype deme propagation. |
 | `cytotype_reproductive_barrier_pass` | `INTEGER` | `{0, 1}` or `NULL` | Equals `1` when a secondary GMM cluster carries at least two independent typed anchors that hold disjoint ploidy or dysploid base $x$ relative to the primary type-anchored cluster. |
+| `hydro_edaphic_niche_regime` | `TEXT` | Regime enum or `NULL` | Step 05/07 hydro-edaphic habitat classification derived from USGS `DS-801` Ca:Mg/Ni-Cr/carbonate C chemistry and USFWS NWI wetland state (e.g., `Ultramafic_Serpentine_Barren`, `Calcareous_Glade`, `Palustrine_Wetland`). |
+| `wetland_fidelity_concordance` | `REAL` | Concordance $[0, 1]$ | Quantitative agreement between site NWI wetland occupancy (`is_nwi_wetland` / distance) and taxon USACE NWPL wetland fidelity score (`nwpl_wetland_score`). |
+| `basionym_synonymy_type` | `TEXT` | Synonymy class or `NULL` | Compares candidate `resurrection_basionym` against `taxon_backbone_profiles` homotypic/heterotypic JSON arrays (`Homotypic` vs `Heterotypic`); clears homotypic combinations out of `resurrection_basionym`. |
 | `is_completed_voucher` | `INTEGER` | `{0, 1}` | Equals `1` when the individual completed integrative evaluation without upstream QC rejection. |
 
 ### 3.7 `taxon_complexes` (Step 07 Unsupervised Species-Complex Delimitation)
@@ -379,7 +410,7 @@ Three cross-language invariants govern every column documented below:
 
 ### 4.1 `v_integrative_triage_master` (Composite Seven-Stage SQL View)
 
-Defined identically in `scripts/core/db_schema.py` and `scripts/core/db_utils.R`, `v_integrative_triage_master` selects from `run_active_cohort` left-joined onto `vouchers`, `plant_individuals`, `voucher_reproductive_phenology` (applying `plant_individual_id = 0` sheet-level fallback `vrp0` only when an individual row is absent), `otu_morphometrics`, `spatial_rf_predictions`, `environmental_cache` (via `lat_lon_key`), a `ROW_NUMBER()`-deduplicated join of `genetic_lineage_assignments` with `genomic_samples` (ranked by `G1_Direct_Voucher` > `G2_Population_Voucher_Proxy` > QC pass > HQ reads > posterior), and `curation_triage` on `(run_id, catalogNumber, plant_individual_id)`, and the view exposes `is_promoted_bronze`, `ecotype_regime`, `lithic_outcrop_index`, `summer_moisture_deficit_idx`, `maritime_continentality_idx`, `n_genomic_samples_linked`, `inferred_cytotype`, `hybrid_generation_class`, `coalescent_gdi`, `public_plastome_match`, `public_its_match`, `waxy_lineage_match`, `public_backbone_clade`, `public_phytop_ils_index`, `public_phytop_ih_index`, `genomic_propagation_tier`, `tier0_calibrated_taxon`, `tier0_calibrated_prob`, `tier0_abstention_flag`, `deme_mahal_d2`, `cluster_propagated_gdi`, `cytology_linkage_tier`, `voucher_sporophytic_2n`, `voucher_ploidy_level`, `taxon_reported_cytotypes`, `is_multi_cytotype_taxon`, `cytotype_reproductive_barrier_pass`, `morph_discordance_reason`, and `conflict_discordance_notes`.
+Defined identically in `scripts/core/db_schema.py` and `scripts/core/db_utils.R`, `v_integrative_triage_master` selects from `run_active_cohort` left-joined onto `vouchers`, `plant_individuals`, `voucher_reproductive_phenology` (applying `plant_individual_id = 0` sheet-level fallback `vrp0` only when an individual row is absent), `otu_morphometrics`, `spatial_rf_predictions`, `environmental_cache` (via `lat_lon_key`), `taxon_backbone_profiles` (exposing `backbone_basionym_name`, `protologue_url`, `natureserve_global_rank`, `nwpl_indicator_code`, and `nwpl_wetland_score`), a `ROW_NUMBER()`-deduplicated join of `genetic_lineage_assignments` with `genomic_samples` (ranked by `G1_Direct_Voucher` > `G2_Population_Voucher_Proxy` > QC pass > HQ reads > posterior), and `curation_triage` on `(run_id, catalogNumber, plant_individual_id)`, and the view exposes `is_promoted_bronze`, `ecotype_regime`, `lithic_outcrop_index`, `summer_moisture_deficit_idx`, `maritime_continentality_idx`, `soil_ca_mg_molar_ratio`, `soil_ultramafic_ni_cr_index`, `soil_carbonate_c_pct`, `is_nwi_wetland`, `nwi_wetland_system`, `nwi_wetland_dist_m`, `n_genomic_samples_linked`, `inferred_cytotype`, `hybrid_generation_class`, `coalescent_gdi`, `public_plastome_match`, `public_its_match`, `waxy_lineage_match`, `public_backbone_clade`, `public_phytop_ils_index`, `public_phytop_ih_index`, `genomic_propagation_tier`, `tier0_calibrated_taxon`, `tier0_calibrated_prob`, `tier0_abstention_flag`, `deme_mahal_d2`, `cluster_propagated_gdi`, `cytology_linkage_tier`, `voucher_sporophytic_2n`, `voucher_ploidy_level`, `taxon_reported_cytotypes`, `is_multi_cytotype_taxon`, `cytotype_reproductive_barrier_pass`, `hydro_edaphic_niche_regime`, `wetland_fidelity_concordance`, `basionym_synonymy_type`, `morph_discordance_reason`, and `conflict_discordance_notes`.
 
 Three explicit precedence rules prevent stale values during partial re-runs (`--start-step 3` or `--start-step 5`):
 1. `run_active_cohort` overrides raw `vouchers` columns for `species_standardized`, `determiner_tier`, `type_status`, `is_promoted_bronze`, and `spatial_balance_weight` via `COALESCE(rac.<col>, ...)` so dynamic authority or synonym updates apply without re-harvesting images.

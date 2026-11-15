@@ -948,7 +948,10 @@ resolve_analysis_group <- function(
     "n_observed_modalities", "total_capitula", "n_anthesis", "n_fruiting",
     "n_bud", "n_senescent", "reproductive_stage_confidence", "dominant_pappus_ratio",
     "pixels_per_mm", "duplicate_count", "is_rock_outcrop", "is_azonal_lithology",
-    "azonal_lithology_presence_buffer"
+    "azonal_lithology_presence_buffer",
+    "soil_ca_mg_molar_ratio", "soil_ultramafic_ni_cr_index", "soil_carbonate_c_pct",
+    "is_nwi_wetland", "nwi_wetland_system", "nwi_wetland_dist_m",
+    "nwpl_indicator_code", "nwpl_wetland_score"
   )
 
   # Coalesce partial-coverage buffered edaphic NAs onto a working copy (leaving raw df unchanged)
@@ -1058,8 +1061,8 @@ resolve_analysis_group <- function(
 
   assign_eco_domain <- function(vn) {
     vl <- tolower(vn)
-    if (grepl("bedrock|outcrop|lithic|cfvo|fragvol|resdept", vl)) return("Lithic_Outcrop")
-    if (grepl("ph|cec|ilr_texture|sand|clay|silt|aws|polaris|solus|ssurgo|soil", vl)) return("Rhizosphere_Pedology")
+    if (grepl("bedrock|outcrop|lithic|cfvo|fragvol|resdept|ultramafic|calcareous", vl)) return("Lithic_Outcrop")
+    if (grepl("ph|cec|ilr_texture|sand|clay|silt|aws|polaris|solus|ssurgo|soil|wetland|seepage", vl)) return("Rhizosphere_Pedology")
     if (grepl("topo_|slope|tpi|twi|hli|elev", vl)) return("Microtopography")
     "Hydrothermal_Maritime_Climate"
   }
@@ -1068,7 +1071,8 @@ resolve_analysis_group <- function(
   # Deduplicate within-domain collinear predictors (|r| > 0.75) before PCA/k-means
   # so redundant lithic/climatic rasters do not inflate single-axis microsite splits
   prio_mech_vars <- c(
-    "lithic_outcrop_index", "min_bedrock_depth_buffer_cm", "ssurgo_rock_outcrop_pct",
+    "lithic_outcrop_index", "ultramafic_calcareous_gradient", "wetland_seepage_index",
+    "min_bedrock_depth_buffer_cm", "ssurgo_rock_outcrop_pct",
     "fine_bedrock_depth_cm", "fine_soil_ph", "ilr_texture_1",
     "summer_moisture_deficit_idx", "maritime_continentality_idx",
     "topo_slope_deg", "topo_twi_30m", "bio4_temp_seasonality", "bio15_precip_seasonality"
@@ -1438,7 +1442,7 @@ select_primary_predictors_from_rf <- function(
   intraspecific_mode = FALSE
 ) {
   clim_pat <- "^(bio[0-9]*_|summer_moisture_|maritime_continentality_|delta_doy$|doy$|hopkins_|sin_doy$|cos_doy$)"
-  topo_pat <- "^(topo_|elevation$|elev_)"
+  topo_pat <- "^(topo_|elevation($|_)|elev_)"
 
   cand_vars <- character(0)
   if (!is.null(vif_res) && is.list(vif_res)) {
@@ -1451,7 +1455,15 @@ select_primary_predictors_from_rf <- function(
   if (length(cand_vars) == 0L && !is.null(df_env) && is.data.frame(df_env)) {
     cand_vars <- discover_candidate_eco_predictors(df_env, include_pheno = FALSE, min_finite = 3L)
   }
-  cand_vars <- unique(cand_vars[!is.na(cand_vars) & nzchar(cand_vars) & !grepl("^MEM[0-9]*$", cand_vars)])
+  raw_geochem_hydro_excl <- c(
+    "soil_ca_mg_molar_ratio", "soil_ultramafic_ni_cr_index", "soil_carbonate_c_pct",
+    "is_nwi_wetland", "nwi_wetland_system", "nwi_wetland_dist_m",
+    "nwpl_indicator_code", "nwpl_wetland_score"
+  )
+  cand_vars <- setdiff(
+    unique(cand_vars[!is.na(cand_vars) & nzchar(cand_vars) & !grepl("^MEM[0-9]*$", cand_vars)]),
+    raw_geochem_hydro_excl
+  )
   if (!is.null(df_env) && is.data.frame(df_env)) {
     cand_vars <- intersect(cand_vars, names(df_env))
     cand_vars <- cand_vars[vapply(cand_vars, function(cl) {

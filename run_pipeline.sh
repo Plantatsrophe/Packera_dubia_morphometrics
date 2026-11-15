@@ -60,6 +60,9 @@ DOWNLOAD_PUBLIC_GENOMICS=0
 SKIP_CYTOLOGY_DOWNLOAD=false
 FORCE_CYTOLOGY_DOWNLOAD=false
 DOWNLOAD_PUBLIC_CYTOLOGY=0
+SKIP_BACKBONE_DOWNLOAD=false
+FORCE_BACKBONE_DOWNLOAD=false
+DOWNLOAD_TAXONOMIC_BACKBONE=0
 LIMIT_ARG=()
 DEMO_FLAG=()
 FOCAL_ARGS=()
@@ -131,6 +134,9 @@ Geographic Scope & Spatial Sampling:
   --skip-cytology-download           Skip automatic preflight download/sync of public Packera cytology records
   --force-cytology-download          Force fresh download of public Packera cytology records into data/cytology/
   --download-public-cytology         Download public Packera cytology records into data/cytology/ during preflight
+  --skip-backbone-download           Skip automatic preflight download/sync of taxonomic backbone profiles
+  --force-backbone-download          Force fresh download of taxonomic backbone profiles into data/taxonomy/
+  --download-taxonomic-backbone      Download dynamic taxonomic backbone profiles into data/taxonomy/ during preflight
 EOF
 }
 
@@ -442,6 +448,18 @@ while [[ $# -gt 0 ]]; do
       ;;
     --download-public-cytology)
       DOWNLOAD_PUBLIC_CYTOLOGY=1
+      shift
+      ;;
+    --skip-backbone-download)
+      SKIP_BACKBONE_DOWNLOAD=true
+      shift
+      ;;
+    --force-backbone-download)
+      FORCE_BACKBONE_DOWNLOAD=true
+      shift
+      ;;
+    --download-taxonomic-backbone)
+      DOWNLOAD_TAXONOMIC_BACKBONE=1
       shift
       ;;
     *)
@@ -1464,7 +1482,7 @@ run_preflight_subset_filter
 # Automatically skips when layers exist on disk; downloads missing layers otherwise.
 # ------------------------------------------------------------------------------
 run_preflight_env_layers() {
-  if [[ "${#DEMO_FLAG[@]}" -gt 0 || "${SKIP_ENV_DOWNLOAD}" == "true" ]]; then
+  if [[ "${#DEMO_FLAG[@]}" -gt 0 || "${SKIP_ENV_DOWNLOAD}" == "true" || "${PLANTMATICS_DEMO_MODE:-0}" == "1" || "${PACKERA_DEMO_MODE:-0}" == "1" || -n "${PYTEST_CURRENT_TEST:-}" ]]; then
     return 0
   fi
   local env_extra_args=()
@@ -1480,6 +1498,23 @@ run_preflight_env_layers() {
   "${PYTHON_MAIN}" scripts/data_prep/download_environmental_layers.py \
     --env-dir "${PROJECT_ROOT}/data/environmental" \
     "${env_extra_args[@]}"
+  local geochem_vouchers=""
+  if [[ -s "${RUN_DIR}/data/tables/curated_vouchers.csv" ]]; then
+    geochem_vouchers="${RUN_DIR}/data/tables/curated_vouchers.csv"
+  elif [[ -s "${PROJECT_ROOT}/data/tables/curated_vouchers.csv" ]]; then
+    geochem_vouchers="${PROJECT_ROOT}/data/tables/curated_vouchers.csv"
+  fi
+  if [[ -n "${geochem_vouchers}" ]]; then
+    local geochem_args=("--env-dir" "${PROJECT_ROOT}/data/environmental" "--vouchers" "${geochem_vouchers}")
+    if [[ -n "${CUSTOM_DB_PATH}" ]]; then
+      geochem_args+=("--db" "${CUSTOM_DB_PATH}")
+    fi
+    if [[ "${FORCE_ENV_DOWNLOAD}" == "true" ]]; then
+      geochem_args+=("--force")
+    fi
+    "${PYTHON_MAIN}" scripts/data_prep/download_geochem_wetland_layers.py \
+      "${geochem_args[@]}" || echo "[Preflight] Geochem/wetland layer provisioning warning (continuing)."
+  fi
 }
 
 run_preflight_env_layers
@@ -1518,6 +1553,50 @@ run_preflight_public_cytology() {
 }
 
 run_preflight_public_cytology
+
+# ------------------------------------------------------------------------------
+# Preflight Dynamic Taxonomic Backbone Provisioning
+# Automatically syncs staged data/taxonomy/ caches to SQLite or downloads backbone.
+# ------------------------------------------------------------------------------
+run_preflight_taxonomic_backbone() {
+  if [[ "${#DEMO_FLAG[@]}" -gt 0 || "${SKIP_BACKBONE_DOWNLOAD}" == "true" || "${PLANTMATICS_DEMO_MODE:-0}" == "1" || "${PACKERA_DEMO_MODE:-0}" == "1" || -n "${PYTEST_CURRENT_TEST:-}" ]]; then
+    return 0
+  fi
+  local bb_script="${PROJECT_ROOT}/scripts/data_prep/download_taxonomic_backbone.py"
+  if [[ ! -f "${bb_script}" ]]; then
+    return 0
+  fi
+  local tax_dir="${PLANTMATICS_TAXONOMY_DIR:-${PACKERA_TAXONOMY_DIR:-${PROJECT_ROOT}/data/taxonomy}}"
+  local bb_args=()
+  if [[ -n "${CUSTOM_DB_PATH}" ]] && grep -q -- '--db' "${bb_script}"; then
+    bb_args+=("--db" "${CUSTOM_DB_PATH}")
+  fi
+  local has_tax_cache=0
+  if [[ -d "${tax_dir}" ]] && find "${tax_dir}" -maxdepth 1 -type f \( -name '*.csv' -o -name '*.json' \) -print -quit | grep -q .; then
+    has_tax_cache=1
+  fi
+  if [[ "${FORCE_BACKBONE_DOWNLOAD}" == "true" || "${DOWNLOAD_TAXONOMIC_BACKBONE}" -eq 1 ]]; then
+    echo "[Preflight] Downloading dynamic taxonomic backbone profiles into ${tax_dir}..."
+    if grep -q -- '--force' "${bb_script}"; then
+      bb_args+=("--force")
+    fi
+    "${PYTHON_MAIN}" "${bb_script}" "${bb_args[@]}" || echo "[Preflight] Taxonomic backbone download skipped cleanly after network warning."
+  elif [[ "${has_tax_cache}" -eq 0 ]]; then
+    echo "[Preflight] Staging initial taxonomic backbone profiles into ${tax_dir}..."
+    "${PYTHON_MAIN}" "${bb_script}" "${bb_args[@]}" || echo "[Preflight] Initial taxonomic backbone download skipped cleanly after network warning."
+  else
+    if grep -q -- '--sync-db-only' "${bb_script}"; then
+      bb_args+=("--sync-db-only")
+    elif grep -q -- '--sync-only' "${bb_script}"; then
+      bb_args+=("--sync-only")
+    else
+      return 0
+    fi
+    "${PYTHON_MAIN}" "${bb_script}" "${bb_args[@]}" || echo "[Preflight] Taxonomic backbone SQLite sync warning (continuing)."
+  fi
+}
+
+run_preflight_taxonomic_backbone
 
 # ------------------------------------------------------------------------------
 # Step 02: LeafMachine3 (YOLO26x / UNet++ v9 / ONNX Runtime) Segmentation, Geometric Gatekeeper & 2-Tier Leaf Extraction

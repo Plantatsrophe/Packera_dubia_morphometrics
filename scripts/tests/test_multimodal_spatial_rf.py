@@ -1464,6 +1464,151 @@ class TestMultimodalSpatialRF(unittest.TestCase):
             self.assertEqual(res.returncode, 0, f"Independent Step 05/06 R check failed:\n{res.stderr}\n{res.stdout}")
             self.assertIn("INDEPENDENT_STEP05_AND_STEP06_OK", res.stdout)
 
+    def test_enm_composite_only_cross_block_vif_and_epv_budget_guards(self):
+        """Verify composite-only geochem/wetland ENM inputs, cross-block VIF <= 5.0 pruning, and anchor-count EPV predictor budgeting."""
+        if not rscript_available():
+            self.skipTest("Rscript not installed.")
+        with tempfile.TemporaryDirectory() as tmp_d:
+            r_code = """
+            suppressPackageStartupMessages({ library(readr); library(dplyr) })
+            source("scripts/core/db_utils.R")
+            source("scripts/morphometrics/authority_weighting_utils.R")
+            source("scripts/analysis/edaphic_fine_grain_utils.R")
+            source("scripts/analysis/05_multimodal_spatial_rf.R")
+
+            set.seed(202611)
+
+            # 1. Composites only in continuous ENM discovery, keeping raw DS-801 & NWI/NWPL strictly for contingency & Step 07
+            n_g1 <- 24L
+            sp_g1 <- rep(c("Packera serpenticola", "Packera aurea"), each = 12L)
+            df_g1 <- data.frame(
+              catalogNumber = sprintf("G1_%02d", seq_len(n_g1)),
+              species_standardized = sp_g1,
+              determiner_tier = "Tier_1_Gold",
+              latitude = c(seq(35.0, 35.4, length.out = 12L), seq(36.1, 36.6, length.out = 12L)),
+              longitude = c(seq(-83.8, -83.4, length.out = 12L), seq(-81.6, -81.1, length.out = 12L)),
+              coordinateUncertaintyInMeters = 150.0,
+              fine_soil_ph = c(rnorm(12L, 6.4, 0.2), rnorm(12L, 5.5, 0.2)),
+              ilr_texture_1 = rnorm(n_g1, 0.2, 0.3),
+              ilr_texture_2 = rnorm(n_g1, -0.1, 0.25),
+              topo_twi_30m = c(rnorm(12L, 4.2, 0.4), rnorm(12L, 11.4, 0.5)),
+              bio1_temp_mean = c(rnorm(12L, 13.8, 0.4), rnorm(12L, 12.6, 0.4)),
+              bio12_precip_annual = rnorm(n_g1, 1380.0, 50.0),
+              soil_ca_mg_molar_ratio = c(rnorm(12L, 0.12, 0.03), rnorm(12L, 3.8, 0.4)),
+              soil_ultramafic_ni_cr_index = c(rnorm(12L, 2.6, 0.3), rnorm(12L, 0.15, 0.05)),
+              soil_carbonate_c_pct = c(rnorm(12L, 0.05, 0.01), rnorm(12L, 2.2, 0.3)),
+              is_nwi_wetland = c(rep(0L, 12L), rep(1L, 12L)),
+              nwi_wetland_system = c(rep("UPL", 12L), rep("PEM1A", 12L)),
+              nwi_wetland_dist_m = c(runif(12L, 220, 480), runif(12L, 0, 12)),
+              nwpl_indicator_code = c(rep("FACU", 12L), rep("FACW", 12L)),
+              nwpl_wetland_score = c(rep(4.0, 12L), rep(2.0, 12L)),
+              stringsAsFactors = FALSE
+            )
+            df_g1 <- compute_derived_habitat_predictors(df_g1)
+            cand_g1 <- discover_candidate_eco_predictors(df_g1, include_pheno = FALSE)
+            stopifnot(all(c("ultramafic_calcareous_gradient", "wetland_seepage_index") %in% cand_g1))
+            raw_ban <- c(
+              "soil_ca_mg_molar_ratio", "soil_ultramafic_ni_cr_index", "soil_carbonate_c_pct",
+              "is_nwi_wetland", "nwi_wetland_system", "nwi_wetland_dist_m",
+              "nwpl_indicator_code", "nwpl_wetland_score"
+            )
+            stopifnot(!any(raw_ban %in% cand_g1))
+            ct_g1 <- evaluate_multiclass_substrate_contingency(df_g1)
+            stopifnot(is.list(ct_g1) && nrow(ct_g1$multiclass_details) >= 1L)
+
+            # 2. Cross-block VIF <= 5.0 pruning prefers proximal composites & climate over collinear topo surrogates
+            n_g2 <- 30L
+            sp_g2 <- rep(c("Packera dubia", "Packera anonyma"), each = 15L)
+            s_g2 <- ifelse(sp_g2 == "Packera dubia", -1.0, 1.0)
+            u1_g2 <- stats::resid(stats::lm(rnorm(n_g2) ~ s_g2))
+            u2_g2 <- stats::resid(stats::lm(rnorm(n_g2) ~ u1_g2 + s_g2))
+            u1_g2 <- u1_g2 / stats::sd(u1_g2)
+            u2_g2 <- u2_g2 / stats::sd(u2_g2)
+            wsi_base <- u1_g2 + 0.6 * s_g2
+            bio1_base <- 14.0 + u2_g2 - 0.5 * s_g2
+            df_g2 <- data.frame(
+              fine_soil_ph = c(rnorm(15L, 4.9, 0.3), rnorm(15L, 6.2, 0.3)),
+              wetland_seepage_index = wsi_base,
+              topo_twi_30m = round(6.5 + 3.2 * wsi_base, 5),
+              bio1_temp_mean = bio1_base,
+              elevation_m = round(2500.0 - 130.0 * bio1_base, 5),
+              bio12_precip_annual = rnorm(n_g2, 1200.0, 90.0),
+              stringsAsFactors = FALSE
+            )
+            bs_g2 <- screen_collinear_predictors_by_block(df_g2, cor.threshold = 0.70, vif.threshold = 5.0, anchor_groups = sp_g2)
+            stopifnot("wetland_seepage_index" %in% bs_g2$kept_vars)
+            stopifnot(!("topo_twi_30m" %in% bs_g2$kept_vars))
+            stopifnot("bio1_temp_mean" %in% bs_g2$kept_vars)
+            stopifnot(!("elevation_m" %in% bs_g2$kept_vars))
+            R_g2 <- stats::cor(df_g2[, bs_g2$kept_vars, drop = FALSE])
+            vifs_g2 <- diag(solve(R_g2 + diag(1e-6, length(bs_g2$kept_vars))))
+            stopifnot(max(vifs_g2, na.rm = TRUE) <= 5.0 + 1e-4)
+
+            # 3. Anchor-count EPV budget: N_anchors = 18 (narrow endemic), 45 (medium), and 120 (wide)
+            make_orth_cohort <- function(n_anc, n_bronze = 0L) {
+              n_tot <- n_anc + n_bronze
+              n_half <- floor(n_anc / 2L)
+              sp_anc <- c(rep("Packera serpenticola", n_half), rep("Packera anonyma", n_anc - n_half))
+              sp_v <- c(sp_anc, rep("Packera anonyma", n_bronze))
+              tier_v <- c(rep("Tier_1_Gold", n_anc), rep("Tier_3_Bronze", n_bronze))
+              s_anc <- ifelse(sp_anc == "Packera serpenticola", 1.0, -1.0)
+              # Construct 16 orthogonal environmental predictors directly on the anchor rows orthogonal to (1, s_anc)
+              Z_anc <- stats::resid(stats::lm(matrix(rnorm(n_anc * 16L), nrow = n_anc, ncol = 16L) ~ s_anc))
+              Q_mat <- qr.Q(qr(Z_anc)) * sqrt(n_anc - 1L)
+              if (n_bronze > 0L) {
+                Q_mat <- rbind(Q_mat, matrix(rnorm(n_bronze * 16L), nrow = n_bronze, ncol = 16L))
+              }
+              pred_nms <- c(
+                "fine_soil_ph", "ilr_texture_1", "ilr_texture_2", "fine_soil_cec",
+                "fine_cfvo_pct", "fine_bedrock_depth_cm", "ultramafic_calcareous_gradient", "wetland_seepage_index",
+                "topo_slope_deg", "topo_tpi_30m", "topo_hli_30m",
+                "bio1_temp_mean", "bio4_temp_seasonality", "bio12_precip_annual", "bio15_precip_seasonality", "summer_moisture_deficit_idx"
+              )
+              out_df <- as.data.frame(Q_mat, stringsAsFactors = FALSE)
+              names(out_df) <- pred_nms
+              s_full <- c(s_anc, rep(-1.0, n_bronze))
+              out_df$fine_soil_ph <- out_df$fine_soil_ph + 1.2 * s_full
+              out_df$bio1_temp_mean <- out_df$bio1_temp_mean - 1.2 * s_full
+              out_df$catalogNumber <- sprintf("EPV_%d_%03d", n_anc, seq_len(n_tot))
+              out_df$species_standardized <- sp_v
+              out_df$analysis_group <- sp_v
+              out_df$determiner_tier <- tier_v
+              out_df$coordinateUncertaintyInMeters <- 200.0
+              out_df$latitude <- seq(34.5, 37.8, length.out = n_tot) + rnorm(n_tot, 0, 0.05)
+              out_df$longitude <- seq(-83.5, -79.0, length.out = n_tot) + rnorm(n_tot, 0, 0.05)
+              out_df
+            }
+
+            df_narrow <- make_orth_cohort(18L, n_bronze = 4L)
+            cand_n <- discover_candidate_eco_predictors(df_narrow, include_pheno = FALSE)
+            stopifnot(length(cand_n) == 16L)
+            srf_n <- compute_spatial_rf_mems(df_narrow, cand_n, n_trees = 50)
+            stopifnot(ncol(srf_n$mems) == 2L)
+            stopifnot(identical(colnames(srf_n$mems), c("MEM1", "MEM2")))
+            stopifnot(length(srf_n$collinearity_screening$kept_vars) == 4L)
+            stopifnot(nrow(srf_n$importance) == 6L)
+
+            df_med <- make_orth_cohort(45L)
+            cand_m <- discover_candidate_eco_predictors(df_med, include_pheno = FALSE)
+            srf_m <- compute_spatial_rf_mems(df_med, cand_m, n_trees = 50)
+            n_env_m <- length(srf_m$collinearity_screening$kept_vars)
+            n_mem_m <- ncol(srf_m$mems)
+            stopifnot(n_env_m >= 4L && n_env_m <= 12L && (n_env_m + n_mem_m) <= 9L)
+
+            df_wide <- make_orth_cohort(120L)
+            cand_w <- discover_candidate_eco_predictors(df_wide, include_pheno = FALSE)
+            srf_w <- compute_spatial_rf_mems(df_wide, cand_w, n_trees = 50)
+            stopifnot(ncol(srf_w$mems) == 5L)
+            stopifnot(length(srf_w$collinearity_screening$kept_vars) == 12L)
+
+            cat("ENM_COMPOSITE_VIF_EPV_GUARDS_OK\n")
+            """
+            r_file = Path(tmp_d) / "test_enm_epv_guards.R"
+            r_file.write_text(r_code, encoding="utf-8")
+            res = run_warm_r_cmd(["Rscript", str(r_file)], stage_key="step05", cwd=PROJECT_ROOT)
+            self.assertEqual(res.returncode, 0, f"ENM composite/VIF/EPV guard test failed:\n{res.stderr}\n{res.stdout}")
+            self.assertIn("ENM_COMPOSITE_VIF_EPV_GUARDS_OK", res.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

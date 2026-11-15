@@ -146,7 +146,13 @@ STEP05_PREDICTOR_LABEL_DICT <- c(
   "azonal_lithology_presence_buffer" = "Buffered Azonal Lithology Presence",
   "fine_soil_soc"                    = "Soil Organic Carbon (g/kg, 0-15cm)",
   "topo_elev_m"                      = "30m Elevation (m a.s.l.)",
-  "delta_doy"                        = "Hopkins Phenological Anomaly (Delta DOY)"
+  "delta_doy"                        = "Hopkins Phenological Anomaly (Delta DOY)",
+  "soil_ca_mg_molar_ratio"           = "Soil Ca:Mg Molar Ratio",
+  "soil_ultramafic_ni_cr_index"      = "Soil Ultramafic Ni-Cr Index",
+  "soil_carbonate_c_pct"             = "Soil Carbonate Carbon (%)",
+  "nwi_wetland_dist_m"               = "NWI Wetland Distance (m)",
+  "ultramafic_calcareous_gradient"   = "Ultramafic-Calcareous Geochem Gradient",
+  "wetland_seepage_index"            = "Wetland & Hydrologic Seepage Index"
 )
 
 .upstream_format_predictor_labels <- if (exists("format_predictor_labels", mode = "function")) format_predictor_labels else NULL
@@ -558,6 +564,19 @@ VALID_TOPO_PREDICTORS <- c(
   "topo_twi_30m"
 )
 
+# Raw DS-801 geochemistry and NWI/NWPL columns remain in SQLite & df strictly for
+# contingency tables and Step 07 guards; only derived mechanistic composites enter X_env / PCA-env.
+NON_ENM_RAW_GEOCHEM_HYDRO_COLS <- c(
+  "soil_ca_mg_molar_ratio",
+  "soil_ultramafic_ni_cr_index",
+  "soil_carbonate_c_pct",
+  "is_nwi_wetland",
+  "nwi_wetland_system",
+  "nwi_wetland_dist_m",
+  "nwpl_indicator_code",
+  "nwpl_wetland_score"
+)
+
 discover_candidate_eco_predictors <- function(df, include_pheno = FALSE, min_finite = 3L, min_coverage_frac = 0.50) {
   if (is.null(df) || !is.data.frame(df) || nrow(df) == 0L) return(character(0))
   nms <- names(df)
@@ -612,7 +631,10 @@ discover_candidate_eco_predictors <- function(df, include_pheno = FALSE, min_fin
   if (has_finite_col("fine_bedrock_depth_cm")) {
     edaph_cols <- c(edaph_cols, "fine_bedrock_depth_cm")
   }
-  for (extra_ed in c("lithic_outcrop_index", "ssurgo_rock_outcrop_pct", "ssurgo_aws_0_50cm")) {
+  for (extra_ed in c(
+    "lithic_outcrop_index", "ssurgo_rock_outcrop_pct", "ssurgo_aws_0_50cm",
+    "ultramafic_calcareous_gradient", "wetland_seepage_index"
+  )) {
     if (has_finite_col(extra_ed)) edaph_cols <- c(edaph_cols, extra_ed)
   }
 
@@ -628,7 +650,7 @@ discover_candidate_eco_predictors <- function(df, include_pheno = FALSE, min_fin
   # Phenology is an organismal reproductive trait, excluded from X_env by default (include_pheno = FALSE)
   pheno_cols <- if (isTRUE(include_pheno) && has_finite_col("delta_doy")) "delta_doy" else character(0)
 
-  cand_out <- unique(c(edaph_cols, topo_cols, wc_cols, pheno_cols))
+  cand_out <- setdiff(unique(c(edaph_cols, topo_cols, wc_cols, pheno_cols)), NON_ENM_RAW_GEOCHEM_HYDRO_COLS)
   if (length(cand_out) == 0L && min_coverage_frac > 0.0) {
     return(discover_candidate_eco_predictors(df, include_pheno = include_pheno, min_finite = min_finite, min_coverage_frac = 0.0))
   }
@@ -1630,6 +1652,9 @@ synthesize_multiscale_edaphics <- function(df, ssurgo_out = "data/tables/ssurgo_
                 "fine_soil_ph", "fine_soil_sand", "fine_soil_clay", "soil_silt_pct",
                 "ilr_texture_1", "ilr_texture_2", "fine_soil_cec", "fine_cfvo_pct", "fine_bedrock_depth_cm",
                 "sgmc_lithology_class", "is_azonal_lithology",
+                "soil_ca_mg_molar_ratio", "soil_ultramafic_ni_cr_index", "soil_carbonate_c_pct",
+                "is_nwi_wetland", "nwi_wetland_system", "nwi_wetland_dist_m",
+                "ultramafic_calcareous_gradient", "wetland_seepage_index",
                 "soil_ph", "soil_cec", "soil_sand", "soil_clay", "soil_silt", "soil_cfvo", "soil_bulk_density")
   present_cols <- intersect(val_cols, names(df))
   val_df <- df[, present_cols, drop = FALSE]
@@ -2424,6 +2449,89 @@ assign_spatial_grid_blocks <- function(coords, block_deg = 0.50, k = 5L) {
   list(coords = bg_coords, X_bg = X_bg)
 }
 
+enforce_epv_predictor_budget <- function(
+  X_env_anc,
+  env_vars,
+  mem_mat = NULL,
+  anchor_groups = NULL,
+  n_anchors = nrow(X_env_anc),
+  epv_divisor = 5L,
+  min_env = 4L,
+  max_env = 12L
+) {
+  env_vars <- setdiff(unique(intersect(env_vars, colnames(X_env_anc))), NON_ENM_RAW_GEOCHEM_HYDRO_COLS)
+  n_anchors <- max(1L, as.integer(n_anchors))
+  total_budget <- as.integer(floor(n_anchors / epv_divisor))
+  mem_cap <- if (n_anchors < 30L) 2L else min(5L, max(2L, total_budget - as.integer(min_env)))
+  mem_out <- if (!is.null(mem_mat) && ncol(mem_mat) > 0L) {
+    mem_mat[, seq_len(min(ncol(mem_mat), mem_cap)), drop = FALSE]
+  } else {
+    mem_mat
+  }
+  n_mems_kept <- if (!is.null(mem_out)) ncol(mem_out) else 0L
+  env_cap <- as.integer(min(max_env, max(min_env, total_budget - n_mems_kept)))
+
+  kept_env <- env_vars
+  if (length(env_vars) > env_cap) {
+    sep_scores <- if (exists("compute_anchor_separation_scores", mode = "function")) {
+      compute_anchor_separation_scores(X_env_anc[, env_vars, drop = FALSE], anchor_groups = anchor_groups)
+    } else {
+      stats::setNames(rep(1.0, length(env_vars)), env_vars)
+    }
+    sep_scores[!is.finite(sep_scores)] <- 0.0
+    prox_tie <- intersect(env_vars, c("ultramafic_calcareous_gradient", "wetland_seepage_index", "lithic_outcrop_index"))
+    if (length(prox_tie) > 0L) sep_scores[prox_tie] <- sep_scores[prox_tie] + 0.02
+    ord_env <- names(sort(sep_scores[env_vars], decreasing = TRUE))
+    kept_env <- ord_env[seq_len(env_cap)]
+
+    clim_pat <- "^(bio[0-9]*_|summer_moisture_|maritime_continentality_)"
+    topo_pat <- "^(topo_|elevation($|_)|elev_)"
+    all_clim <- grep(clim_pat, env_vars, value = TRUE, ignore.case = TRUE)
+    all_edaph <- setdiff(env_vars, unique(c(all_clim, grep(topo_pat, env_vars, value = TRUE, ignore.case = TRUE))))
+
+    if (length(all_clim) > 0L && !any(kept_env %in% all_clim)) {
+      best_c <- names(sort(sep_scores[all_clim], decreasing = TRUE))[1L]
+      dup_pool <- kept_env[order(sep_scores[kept_env], decreasing = FALSE)]
+      blk_counts <- c(
+        clim = sum(kept_env %in% all_clim),
+        edaph = sum(kept_env %in% all_edaph),
+        topo = sum(!(kept_env %in% c(all_clim, all_edaph)))
+      )
+      drop_cands <- dup_pool[vapply(dup_pool, function(v) {
+        b <- if (v %in% all_clim) "clim" else if (v %in% all_edaph) "edaph" else "topo"
+        blk_counts[[b]] >= 2L
+      }, logical(1))]
+      drop_target <- if (length(drop_cands) > 0L) drop_cands[1L] else dup_pool[1L]
+      kept_env <- unique(c(setdiff(kept_env, drop_target), best_c))
+    }
+    if (length(all_edaph) > 0L && !any(kept_env %in% all_edaph)) {
+      best_e <- names(sort(sep_scores[all_edaph], decreasing = TRUE))[1L]
+      dup_pool <- kept_env[order(sep_scores[kept_env], decreasing = FALSE)]
+      blk_counts <- c(
+        clim = sum(kept_env %in% all_clim),
+        edaph = sum(kept_env %in% all_edaph),
+        topo = sum(!(kept_env %in% c(all_clim, all_edaph)))
+      )
+      drop_cands <- dup_pool[vapply(dup_pool, function(v) {
+        b <- if (v %in% all_clim) "clim" else if (v %in% all_edaph) "edaph" else "topo"
+        blk_counts[[b]] >= 2L
+      }, logical(1))]
+      drop_target <- if (length(drop_cands) > 0L) drop_cands[1L] else dup_pool[1L]
+      kept_env <- unique(c(setdiff(kept_env, drop_target), best_e))
+    }
+    kept_env <- kept_env[order(sep_scores[kept_env], decreasing = TRUE)]
+  }
+
+  list(
+    env_vars = kept_env,
+    mem_mat = mem_out,
+    env_cap = env_cap,
+    mem_cap = mem_cap,
+    total_epv_budget = total_budget,
+    n_anchors = n_anchors
+  )
+}
+
 compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_mode = FALSE, vif_res = NULL, env_dir = NULL, demo = FALSE) {
   message("Generating Moran's Eigenvector Maps (MEM1..MEM5) & fitting Authority-Anchored Spatial Random Forests...")
   .old_seed_srf <- if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) get(".Random.seed", envir = .GlobalEnv) else NULL
@@ -2474,7 +2582,7 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
   }
 
   # Prepare raw feature matrix (keeping missing values as NA until taxon-blind anchor/fold imputation!)
-  env_vars <- intersect(env_vars, names(df))
+  env_vars <- setdiff(intersect(env_vars, names(df)), NON_ENM_RAW_GEOCHEM_HYDRO_COLS)
   X_env_raw <- as.matrix(df[, env_vars, drop = FALSE])
   storage.mode(X_env_raw) <- "double"
   y <- factor(df$analysis_group)
@@ -2593,6 +2701,47 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
     env_vars <- intersect(colnames(X_env_raw), unique(kept_v))
     X_env_raw <- X_env_raw[, env_vars, drop = FALSE]
   }
+
+  epv_res <- enforce_epv_predictor_budget(
+    X_env_anc = X_env_raw[anchor_idx, , drop = FALSE],
+    env_vars = env_vars,
+    mem_mat = MEMs,
+    anchor_groups = anc_grp_for_vif[anchor_idx],
+    n_anchors = length(anchor_idx)
+  )
+  MEMs <- epv_res$mem_mat
+  if (length(epv_res$env_vars) >= 1L && length(epv_res$env_vars) < length(env_vars)) {
+    message(sprintf(
+      "[EPV Predictor Budget] Capped predictors for N_anchors=%d (total budget=%d, MEMs=%d, env cap=%d): retained %d / %d env predictors (%s).",
+      length(anchor_idx), epv_res$total_epv_budget,
+      if (!is.null(MEMs)) ncol(MEMs) else 0L, epv_res$env_cap,
+      length(epv_res$env_vars), length(env_vars), paste(epv_res$env_vars, collapse = ", ")
+    ))
+    env_vars <- epv_res$env_vars
+    X_env_raw <- X_env_raw[, env_vars, drop = FALSE]
+  } else if (length(anchor_idx) < 30L && !is.null(MEMs)) {
+    message(sprintf(
+      "[EPV Predictor Budget] Small-anchor guard (N_anchors=%d < 30): scaled MEMs to %d and retained %d env predictors.",
+      length(anchor_idx), ncol(MEMs), length(env_vars)
+    ))
+  }
+  if (is.list(col_screen)) {
+    col_screen$kept_vars <- env_vars
+    col_screen$selected_variables <- env_vars
+    if (!is.null(col_screen$edaphic_variables)) col_screen$edaphic_variables <- intersect(col_screen$edaphic_variables, env_vars)
+    if (!is.null(col_screen$selected_edaphic)) col_screen$selected_edaphic <- intersect(col_screen$selected_edaphic, env_vars)
+    if (!is.null(col_screen$climatic_variables)) col_screen$climatic_variables <- intersect(col_screen$climatic_variables, env_vars)
+    if (!is.null(col_screen$selected_climatic)) col_screen$selected_climatic <- intersect(col_screen$selected_climatic, env_vars)
+    if (!is.null(col_screen$topo_variables)) col_screen$topo_variables <- intersect(col_screen$topo_variables, env_vars)
+    if (!is.null(col_screen$selected_topo)) col_screen$selected_topo <- intersect(col_screen$selected_topo, env_vars)
+    col_screen$epv_budget <- list(
+      n_anchors = length(anchor_idx),
+      total_epv_budget = epv_res$total_epv_budget,
+      env_cap = epv_res$env_cap,
+      mem_cap = epv_res$mem_cap
+    )
+  }
+
   # Impute strictly using taxon-blind active-anchor medians (zero target-label leakage!)
   X_env <- .impute_by_train_medians(X_env_raw, X_env_raw[anchor_idx, , drop = FALSE])
   X_all <- cbind(X_env, MEMs)
@@ -2685,7 +2834,7 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
 
     pred_names <- rownames(imp_mat)
     is_mem_pred <- grepl("^MEM", pred_names)
-    is_fine_edaphic_pred <- grepl("^(fine_|ilr_texture_|ssurgo_|polaris_|solus_|topo_|soil_|sgmc_|is_azonal|lithic_outcrop_)", pred_names)
+    is_fine_edaphic_pred <- grepl("^(fine_|ilr_texture_|ssurgo_|polaris_|solus_|topo_|soil_|sgmc_|is_azonal|lithic_outcrop_|ultramafic_calcareous_|wetland_seepage_)", pred_names)
     is_climate_pred <- grepl("^(bio|delta_doy|doy|summer_moisture_|maritime_continentality_)", pred_names, ignore.case = TRUE)
     imp_df <- data.frame(
       Predictor = pred_names,
@@ -2700,7 +2849,7 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
     )
     imp_df <- imp_df[order(imp_df$MeanDecreaseAccuracy, decreasing = TRUE), ]
 
-    fine_edaphic_vars <- intersect(env_vars, grep("^(fine_|ilr_texture_|ssurgo_|polaris_|solus_|topo_|soil_|sgmc_|is_azonal|lithic_outcrop_)", env_vars, value = TRUE))
+    fine_edaphic_vars <- intersect(env_vars, grep("^(fine_|ilr_texture_|ssurgo_|polaris_|solus_|topo_|soil_|sgmc_|is_azonal|lithic_outcrop_|ultramafic_calcareous_|wetland_seepage_)", env_vars, value = TRUE))
     macro_climate_vars <- intersect(env_vars, grep("^(bio|delta_doy|doy|summer_moisture_|maritime_continentality_)", env_vars, value = TRUE, ignore.case = TRUE))
     ibe_df <- if (exists("compute_isolation_by_environment", mode = "function")) {
       tryCatch(compute_isolation_by_environment(df[anchor_idx, , drop = FALSE], edaph_vars = fine_edaphic_vars, clim_vars = macro_climate_vars, mem_mat = MEMs[anchor_idx, , drop = FALSE]), error = function(e) NULL)
@@ -2926,7 +3075,7 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
   # Spatial vs Environmental Variance Partitioning (vegan::varpart across [A] Fine-Grain Edaphic & Outcrop Lithology, [B] Macro-Climate, [C] Spatial MEMs)
   pred_names <- rownames(imp_mat)
   is_mem_pred <- grepl("^MEM", pred_names)
-  is_fine_edaphic_pred <- grepl("^(fine_|ilr_texture_|ssurgo_|polaris_|solus_|topo_|soil_|sgmc_|is_azonal|lithic_outcrop_)", pred_names)
+  is_fine_edaphic_pred <- grepl("^(fine_|ilr_texture_|ssurgo_|polaris_|solus_|topo_|soil_|sgmc_|is_azonal|lithic_outcrop_|ultramafic_calcareous_|wetland_seepage_)", pred_names)
   is_climate_pred <- grepl("^(bio|delta_doy|doy|summer_moisture_|maritime_continentality_)", pred_names, ignore.case = TRUE)
 
   imp_df <- data.frame(
@@ -2946,7 +3095,7 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
   )
   imp_df <- imp_df[order(imp_df$MeanDecreaseAccuracy, decreasing = TRUE), ]
 
-  fine_edaphic_vars <- intersect(env_vars, grep("^(fine_|ilr_texture_|ssurgo_|polaris_|solus_|topo_|soil_|sgmc_|is_azonal|lithic_outcrop_)", env_vars, value = TRUE))
+  fine_edaphic_vars <- intersect(env_vars, grep("^(fine_|ilr_texture_|ssurgo_|polaris_|solus_|topo_|soil_|sgmc_|is_azonal|lithic_outcrop_|ultramafic_calcareous_|wetland_seepage_)", env_vars, value = TRUE))
   macro_climate_vars <- intersect(env_vars, grep("^(bio|delta_doy|doy|summer_moisture_|maritime_continentality_)", env_vars, value = TRUE, ignore.case = TRUE))
 
   varpart_obj <- NULL
@@ -3431,10 +3580,10 @@ compute_edaphic_schoener_d <- function(
   if (length(cand_groups) < 2L) cand_groups <- sort(unique(stats::na.omit(df_calib$analysis_group)))
   pairs <- if (length(cand_groups) >= 2L) utils::combn(cand_groups, 2L, simplify = FALSE) else list()
 
-  edaph_cols <- intersect(as.character(primary_edaph_vars), names(df_calib))
+  edaph_cols <- setdiff(intersect(as.character(primary_edaph_vars), names(df_calib)), NON_ENM_RAW_GEOCHEM_HYDRO_COLS)
   if (length(edaph_cols) == 0L) {
     cand_all <- discover_candidate_eco_predictors(df_calib, include_pheno = FALSE, min_finite = 3L)
-    edaph_cols <- grep("^(fine_|ilr_texture_|ssurgo_|polaris_|solus_|soil_|sgmc_|is_azonal)", cand_all, value = TRUE, ignore.case = TRUE)
+    edaph_cols <- grep("^(fine_|ilr_texture_|ssurgo_|polaris_|solus_|soil_|sgmc_|is_azonal|lithic_outcrop_|ultramafic_calcareous_|wetland_seepage_)", cand_all, value = TRUE, ignore.case = TRUE)
   }
   if (length(edaph_cols) == 0L || length(pairs) == 0L) {
     return(data.frame(
@@ -3518,7 +3667,7 @@ run_warren_niche_identity_tests <- function(
   if (is.null(env_vars) || length(env_vars) == 0L) {
     env_vars <- discover_candidate_eco_predictors(df_calib, include_pheno = FALSE, min_finite = 3L)
   }
-  all_req_vars <- unique(c(env_vars, primary_env_vars, primary_clim_vars, primary_edaph_vars))
+  all_req_vars <- setdiff(unique(c(env_vars, primary_env_vars, primary_clim_vars, primary_edaph_vars)), NON_ENM_RAW_GEOCHEM_HYDRO_COLS)
   env_vars <- intersect(all_req_vars, names(df_calib))
   X_raw <- as.matrix(df_calib[, env_vars, drop = FALSE])
 
@@ -3652,7 +3801,7 @@ run_warren_niche_identity_tests <- function(
 # ------------------------------------------------------------------------------
 select_top_rf_predictors <- function(imp_df, plot_df) {
   avail_cols <- names(plot_df)
-  edaph_regex <- "^(fine_|ilr_texture_|ssurgo_|polaris_|solus_|topo_|soil_|sgmc_|is_azonal)"
+  edaph_regex <- "^(fine_|ilr_texture_|ssurgo_|polaris_|solus_|topo_|soil_|sgmc_|is_azonal|ultramafic_calcareous_|wetland_seepage_)"
 
   default_1 <- if ("fine_soil_sand" %in% avail_cols) "fine_soil_sand" else if ("soil_sand" %in% avail_cols) "soil_sand" else avail_cols[1]
   default_2 <- if ("fine_soil_ph" %in% avail_cols) "fine_soil_ph" else if ("soil_ph" %in% avail_cols) "soil_ph" else avail_cols[min(2L, length(avail_cols))]
@@ -3930,7 +4079,18 @@ main <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
     demo = demo_mode
   )
   if (exists("compute_derived_habitat_predictors", mode = "function")) {
-    vouchers_df <- compute_derived_habitat_predictors(vouchers_df)
+    gw_db_con <- NULL
+    if (!demo_mode && exists("connect_packera_db", mode = "function") &&
+        (nzchar(Sys.getenv("RUN_ID", unset = "")) ||
+         nzchar(Sys.getenv("PLANTMATICS_DB_PATH", unset = "")) ||
+         nzchar(Sys.getenv("PACKERA_DB_PATH", unset = "")) ||
+         (exists("is_sqlite_active_for_inputs", mode = "function") && is_sqlite_active_for_inputs(opts$vouchers, demo = demo_mode)))) {
+      gw_db_con <- tryCatch(connect_packera_db(read_only = TRUE, demo = FALSE), error = function(e) NULL)
+    }
+    vouchers_df <- compute_derived_habitat_predictors(vouchers_df, db_conn = gw_db_con, env_dir = opts$env_dir)
+    if (!is.null(gw_db_con) && exists("disconnect_packera_db", mode = "function")) {
+      tryCatch(disconnect_packera_db(gw_db_con), error = function(e) NULL)
+    }
   }
 
   # Stage 1c: Cohort-Adaptive Latitudinal Baseline & Circular Anthesis Phenology Engine (independent organismal trait)
@@ -3981,6 +4141,13 @@ main <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
     env_dir = opts$env_dir,
     demo = demo_mode
   )
+  if (!is.null(srf_res$collinearity_screening) && is.list(srf_res$collinearity_screening)) {
+    k_srf <- if (!is.null(srf_res$collinearity_screening$kept_vars)) srf_res$collinearity_screening$kept_vars else srf_res$collinearity_screening$selected_variables
+    if (length(k_srf) > 0L) {
+      vif_res <- srf_res$collinearity_screening
+      kept_rf_vars <- k_srf
+    }
+  }
   vouchers_df$spatial_block_cv_acc <- round(srf_res$Spatial_Block_CV_Accuracy, 4)
   vouchers_df$spatial_autocorr_range_km <- srf_res$spatial_autocorr_range_km
   vouchers_df$rf_predicted_taxon <- srf_res$rf_predicted_taxon

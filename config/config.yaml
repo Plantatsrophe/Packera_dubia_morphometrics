@@ -47,6 +47,8 @@ models:
 
 # Target Focal Taxa, Synonyms, and Outgroups (empty = dynamic genus-wide Packera discovery via GBIF)
 taxa:
+  target_genus: "Packera"
+  target_family: "Asteraceae"
   target_species: []
   synonyms: {}
   outgroups: []

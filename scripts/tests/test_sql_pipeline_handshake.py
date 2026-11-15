@@ -1301,7 +1301,7 @@ class TestSQLPipelineHandshake(unittest.TestCase):
             "cluster_propagated_gdi",
         }
 
-        # 1. Python db.py atomic migration + WAL replay + 20261126 schema upgrade
+        # 1. Python db.py atomic migration + WAL replay + 20261127 schema upgrade
         with tempfile.TemporaryDirectory() as td_py:
             ws_py = Path(td_py)
             legacy_db, target_db = _seed_legacy_wal_workspace(
@@ -1318,7 +1318,7 @@ class TestSQLPipelineHandshake(unittest.TestCase):
                     self.assertFalse(Path(f"{legacy_db}-shm").exists())
                     self.assertTrue(target_db.is_file())
                     uv = int(conn.execute("PRAGMA user_version;").fetchone()[0])
-                    self.assertEqual(uv, 20261126)
+                    self.assertEqual(uv, 20261127)
 
                     gs_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(genomic_samples);").fetchall()}
                     gla_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(genetic_lineage_assignments);").fetchall()}
@@ -1354,7 +1354,7 @@ local({{
   on.exit(disconnect_packera_db(conn), add = TRUE)
   stopifnot(!is.null(conn))
   uv <- as.integer(DBI::dbGetQuery(conn, "PRAGMA user_version;")[[1L]][1L])
-  stopifnot(uv == 20261126L)
+  stopifnot(uv == 20261127L)
   gs_cols <- DBI::dbListFields(conn, "genomic_samples")
   gla_cols <- DBI::dbListFields(conn, "genetic_lineage_assignments")
   ct_cols <- DBI::dbListFields(conn, "curation_triage")
@@ -1389,12 +1389,12 @@ local({{
                 self.assertTrue(target_r.is_file())
 
     def test_curation_triage_genomic_propagation_columns_and_migration(self) -> None:
-        """Verify schema 20261126 migrates from previous schema version and exposes the 6 genomic propagation columns."""
+        """Verify schema 20261127 migrates from previous schema version and exposes the 6 genomic propagation columns."""
         from scripts.core.db import ensure_pipeline_run, populate_run_active_cohort
         from scripts.core.db_schema import PACKERA_SCHEMA_USER_VERSION, PLANTMATICS_SCHEMA_USER_VERSION
 
-        self.assertEqual(PLANTMATICS_SCHEMA_USER_VERSION, 20261126)
-        self.assertEqual(PACKERA_SCHEMA_USER_VERSION, 20261126)
+        self.assertEqual(PLANTMATICS_SCHEMA_USER_VERSION, 20261127)
+        self.assertEqual(PACKERA_SCHEMA_USER_VERSION, 20261127)
         prev_ver = PLANTMATICS_SCHEMA_USER_VERSION - 1
         prop_cols = (
             "genomic_propagation_tier",
@@ -1510,7 +1510,7 @@ local({{
                 conn.close()
 
     def test_cytology_schema_migration_and_purge_runs_only_preservation(self) -> None:
-        """Verify schema 20261125 -> 20261126 creates cytology tables/columns and purge_runs_only preserves them."""
+        """Verify schema 20261125 -> 20261127 creates cytology tables/columns and purge_runs_only preserves them."""
         from scripts.core.db import (
             ensure_pipeline_run,
             populate_run_active_cohort,
@@ -1520,7 +1520,7 @@ local({{
         )
         from scripts.core.db_schema import PLANTMATICS_SCHEMA_USER_VERSION
 
-        self.assertEqual(PLANTMATICS_SCHEMA_USER_VERSION, 20261126)
+        self.assertEqual(PLANTMATICS_SCHEMA_USER_VERSION, 20261127)
         cyto_ct_cols = (
             "cytology_linkage_tier",
             "voucher_sporophytic_2n",
@@ -1572,7 +1572,7 @@ local({{
 
             conn = get_db_connection(db_p, init_schema=True)
             try:
-                self.assertEqual(int(conn.execute("PRAGMA user_version;").fetchone()[0]), 20261126)
+                self.assertEqual(int(conn.execute("PRAGMA user_version;").fetchone()[0]), 20261127)
                 tables = {str(r[0]) for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table';").fetchall()}
                 self.assertIn("cytological_records", tables)
                 self.assertIn("taxon_cytology_summary", tables)
@@ -1677,6 +1677,261 @@ local({{
                 self.assertEqual(conn2.execute("SELECT COUNT(*) FROM curation_triage;").fetchone()[0], 0)
             finally:
                 conn2.close()
+
+    def test_backbone_geochem_wetland_schema_20261127_roundtrip(self) -> None:
+        """Verify 20261126 -> 20261127 migration creates backbone/wetland/geochem tables/cols and master view aliases."""
+        from scripts.core.db import (
+            ensure_pipeline_run,
+            get_db_connection,
+            populate_run_active_cohort,
+            upsert_rows_generic,
+            upsert_vouchers_records,
+        )
+        from scripts.core.db_schema import PLANTMATICS_SCHEMA_USER_VERSION
+
+        self.assertEqual(PLANTMATICS_SCHEMA_USER_VERSION, 20261127)
+        expected_backbone_cols = {
+            "species_standardized",
+            "target_genus",
+            "accepted_scientific_name",
+            "accepted_authorship",
+            "basionym_name",
+            "basionym_authorship",
+            "homotypic_synonyms_json",
+            "heterotypic_synonyms_json",
+            "is_hybrid_taxon",
+            "hybrid_formula",
+            "publication_citation",
+            "publication_year",
+            "protologue_url",
+            "locus_classicus_text",
+            "tdwg_native_codes_json",
+            "tdwg_introduced_codes_json",
+            "natureserve_element_id",
+            "natureserve_global_rank",
+            "nwpl_indicator_code",
+            "nwpl_wetland_score",
+            "backbone_source",
+            "updated_at",
+        }
+        expected_ns_cols = {
+            "species_standardized",
+            "country_code",
+            "subnation_code",
+            "s_rank",
+            "is_native",
+            "is_exotic",
+            "is_historical_or_extirpated",
+        }
+        expected_env_cols = (
+            "soil_ca_mg_molar_ratio",
+            "soil_ultramafic_ni_cr_index",
+            "soil_carbonate_c_pct",
+            "is_nwi_wetland",
+            "nwi_wetland_system",
+            "nwi_wetland_dist_m",
+        )
+        expected_ct_cols = (
+            "hydro_edaphic_niche_regime",
+            "wetland_fidelity_concordance",
+            "basionym_synonymy_type",
+        )
+        expected_mv_aliases = (
+            "backbone_basionym_name",
+            "protologue_url",
+            "natureserve_global_rank",
+            "nwpl_indicator_code",
+            "nwpl_wetland_score",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_p = Path(tmp) / "legacy_20261126.sqlite"
+            raw_conn = sqlite3.connect(db_p)
+            raw_conn.executescript(
+                """
+                PRAGMA user_version = 20261126;
+                CREATE TABLE pipeline_runs (
+                    run_id TEXT PRIMARY KEY,
+                    run_dir TEXT,
+                    start_timestamp TEXT,
+                    end_timestamp TEXT,
+                    git_commit_sha TEXT,
+                    cli_arguments_json TEXT,
+                    focal_taxon TEXT,
+                    intraspecific_mode INTEGER DEFAULT 0
+                );
+                INSERT INTO pipeline_runs (run_id, start_timestamp) VALUES ('r_27', '2026-11-14T00:00:00Z');
+                CREATE TABLE environmental_cache (
+                    lat_lon_key TEXT PRIMARY KEY,
+                    catalogNumber TEXT
+                );
+                INSERT INTO environmental_cache (lat_lon_key, catalogNumber) VALUES ('35.50000_-82.50000', 'NCU-OLD-26');
+                CREATE TABLE curation_triage (
+                    run_id TEXT NOT NULL,
+                    catalogNumber TEXT NOT NULL,
+                    plant_individual_id INTEGER NOT NULL DEFAULT 0,
+                    taxonomic_status_call TEXT,
+                    recommended_determination TEXT,
+                    PRIMARY KEY (run_id, catalogNumber, plant_individual_id)
+                );
+                INSERT INTO curation_triage VALUES ('r_27', 'NCU-OLD-26', 0, 'Species_Confirmed', 'Packera aurea');
+                """
+            )
+            raw_conn.commit()
+            raw_conn.close()
+
+            conn = get_db_connection(db_p, init_schema=True)
+            try:
+                self.assertEqual(int(conn.execute("PRAGMA user_version;").fetchone()[0]), 20261127)
+                tbp_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(taxon_backbone_profiles);").fetchall()}
+                ns_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(natureserve_subnational_ranges);").fetchall()}
+                env_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(environmental_cache);").fetchall()}
+                ct_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(curation_triage);").fetchall()}
+                mv_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(v_integrative_triage_master);").fetchall()}
+
+                self.assertEqual(len(expected_backbone_cols), 22)
+                self.assertTrue(expected_backbone_cols.issubset(tbp_cols), f"Missing backbone cols: {expected_backbone_cols - tbp_cols}")
+                self.assertTrue(expected_ns_cols.issubset(ns_cols), f"Missing natureserve cols: {expected_ns_cols - ns_cols}")
+                for col in (*expected_env_cols, *expected_ct_cols, *expected_mv_aliases):
+                    self.assertIn(col, mv_cols, f"v_integrative_triage_master missing {col}")
+                for col in expected_env_cols:
+                    self.assertIn(col, env_cols, f"environmental_cache missing {col}")
+                for col in expected_ct_cols:
+                    self.assertIn(col, ct_cols, f"curation_triage missing {col}")
+
+                old_ct = conn.execute(
+                    "SELECT recommended_determination FROM curation_triage WHERE run_id='r_27' AND catalogNumber='NCU-OLD-26';"
+                ).fetchone()
+                self.assertEqual(old_ct[0], "Packera aurea")
+
+                upsert_rows_generic(
+                    conn,
+                    table_name="taxon_backbone_profiles",
+                    rows=[
+                        {
+                            "species_standardized": "Packera serpenticola",
+                            "target_genus": "Packera",
+                            "accepted_scientific_name": "Packera serpenticola",
+                            "accepted_authorship": "Boufford, Kartesz, Shi & R.Zhou",
+                            "basionym_name": "Packera serpenticola",
+                            "basionym_authorship": "Boufford, Kartesz, Shi & R.Zhou",
+                            "homotypic_synonyms_json": "[]",
+                            "heterotypic_synonyms_json": "[]",
+                            "is_hybrid_taxon": 0,
+                            "hybrid_formula": "",
+                            "publication_citation": "Syst. Bot. 39(3): 1027",
+                            "publication_year": 2014,
+                            "protologue_url": "https://www.biodiversitylibrary.org/page/123456",
+                            "locus_classicus_text": "Buck Creek Serpentine Barrens, Clay Co., NC",
+                            "tdwg_native_codes_json": '["NCA"]',
+                            "tdwg_introduced_codes_json": "[]",
+                            "natureserve_element_id": "ELEMENT_GLOBAL.2.999999",
+                            "natureserve_global_rank": "G1",
+                            "nwpl_indicator_code": "UPL",
+                            "nwpl_wetland_score": 5.0,
+                            "backbone_source": "COL_WCVP_2232+BHL+NatureServe",
+                            "updated_at": "2026-11-14T00:00:00Z",
+                        }
+                    ],
+                    pk_cols=("species_standardized",),
+                )
+                upsert_rows_generic(
+                    conn,
+                    table_name="natureserve_subnational_ranges",
+                    rows=[
+                        {
+                            "species_standardized": "Packera serpenticola",
+                            "country_code": "US",
+                            "subnation_code": "NC",
+                            "s_rank": "S1",
+                            "is_native": 1,
+                            "is_exotic": 0,
+                            "is_historical_or_extirpated": 0,
+                        }
+                    ],
+                    pk_cols=("species_standardized", "country_code", "subnation_code"),
+                )
+                vrows = [
+                    {
+                        "catalogNumber": "NCU-BB-27",
+                        "institutionCode": "NCU",
+                        "scientificName": "Packera serpenticola",
+                        "species_standardized": "Packera serpenticola",
+                        "decimalLatitude": 35.08333,
+                        "decimalLongitude": -83.61667,
+                        "determiner_tier": "Tier_1_Gold",
+                        "qc_status": "PASS",
+                    }
+                ]
+                upsert_vouchers_records(conn, vrows)
+                ensure_pipeline_run(conn, run_id="r_27")
+                populate_run_active_cohort(conn, run_id="r_27", voucher_rows=vrows, clear_existing=False)
+                upsert_rows_generic(
+                    conn,
+                    table_name="environmental_cache",
+                    rows=[
+                        {
+                            "lat_lon_key": "35.08333_-83.61667",
+                            "catalogNumber": "NCU-BB-27",
+                            "soil_ca_mg_molar_ratio": 0.42,
+                            "soil_ultramafic_ni_cr_index": 2.85,
+                            "soil_carbonate_c_pct": 0.05,
+                            "is_nwi_wetland": 0,
+                            "nwi_wetland_system": "Upland",
+                            "nwi_wetland_dist_m": 650.0,
+                        }
+                    ],
+                    pk_cols=("lat_lon_key",),
+                )
+                upsert_rows_generic(
+                    conn,
+                    table_name="curation_triage",
+                    rows=[
+                        {
+                            "run_id": "r_27",
+                            "catalogNumber": "NCU-BB-27",
+                            "plant_individual_id": 0,
+                            "taxonomic_status_call": "Species_Confirmed",
+                            "recommended_determination": "Packera serpenticola",
+                            "hydro_edaphic_niche_regime": "Ultramafic_Serpentine_Barren",
+                            "wetland_fidelity_concordance": 1.0,
+                            "basionym_synonymy_type": "Heterotypic",
+                        }
+                    ],
+                    pk_cols=("run_id", "catalogNumber", "plant_individual_id"),
+                )
+                mv_row = conn.execute(
+                    """
+                    SELECT backbone_basionym_name, protologue_url, natureserve_global_rank,
+                           nwpl_indicator_code, nwpl_wetland_score,
+                           soil_ca_mg_molar_ratio, soil_ultramafic_ni_cr_index, soil_carbonate_c_pct,
+                           is_nwi_wetland, nwi_wetland_system, nwi_wetland_dist_m,
+                           hydro_edaphic_niche_regime, wetland_fidelity_concordance, basionym_synonymy_type
+                    FROM v_integrative_triage_master
+                    WHERE run_id = 'r_27' AND catalogNumber = 'NCU-BB-27';
+                    """
+                ).fetchone()
+                self.assertEqual(
+                    tuple(mv_row),
+                    (
+                        "Packera serpenticola",
+                        "https://www.biodiversitylibrary.org/page/123456",
+                        "G1",
+                        "UPL",
+                        5.0,
+                        0.42,
+                        2.85,
+                        0.05,
+                        0,
+                        "Upland",
+                        650.0,
+                        "Ultramafic_Serpentine_Barren",
+                        1.0,
+                        "Heterotypic",
+                    ),
+                )
+            finally:
+                conn.close()
 
 
 if __name__ == "__main__":

@@ -48,6 +48,17 @@ from scripts.core.logger import setup_logging
 
 logger = setup_logging(name="plantmatics.genomics.ingest")
 
+
+def _resolve_target_filter(attr: str, env_key: str, default: str) -> str:
+    try:
+        from scripts.core import config as _cfg
+        fn = getattr(_cfg, attr, None)
+        if callable(fn) and (val := str(fn()).strip()):
+            return val.lower()
+    except Exception:
+        pass
+    return (os.environ.get(f"PLANTMATICS_{env_key}") or os.environ.get(f"PACKERA_{env_key}") or default).strip().lower()
+
 # Taxon code table used in Fuller / SNPsaurus field and sequencing labels
 PAC_CODE_TO_TAXON: Dict[str, Tuple[str, str]] = {
     "TOM": ("Packera tomentosa", "Packera dubia"),
@@ -381,7 +392,13 @@ def discover_genomic_inputs(genomics_dir: Path) -> StagedGenomicAssets:
         low = name.lower()
         if name.startswith(".") or low.endswith(_TRANSIENT_DOWNLOAD_SUFFIXES) or low.endswith(_RAW_SEQ_SUFFIXES):
             continue
-        if low in ("parsed_genomic_samples.csv", "allele_dosage_matrix.tsv", "genomic_manifest.json", "hdplot_locus_diagnostics.tsv"):
+        if low in (
+            "parsed_genomic_samples.csv",
+            "allele_dosage_matrix.tsv",
+            "genomic_manifest.json",
+            "hdplot_locus_diagnostics.tsv",
+            "locus_weights.tsv",
+        ):
             continue
         if low.startswith("public_packera_"):
             assets.public_reference_files.append(p)
@@ -478,12 +495,14 @@ def _parse_field_metadata(metadata_csvs: Sequence[Path]) -> Tuple[List[Dict[str,
         rec_by_col = cols_low.get("recordedby") or cols_low.get("collector")
         rec_num_col = cols_low.get("recordnumber") or cols_low.get("record_number") or cols_low.get("collector_number") or cols_low.get("collection_number")
 
+        target_family = _resolve_target_filter("resolve_target_family", "TARGET_FAMILY", "asteraceae")
+        target_genus = _resolve_target_filter("resolve_target_genus", "TARGET_GENUS", "packera")
         for _, row in df.iterrows():
             taxon_str = str(row.get(tax_col, "")).strip() if tax_col else ""
             fam_str = str(row.get(fam_col, "")).strip() if fam_col else ""
-            if fam_str and fam_str.lower() != "asteraceae":
+            if fam_str and target_family and fam_str.lower() != target_family:
                 continue
-            if not taxon_str.lower().startswith("packera"):
+            if target_genus and not taxon_str.lower().startswith(target_genus):
                 continue
 
             proj_clean = strip_smart_quotes(row.get(pid_col, "")) if pid_col else ""
@@ -1453,6 +1472,62 @@ def _infer_sample_cytotype(
     return "4x", round(delta, 4)
 
 
+def _load_paraloss1272_catalog(genomics_dir: Optional[Path]) -> Dict[str, Tuple[int, float]]:
+    """Load staged `public_packera_paraloss1272_loci.csv` locus weights when available."""
+    if genomics_dir is None:
+        return {}
+    cat_path = Path(genomics_dir) / "public_packera_paraloss1272_loci.csv"
+    if not cat_path.is_file() or cat_path.stat().st_size == 0:
+        return {}
+    catalog: Dict[str, Tuple[int, float]] = {}
+    try:
+        with open(cat_path, encoding="utf-8", newline="") as fh:
+            for row in csv.DictReader(fh):
+                lid = str(row.get("locus_id") or "").strip()
+                if not lid:
+                    continue
+                p_cls = str(row.get("paralogy_class") or "").strip().lower()
+                raw_w = str(row.get("locus_paralogy_weight") or "").strip()
+                if raw_w:
+                    try:
+                        wt = float(raw_w)
+                    except ValueError:
+                        wt = 1.5 if "single" in p_cls else (0.5 if any(k in p_cls for k in ("multi", "paralog")) else 1.0)
+                else:
+                    wt = 1.5 if "single" in p_cls else (0.5 if any(k in p_cls for k in ("multi", "paralog")) else 1.0)
+                is_sc = 1 if ("single" in p_cls or wt > 1.05) else 0
+                catalog[lid] = (is_sc, wt)
+                catalog[lid.lower()] = (is_sc, wt)
+    except Exception as exc:
+        logger.warning("Could not parse ParaLoss-1272 catalog %s: %s", cat_path, exc)
+    return catalog
+
+
+def _lookup_paraloss1272_locus(
+    locus_id: str,
+    catalog: Mapping[str, Tuple[int, float]],
+) -> Tuple[bool, int, float]:
+    """Match locus ID or stripped SNP suffix against `public_packera_paraloss1272_loci.csv`."""
+    raw = str(locus_id or "").strip()
+    if not raw or not catalog:
+        return False, 0, 1.0
+    cands: List[str] = [raw]
+    for sep in (":", "."):
+        if sep in raw:
+            cands.append(raw.split(sep, 1)[0])
+    no_pos = re.split(r"(?i)_pos(?:[\d_:-].*)?$", raw, maxsplit=1)[0]
+    if no_pos and no_pos != raw:
+        cands.append(no_pos)
+    base = re.split(r"(?i)(?::|_pos|\.)", raw, maxsplit=1)[0]
+    if base:
+        cands.append(base)
+    for cand in cands:
+        hit = catalog.get(cand) or catalog.get(cand.lower())
+        if hit is not None:
+            return True, int(hit[0]), float(hit[1])
+    return False, 0, 1.0
+
+
 def _evaluate_hdplot_loci(
     sub_pass: np.ndarray,
     sub_ref: np.ndarray,
@@ -1461,8 +1536,11 @@ def _evaluate_hdplot_loci(
     locus_ids: Sequence[str],
     h_max: float = 0.60,
     d_max: float = 4.0,
+    paraloss_catalog: Optional[Mapping[str, Tuple[int, float]]] = None,
+    genomics_dir: Optional[Path] = None,
 ) -> Tuple[np.ndarray, pd.DataFrame]:
     """Apply McKinney et al. (2017) HDplot paralog filter (`H <= 0.60`, `|D| <= 4.0`) without MAF pruning."""
+    cat = paraloss_catalog if paraloss_catalog is not None else _load_paraloss1272_catalog(genomics_dir)
     n_loci = len(locus_ids)
     keep_mask = np.ones(n_loci, dtype=bool)
     diag_rows: List[Dict[str, Any]] = []
@@ -1507,6 +1585,10 @@ def _evaluate_hdplot_loci(
             keep_mask[j] = False
             reason = "monomorphic_or_sparse"
 
+        matched_pl, is_sc, p_wt = _lookup_paraloss1272_locus(locus_ids[j], cat)
+        if not matched_pl:
+            p_wt = 1.0
+
         diag_rows.append({
             "locus_id": locus_ids[j],
             "n_called_ref": n_called_r,
@@ -1518,6 +1600,8 @@ def _evaluate_hdplot_loci(
             "D_read_ratio": round(d_stat, 4),
             "hdplot_keep": 1 if keep_mask[j] else 0,
             "filter_reason": reason,
+            "is_paraloss1272_single_copy": int(is_sc),
+            "locus_paralogy_weight": round(float(p_wt), 3),
         })
 
     return keep_mask, pd.DataFrame(diag_rows)
@@ -1925,6 +2009,8 @@ def run_genomic_ingestion(
     n_loci_retained = 0
     dosage_out_path = out_dir / "allele_dosage_matrix.tsv"
     hdplot_out_path = out_dir / "hdplot_locus_diagnostics.tsv"
+    weights_out_path = out_dir / "locus_weights.tsv"
+    paraloss_catalog = _load_paraloss1272_catalog(genomics_dir)
 
     if dosage_samples and n_loci_raw > 0:
         pass_recs = [r for r in records if r["geno_quality_pass"] == 1 and r["genetic_sample_id"] in sample_idx_map]
@@ -1942,6 +2028,7 @@ def run_genomic_ingestion(
             keep_mask, hd_df = _evaluate_hdplot_loci(
                 sub_pass, sub_ref, rd_ref, ad_ref, locus_ids,
                 h_max=paralog_ho_threshold, d_max=hdplot_d_threshold,
+                paraloss_catalog=paraloss_catalog,
             )
             hd_df.to_csv(hdplot_out_path, sep="\t", index=False, na_rep="NA")
 
@@ -1969,6 +2056,10 @@ def run_genomic_ingestion(
             dos_df.insert(0, "genetic_sample_id", pass_ids)
             dos_df.to_csv(dosage_out_path, sep="\t", index=False, na_rep="NA")
 
+            if paraloss_catalog and any(_lookup_paraloss1272_locus(lid, paraloss_catalog)[0] for lid in locus_ids):
+                wt_df = hd_df.loc[hd_df["hdplot_keep"] == 1, ["locus_id", "locus_paralogy_weight", "is_paraloss1272_single_copy"]]
+                wt_df.to_csv(weights_out_path, sep="\t", index=False, na_rep="NA")
+
     samples_df = pd.DataFrame(records)
     samples_csv = out_dir / "parsed_genomic_samples.csv"
     samples_df.to_csv(samples_csv, index=False)
@@ -1979,6 +2070,7 @@ def run_genomic_ingestion(
         "parsed_samples_csv": str(samples_csv),
         "allele_dosage_tsv": str(dosage_out_path) if dosage_out_path.exists() else None,
         "hdplot_diagnostics_tsv": str(hdplot_out_path) if hdplot_out_path.exists() else None,
+        "locus_weights_tsv": str(weights_out_path) if weights_out_path.exists() else None,
         "tree_files": [str(p) for p in assets.tree_files],
         "alignment_files": [str(p) for p in assets.alignment_files],
         "organellar_files": [str(p) for p in assets.organellar_files],

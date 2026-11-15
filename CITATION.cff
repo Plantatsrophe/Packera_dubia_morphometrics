@@ -6,7 +6,7 @@ version: "5.2.0"
 identifiers:
   - type: other
     value: "UNC-BOT-SOP-2026-04-REV5"
-    description: "University of North Carolina at Chapel Hill Herbarium (NCU) Standard Operating Procedure Revision 5 (SQLite Schema 20261126)"
+    description: "University of North Carolina at Chapel Hill Herbarium (NCU) Standard Operating Procedure Revision 5 (SQLite Schema 20261127)"
 date-released: "2026-11-14"
 license: MIT
 repository-code: "https://github.com/Plantatsrophe/Plantmatics"

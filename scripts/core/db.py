@@ -177,6 +177,12 @@ ENVIRONMENTAL_CACHE_COLUMNS: Tuple[str, ...] = (
     "soil_silt_soilgrids",
     "soil_cfvo_soilgrids",
     "soil_bulk_density_soilgrids",
+    "soil_ca_mg_molar_ratio",
+    "soil_ultramafic_ni_cr_index",
+    "soil_carbonate_c_pct",
+    "is_nwi_wetland",
+    "nwi_wetland_system",
+    "nwi_wetland_dist_m",
 )
 
 ENVIRONMENTAL_TEXT_COLS: Set[str] = {
@@ -188,6 +194,7 @@ ENVIRONMENTAL_TEXT_COLS: Set[str] = {
     "taxgreatgroup",
     "outcrop_class",
     "sgmc_lithology_class",
+    "nwi_wetland_system",
 }
 ENVIRONMENTAL_BOOL_COLS: Set[str] = {
     "is_rock_outcrop",
@@ -197,6 +204,7 @@ ENVIRONMENTAL_BOOL_COLS: Set[str] = {
     "is_clim_eligible_coord",
     "is_edaphic_eligible_coord",
     "azonal_lithology_presence_buffer",
+    "is_nwi_wetland",
 }
 
 
@@ -2750,6 +2758,8 @@ def ingest_existing_run_tables_into_db(
                 "tier0_calibrated_taxon",
                 "cytology_linkage_tier",
                 "taxon_reported_cytotypes",
+                "hydro_edaphic_niche_regime",
+                "basionym_synonymy_type",
             ):
                 if sc in r:
                     d_tri[sc] = _to_str(r.get(sc))
@@ -2786,6 +2796,7 @@ def ingest_existing_run_tables_into_db(
                 "tier0_calibrated_prob",
                 "deme_mahal_d2",
                 "cluster_propagated_gdi",
+                "wetland_fidelity_concordance",
             ):
                 if fc in r:
                     d_tri[fc] = _to_float(r.get(fc))
@@ -2952,6 +2963,113 @@ def upsert_taxon_cytology_summary(
         "taxon_cytology_summary",
         norm_rows,
         ("species_standardized",),
+        preserve_existing_on_null=preserve_existing_on_null,
+    )
+
+
+def upsert_taxon_backbone_profiles(
+    conn: sqlite3.Connection,
+    rows: Sequence[Mapping[str, Any]],
+    demo: bool = False,
+    *,
+    preserve_existing_on_null: bool = True,
+) -> int:
+    """Upsert Tier A taxonomic, protologue, NatureServe rank, and NWPL profiles into `taxon_backbone_profiles`."""
+    if demo or not rows:
+        return 0
+    _ensure_dynamic_table_migrated(conn, "taxon_backbone_profiles")
+    str_cols = (
+        "accepted_scientific_name",
+        "accepted_authorship",
+        "basionym_name",
+        "basionym_authorship",
+        "homotypic_synonyms_json",
+        "heterotypic_synonyms_json",
+        "hybrid_formula",
+        "publication_citation",
+        "protologue_url",
+        "locus_classicus_text",
+        "tdwg_native_codes_json",
+        "tdwg_introduced_codes_json",
+        "natureserve_element_id",
+        "natureserve_global_rank",
+        "nwpl_indicator_code",
+        "backbone_source",
+        "updated_at",
+    )
+    has_any_tg = any(_to_str(raw.get("target_genus")) for raw in rows)
+    norm_rows: List[Dict[str, Any]] = []
+    for raw in rows:
+        sp_std = _to_str(raw.get("species_standardized"))
+        if not sp_std:
+            continue
+        item: Dict[str, Any] = {"species_standardized": sp_std}
+        if has_any_tg:
+            item["target_genus"] = _to_str(raw.get("target_genus")) or "Packera"
+        for col in str_cols:
+            if col in raw or not preserve_existing_on_null:
+                item[col] = _to_str(raw.get(col))
+        if "is_hybrid_taxon" in raw:
+            bval = _to_bool_int(raw.get("is_hybrid_taxon"))
+            item["is_hybrid_taxon"] = (0 if bval is None and not preserve_existing_on_null else bval)
+        elif not preserve_existing_on_null:
+            item["is_hybrid_taxon"] = 0
+        if "publication_year" in raw or not preserve_existing_on_null:
+            item["publication_year"] = _to_int(raw.get("publication_year"))
+        if "nwpl_wetland_score" in raw or not preserve_existing_on_null:
+            item["nwpl_wetland_score"] = _to_float(raw.get("nwpl_wetland_score"))
+        norm_rows.append(item)
+
+    if not norm_rows:
+        return 0
+    return upsert_rows_generic(
+        conn,
+        "taxon_backbone_profiles",
+        norm_rows,
+        ("species_standardized",),
+        preserve_existing_on_null=preserve_existing_on_null,
+    )
+
+
+def upsert_natureserve_subnational_ranges(
+    conn: sqlite3.Connection,
+    rows: Sequence[Mapping[str, Any]],
+    demo: bool = False,
+    *,
+    preserve_existing_on_null: bool = False,
+) -> int:
+    """Upsert Tier A NatureServe subnational US state and Canadian province rows into `natureserve_subnational_ranges`."""
+    if demo or not rows:
+        return 0
+    _ensure_dynamic_table_migrated(conn, "natureserve_subnational_ranges")
+    norm_rows: List[Dict[str, Any]] = []
+    for raw in rows:
+        sp_std = _to_str(raw.get("species_standardized"))
+        c_code = (_to_str(raw.get("country_code")) or "").upper()
+        sub_code = (_to_str(raw.get("subnation_code")) or "").upper()
+        if not sp_std or not c_code or not sub_code:
+            continue
+        is_nat = _to_bool_int(raw.get("is_native"))
+        is_exo = _to_bool_int(raw.get("is_exotic"))
+        is_hist = _to_bool_int(raw.get("is_historical_or_extirpated"))
+        item: Dict[str, Any] = {
+            "species_standardized": sp_std,
+            "country_code": c_code,
+            "subnation_code": sub_code,
+            "s_rank": _to_str(raw.get("s_rank")),
+            "is_native": 1 if is_nat is None else is_nat,
+            "is_exotic": 0 if is_exo is None else is_exo,
+            "is_historical_or_extirpated": 0 if is_hist is None else is_hist,
+        }
+        norm_rows.append(item)
+
+    if not norm_rows:
+        return 0
+    return upsert_rows_generic(
+        conn,
+        "natureserve_subnational_ranges",
+        norm_rows,
+        ("species_standardized", "country_code", "subnation_code"),
         preserve_existing_on_null=preserve_existing_on_null,
     )
 
@@ -3228,8 +3346,9 @@ def purge_segments_and_runs(
     Purges all Step 02 to 06 segmentation artifacts (masks, contours, ECT matrices,
     cropped patches, non-Step-01 tables, figures, reports, and run directories) and
     clears Step 02 to 06 SQLite tables while preserving Step 01 harvested vouchers,
-    raw voucher imagery, taxon synonyms, `cytological_records`,
-    `taxon_cytology_summary`, `data/cytology/`, and the environmental cache.
+    raw voucher imagery, taxon synonyms, `taxon_backbone_profiles`,
+    `natureserve_subnational_ranges`, `cytological_records`,
+    `taxon_cytology_summary`, `data/taxonomy/`, `data/cytology/`, and `environmental_cache`.
     """
     import shutil as _shutil
 
@@ -3346,9 +3465,10 @@ def purge_runs_only(
     Step 01 harvested vouchers, raw voucher images, and Step 02 segmentation assets
     (`data/masks`, `data/contours`, `data/ect`, `data/cropped_patches`,
     `extracted_leaf_manifest.csv`, `voucher_reproductive_metrics.csv`,
-    `voucher_phenological_states.csv`, `failed_qc_vouchers.csv`, `data/cytology/`,
+    `voucher_phenological_states.csv`, `failed_qc_vouchers.csv`, `data/taxonomy/`, `data/cytology/`,
     and SQLite `vouchers`, `plant_individuals`, `extracted_leaves`,
-    `voucher_reproductive_phenology`, `cytological_records`, and `taxon_cytology_summary`).
+    `voucher_reproductive_phenology`, `taxon_backbone_profiles`,
+    `natureserve_subnational_ranges`, `cytological_records`, and `taxon_cytology_summary`).
 
     When `refresh_env_buffers=True`, resets cached `min_bedrock_depth_buffer_cm` to NULL/NA
     in `environmental_cache` and `fine_grain_edaphic_cache.csv` so Step 05 recomputes true

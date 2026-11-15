@@ -32,6 +32,9 @@ SSURGO_OUTCROP_SERIES_REGEX <- "(?i)(\\brock outcrop\\b|\\brock land\\b|\\bflatr
 for (.db_p in c("scripts/core/db_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "..", "core", "db_utils.R"))) {
   if (!is.na(.db_p) && nzchar(.db_p) && file.exists(.db_p)) { source(.db_p); break }
 }
+for (.gw_p in c("scripts/analysis/edaphic_geochem_wetland_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "edaphic_geochem_wetland_utils.R"))) {
+  if (!exists("enrich_geochem_wetland_predictors", mode = "function") && !is.na(.gw_p) && nzchar(.gw_p) && file.exists(.gw_p)) { source(.gw_p); break }
+}
 
 SGMC_LITHOLOGY_CLASSES <- c(
   "Ultramafic_Serpentine",
@@ -70,7 +73,9 @@ FINE_GRAIN_CACHE_COLS <- c(
   "buffer_radius_m", "high_coord_uncertainty_flag", "is_training_eligible_coord",
   "is_clim_eligible_coord", "is_edaphic_eligible_coord", "edaphic_coord_weight",
   "ph_q10_buffer", "ph_q90_buffer", "min_bedrock_depth_buffer_cm",
-  "max_cfvo_buffer_pct", "azonal_lithology_presence_buffer"
+  "max_cfvo_buffer_pct", "azonal_lithology_presence_buffer",
+  "soil_ca_mg_molar_ratio", "soil_ultramafic_ni_cr_index", "soil_carbonate_c_pct",
+  "is_nwi_wetland", "nwi_wetland_system", "nwi_wetland_dist_m"
 )
 
 format_lat_lon_key <- function(lat, lon) {
@@ -2021,12 +2026,12 @@ screen_collinear_predictors_by_block <- function(
   if (is.null(topo_vars)) {
     if (is.null(edaph_vars)) {
       topo_vars <- setdiff(
-        grep("^(topo_|elevation$|elev_)", all_cols, value = TRUE, ignore.case = TRUE),
+        grep("^(topo_|elevation($|_)|elev_)", all_cols, value = TRUE, ignore.case = TRUE),
         clim_vars
       )
     } else {
       topo_vars <- setdiff(
-        grep("^(topo_|elevation$|elev_)", all_cols, value = TRUE, ignore.case = TRUE),
+        grep("^(topo_|elevation($|_)|elev_)", all_cols, value = TRUE, ignore.case = TRUE),
         unique(c(clim_vars, edaph_vars))
       )
     }
@@ -2079,12 +2084,102 @@ screen_collinear_predictors_by_block <- function(
   }
 
   sel_joint <- unique(c(sel_edaph, sel_topo, sel_clim))
+  cross_pruned <- character(0)
+  if (length(sel_joint) >= 2L && is.finite(vif.threshold)) {
+    X_joint_imp <- as.data.frame(lapply(sel_joint, function(cl) {
+      vj <- suppressWarnings(as.numeric(X_df[[cl]]))
+      fin_j <- is.finite(vj)
+      med_j <- if (any(fin_j)) stats::median(vj[fin_j], na.rm = TRUE) else 0.0
+      if (!is.finite(med_j)) med_j <- 0.0
+      vj[!fin_j] <- med_j
+      vj
+    }), stringsAsFactors = FALSE)
+    colnames(X_joint_imp) <- sel_joint
+    X_joint_imp <- as.matrix(X_joint_imp)
+    storage.mode(X_joint_imp) <- "double"
+
+    sds_j <- apply(X_joint_imp, 2L, stats::sd)
+    cand <- colnames(X_joint_imp)[is.finite(sds_j) & sds_j > 1e-8]
+    if (length(cand) == 0L) cand <- sel_joint[1L]
+
+    if (length(cand) >= 2L) {
+      prox_bonus <- stats::setNames(rep(0.0, length(cand)), cand)
+      prox_bonus[intersect(cand, sel_clim)] <- 0.15
+      prox_bonus[intersect(cand, sel_edaph)] <- 0.18
+      prox_bonus[intersect(cand, c("ultramafic_calcareous_gradient", "wetland_seepage_index", "lithic_outcrop_index"))] <- 0.25
+      joint_pref_scores <- as.numeric(scores_all[cand])
+      joint_pref_scores[!is.finite(joint_pref_scores)] <- 0.0
+      names(joint_pref_scores) <- cand
+      joint_pref_scores <- joint_pref_scores + prox_bonus[cand]
+
+      has_multi_anchor_groups <- FALSE
+      X_resid_grp <- NULL
+      if (!is.null(anchor_groups) && length(anchor_groups) == nrow(X_joint_imp)) {
+        g_chr <- trimws(as.character(anchor_groups))
+        ok_g <- !is.na(g_chr) & nzchar(g_chr) & !(tolower(g_chr) %in% c("unknown", "na", "none"))
+        tbl_g <- table(g_chr[ok_g])
+        valid_g <- names(tbl_g[tbl_g >= 2L])
+        if (length(valid_g) >= 2L) {
+          has_multi_anchor_groups <- TRUE
+          idx_vg <- which(ok_g & (g_chr %in% valid_g))
+          X_resid_grp <- X_joint_imp[idx_vg, cand, drop = FALSE]
+          g_sub <- g_chr[idx_vg]
+          for (gn in valid_g) {
+            gm <- which(g_sub == gn)
+            if (length(gm) >= 2L) {
+              X_resid_grp[gm, ] <- sweep(X_resid_grp[gm, , drop = FALSE], 2L, colMeans(X_resid_grp[gm, , drop = FALSE]), "-")
+            } else {
+              X_resid_grp[gm, ] <- 0.0
+            }
+          }
+        }
+      }
+
+      while (length(cand) >= 2L) {
+        R_sub <- suppressWarnings(stats::cor(X_joint_imp[, cand, drop = FALSE], use = "pairwise.complete.obs"))
+        R_sub[!is.finite(R_sub)] <- 0.0
+        diag(R_sub) <- 1.0
+        vifs <- tryCatch(diag(solve(R_sub + diag(1e-6, length(cand)))), error = function(e) rep(1.0, length(cand)))
+        names(vifs) <- cand
+        over_v <- names(vifs[is.finite(vifs) & vifs > vif.threshold])
+        if (length(over_v) == 0L) break
+
+        protected_v <- character(0)
+        if (isTRUE(has_multi_anchor_groups) && !is.null(X_resid_grp)) {
+          R_res <- suppressWarnings(stats::cor(X_resid_grp[, cand, drop = FALSE], use = "pairwise.complete.obs"))
+          R_res[!is.finite(R_res)] <- 0.0
+          diag(R_res) <- 1.0
+          resid_vifs <- tryCatch(diag(solve(R_res + diag(1e-6, length(cand)))), error = function(e) rep(Inf, length(cand)))
+          names(resid_vifs) <- cand
+          for (vv in over_v) {
+            if ((vv %in% c(sel_clim, sel_edaph)) && is.finite(resid_vifs[[vv]]) && resid_vifs[[vv]] <= vif.threshold) {
+              protected_v <- c(protected_v, vv)
+            }
+          }
+        }
+        droppable_over <- setdiff(over_v, protected_v)
+        if (length(droppable_over) == 0L) break
+
+        max_d_vif <- max(vifs[droppable_over], na.rm = TRUE)
+        top_over <- droppable_over[vifs[droppable_over] >= (max_d_vif - 0.25)]
+        drop_v <- top_over[order(joint_pref_scores[top_over], decreasing = FALSE)][1L]
+        cand <- setdiff(cand, drop_v)
+      }
+    }
+    cross_pruned <- setdiff(sel_joint, cand)
+    sel_joint <- cand
+    sel_edaph <- intersect(sel_edaph, sel_joint)
+    sel_topo <- intersect(sel_topo, sel_joint)
+    sel_clim <- intersect(sel_clim, sel_joint)
+  }
   pruned_joint <- setdiff(all_cols, sel_joint)
   message(sprintf(
-    "Partitioned 3-Block Collinearity Pruning: retained %d Edaphic-Lithic (%s), %d Topographic (%s), and %d Climatic (%s) predictors.",
+    "Partitioned 3-Block + Cross-Block Collinearity Pruning (VIF <= %.1f): retained %d Edaphic-Lithic (%s), %d Topographic (%s), and %d Climatic (%s)%s.",
+    vif.threshold,
     length(sel_edaph), paste(sel_edaph, collapse = ", "),
     length(sel_topo), paste(sel_topo, collapse = ", "),
-    length(sel_clim), paste(sel_clim, collapse = ", ")
+    length(sel_clim), paste(sel_clim, collapse = ", "),
+    if (length(cross_pruned) > 0L) sprintf(" [cross-block pruned: %s]", paste(cross_pruned, collapse = ", ")) else ""
   ))
   list(
     selected_variables = sel_joint,
@@ -2202,6 +2297,12 @@ evaluate_multiclass_substrate_contingency <- function(
   suborder_vec <- if ("taxsuborder" %in% names(target_df)) trimws(as.character(target_df$taxsuborder)) else rep(NA_character_, n_tot)
   suborder_vec[is.na(suborder_vec) | !nzchar(suborder_vec) | tolower(suborder_vec) == "na"] <- NA_character_
   present_suborders <- sort(unique(stats::na.omit(suborder_vec)))
+
+  # 4) USFWS NWI Wetland / Fen Regime (evaluated separately from SGMC bedrock classes)
+  is_nwi_wet_v <- if ("is_nwi_wetland" %in% names(target_df)) suppressWarnings(as.numeric(target_df$is_nwi_wetland)) else rep(NA_real_, n_tot)
+  nwi_dist_v <- if ("nwi_wetland_dist_m" %in% names(target_df)) suppressWarnings(as.numeric(target_df$nwi_wetland_dist_m)) else rep(NA_real_, n_tot)
+  has_wetland_obs <- any(is.finite(is_nwi_wet_v)) || any(is.finite(nwi_dist_v))
+  is_palustrine_fen <- (!is.na(is_nwi_wet_v) & is_nwi_wet_v == 1) | (is.finite(nwi_dist_v) & nwi_dist_v <= 30.0)
 
   # Regional Eastern North American reference proportions for single-taxon mode fallback
   n_bg_ref <- max(120L, 2L * n_tot)
@@ -2329,6 +2430,37 @@ evaluate_multiclass_substrate_contingency <- function(
             stringsAsFactors = FALSE
           )
         }
+      }
+    }
+
+    # (D) USFWS NWI Palustrine Wetland / Fen Regime
+    if (has_wetland_obs) {
+      a_w <- sum(in_tx & is_palustrine_fen)
+      b_w <- sum(in_tx & !is_palustrine_fen)
+      if (!single_group_mode && any(!in_tx)) {
+        c0_w <- sum((!in_tx) & is_palustrine_fen)
+        d0_w <- sum((!in_tx) & !is_palustrine_fen)
+      } else {
+        c0_w <- max(1L, as.integer(round(n_bg_ref * 0.06)))
+        d0_w <- max(1L, n_bg_ref - c0_w)
+      }
+      if ((a_w + c0_w) > 0L && (a_w > 0L || (!single_group_mode && c0_w > 0L))) {
+        ft_w <- compute_fisher_2x2_safe(a_w, b_w, c0_w, d0_w)
+        detail_rows[[length(detail_rows) + 1L]] <- data.frame(
+          Taxon = tx,
+          Substrate_Domain = "NWI_Wetland_Regime",
+          Substrate_Class = "Palustrine_Wetland_Fen",
+          In_Class_Count = a_w,
+          Out_Class_Count = b_w,
+          Comparator_In_Count = c0_w,
+          Comparator_Out_Count = d0_w,
+          Class_Frequency_Pct = round(100.0 * a_w / max(1L, a_w + b_w), 2),
+          Odds_Ratio = round(ft_w$odds_ratio, 3),
+          CI_Lower = round(ft_w$ci_lower, 3),
+          CI_Upper = round(ft_w$ci_upper, 3),
+          P_Value = ft_w$p_value,
+          stringsAsFactors = FALSE
+        )
       }
     }
   }
@@ -2554,7 +2686,7 @@ evaluate_multiclass_substrate_contingency <- function(
 #    (Separates Lithic Outcrops, Xeric Sandhills, Maritime Coastal Strand &
 #     Summer-Drought Western Prairies Strictly From Measured Covariates)
 # ------------------------------------------------------------------------------
-compute_derived_habitat_predictors <- function(df) {
+compute_derived_habitat_predictors <- function(df, db_conn = NULL, env_dir = "data/environmental") {
   if (is.null(df) || !is.data.frame(df) || nrow(df) == 0L) return(df)
   n <- nrow(df)
   nms <- names(df)
@@ -2625,6 +2757,10 @@ compute_derived_habitat_predictors <- function(df) {
         df$maritime_continentality_idx <- mc_idx
       }
     }
+  }
+
+  if (exists("enrich_geochem_wetland_predictors", mode = "function")) {
+    df <- enrich_geochem_wetland_predictors(df, db_conn = db_conn, env_dir = env_dir)
   }
 
   df

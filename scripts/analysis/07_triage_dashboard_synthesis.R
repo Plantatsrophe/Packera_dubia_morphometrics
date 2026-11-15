@@ -65,6 +65,9 @@ for (.gp_p in c("scripts/analysis/step07_genomic_propagation.R", file.path(dirna
 for (.cy_p in c("scripts/analysis/step07_cytology_integration.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "step07_cytology_integration.R"))) {
   if (!exists("run_step07_cytology_integration", mode = "function") && !is.na(.cy_p) && nzchar(.cy_p) && file.exists(.cy_p)) { source(.cy_p); break }
 }
+for (.gw_p in c("scripts/analysis/edaphic_geochem_wetland_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "edaphic_geochem_wetland_utils.R"))) {
+  if (!exists("evaluate_step07_hydro_edaphic_and_basionym_guards", mode = "function") && !is.na(.gw_p) && nzchar(.gw_p) && file.exists(.gw_p)) { source(.gw_p); break }
+}
 
 .step07_safe_bool <- function(x) {
   if (exists(".safe_bool_vec_r", mode = "function")) return(.safe_bool_vec_r(x))
@@ -3323,6 +3326,68 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
   df$synthesis_triage_priority <- triage_prios; df$synthesis_triage_action <- triage_acts
   df$synthesis_rationale <- rationales
   df$taxonomic_treatment_broad <- treat_broad; df$taxonomic_treatment_subtype <- treat_sub
+  if (exists("evaluate_step07_hydro_edaphic_and_basionym_guards", mode = "function")) {
+    step07_gw_conn <- NULL
+    if (!is.null(opts$db_conn) && requireNamespace("DBI", quietly = TRUE) &&
+        isTRUE(tryCatch(DBI::dbIsValid(opts$db_conn), error = function(e) FALSE))) {
+      step07_gw_conn <- opts$db_conn
+    } else if (exists("c_geo", inherits = FALSE) && !is.null(c_geo) && requireNamespace("DBI", quietly = TRUE) &&
+               isTRUE(tryCatch(DBI::dbIsValid(c_geo), error = function(e) FALSE))) {
+      step07_gw_conn <- c_geo
+    } else if (!isTRUE(opts$demo) &&
+               Sys.getenv("PACKERA_DEMO_MODE", unset = "") != "1" &&
+               Sys.getenv("PLANTMATICS_DEMO_MODE", unset = "") != "1" &&
+               exists("connect_packera_db", mode = "function") &&
+               requireNamespace("DBI", quietly = TRUE) &&
+               (nzchar(as.character(if (!is.null(opts_cyto$db_path)) opts_cyto$db_path else "")) ||
+                nzchar(Sys.getenv("RUN_ID", unset = "")) ||
+                nzchar(.env_plantmatics_or_packera("PLANTMATICS_DB_PATH", "PACKERA_DB_PATH")) ||
+                (!is.null(opts$vouchers) && exists("is_sqlite_active_for_inputs", mode = "function") && is_sqlite_active_for_inputs(opts$vouchers, demo = isTRUE(opts$demo))))) {
+      step07_gw_conn <- tryCatch(connect_packera_db(db_path = opts_cyto$db_path, read_only = TRUE, demo = FALSE), error = function(e) NULL)
+      if (!is.null(step07_gw_conn)) {
+        on.exit(tryCatch(if (!is.null(step07_gw_conn) && DBI::dbIsValid(step07_gw_conn)) DBI::dbDisconnect(step07_gw_conn), error = function(e) NULL), add = TRUE)
+      }
+    }
+    pre_res_bas <- df$resurrection_basionym
+    df <- evaluate_step07_hydro_edaphic_and_basionym_guards(df, db_conn = step07_gw_conn)
+    nwpl_code_v <- if ("nwpl_indicator_code" %in% names(df)) toupper(trimws(as.character(df$nwpl_indicator_code))) else rep(NA_character_, n)
+    nwi_dist_v <- if ("nwi_wetland_dist_m" %in% names(df)) suppressWarnings(as.numeric(df$nwi_wetland_dist_m)) else rep(NA_real_, n)
+    w_ed_k <- if ("w_edaphic_kappa" %in% names(df)) suppressWarnings(as.numeric(df$w_edaphic_kappa)) else rep(NA_real_, n)
+    cda_p_v <- if ("cda_posterior_prob" %in% names(df)) suppressWarnings(as.numeric(df$cda_posterior_prob)) else rep(NA_real_, n)
+    for (hi in seq_len(n)) {
+      was_res_hi <- !is.na(pre_res_bas[hi]) && nzchar(trimws(pre_res_bas[hi]))
+      is_homo_hi <- !is.na(df$basionym_synonymy_type[hi]) && identical(df$basionym_synonymy_type[hi], "Homotypic")
+      if (was_res_hi && is_homo_hi && is.na(df$resurrection_basionym[hi])) {
+        if (identical(df$taxonomic_status_call[hi], "Taxonomic_Resurrection_Candidate")) {
+          gmm_k_hi <- if ("gmm_cluster" %in% names(df) && is.finite(suppressWarnings(as.integer(df$gmm_cluster[hi])))) max(1L, as.integer(df$gmm_cluster[hi])) else 2L
+          df$taxonomic_status_call[hi] <- "Putative_Cryptic_Species"
+          df$recommended_determination[hi] <- sprintf("%s (Putative Cryptic Lineage K%d)", as.character(df$species_standardized[hi]), gmm_k_hi)
+          df$synthesis_triage_action[hi] <- "Flag_Putative_Cryptic_Species"
+          df$taxonomic_treatment_broad[hi] <- "Misidentification / Cryptic Species"
+          df$taxonomic_treatment_subtype[hi] <- "Putative_Cryptic_Species"
+          df$synthesis_rationale[hi] <- sub("Stage 3 Basionym Resurrection Candidate", "Stage 3 Cryptic Congruence (Homotypic Basionym Guarded)", ifelse(is.na(df$synthesis_rationale[hi]), "", df$synthesis_rationale[hi]), fixed = TRUE)
+        }
+        cur_rat_h <- ifelse(is.na(df$synthesis_rationale[hi]), "", as.character(df$synthesis_rationale[hi]))
+        if (!grepl("\\[Homotypic Basionym Guard:", cur_rat_h)) {
+          df$synthesis_rationale[hi] <- paste0(cur_rat_h, sprintf(" [Homotypic Basionym Guard: %s shares type with %s; resurrection blocked]", pre_res_bas[hi], as.character(df$species_standardized[hi])))
+        }
+      }
+      is_obl_facw <- !is.na(nwpl_code_v[hi]) && (nwpl_code_v[hi] %in% c("OBL", "FACW"))
+      is_dry_site <- (!is.na(df$hydro_edaphic_niche_regime[hi]) && df$hydro_edaphic_niche_regime[hi] %in% c("Ultramafic_Serpentine_Barren", "Calcareous_Carbonate_Glade", "Siliceous_Felsic_Outcrop")) ||
+                     (is.finite(nwi_dist_v[hi]) && nwi_dist_v[hi] >= 200.0)
+      cur_rat_w <- ifelse(is.na(df$synthesis_rationale[hi]), "", as.character(df$synthesis_rationale[hi]))
+      if (is_obl_facw && is_dry_site && is.finite(df$wetland_fidelity_concordance[hi]) && df$wetland_fidelity_concordance[hi] < 0.25 &&
+          !grepl("\\[Hydro-Edaphic Discordance:", cur_rat_w)) {
+        wk_s <- if (is.finite(w_ed_k[hi])) sprintf(", w_edaphic_kappa=%.2f", w_ed_k[hi]) else ""
+        mp_s <- if (is.finite(cda_p_v[hi])) sprintf(", morph_cda_p=%.2f", cda_p_v[hi]) else ""
+        reg_s <- if (!is.na(df$hydro_edaphic_niche_regime[hi])) df$hydro_edaphic_niche_regime[hi] else "Dry_Upland"
+        df$synthesis_rationale[hi] <- paste0(
+          cur_rat_w,
+          sprintf(" [Hydro-Edaphic Discordance: taxon NWPL=%s in %s (wetland_concordance=%.2f%s%s)]", nwpl_code_v[hi], reg_s, df$wetland_fidelity_concordance[hi], wk_s, mp_s)
+        )
+      }
+    }
+  }
   has_morph <- if ("can1" %in% names(df)) !is.na(df$can1) else if ("cda_predicted_taxon" %in% names(df)) !is.na(df$cda_predicted_taxon) else rep(TRUE, n)
   has_edaph <- if ("edaphic_best_fit_taxon" %in% names(df)) !is.na(df$edaphic_best_fit_taxon) else rep(FALSE, n)
   df$is_completed_voucher <- has_morph | has_edaph | has_geno_dv
@@ -3338,6 +3403,9 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
   if (!("taxon_reported_cytotypes" %in% names(df))) df$taxon_reported_cytotypes <- rep(NA_character_, n) else df$taxon_reported_cytotypes <- as.character(df$taxon_reported_cytotypes)
   if (!("is_multi_cytotype_taxon" %in% names(df))) df$is_multi_cytotype_taxon <- rep(NA_integer_, n) else df$is_multi_cytotype_taxon <- suppressWarnings(as.integer(df$is_multi_cytotype_taxon))
   if (!("cytotype_reproductive_barrier_pass" %in% names(df))) df$cytotype_reproductive_barrier_pass <- rep(NA_integer_, n) else df$cytotype_reproductive_barrier_pass <- suppressWarnings(as.integer(df$cytotype_reproductive_barrier_pass))
+  if (!("hydro_edaphic_niche_regime" %in% names(df))) df$hydro_edaphic_niche_regime <- rep(NA_character_, n) else df$hydro_edaphic_niche_regime <- as.character(df$hydro_edaphic_niche_regime)
+  if (!("wetland_fidelity_concordance" %in% names(df))) df$wetland_fidelity_concordance <- rep(NA_real_, n) else df$wetland_fidelity_concordance <- suppressWarnings(as.numeric(df$wetland_fidelity_concordance))
+  if (!("basionym_synonymy_type" %in% names(df))) df$basionym_synonymy_type <- rep(NA_character_, n) else df$basionym_synonymy_type <- as.character(df$basionym_synonymy_type)
   attr(df, "can_evaluate_hybrids") <- can_evaluate_hybrids
   if (!is.null(prop_sum_attr)) attr(df, "genomic_propagation_summary") <- prop_sum_attr
   if (!is.null(cyto_md_attr)) attr(df, "cytology_markdown_lines") <- cyto_md_attr

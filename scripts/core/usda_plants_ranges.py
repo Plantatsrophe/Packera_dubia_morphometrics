@@ -55,6 +55,7 @@ try:
 except ImportError:
     Point = shape = nearest_points = unary_union = STRtree = None  # type: ignore[assignment]
 
+from scripts.core.config import resolve_target_genus
 from scripts.core.db import (
     get_db_connection,
     is_canonical_or_explicit_db_context,
@@ -64,8 +65,10 @@ from scripts.core.db import (
 from scripts.core.epa_ecoregions import (
     DEFAULT_EPA_L3_GEOJSON,
     DEFAULT_US_COUNTIES_GEOJSON,
+    _CANADIAN_PROV_ABBR_TO_FULL,
     _US_STATE_ABBR_TO_FULL,
     _ensure_epa_level3_cache_files,
+    _is_canadian_province_label,
     _normalize_us_county_name,
     _normalize_us_state_name,
     load_epa_level3_spatial_index,
@@ -87,6 +90,63 @@ USDA_DISTRIBUTION_CSV_API_URL = "https://plantsservices.sc.egov.usda.gov/api/Pla
 USDA_USER_AGENT = "PackeraResearchBot/1.0 (UNC Chapel Hill Herbarium; Evolutionary Morphometrics Lab)"
 
 _US_FULL_STATE_NAMES: Set[str] = set(_US_STATE_ABBR_TO_FULL.values())
+_US_FULL_TO_ABBR: Dict[str, str] = {full: abbr.upper() for abbr, full in _US_STATE_ABBR_TO_FULL.items()}
+_CA_FULL_TO_ABBR: Dict[str, str] = {
+    "ontario": "ON",
+    "quebec": "QC",
+    "new brunswick": "NB",
+    "nova scotia": "NS",
+    "prince edward island": "PE",
+    "newfoundland and labrador": "NL",
+    "manitoba": "MB",
+    "saskatchewan": "SK",
+    "alberta": "AB",
+    "british columbia": "BC",
+    "yukon": "YT",
+    "northwest territories": "NT",
+    "nunavut": "NU",
+}
+_SUBNATION_EDGE_PAIRS: Tuple[Tuple[str, str], ...] = (
+    ("AL", "FL"), ("AL", "GA"), ("AL", "MS"), ("AL", "TN"),
+    ("AK", "YT"), ("AK", "BC"),
+    ("AZ", "CA"), ("AZ", "CO"), ("AZ", "NM"), ("AZ", "NV"), ("AZ", "UT"),
+    ("AR", "LA"), ("AR", "MO"), ("AR", "MS"), ("AR", "OK"), ("AR", "TN"), ("AR", "TX"),
+    ("CA", "NV"), ("CA", "OR"),
+    ("CO", "KS"), ("CO", "NE"), ("CO", "NM"), ("CO", "OK"), ("CO", "UT"), ("CO", "WY"),
+    ("CT", "MA"), ("CT", "NY"), ("CT", "RI"),
+    ("DE", "MD"), ("DE", "NJ"), ("DE", "PA"), ("DC", "MD"), ("DC", "VA"),
+    ("FL", "GA"), ("GA", "NC"), ("GA", "SC"), ("GA", "TN"),
+    ("ID", "MT"), ("ID", "NV"), ("ID", "OR"), ("ID", "UT"), ("ID", "WA"), ("ID", "WY"), ("ID", "BC"), ("ID", "AB"),
+    ("IL", "IN"), ("IL", "IA"), ("IL", "KY"), ("IL", "MO"), ("IL", "WI"),
+    ("IN", "KY"), ("IN", "MI"), ("IN", "OH"), ("IA", "MN"), ("IA", "MO"), ("IA", "NE"), ("IA", "SD"), ("IA", "WI"),
+    ("KS", "MO"), ("KS", "NE"), ("KS", "OK"),
+    ("KY", "MO"), ("KY", "OH"), ("KY", "TN"), ("KY", "VA"), ("KY", "WV"),
+    ("LA", "MS"), ("LA", "TX"),
+    ("ME", "NH"), ("ME", "NB"), ("ME", "QC"),
+    ("MD", "PA"), ("MD", "VA"), ("MD", "WV"),
+    ("MA", "NH"), ("MA", "NY"), ("MA", "RI"), ("MA", "VT"),
+    ("MI", "MN"), ("MI", "OH"), ("MI", "WI"), ("MI", "ON"),
+    ("MN", "ND"), ("MN", "SD"), ("MN", "WI"), ("MN", "MB"), ("MN", "ON"),
+    ("MS", "TN"), ("MO", "NE"), ("MO", "OK"), ("MO", "TN"),
+    ("MT", "ND"), ("MT", "SD"), ("MT", "WY"), ("MT", "AB"), ("MT", "BC"), ("MT", "SK"),
+    ("NE", "SD"), ("NE", "WY"), ("NV", "OR"), ("NV", "UT"),
+    ("NH", "VT"), ("NH", "QC"), ("NJ", "NY"), ("NJ", "PA"),
+    ("NM", "OK"), ("NM", "TX"), ("NM", "UT"),
+    ("NY", "PA"), ("NY", "VT"), ("NY", "ON"), ("NY", "QC"),
+    ("NC", "SC"), ("NC", "TN"), ("NC", "VA"),
+    ("ND", "SD"), ("ND", "MB"), ("ND", "SK"),
+    ("OH", "PA"), ("OH", "WV"), ("OH", "ON"), ("OK", "TX"),
+    ("OR", "WA"), ("PA", "WV"), ("PA", "ON"),
+    ("SD", "WY"), ("TN", "VA"), ("UT", "WY"),
+    ("VT", "QC"), ("VA", "WV"), ("WA", "BC"),
+    ("YT", "BC"), ("YT", "NT"), ("BC", "AB"), ("BC", "NT"),
+    ("AB", "SK"), ("AB", "NT"), ("SK", "MB"), ("SK", "NT"), ("SK", "NU"),
+    ("MB", "ON"), ("MB", "NU"), ("ON", "QC"), ("QC", "NB"), ("QC", "NL"), ("NB", "NS"), ("NB", "PE"), ("NS", "PE"),
+)
+_SUBNATION_ADJACENCY: Dict[str, Set[str]] = {}
+for _s_a, _s_b in _SUBNATION_EDGE_PAIRS:
+    _SUBNATION_ADJACENCY.setdefault(_s_a, set()).add(_s_b)
+    _SUBNATION_ADJACENCY.setdefault(_s_b, set()).add(_s_a)
 _EXCLUDED_STATUS_TOKENS = ("excluded", "(x)", "false report", "erroneous")
 
 # Process-level caches
@@ -1255,6 +1315,148 @@ def _is_within_geodesic_buffer(
     return False
 
 
+def _resolve_voucher_country_and_subnation(
+    row: Mapping[str, Any],
+    st_raw: Optional[str],
+    st_norm: Optional[str],
+) -> Tuple[Optional[str], Optional[str]]:
+    """Normalize voucher `(country_code, subnation_code)` for NatureServe fallback checks."""
+    raw_c = ""
+    for col in ("countryCode", "country"):
+        val = row.get(col)
+        if val is not None and not pd.isna(val) and str(val).strip():
+            raw_c = str(val).strip().upper()
+            break
+    c_code: Optional[str] = None
+    if raw_c in {"US", "USA", "U.S.", "U.S.A.", "UNITED STATES", "UNITED STATES OF AMERICA"}:
+        c_code = "US"
+    elif raw_c in {"CA", "CAN", "CANADA"}:
+        c_code = "CA"
+
+    raw_st_clean = str(st_raw or "").strip()
+    if re.match(r"^(?:US|CA)-([A-Za-z]{2})$", raw_st_clean, flags=re.IGNORECASE):
+        c_prefix, sub_tok = raw_st_clean.split("-", 1)
+        return (c_code or c_prefix.upper()), sub_tok.upper()
+
+    if c_code == "CA" and raw_st_clean.upper() in {"CA", "CAN", "CANADA"}:
+        return "CA", None
+
+    st_norm_dwc = _normalize_us_state_name(raw_st_clean)
+    eff_full = st_norm_dwc or st_norm
+    if not eff_full:
+        return c_code, None
+    if eff_full in _CA_FULL_TO_ABBR or _is_canadian_province_label(raw_st_clean):
+        ca_full = _CANADIAN_PROV_ABBR_TO_FULL.get(eff_full, eff_full)
+        sub_ca = _CA_FULL_TO_ABBR.get(ca_full)
+        if sub_ca and (c_code is None or c_code == "CA"):
+            return "CA", sub_ca
+    if eff_full in _US_FULL_TO_ABBR:
+        sub_us = _US_FULL_TO_ABBR[eff_full]
+        if c_code is None or c_code == "US":
+            return "US", sub_us
+    return c_code, None
+
+
+def _load_natureserve_ranges_for_taxa(
+    taxa: Sequence[str],
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+    db_path: Optional[Union[str, Path]] = None,
+    workspace_dir: Path = PROJECT_ROOT,
+    cache_dir: Optional[Path] = None,
+) -> Dict[str, Dict[Tuple[str, str], Dict[str, Any]]]:
+    """Read subnational state/province distributions from SQLite `natureserve_subnational_ranges`."""
+    clean_taxa = sorted({str(t).strip() for t in taxa if str(t or "").strip()})
+    if not clean_taxa:
+        return {}
+
+    own_conn = False
+    active_conn = conn
+    if active_conn is None:
+        eff_cache_dir = Path(cache_dir) if cache_dir is not None else (Path(workspace_dir) / "data" / "environmental" / "usda_plants")
+        use_sqlite = db_path is not None or (
+            os.environ.get("PLANTMATICS_DEMO_MODE") != "1"
+            and os.environ.get("PACKERA_DEMO_MODE") != "1"
+            and is_canonical_or_explicit_db_context(eff_cache_dir, workspace_root=workspace_dir)
+        )
+        if not use_sqlite:
+            return {}
+        try:
+            resolved_db = resolve_db_path(db_path=db_path, workspace_root=workspace_dir)
+        except Exception:
+            return {}
+        if resolved_db == ":memory:" or not Path(resolved_db).is_file():
+            return {}
+        try:
+            active_conn = get_db_connection(db_path=resolved_db, read_only=True, workspace_root=workspace_dir)
+            own_conn = True
+        except Exception:
+            return {}
+
+    out: Dict[str, Dict[Tuple[str, str], Dict[str, Any]]] = {}
+    try:
+        tbl_chk = active_conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'natureserve_subnational_ranges';"
+        ).fetchone()
+        if not tbl_chk:
+            return {}
+        placeholders = ", ".join("?" for _ in clean_taxa)
+        rows = active_conn.execute(
+            f"""
+            SELECT species_standardized, country_code, subnation_code, s_rank,
+                   is_native, is_exotic, is_historical_or_extirpated
+            FROM natureserve_subnational_ranges
+            WHERE species_standardized IN ({placeholders});
+            """,
+            tuple(clean_taxa),
+        ).fetchall()
+        for r in rows:
+            sp = str(r[0] or "").strip()
+            c_code = str(r[1] or "").strip().upper()
+            sub_code = str(r[2] or "").strip().upper()
+            if not sp or not c_code or not sub_code:
+                continue
+            out.setdefault(sp, {})[(c_code, sub_code)] = {
+                "s_rank": str(r[3] or "").strip(),
+                "is_native": bool(int(r[4])) if r[4] is not None else True,
+                "is_exotic": bool(int(r[5])) if r[5] is not None else False,
+                "is_historical_or_extirpated": bool(int(r[6])) if r[6] is not None else False,
+            }
+    except sqlite3.Error:
+        return {}
+    finally:
+        if own_conn and active_conn is not None:
+            active_conn.close()
+    return out
+
+
+def _evaluate_natureserve_voucher(
+    c_code: Optional[str],
+    sub_code: Optional[str],
+    ns_map: Mapping[Tuple[str, str], Mapping[str, Any]],
+    extra_us_states: Optional[Set[str]] = None,
+) -> str:
+    """Evaluate a US/CA voucher against NatureServe subnational records + 1-ring state adjacency."""
+    if c_code not in {"US", "CA"} or not sub_code or not ns_map:
+        return "non_us_or_unresolved"
+    rec = ns_map.get((c_code, sub_code))
+    if rec is not None:
+        if rec.get("is_exotic") and not rec.get("is_native"):
+            return "natureserve_exotic_or_waif"
+        if rec.get("is_exotic"):
+            return "natureserve_exotic_or_waif"
+        return "natureserve_state_in_range"
+
+    mapped_subs = {sub for (_, sub) in ns_map.keys()}
+    for st_full in extra_us_states or ():
+        abbr = _US_FULL_TO_ABBR.get(st_full)
+        if abbr:
+            mapped_subs.add(abbr)
+    if _SUBNATION_ADJACENCY.get(sub_code, set()) & mapped_subs:
+        return "buffered_adjacent"
+    return "out_of_range"
+
+
 def filter_vouchers_by_usda_county_range(
     df: "pd.DataFrame",
     standardize_taxon_fn: Callable[[Any], Optional[str]],
@@ -1269,27 +1471,33 @@ def filter_vouchers_by_usda_county_range(
     force_refresh: bool = False,
     drop_out_of_range: bool = True,
     logger: Optional[logging.Logger] = None,
+    target_genus: Optional[str] = None,
+    conn: Optional[sqlite3.Connection] = None,
 ) -> Tuple["pd.DataFrame", Dict[str, int]]:
     """
     Evaluate harvested vouchers against USDA PLANTS county distributions (with 1-ring
-    county adjacency and `county_buffer_km` geodesic buffer), recording `usda_symbol`
-    and `usda_county_status` (`in_range`, `buffered_adjacent`, `out_of_range`,
+    county adjacency and `county_buffer_km` geodesic buffer) and SQLite
+    `natureserve_subnational_ranges` fallback for unmapped taxa or Canadian vouchers.
+    Records `usda_symbol` and `usda_county_status` (`in_range`, `buffered_adjacent`,
+    `natureserve_state_in_range`, `natureserve_exotic_or_waif`, `out_of_range`,
     `unmapped_taxon`, `non_us_or_unresolved`) for SQLite persistence. When
-    `drop_out_of_range=False` (`config.yaml` default `usda_county_filter: false`), all
-    vouchers are retained in soft audit mode; when `drop_out_of_range=True`, non-exempt
-    `out_of_range` records are removed prior to Step 01 image downloading.
+    `drop_out_of_range=False`, all vouchers are retained in soft audit mode; when
+    `drop_out_of_range=True`, non-exempt `out_of_range` records are removed prior to
+    Step 01 image downloading.
 
     Exemptions (when `drop_out_of_range=True`):
       - Verified nomenclatural type specimens (`type_rank >= 1`) are unconditionally retained.
       - `Tier_1_Gold` specialist determinations are retained when `exempt_gold=True`.
-      - Taxa with zero mapped US counties in USDA PLANTS (`unmapped_taxon`) and non-US or
-        ungeoreferenced/unresolved occurrences (`non_us_or_unresolved`) fail open so valid
-        records are never dropped due to missing checklist coverage.
+      - Taxa with zero mapped US counties and zero NatureServe subnational records
+        (`unmapped_taxon`) and non-US/CA or unresolved occurrences (`non_us_or_unresolved`)
+        fail open so valid records are never dropped due to missing checklist coverage.
     """
     stats: Dict[str, int] = {
         "evaluated": 0,
         "in_range": 0,
         "buffered_adjacent": 0,
+        "natureserve_state_in_range": 0,
+        "natureserve_exotic_or_waif": 0,
         "exempt_retained": 0,
         "unmapped_or_non_us": 0,
         "dropped_out_of_range": 0,
@@ -1300,13 +1508,15 @@ def filter_vouchers_by_usda_county_range(
     out_df = df.copy()
     stats["evaluated"] = len(out_df)
 
-    # Build reverse synonym map: canonical_packera -> sorted synonym strings
+    # Build reverse synonym map: canonical_taxon -> sorted synonym strings
     canon_to_syns: Dict[str, List[str]] = {}
     for raw_low, canon_val in (synonym_to_canonical or {}).items():
         if canon_val:
             canon_to_syns.setdefault(canon_val, []).append(raw_low)
 
-    # Resolve canonical Packera taxon per row
+    # Resolve canonical target-genus taxon per row
+    eff_genus = resolve_target_genus(explicit_genus=target_genus)
+    genus_prefix = f"{eff_genus.strip()} "
     resolved_taxa: List[str] = []
     for _, row in out_df.iterrows():
         std_tx: Optional[str] = None
@@ -1317,7 +1527,7 @@ def filter_vouchers_by_usda_county_range(
                     break
         resolved_taxa.append(std_tx or "")
 
-    unique_taxa = sorted({tx for tx in resolved_taxa if tx.startswith("Packera ")})
+    unique_taxa = sorted({tx for tx in resolved_taxa if tx.startswith(genus_prefix)})
     if not unique_taxa:
         out_df["usda_symbol"] = ""
         out_df["usda_county_status"] = "unmapped_taxon"
@@ -1337,10 +1547,18 @@ def filter_vouchers_by_usda_county_range(
             logger=logger,
         )
 
+    ns_ranges_by_taxon = _load_natureserve_ranges_for_taxa(
+        unique_taxa,
+        conn=conn,
+        db_path=db_path,
+        workspace_dir=workspace_dir,
+        cache_dir=cache_dir,
+    )
+
     has_any_mapped = any(
         bool(r["counties"] or r["state_only_states"])
         for r in taxon_ranges.values()
-    )
+    ) or any(bool(v) for v in ns_ranges_by_taxon.values())
     if not has_any_mapped:
         out_df["usda_symbol"] = ""
         out_df["usda_county_status"] = "unmapped_taxon"
@@ -1380,10 +1598,12 @@ def filter_vouchers_by_usda_county_range(
     for idx_pos, (_, row) in enumerate(out_df.iterrows()):
         tx = resolved_taxa[idx_pos]
         r_info = taxon_ranges.get(tx)
+        ns_map = ns_ranges_by_taxon.get(tx, {})
+        has_usda = bool(r_info and (r_info["counties"] or r_info["state_only_states"]))
         sym_str = ";".join(r_info["symbols"]) if (r_info and r_info["symbols"]) else ""
         usda_symbols_col.append(sym_str)
 
-        if not r_info or (not r_info["counties"] and not r_info["state_only_states"]):
+        if not has_usda and not ns_map:
             usda_status_col.append("unmapped_taxon")
             stats["unmapped_or_non_us"] += 1
             keep_mask.append(True)
@@ -1427,6 +1647,44 @@ def filter_vouchers_by_usda_county_range(
             county=co_raw,
             spatial_graph=spatial_graph,
         )
+        c_code, sub_code = _resolve_voucher_country_and_subnation(row, st_raw=st_raw, st_norm=st_norm)
+
+        # Fallback to NatureServe subnational ranges when USDA lacks taxon counties OR voucher is Canadian
+        if (not has_usda) or (c_code == "CA" and ns_map):
+            ns_status = _evaluate_natureserve_voucher(
+                c_code=c_code,
+                sub_code=sub_code,
+                ns_map=ns_map,
+                extra_us_states=(r_info or {}).get("documented_states") if has_usda else None,
+            )
+            if ns_status == "natureserve_state_in_range":
+                usda_status_col.append(ns_status)
+                stats["natureserve_state_in_range"] += 1
+                keep_mask.append(True)
+            elif ns_status == "natureserve_exotic_or_waif":
+                usda_status_col.append(ns_status)
+                stats["natureserve_exotic_or_waif"] += 1
+                keep_mask.append(True)
+            elif ns_status == "buffered_adjacent":
+                usda_status_col.append("buffered_adjacent")
+                stats["buffered_adjacent"] += 1
+                keep_mask.append(True)
+            elif ns_status == "non_us_or_unresolved":
+                usda_status_col.append("non_us_or_unresolved")
+                stats["unmapped_or_non_us"] += 1
+                keep_mask.append(True)
+            else:
+                usda_status_col.append("out_of_range")
+                if is_exempt:
+                    stats["exempt_retained"] += 1
+                    keep_mask.append(True)
+                elif not drop_out_of_range:
+                    keep_mask.append(True)
+                else:
+                    stats["dropped_out_of_range"] += 1
+                    dropped_by_taxon[tx] = dropped_by_taxon.get(tx, 0) + 1
+                    keep_mask.append(False)
+            continue
 
         if is_non_us or (st_norm is None and lat_v is None and lon_v is None):
             usda_status_col.append("non_us_or_unresolved")

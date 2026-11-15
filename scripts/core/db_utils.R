@@ -16,7 +16,7 @@
 #       with seamless CSV fallback merging.
 # ==============================================================================
 
-PLANTMATICS_SCHEMA_USER_VERSION <- 20261126L
+PLANTMATICS_SCHEMA_USER_VERSION <- 20261127L
 PACKERA_SCHEMA_USER_VERSION <- PLANTMATICS_SCHEMA_USER_VERSION
 
 resolve_packera_workers <- function(max_workers = 32L, n_tasks = NULL) {
@@ -126,7 +126,8 @@ PACKERA_DB_LOGICAL_COLS <- c(
   "is_confident_label_noise", "cryptic_cluster_cohesion_pass",
   "cryptic_non_clinal_pass", "hybrid_zone_cohesion_pass",
   "geno_quality_pass", "is_putative_novel_or_hybrid_query", "is_geno_admixed", "cytonuclear_discordant",
-  "is_multi_cytotype_taxon", "cytotype_reproductive_barrier_pass"
+  "is_multi_cytotype_taxon", "cytotype_reproductive_barrier_pass",
+  "is_nwi_wetland", "is_hybrid_taxon", "is_native", "is_exotic", "is_historical_or_extirpated"
 )
 
 PACKERA_DB_HARMONIC_COLS <- as.vector(vapply(
@@ -333,7 +334,10 @@ PACKERA_DB_WC_BIO_COLS <- c(
       voucher_ploidy_level = "INTEGER",
       taxon_reported_cytotypes = "TEXT",
       is_multi_cytotype_taxon = "INTEGER",
-      cytotype_reproductive_barrier_pass = "INTEGER"
+      cytotype_reproductive_barrier_pass = "INTEGER",
+      hydro_edaphic_niche_regime = "TEXT",
+      wetland_fidelity_concordance = "REAL",
+      basionym_synonymy_type = "TEXT"
     ))
   }
   if (identical(table_name, "cytological_records")) {
@@ -423,7 +427,13 @@ PACKERA_DB_WC_BIO_COLS <- c(
         soil_cfvo = "REAL",
         soil_clay_soilgrids = "REAL",
         soil_silt_soilgrids = "REAL",
-        soil_cfvo_soilgrids = "REAL"
+        soil_cfvo_soilgrids = "REAL",
+        soil_ca_mg_molar_ratio = "REAL",
+        soil_ultramafic_ni_cr_index = "REAL",
+        soil_carbonate_c_pct = "REAL",
+        is_nwi_wetland = "INTEGER",
+        nwi_wetland_system = "TEXT",
+        nwi_wetland_dist_m = "REAL"
       )
     ))
   }
@@ -457,6 +467,39 @@ PACKERA_DB_WC_BIO_COLS <- c(
       public_backbone_clade = "TEXT",
       public_phytop_ils_index = "REAL",
       public_phytop_ih_index = "REAL"
+    ))
+  }
+  if (identical(table_name, "taxon_backbone_profiles")) {
+    return(c(
+      target_genus = "TEXT DEFAULT 'Packera'",
+      accepted_scientific_name = "TEXT",
+      accepted_authorship = "TEXT",
+      basionym_name = "TEXT",
+      basionym_authorship = "TEXT",
+      homotypic_synonyms_json = "TEXT",
+      heterotypic_synonyms_json = "TEXT",
+      is_hybrid_taxon = "INTEGER DEFAULT 0",
+      hybrid_formula = "TEXT",
+      publication_citation = "TEXT",
+      publication_year = "INTEGER",
+      protologue_url = "TEXT",
+      locus_classicus_text = "TEXT",
+      tdwg_native_codes_json = "TEXT",
+      tdwg_introduced_codes_json = "TEXT",
+      natureserve_element_id = "TEXT",
+      natureserve_global_rank = "TEXT",
+      nwpl_indicator_code = "TEXT",
+      nwpl_wetland_score = "REAL",
+      backbone_source = "TEXT",
+      updated_at = "TEXT"
+    ))
+  }
+  if (identical(table_name, "natureserve_subnational_ranges")) {
+    return(c(
+      s_rank = "TEXT",
+      is_native = "INTEGER DEFAULT 1",
+      is_exotic = "INTEGER DEFAULT 0",
+      is_historical_or_extirpated = "INTEGER DEFAULT 0"
     ))
   }
   character(0)
@@ -502,7 +545,7 @@ PACKERA_DB_WC_BIO_COLS <- c(
     return(FALSE)
   }
   changed <- FALSE
-  for (tbl in c("extracted_leaves", "run_active_cohort", "leaf_efa_harmonics", "otu_morphometrics", "spatial_rf_predictions", "curation_triage", "environmental_cache", "genomic_samples", "genetic_lineage_assignments", "cytological_records", "taxon_cytology_summary")) {
+  for (tbl in c("extracted_leaves", "run_active_cohort", "leaf_efa_harmonics", "otu_morphometrics", "spatial_rf_predictions", "curation_triage", "environmental_cache", "genomic_samples", "genetic_lineage_assignments", "cytological_records", "taxon_cytology_summary", "taxon_backbone_profiles", "natureserve_subnational_ranges")) {
     if (isTRUE(.migrate_dynamic_sqlite_table_r(conn, tbl))) {
       changed <- TRUE
     }
@@ -749,7 +792,12 @@ connect_packera_db <- function(
     "public_backbone_clade", "public_phytop_ils_index", "public_phytop_ih_index",
     "genomic_propagation_tier", "cluster_propagated_gdi",
     "cytology_linkage_tier", "voucher_sporophytic_2n", "voucher_ploidy_level",
-    "taxon_reported_cytotypes", "is_multi_cytotype_taxon", "cytotype_reproductive_barrier_pass"
+    "taxon_reported_cytotypes", "is_multi_cytotype_taxon", "cytotype_reproductive_barrier_pass",
+    "soil_ca_mg_molar_ratio", "soil_ultramafic_ni_cr_index", "soil_carbonate_c_pct",
+    "is_nwi_wetland", "nwi_wetland_system", "nwi_wetland_dist_m",
+    "hydro_edaphic_niche_regime", "wetland_fidelity_concordance", "basionym_synonymy_type",
+    "backbone_basionym_name", "protologue_url", "natureserve_global_rank",
+    "nwpl_indicator_code", "nwpl_wetland_score"
   ) %in% mv_fields_chk)
   if (cur_ver >= PLANTMATICS_SCHEMA_USER_VERSION &&
     el_has_zone && om_has_cauline && mv_has_latest &&
@@ -758,7 +806,9 @@ connect_packera_db <- function(
         db_table_exists_safe(conn, "genomic_samples") &&
         db_table_exists_safe(conn, "genetic_lineage_assignments") &&
         db_table_exists_safe(conn, "cytological_records") &&
-        db_table_exists_safe(conn, "taxon_cytology_summary")
+        db_table_exists_safe(conn, "taxon_cytology_summary") &&
+        db_table_exists_safe(conn, "taxon_backbone_profiles") &&
+        db_table_exists_safe(conn, "natureserve_subnational_ranges")
     ))) {
     return(conn)
   }
@@ -769,7 +819,9 @@ connect_packera_db <- function(
       !db_table_exists_safe(conn, "genomic_samples") ||
       !db_table_exists_safe(conn, "genetic_lineage_assignments") ||
       !db_table_exists_safe(conn, "cytological_records") ||
-      !db_table_exists_safe(conn, "taxon_cytology_summary")
+      !db_table_exists_safe(conn, "taxon_cytology_summary") ||
+      !db_table_exists_safe(conn, "taxon_backbone_profiles") ||
+      !db_table_exists_safe(conn, "natureserve_subnational_ranges")
     if (!view_needs_refresh && db_table_exists_safe(conn, "v_integrative_triage_master")) {
       v_cols <- tryCatch(DBI::dbListFields(conn, "v_integrative_triage_master"), error = function(e) character(0))
       req_v_cols <- c(
@@ -793,7 +845,12 @@ connect_packera_db <- function(
         "public_backbone_clade", "public_phytop_ils_index", "public_phytop_ih_index",
         "genomic_propagation_tier", "cluster_propagated_gdi",
         "cytology_linkage_tier", "voucher_sporophytic_2n", "voucher_ploidy_level",
-        "taxon_reported_cytotypes", "is_multi_cytotype_taxon", "cytotype_reproductive_barrier_pass"
+        "taxon_reported_cytotypes", "is_multi_cytotype_taxon", "cytotype_reproductive_barrier_pass",
+        "soil_ca_mg_molar_ratio", "soil_ultramafic_ni_cr_index", "soil_carbonate_c_pct",
+        "is_nwi_wetland", "nwi_wetland_system", "nwi_wetland_dist_m",
+        "hydro_edaphic_niche_regime", "wetland_fidelity_concordance", "basionym_synonymy_type",
+        "backbone_basionym_name", "protologue_url", "natureserve_global_rank",
+        "nwpl_indicator_code", "nwpl_wetland_score"
       )
       if (length(v_cols) > 0L && !all(req_v_cols %in% v_cols)) {
         view_needs_refresh <- TRUE
@@ -2167,7 +2224,8 @@ try_fetch_master_view_for_cohort <- function(
       "genomic_propagation_tier", "tier0_calibrated_taxon", "tier0_calibrated_prob",
       "tier0_abstention_flag", "deme_mahal_d2", "cluster_propagated_gdi",
       "cytology_linkage_tier", "voucher_sporophytic_2n", "voucher_ploidy_level",
-      "taxon_reported_cytotypes", "is_multi_cytotype_taxon", "cytotype_reproductive_barrier_pass"
+      "taxon_reported_cytotypes", "is_multi_cytotype_taxon", "cytotype_reproductive_barrier_pass",
+      "hydro_edaphic_niche_regime", "wetland_fidelity_concordance", "basionym_synonymy_type"
     )
     master_df <- master_df[, setdiff(names(master_df), stale_ct_cols), drop = FALSE]
   }
@@ -2244,11 +2302,11 @@ persist_step07_to_sqlite <- function(
     out_i[ok_i] <- as.integer(round(v_num[ok_i]))
     ct_df[[.icol]] <- out_i
   }
-  for (.fcol in intersect(c("tier0_calibrated_prob", "deme_mahal_d2", "cluster_propagated_gdi"), names(ct_df))) {
+  for (.fcol in intersect(c("tier0_calibrated_prob", "deme_mahal_d2", "cluster_propagated_gdi", "wetland_fidelity_concordance"), names(ct_df))) {
     v_f <- ct_df[[.fcol]]
     ct_df[[.fcol]] <- if (is.factor(v_f)) suppressWarnings(as.numeric(as.character(v_f))) else suppressWarnings(as.numeric(v_f))
   }
-  for (.scol in intersect(c("genomic_propagation_tier", "tier0_calibrated_taxon", "cytology_linkage_tier", "taxon_reported_cytotypes"), names(ct_df))) {
+  for (.scol in intersect(c("genomic_propagation_tier", "tier0_calibrated_taxon", "cytology_linkage_tier", "taxon_reported_cytotypes", "hydro_edaphic_niche_regime", "basionym_synonymy_type"), names(ct_df))) {
     ct_df[[.scol]] <- as.character(ct_df[[.scol]])
   }
 
