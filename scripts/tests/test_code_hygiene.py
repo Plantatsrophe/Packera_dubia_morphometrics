@@ -302,6 +302,8 @@ class TestCodeHygiene(unittest.TestCase):
                 for token in FORBIDDEN_OBSOLETE_SAM2_AND_PRUNED_HELPER_TOKENS:
                     if token in ("x_norm", "y_norm", "ingest_genetic_data"):
                         hit = bool(re.search(rf"(?<![A-Za-z0-9_]){re.escape(token)}(?![A-Za-z0-9_])", line))
+                    elif token == "fig06c_":
+                        hit = bool(re.search(r"fig06c_(?!cytonuclear_paralog_cytotype)", line))
                     else:
                         hit = token in line
                     if hit:
@@ -332,6 +334,7 @@ class TestCodeHygiene(unittest.TestCase):
             PROJECT_ROOT / "scripts" / "data_prep" / "download_geochem_wetland_layers.py",
             PROJECT_ROOT / "scripts" / "analysis" / "edaphic_geochem_wetland_utils.R",
             PROJECT_ROOT / "scripts" / "tests" / "test_external_data_sources.py",
+            PROJECT_ROOT / "scripts" / "figures" / "step06c_figures.R",
         )
         strict_ceilings = {
             PROJECT_ROOT / "scripts" / "data_prep" / "download_public_packera_sequences.py": 500,
@@ -343,6 +346,7 @@ class TestCodeHygiene(unittest.TestCase):
             PROJECT_ROOT / "scripts" / "data_prep" / "download_geochem_wetland_layers.py": 450,
             PROJECT_ROOT / "scripts" / "analysis" / "edaphic_geochem_wetland_utils.R": 320,
             PROJECT_ROOT / "scripts" / "tests" / "test_external_data_sources.py": 420,
+            PROJECT_ROOT / "scripts" / "figures" / "step06c_figures.R": 350,
         }
         for mod_path in bounded_paths:
             self.assertTrue(mod_path.exists(), f"Missing expected bounded module: {mod_path}")

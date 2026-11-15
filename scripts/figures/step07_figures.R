@@ -118,7 +118,28 @@ render_step07a_integrative_synthesis_png <- function(
     m_ctx <- build_na_projected_basemap_gg(tdf[[lon_col]], tdf[[lat_col]])
     pts_g <- project_lonlat_points_r(tdf, m_ctx, lon_col = lon_col, lat_col = lat_col)
     pm <- m_ctx$plot
+    has_halo_anchors <- FALSE
     if (nrow(pts_g) > 0L) {
+      g_halo_tiers <- c("G1_Direct_Voucher", "G1_Exsiccatae_Isoduplicate", "G2_Conditional_Deme_Hull")
+      c_halo_tiers <- c("C1_Direct_Cytovoucher", "C2_Exsiccatae_Cytoduplicate")
+      gl_g <- if ("geno_linkage_tier" %in% names(pts_g)) trimws(as.character(pts_g$geno_linkage_tier)) else if ("linkage_tier" %in% names(pts_g)) trimws(as.character(pts_g$linkage_tier)) else rep("", nrow(pts_g))
+      gp_g <- if ("genomic_propagation_tier" %in% names(pts_g)) trimws(as.character(pts_g$genomic_propagation_tier)) else rep("", nrow(pts_g))
+      cy_g <- if ("cytology_linkage_tier" %in% names(pts_g)) trimws(as.character(pts_g$cytology_linkage_tier)) else rep("", nrow(pts_g))
+      geno_halo_pts <- pts_g[(!is.na(gl_g) & gl_g %in% g_halo_tiers) | (!is.na(gp_g) & gp_g %in% g_halo_tiers), , drop = FALSE]
+      cyto_halo_pts <- pts_g[!is.na(cy_g) & cy_g %in% c_halo_tiers, , drop = FALSE]
+      has_halo_anchors <- (nrow(geno_halo_pts) > 0L) || (nrow(cyto_halo_pts) > 0L)
+      if (nrow(geno_halo_pts) > 0L) {
+        pm <- pm + ggplot2::geom_point(
+          data = geno_halo_pts, ggplot2::aes(x = .data$map_x, y = .data$map_y),
+          inherit.aes = FALSE, shape = 1L, fill = NA, size = 4.0, stroke = 0.7, color = "#1E293B", show.legend = FALSE
+        )
+      }
+      if (nrow(cyto_halo_pts) > 0L) {
+        pm <- pm + ggplot2::geom_point(
+          data = cyto_halo_pts, ggplot2::aes(x = .data$map_x, y = .data$map_y),
+          inherit.aes = FALSE, shape = 5L, fill = NA, size = 4.0, stroke = 0.7, color = "#1E293B", show.legend = FALSE
+        )
+      }
       pm <- pm +
         ggplot2::geom_point(
           data = pts_g,
@@ -128,9 +149,10 @@ render_step07a_integrative_synthesis_png <- function(
         ggplot2::scale_color_manual(values = PACKERA_TREATMENT_PALETTE) +
         ggplot2::scale_shape_manual(values = PACKERA_TREATMENT_HOLLOW_SHAPES)
     }
+    map_sub <- if (has_halo_anchors) "NAD83 / Conus Albers Equal Area (EPSG:5070) (O = G1/G2 DNA, <> = C1/C2 2n)" else "NAD83 / Conus Albers Equal Area (EPSG:5070)"
     pm + ggplot2::labs(
       title = "B. Geographic Contact Zones, Anomalies & Type Localities",
-      subtitle = "NAD83 / Conus Albers Equal Area (EPSG:5070)"
+      subtitle = map_sub
     )
   } else {
     ggplot2::ggplot() + theme_packera_pub() + ggplot2::labs(title = "B. Geographic Contact Zones")
@@ -161,6 +183,19 @@ render_step07a_integrative_synthesis_png <- function(
   w_m <- if ("w_morph_kappa" %in% names(tdf) && any(is.finite(suppressWarnings(as.numeric(tdf$w_morph_kappa))))) stats::median(suppressWarnings(as.numeric(tdf$w_morph_kappa)), na.rm = TRUE) else 0.50
   w_e <- if ("w_edaphic_kappa" %in% names(tdf) && any(is.finite(suppressWarnings(as.numeric(tdf$w_edaphic_kappa))))) stats::median(suppressWarnings(as.numeric(tdf$w_edaphic_kappa)), na.rm = TRUE) else 0.30
   w_p <- if ("w_pheno_kappa" %in% names(tdf) && any(is.finite(suppressWarnings(as.numeric(tdf$w_pheno_kappa))))) stats::median(suppressWarnings(as.numeric(tdf$w_pheno_kappa)), na.rm = TRUE) else 0.20
+  wg_raw <- if ("w_geno_kappa" %in% names(tdf)) suppressWarnings(as.numeric(tdf$w_geno_kappa)) else numeric(0)
+  wg_pos <- wg_raw[is.finite(wg_raw) & wg_raw > 0.0]
+  w_g <- if (length(wg_pos) > 0L) mean(wg_pos) else if (any(is.finite(wg_raw))) mean(wg_raw[is.finite(wg_raw)]) else NA_real_
+
+  active_geno_tiers <- c("G1_Direct_Voucher", "G1_Exsiccatae_Isoduplicate", "G2_Population_Voucher_Proxy", "G2_Conditional_Deme_Hull")
+  .active_geno_mask_07 <- function(d) {
+    if (!("geno_predicted_taxon" %in% names(d))) return(rep(FALSE, nrow(d)))
+    gp_v <- trimws(as.character(d$geno_predicted_taxon))
+    gl_v <- if ("geno_linkage_tier" %in% names(d)) trimws(as.character(d$geno_linkage_tier)) else if ("linkage_tier" %in% names(d)) trimws(as.character(d$linkage_tier)) else rep("", nrow(d))
+    pt_v <- if ("genomic_propagation_tier" %in% names(d)) trimws(as.character(d$genomic_propagation_tier)) else rep("", nrow(d))
+    !is.na(gp_v) & nzchar(gp_v) & gp_v != "Unknown" & ((!is.na(gl_v) & gl_v %in% active_geno_tiers) | (!is.na(pt_v) & pt_v %in% active_geno_tiers))
+  }
+  has_geno_stream <- any(.active_geno_mask_07(tdf))
 
   wett_rows <- lapply(active_taxa, function(tx) {
     sub_tx <- tdf[tdf$plot_group == tx, , drop = FALSE]
@@ -209,22 +244,41 @@ render_step07a_integrative_synthesis_png <- function(
     dd_r <- if ("delta_doy_resid" %in% names(sub_tx)) suppressWarnings(as.numeric(sub_tx$delta_doy_resid)) else if ("delta_doy" %in% names(sub_tx)) suppressWarnings(as.numeric(sub_tx$delta_doy)) else rep(NA_real_, n_tx)
     pct_pheno <- if (any(is.finite(dd_r))) 100.0 * mean(abs(dd_r) <= 21.0, na.rm = TRUE) else NA_real_
 
-    # Independent stream 5: Mean probabilistic_consensus_score (scaled 0-100)
+    # Independent stream 5/6: Mean probabilistic_consensus_score (scaled 0-100) + optional active Genomic stream
     pcs_v <- if ("probabilistic_consensus_score" %in% names(sub_tx)) suppressWarnings(as.numeric(sub_tx$probabilistic_consensus_score)) else rep(NA_real_, n_tx)
     pct_cons <- if (any(is.finite(pcs_v))) 100.0 * mean(pmin(1.0, pmax(0.0, pcs_v)), na.rm = TRUE) else 100.0 * mean(sub_tx$treatment_call %in% c("Confirmed_Species", "Confirmed_Type_Control"))
 
+    if (has_geno_stream) {
+      g_ok <- .active_geno_mask_07(sub_tx)
+      pct_geno <- if (any(g_ok)) {
+        if (is_single_sp_06) {
+          adm_sub <- if ("is_geno_admixed" %in% names(sub_tx)) (!is.na(sub_tx$is_geno_admixed) & toupper(trimws(as.character(sub_tx$is_geno_admixed))) %in% c("TRUE", "1", "T", "YES")) else rep(FALSE, n_tx)
+          100.0 * mean(!adm_sub[g_ok], na.rm = TRUE)
+        } else {
+          100.0 * mean(trimws(as.character(sub_tx$geno_predicted_taxon[g_ok])) == trimws(as.character(sub_tx$species_standardized[g_ok])), na.rm = TRUE)
+        }
+      } else NA_real_
+      stream_lvls <- c("1. Leaf Morphometrics", "2. Ecological & Edaphic", "3. Topological ECT & OSR", "4. Circular Phenology", "5. Genomic & Lineage", "6. Consensus Score")
+      score_vec <- c(pct_morph, pct_eco, pct_ect_osr, pct_pheno, pct_geno, pct_cons)
+    } else {
+      stream_lvls <- c("1. Leaf Morphometrics", "2. Ecological & Edaphic", "3. Topological ECT & OSR", "4. Circular Phenology", "5. Consensus Score")
+      score_vec <- c(pct_morph, pct_eco, pct_ect_osr, pct_pheno, pct_cons)
+    }
+
     data.frame(
       plot_group = tx,
-      stream = factor(
-        c("1. Leaf Morphometrics", "2. Ecological & Edaphic", "3. Topological ECT & OSR", "4. Circular Phenology", "5. Consensus Score"),
-        levels = c("1. Leaf Morphometrics", "2. Ecological & Edaphic", "3. Topological ECT & OSR", "4. Circular Phenology", "5. Consensus Score")
-      ),
-      score = c(pct_morph, pct_eco, pct_ect_osr, pct_pheno, pct_cons),
+      stream = factor(stream_lvls, levels = stream_lvls),
+      score = score_vec,
       stringsAsFactors = FALSE
     )
   })
   wett_df <- do.call(rbind, wett_rows)
   wett_df$lbl <- ifelse(is.finite(wett_df$score), sprintf("%.0f%%", wett_df$score), "N/A")
+  wett_sub <- if (has_geno_stream) {
+    sprintf("OOF \u03ba weights: Morph = %.2f | Edaphic = %.2f | Phenology = %.2f | Genomic = %s", w_m, w_e, w_p, ifelse(is.finite(w_g), sprintf("%.2f", w_g), "N/A"))
+  } else {
+    sprintf("OOF \u03ba weights: Morph = %.2f | Edaphic = %.2f | Phenology = %.2f", w_m, w_e, w_p)
+  }
 
   p_wett <- ggplot2::ggplot(wett_df, ggplot2::aes(x = .data$stream, y = .data$plot_group, fill = .data$score)) +
     ggplot2::geom_tile(color = "white", linewidth = 0.5) +
@@ -239,7 +293,7 @@ render_step07a_integrative_synthesis_png <- function(
     ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 25, hjust = 1)) +
     ggplot2::labs(
       title = "D. Multi-Evidence Wettstein Concordance Grid",
-      subtitle = sprintf("OOF \u03ba weights: Morph = %.2f | Edaphic = %.2f | Phenology = %.2f", w_m, w_e, w_p),
+      subtitle = wett_sub,
       x = NULL, y = NULL
     )
 

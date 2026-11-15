@@ -500,6 +500,7 @@ class TestGenomicIntegration(unittest.TestCase):
                 self.assertIn("06_genomic_phylogenomics.R", cmd1)
                 self.assertIn("fig06a_genomic_pcoa_tree_concordance.png", cmd1)
                 self.assertIn("fig06b_reticulation_gdi_landscape.png", cmd1)
+                self.assertTrue(any("fig06c_cytonuclear_paralog_cytotype_audit.png" in str(a) for a in m_run.call_args_list[1].args[0]))
 
     def test_hdplot_eb_dosage_cytotype_and_run5563_linker(self) -> None:
         # 1. Dual GATK vs BBMap AD field depth parsing
@@ -849,6 +850,11 @@ class TestGenomicIntegration(unittest.TestCase):
                         "INSERT INTO plant_individuals (catalogNumber, plant_individual_id, rosette_centroid_x) VALUES (?, ?, ?);",
                         (row[0], row[1], 100.0),
                     )
+                for sp_c, r_cy, m2n, mpl in (("Packera dubia", "2x, 4x", 44, 2), ("Packera schweinitziana", "4x", 44, 4)):
+                    conn.execute(
+                        "INSERT OR REPLACE INTO taxon_cytology_summary (species_standardized, reported_cytotypes, modal_sporophytic_2n, modal_ploidy_level) VALUES (?, ?, ?, ?);",
+                        (sp_c, r_cy, m2n, mpl),
+                    )
                 conn.commit()
             finally:
                 conn.close()
@@ -907,6 +913,26 @@ class TestGenomicIntegration(unittest.TestCase):
                         "30", cyt, "5.2", plast, its_r, str(cytonuc),
                     ])
 
+            with open(parsed_dir / "hdplot_locus_diagnostics.tsv", "w", encoding="utf-8", newline="") as fh:
+                wr = csv.writer(fh, delimiter="\t")
+                wr.writerow(["locus_id", "n_called_ref", "n_hets_ref", "H_obs", "het_ref_reads", "het_alt_reads", "het_total_reads", "D_read_ratio", "hdplot_keep", "filter_reason", "is_paraloss1272_single_copy", "locus_paralogy_weight"])
+                for li, lid in enumerate(loci):
+                    is_pl = 1 if li < 10 else 0
+                    wr.writerow([lid, "8", "3", f"{0.18 + 0.01 * (li % 10):.3f}", "30", "28", "58", f"{-1.2 + 0.1 * (li % 10):.3f}", "1", "keep", str(is_pl), "1.5" if is_pl else "1.0"])
+                wr.writerow(["L_PARA_1", "8", "7", "0.820", "45", "10", "55", "6.200", "0", "high_H_and_D", "0", "0.5"])
+                wr.writerow(["L_PARA_2", "8", "6", "0.740", "12", "42", "54", "-5.400", "0", "high_H_and_D", "0", "0.5"])
+            with open(parsed_dir / "locus_weights.tsv", "w", encoding="utf-8", newline="") as fh:
+                wr = csv.writer(fh, delimiter="\t")
+                wr.writerow(["locus_id", "is_paraloss1272_single_copy", "locus_paralogy_weight"])
+                for li, lid in enumerate(loci):
+                    is_pl = 1 if li < 10 else 0
+                    wr.writerow([lid, str(is_pl), "1.5" if is_pl else "1.0"])
+            with open(parsed_dir / "cytonuclear_discordance.csv", "w", encoding="utf-8", newline="") as fh:
+                wr = csv.writer(fh)
+                wr.writerow(["genetic_sample_id", "nuclear_taxon", "plastid_clade", "its_ribotype", "cytonuclear_discordant", "public_plastome_match", "public_its_match", "waxy_lineage_match"])
+                for sid, _, _, sp, _, _, _, _, plast, its_r, cytonuc, _ in s_defs:
+                    cp_tx = "Packera schweinitziana" if sid == "PACF1HYBM" else sp
+                    wr.writerow([sid, sp, plast, its_r, str(cytonuc), cp_tx, sp, sp])
             with open(parsed_dir / "genomic_manifest.json", "w", encoding="utf-8") as fh:
                 json.dump({"status": "ingested", "n_samples_total": len(s_defs), "n_loci_retained": 30}, fh)
             (pop_geno / "packera_batch.vcf").write_text(
@@ -924,6 +950,7 @@ class TestGenomicIntegration(unittest.TestCase):
             batch_r = tmp / "verify_batched_phase2.R"
             fig6a = figs_dir / "fig06a_genomic_pcoa_tree_concordance.png"
             fig6b = figs_dir / "fig06b_reticulation_gdi_landscape.png"
+            fig6c = figs_dir / "fig06c_cytonuclear_paralog_cytotype_audit.png"
             fig7a_base = figs_dir / "fig07a_base_3stream.png"
             fig7a_4st = figs_dir / "fig07a_integrative_taxonomic_synthesis.png"
             q_base_csv = tables_dir / "triage_queue_base3.csv"
@@ -976,6 +1003,7 @@ st_pop <- system2(
     "--output-figures", {json.dumps(str(figs_dir))},
     "--figure-a", {json.dumps(str(fig6a))},
     "--figure-b", {json.dumps(str(fig6b))},
+    "--figure-c", {json.dumps(str(fig6c))},
     "--run-id", "batch_smoke",
     "--db", {json.dumps(str(db_path))},
     "--demo"
@@ -996,6 +1024,7 @@ for (fn in req_phase2_files) {{
 }}
 stopifnot(file.exists({json.dumps(str(fig6a))}), file.info({json.dumps(str(fig6a))})$size > 5000)
 stopifnot(file.exists({json.dumps(str(fig6b))}), file.info({json.dumps(str(fig6b))})$size > 5000)
+stopifnot(file.exists({json.dumps(str(fig6c))}), file.info({json.dumps(str(fig6c))})$size > 10240)
 
 ga <- utils::read.csv(file.path({json.dumps(str(step06_out))}, "genomic_assignments.csv"), stringsAsFactors = FALSE)
 rownames(ga) <- ga$genetic_sample_id
@@ -1058,6 +1087,28 @@ stopifnot(identical(as.character(f1_row$taxonomic_treatment_subtype), "Hybrid_In
 
 stopifnot(file.exists(file.path({json.dumps(str(tables_dir))}, "genomic_field_triage.csv")))
 stopifnot(file.exists({json.dumps(str(fig7a_4st))}), file.info({json.dumps(str(fig7a_4st))})$size > 5000)
+source("scripts/figures/step06c_figures.R")
+pub_conc_demo <- data.frame(
+  taxon = c("Packera dubia", "Packera schweinitziana", "Packera millefolium"),
+  public_phytop_ils_index = c(0.21, 0.19, 0.14),
+  public_phytop_ih_index = c(0.08, 0.05, 0.03),
+  stringsAsFactors = FALSE
+)
+render_fig06c_cytonuclear_paralog_cytotype_png(
+  {json.dumps(str(fig6c))},
+  {json.dumps(str(parsed_dir))},
+  {json.dumps(str(step06_out))},
+  ga,
+  pub_concordance_df = pub_conc_demo,
+  db_path = {json.dumps(str(db_path))}
+)
+render_step07a_integrative_synthesis_png(q3, out_plot_path = {json.dumps(str(fig7a_base))})
+q4_cyto <- q4
+q4_cyto$cytology_linkage_tier <- ifelse(q4_cyto$catalogNumber == "NCU_DUB_1", "C1_Direct_Cytovoucher", NA_character_)
+render_step07a_integrative_synthesis_png(q4_cyto, out_plot_path = {json.dumps(str(fig7a_4st))})
+stopifnot(file.exists({json.dumps(str(fig6c))}), file.info({json.dumps(str(fig6c))})$size > 10240)
+stopifnot(file.exists({json.dumps(str(fig7a_base))}), file.info({json.dumps(str(fig7a_base))})$size > 10240)
+stopifnot(file.exists({json.dumps(str(fig7a_4st))}), file.info({json.dumps(str(fig7a_4st))})$size > 10240)
 rep_txt <- paste(readLines({json.dumps(str(rep_4st_md))}, warn = FALSE), collapse = "\\n")
 stopifnot(grepl("## 5\\\\. Independent Step 06 Genomic & Phylogenomic Evidence Stream", rep_txt))
 stopifnot(length(list.files({json.dumps(str(figs_dir))}, pattern = "\\\\.pdf$", ignore.case = TRUE)) == 0L)
@@ -1192,6 +1243,12 @@ cat("BATCHED_PHASE2_R_OK\\n")
                 f"Batched R verification failed (exit={proc.returncode}):\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}",
             )
             self.assertIn("BATCHED_PHASE2_R_OK", proc.stdout)
+            for png_p in (fig6c, fig7a_base, fig7a_4st):
+                self.assertTrue(png_p.is_file(), f"Missing rendered PNG: {png_p}")
+                self.assertGreater(png_p.stat().st_size, 10240, f"PNG too small: {png_p}")
+                with open(png_p, "rb") as fh_png:
+                    self.assertEqual(fh_png.read(8), b"\x89PNG\r\n\x1a\n", f"Invalid PNG magic header: {png_p}")
+            self.assertEqual(list(figs_dir.glob("*.pdf")), [])
 
     def test_download_public_packera_sequences_flat_extraction_and_sha256(self) -> None:
         """(a) Verify mocked Dryad (SHA-256 + nested zip), NCBI nuccore/SRA, and BOLD download flatly."""
@@ -1737,6 +1794,8 @@ cat("BATCHED_PHASE2_R_OK\\n")
                     str(figs_dir / "fig06a.png"),
                     "--figure-b",
                     str(figs_dir / "fig06b.png"),
+                    "--figure-c",
+                    str(figs_dir / "fig06c.png"),
                     "--run-id",
                     run_id,
                     "--db",
@@ -1749,6 +1808,12 @@ cat("BATCHED_PHASE2_R_OK\\n")
                 },
             )
             self.assertEqual(proc.returncode, 0, f"Step 06 public backbone run failed:\n{proc.stdout}\n{proc.stderr}")
+            fig6c_pub = figs_dir / "fig06c.png"
+            self.assertTrue(fig6c_pub.is_file())
+            self.assertGreater(fig6c_pub.stat().st_size, 10240)
+            with open(fig6c_pub, "rb") as fh_p:
+                self.assertEqual(fh_p.read(8), b"\x89PNG\r\n\x1a\n")
+            self.assertEqual(list(figs_dir.glob("*.pdf")), [])
 
             cohesion_csv = out_dir / "genomic_clade_cohesion_summary.csv"
             self.assertTrue(cohesion_csv.is_file())

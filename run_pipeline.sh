@@ -1063,7 +1063,7 @@ has_geo_cols = (
     ('stateProvince' in df.columns and df['stateProvince'].astype(str).str.strip().replace({'nan': '', 'None': ''}).ne('').any())
     or ('decimalLongitude' in df.columns and pd.to_numeric(df['decimalLongitude'], errors='coerce').notna().any())
 )
-if eff_geo_scope == 'eastern_na' and not inc_west_pf and not custom_taxa and not focal_raw and has_geo_cols:
+if eff_geo_scope == 'eastern_na' and not inc_west_pf and not custom_taxa and has_geo_cols:
     keep_east_pf, east_pf_stats = evaluate_eastern_na_cohort_filter(df, standardize_packera_taxon)
     if not keep_east_pf.all():
         before_east_pf = len(df)
@@ -1281,18 +1281,41 @@ if focal_raw:
                     (p for p in run_dir.parents if p.name == 'runs'),
                     run_dir.parent,
                 )
-            neigh_candidates = [
-                run_dir / 'outputs' / 'reports' / 'focal_auto_neighbors.txt',
-                runs_search_root / 'latest' / 'outputs' / 'reports' / 'focal_auto_neighbors.txt',
-            ] + sorted(runs_search_root.glob('**/outputs/reports/focal_auto_neighbors.txt'), reverse=True)
-            comp_candidates = [
-                run_dir / 'outputs' / 'reports' / 'empirical_taxon_complexes.csv',
-                runs_search_root / 'latest' / 'outputs' / 'reports' / 'empirical_taxon_complexes.csv',
-            ] + sorted(runs_search_root.glob('**/outputs/reports/empirical_taxon_complexes.csv'), reverse=True)
-            aff_candidates = [
-                run_dir / 'outputs' / 'reports' / 'pairwise_taxon_affinity_matrix.csv',
-                runs_search_root / 'latest' / 'outputs' / 'reports' / 'pairwise_taxon_affinity_matrix.csv',
-            ] + sorted(runs_search_root.glob('**/outputs/reports/pairwise_taxon_affinity_matrix.csv'), reverse=True)
+            ts_reports = None
+            if triage_source_raw and triage_source_raw.upper() not in ('ALL', '*'):
+                ts_norm = resolve_canonical_run_id(explicit_run_id=triage_source_raw, workspace_root=root_data.parent)
+                ts_cands = [
+                    runs_search_root / ts_norm / 'outputs' / 'reports',
+                    Path(triage_source_raw) / 'outputs' / 'reports',
+                    root_data.parent / 'runs' / ts_norm / 'outputs' / 'reports',
+                ]
+                ts_reports = next((p for p in ts_cands if p.is_dir()), None)
+            if ts_reports is not None:
+                neigh_candidates = [
+                    run_dir / 'outputs' / 'reports' / 'focal_auto_neighbors.txt',
+                    ts_reports / 'focal_auto_neighbors.txt',
+                ]
+                comp_candidates = [
+                    run_dir / 'outputs' / 'reports' / 'empirical_taxon_complexes.csv',
+                    ts_reports / 'empirical_taxon_complexes.csv',
+                ]
+                aff_candidates = [
+                    run_dir / 'outputs' / 'reports' / 'pairwise_taxon_affinity_matrix.csv',
+                    ts_reports / 'pairwise_taxon_affinity_matrix.csv',
+                ]
+            else:
+                neigh_candidates = [
+                    run_dir / 'outputs' / 'reports' / 'focal_auto_neighbors.txt',
+                    runs_search_root / 'latest' / 'outputs' / 'reports' / 'focal_auto_neighbors.txt',
+                ] + sorted(runs_search_root.glob('**/outputs/reports/focal_auto_neighbors.txt'), reverse=True)
+                comp_candidates = [
+                    run_dir / 'outputs' / 'reports' / 'empirical_taxon_complexes.csv',
+                    runs_search_root / 'latest' / 'outputs' / 'reports' / 'empirical_taxon_complexes.csv',
+                ] + sorted(runs_search_root.glob('**/outputs/reports/empirical_taxon_complexes.csv'), reverse=True)
+                aff_candidates = [
+                    run_dir / 'outputs' / 'reports' / 'pairwise_taxon_affinity_matrix.csv',
+                    runs_search_root / 'latest' / 'outputs' / 'reports' / 'pairwise_taxon_affinity_matrix.csv',
+                ] + sorted(runs_search_root.glob('**/outputs/reports/pairwise_taxon_affinity_matrix.csv'), reverse=True)
 
             comp_file = next((p for p in comp_candidates if p.is_file() and p.stat().st_size > 0), None)
             aff_file = next((p for p in aff_candidates if p.is_file() and p.stat().st_size > 0), None)
@@ -1760,6 +1783,7 @@ if [[ "${START_STEP}" -le 6 ]]; then
       --tables-dir "${RUN_DIR}/data/tables" \
       --figure-a "${RUN_DIR}/outputs/figures/fig06a_genomic_pcoa_tree_concordance.png" \
       --figure-b "${RUN_DIR}/outputs/figures/fig06b_reticulation_gdi_landscape.png" \
+      --figure-c "${RUN_DIR}/outputs/figures/fig06c_cytonuclear_paralog_cytotype_audit.png" \
       --run-id "${RUN_ID}" \
       ${GENO_R_DB_ARGS[@]+"${GENO_R_DB_ARGS[@]}"} \
       ${DEMO_FLAG[@]+"${DEMO_FLAG[@]}"}

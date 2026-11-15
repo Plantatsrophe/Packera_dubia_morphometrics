@@ -53,6 +53,7 @@ if (!exists("compute_microhaplotype_coancestry", mode = "function")) .src_step06
 if (!exists("run_step06_landscape_genomics", mode = "function")) .src_step06_rel("scripts/analysis/step06_spatial_landscape_genomics.R")
 if (!exists("load_public_packera_backbone", mode = "function")) .src_step06_rel("scripts/analysis/step06_public_backbone.R")
 if (!exists("render_fig06a_genomic_pcoa_tree_png", mode = "function")) .src_step06_rel("scripts/figures/step06_figures.R")
+if (!exists("render_fig06c_cytonuclear_paralog_cytotype_png", mode = "function")) .src_step06_rel("scripts/figures/step06c_figures.R")
 
 .resolve_step06_db_env <- function(default = "") {
   for (k in c("PLANTMATICS_DB_PATH", "PACKERA_SQLITE_DB", "PACKERA_DB_PATH")) {
@@ -74,6 +75,7 @@ parse_step06_args <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
   parser <- optparse::add_option(parser, c("--output-figures"), type = "character", default = "outputs/figures")
   parser <- optparse::add_option(parser, c("--figure-a"), type = "character", default = "")
   parser <- optparse::add_option(parser, c("--figure-b"), type = "character", default = "")
+  parser <- optparse::add_option(parser, c("--figure-c"), type = "character", default = "")
   parser <- optparse::add_option(parser, c("--run-id"), type = "character", default = Sys.getenv("RUN_ID", unset = "canonical"))
   parser <- optparse::add_option(parser, c("--db"), type = "character", default = "")
   parser <- optparse::add_option(parser, c("--db-path"), type = "character", default = .resolve_step06_db_env(""))
@@ -776,9 +778,11 @@ run_step06_genomic_phylogenomics <- function(opts) {
   dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
   fig_a <- .resolve_first_nonempty(opts[["figure-a"]], file.path(fig_dir, "fig06a_genomic_pcoa_tree_concordance.png"))
   fig_b <- .resolve_first_nonempty(opts[["figure-b"]], file.path(fig_dir, "fig06b_reticulation_gdi_landscape.png"))
+  fig_c <- .resolve_first_nonempty(opts[["figure-c"]], file.path(fig_dir, "fig06c_cytonuclear_paralog_cytotype_audit.png"))
   pass_df$coancestry_cluster <- coanc_res$cluster
   render_fig06a_genomic_pcoa_tree_png(fig_a, pass_df, assign_df, q_mat, eig_pct, phylo_res$tree, congr_df, eff_db_ro, opts[["run-id"]])
   render_fig06b_reticulation_gdi_png(fig_b, tri_res$triangle_df, fb_res$fbranch_df, gdi_df, land_res$feems_edges_df, land_res$summary_df, organellar_placement_df = pub_eval$placement_df)
+  render_fig06c_cytonuclear_paralog_cytotype_png(fig_c, parsed_dir, out_dir, full_audit, pub_concordance_df = pub_eval$concordance_df, organellar_placement_df = pub_eval$placement_df, db_path = eff_db_ro)
 
   message(sprintf(
     "[Step 06/07] Phylogenomics complete: %d/%d passing | LORO acc=%.3f kappa=%.3f | M/P conc=%.4f | median gdi=%.3f",

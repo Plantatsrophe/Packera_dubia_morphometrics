@@ -101,7 +101,6 @@ def build_four_stage_commands(
         common_tail.extend(["--threads", str(threads)])
 
     r1, r2, r3, r4 = _stage_run_ids(prefix, discovery_run_id=discovery_run_id)
-    has_discovery_override = bool(discovery_run_id is not None and str(discovery_run_id).strip())
 
     stages: List[Tuple[str, str, List[str]]] = []
     if not skip_discovery:
@@ -125,10 +124,13 @@ def build_four_stage_commands(
         "--run-id",
         r2,
         "--skip-harvest",
+        "--geographic-scope",
+        geographic_scope,
         "--focal-taxon",
         focal_taxon,
         "--discover-complexes",
-        *(["--triage-source", r1] if has_discovery_override else []),
+        "--triage-source",
+        r1,
         "--gold-anchors",
         str(gold_anchors),
         "--skip-backbone-download",
@@ -142,6 +144,8 @@ def build_four_stage_commands(
         "--run-id",
         r3,
         "--skip-harvest",
+        "--geographic-scope",
+        geographic_scope,
         "--focal-taxon",
         focal_taxon,
         "--intraspecific-mode",
@@ -160,6 +164,8 @@ def build_four_stage_commands(
         r4,
         "--start-step",
         "3",
+        "--geographic-scope",
+        geographic_scope,
         "--focal-taxon",
         focal_taxon,
         "--intraspecific-mode",

@@ -7,6 +7,7 @@ import contextlib
 import csv
 import io
 import json
+import os
 import re
 import subprocess
 import sys
@@ -21,9 +22,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 TRIAGE_CSV_HEADERS = [
-    "catalogNumber", "plant_individual_id", "institutionCode", "species_standardized",
-    "recommended_determination", "taxonomic_treatment_subtype", "synthesis_triage_priority",
-    "gmm_cluster", "cryptic_cluster_cohesion_pass", "delta_doy_resid", "synthesis_rationale",
+    "catalogNumber", "plant_individual_id", "institutionCode", "species_standardized", "recommended_determination",
+    "taxonomic_treatment_subtype", "synthesis_triage_priority", "gmm_cluster", "cryptic_cluster_cohesion_pass", "delta_doy_resid", "synthesis_rationale",
 ]
 
 
@@ -201,15 +201,15 @@ class TestEasternNAMonographCLI(unittest.TestCase):
 
         self.assertTrue(callable(_stage_run_ids))
         self.assertEqual(slugify_taxon("Packera anonyma"), "Packera_anonyma")
-        self.assertEqual(len(build_four_stage_commands(run_script=PROJECT_ROOT / "run_pipeline.sh", focal_taxon="Packera dubia", prefix="dubia")), 4)
+        stages = build_four_stage_commands(run_script=PROJECT_ROOT / "run_pipeline.sh", focal_taxon="Packera dubia", prefix="dubia", geographic_scope="eastern_na")
+        self.assertEqual(len(stages), 4)
+        self.assertTrue(all(["--geographic-scope", "eastern_na"] in [c[i:i + 2] for i in range(len(c) - 1)] for _, _, c in stages))
+        self.assertIn(["--triage-source", "dubia_01_eastern_discovery"], [stages[1][2][i:i + 2] for i in range(len(stages[1][2]) - 1)])
 
         with tempfile.TemporaryDirectory() as tmp:
             ws = Path(tmp).resolve()
             (ws / "run_pipeline.sh").write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
-            db_path = _seed_voucher_db(
-                ws / "data" / "plantmatics.sqlite",
-                {"Packera anonyma": 16, "Packera aurea": 16, "Packera obovata": 15, "Packera schweinitziana": 4},
-            )
+            db_path = _seed_voucher_db(ws / "data" / "plantmatics.sqlite", {"Packera anonyma": 16, "Packera aurea": 16, "Packera obovata": 15, "Packera schweinitziana": 4})
 
             def _forbid_pipeline(*args, **kwargs):
                 cmd = args[0] if args else []
@@ -226,6 +226,7 @@ class TestEasternNAMonographCLI(unittest.TestCase):
             stdout = buf.getvalue()
             cmd_lines = [ln for ln in stdout.splitlines() if "run_pipeline.sh" in ln and "--run-id" in ln]
             self.assertEqual(len(cmd_lines), 12, f"Expected 3 genus + 9 species commands:\n{stdout}")
+            self.assertTrue(all("--geographic-scope eastern_na" in ln for ln in cmd_lines))
             for stage in ("00_genus_wide/01_raw_discovery", "00_genus_wide/02_purified_genus", "00_genus_wide/03_gold_thin_audit"):
                 self.assertIn(stage, stdout)
             for slug in ("Packera_anonyma", "Packera_aurea", "Packera_obovata"):
@@ -292,15 +293,11 @@ class TestEasternNAMonographCLI(unittest.TestCase):
                     {"catalogNumber": "NCU_DUBIA_003", "plant_individual_id": 1, "institutionCode": "NCU", "species_standardized": "Packera dubia", "recommended_determination": "Packera dubia", "taxonomic_treatment_subtype": "Putative_Cryptic_Species", "synthesis_triage_priority": "CRITICAL", "gmm_cluster": "2", "cryptic_cluster_cohesion_pass": "TRUE", "delta_doy_resid": "19.5", "synthesis_rationale": "Cohesive outcrop lineage"},
                 ],
             )
-            _seed_stage_outputs(
-                ws, db_path, f"{parent_id}/Packera_dubia/04_gold_thin_audit",
-                [{"catalogNumber": "NCU_DUBIA_003", "plant_individual_id": 1, "species_standardized": "Packera dubia", "taxonomic_treatment_subtype": "Putative_Cryptic_Species", "gmm_cluster": "2", "cryptic_cluster_cohesion_pass": "TRUE"}],
-            )
+            _seed_stage_outputs(ws, db_path, f"{parent_id}/Packera_dubia/04_gold_thin_audit",
+                                [{"catalogNumber": "NCU_DUBIA_003", "plant_individual_id": 1, "species_standardized": "Packera dubia", "taxonomic_treatment_subtype": "Putative_Cryptic_Species", "gmm_cluster": "2", "cryptic_cluster_cohesion_pass": "TRUE"}])
             for st in ("03_intraspecific_clean", "04_gold_thin_audit"):
-                _seed_stage_outputs(
-                    ws, db_path, f"{parent_id}/Packera_aurea/{st}",
-                    [{"catalogNumber": "NCU_AUREA_001", "plant_individual_id": 1, "species_standardized": "Packera aurea", "taxonomic_treatment_subtype": "Confirmed_Species", "gmm_cluster": "1"}],
-                )
+                _seed_stage_outputs(ws, db_path, f"{parent_id}/Packera_aurea/{st}",
+                                    [{"catalogNumber": "NCU_AUREA_001", "plant_individual_id": 1, "species_standardized": "Packera aurea", "taxonomic_treatment_subtype": "Confirmed_Species", "gmm_cluster": "1"}])
 
             with mock.patch("subprocess.run", side_effect=_fake_run) as m_sum:
                 self.assertEqual(monograph_main(["--parent-run-id", parent_id, "--summarize-only", "--db", str(db_path)], workspace_root=ws), 0)
@@ -331,6 +328,46 @@ class TestEasternNAMonographCLI(unittest.TestCase):
                 md_text = md_file.read_text(encoding="utf-8")
                 self.assertNotIn("\u2013", md_text, f"En dash found in {md_file}")
                 self.assertNotIn("\u2014", md_text, f"Em dash found in {md_file}")
+
+    def test_focal_taxon_eastern_gate_and_triage_source_auto_neighbors(self) -> None:
+        """Verify eastern_na --focal-taxon pruning and --auto-neighbors pinning to --triage-source."""
+        import pandas as pd
+        from scripts.core.db import get_db_connection, upsert_vouchers_records
+
+        sh_src = (PROJECT_ROOT / "run_pipeline.sh").read_text(encoding="utf-8")
+        fn_body = sh_src[sh_src.index("run_preflight_subset_filter() {"):sh_src.index("\nrun_preflight_subset_filter\n")]
+        with tempfile.TemporaryDirectory() as tmp:
+            root_data, runs_root = Path(tmp).resolve() / "root_data", Path(tmp).resolve() / "runs"
+            run_dir = runs_root / "paupercula_02_complex_triage"
+            (tables_dir := run_dir / "data" / "tables").mkdir(parents=True, exist_ok=True)
+            (root_data / "cropped_patches" / "capitula").mkdir(parents=True, exist_ok=True)
+            recs = [
+                {"catalogNumber": c, "scientificName": sp, "species_standardized": sp, "stateProvince": st, "decimalLatitude": lat,
+                 "decimalLongitude": lon, "type_status": ts, "determiner_tier": "Tier_1_Gold", "is_primary_duplicate": 1,
+                 "duplicate_count": 1, "image_path": f"data/raw_vouchers/{c}.webp"}
+                for c, sp, st, lat, lon, ts in (
+                    ("PAUP_NC1", "Packera paupercula", "NC", 35.9, -79.0, ""), ("PAUP_NC2", "Packera paupercula", "NC", 35.8, -79.1, ""),
+                    ("PAUP_TYPE", "Packera paupercula", "MT", 46.8, -110.0, "HOLOTYPE"), ("PAUP_MT", "Packera paupercula", "MT", 46.8, -110.0, ""),
+                    ("PAUP_CO", "Packera paupercula", "CO", 39.7, -105.0, ""), ("PAUP_ND", "Packera paupercula", "ND", 46.9, -102.8, ""),
+                    ("ANON_NC1", "Packera anonyma", "NC", 35.9, -79.0, ""), ("OBOV_NC1", "Packera obovata", "NC", 35.9, -79.0, ""),
+                )
+            ]
+            with contextlib.closing(get_db_connection(db_path=root_data / "plantmatics.sqlite", init_schema=True)) as conn:
+                upsert_vouchers_records(conn, recs)
+            pd.DataFrame([r for r in recs if r["catalogNumber"] not in {"PAUP_MT", "PAUP_CO", "PAUP_ND"}]).to_csv(tables_dir / "curated_vouchers.csv", index=False)
+            for rid, neigh in (("run_A", "Packera anonyma"), ("decoy_west", "Packera obovata")):
+                _write_csv(runs_root / rid / "outputs" / "reports" / "empirical_taxon_complexes.csv", ["species_standardized", "consensus_complex_id"], [{"species_standardized": "Packera paupercula", "consensus_complex_id": 1}, {"species_standardized": neigh, "consensus_complex_id": 1}])
+            (runs_root / "latest").symlink_to("decoy_west")
+            env = {k: v for k, v in os.environ.items() if k not in ("PLANTMATICS_DB_PATH", "PLANTMATICS_DEMO_MODE", "PACKERA_DB_PATH", "PACKERA_DEMO_MODE")}
+            env.update({"PROJECT_ROOT": str(PROJECT_ROOT), "RUN_DIR": str(run_dir), "PYTHON_MAIN": sys.executable, "GEOGRAPHIC_SCOPE": "eastern_na",
+                        "INCLUDE_WESTERN": "false", "FOCAL_TAXON": "Packera paupercula", "AUTO_NEIGHBORS": "true", "TRIAGE_SOURCE": "run_A",
+                        "REUSE_CANONICAL_DATA": "true", "SEED_DATA_DIR": str(root_data)})
+            script = f"set -euo pipefail\n{fn_body}\nrun_preflight_subset_filter\n".replace('"${PROJECT_ROOT}/data"', f'"{root_data}"')
+            res = subprocess.run(["bash", "-c", script], cwd=str(PROJECT_ROOT), capture_output=True, text=True, env=env, check=True)
+            self.assertIn("Restored 3 vouchers", res.stdout)
+            self.assertIn("[Preflight: Cis-Mississippi Eastern NA Scope]", res.stdout)
+            self.assertEqual(set(pd.read_csv(tables_dir / "curated_vouchers.csv")["catalogNumber"]), {"PAUP_NC1", "PAUP_NC2", "PAUP_TYPE", "ANON_NC1"})
+            self.assertNotIn("Packera obovata", res.stdout)
 
 
 if __name__ == "__main__":

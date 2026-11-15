@@ -1252,6 +1252,8 @@ def run_genomics_stream(
         str(figures_dir / "fig06a_genomic_pcoa_tree_concordance.png"),
         "--figure-b",
         str(figures_dir / "fig06b_reticulation_gdi_landscape.png"),
+        "--figure-c",
+        str(figures_dir / "fig06c_cytonuclear_paralog_cytotype_audit.png"),
         "--run-id",
         eff_run_id,
     ]

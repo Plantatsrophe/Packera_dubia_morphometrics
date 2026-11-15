@@ -4,6 +4,16 @@ All notable methodological, statistical, figure, and SQLite relational schema ch
 
 The structure follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [5.7.0] - 2026-11-15 (`UNC-BOT-SOP-2026-04-REV5` | SQLite Schema `20261127`)
+
+### Added
+* **15th Canonical Plate `fig06c_cytonuclear_paralog_cytotype_audit.png` (`scripts/figures/step06c_figures.R`):** I added a modular `< 350`-line Step 06 audit plate rendered via `render_fig06c_cytonuclear_paralog_cytotype_png()` and `save_packera_png_300()` (300-DPI PNG only, zero `.pdf` outputs). Panel A displays `HDplot` paralog filtering alongside `Compositae-ParaLoss-1272` weights with hollow shapes, Panel B maps skimmed plastome, nrITS, and nuclear `waxy` concordance with red borders on cytonuclear capture rows, Panel C plots public backbone `PhyTop` ILS vs. introgression coordinates with repelled ICN labels, and Panel D displays `nQuire` cytotype log-likelihood distributions paired with `CCDB`/`ICNA` SQLite priors.
+* **Step 06 CLI Wiring (`scripts/analysis/06_genomic_phylogenomics.R`, `main.py`, `run_pipeline.sh`):** Added `--figure-c` flag handling and wired `fig06c_cytonuclear_paralog_cytotype_audit.png` generation directly into `run_genomics_stream()` and standalone shell runs.
+* **Warm-R Figure Verification and Line-Ceiling Enforcement (`scripts/tests/test_code_hygiene.py`, `scripts/tests/test_genomic_integration.py`):** Registered `step06c_figures.R` under a strict `350`-line limit, narrowed the legacy `fig06c_` hygiene guard, and verified `fig06c` alongside genomic-enabled and zero-genomics `fig07a` PNG magic headers inside the batched R integration suite.
+
+### Changed
+* **Dynamic `fig07a` Wettstein Genomics Column and Map Anchor Halos (`scripts/figures/step07_figures.R`):** Updated `render_step07a_integrative_synthesis_png()` so Panel D inserts `"5. Genomic & Lineage"` paired with `w_geno_kappa` whenever sequenced or propagated genomic rows are active and keeps exact 5-column zero-genomics invariance when absent. Added unfilled outer concentric rings onto Panel B (`shape = 1` for `G1`/`G2` DNA anchors and `shape = 5` diamond rings for `C1`/`C2` cytovouchers) alongside an explanatory subtitle key when anchors exist.
+
 ## [5.6.0] - 2026-11-14 (`UNC-BOT-SOP-2026-04-REV5` | SQLite Schema `20261127`)
 
 ### Added
