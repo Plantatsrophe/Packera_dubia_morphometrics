@@ -23,13 +23,10 @@ import logging
 import math
 import os
 import re
-import subprocess
 import sys
 import tempfile
 import time
-import unicodedata
 import urllib.request
-import zipfile
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 
@@ -70,20 +67,17 @@ class _MissingPygbifSubmodule:
 
 
 try:
-    import pygbif
     import pygbif.occurrences as occ
     import pygbif.species as species
 except ImportError:
-    pygbif = None  # type: ignore[assignment]
     occ = _MissingPygbifSubmodule("pygbif.occurrences")  # type: ignore[assignment]
     species = _MissingPygbifSubmodule("pygbif.species")  # type: ignore[assignment]
 
 _AIOHTTP_CLIENT_ERRORS: Tuple[type, ...] = (aiohttp.ClientError,) if aiohttp is not None else ()
 try:
-    from shapely.geometry import Point, Polygon, shape
-    from shapely.strtree import STRtree
+    from shapely.geometry import Point
 except ImportError:
-    Point = Polygon = shape = STRtree = None  # type: ignore[assignment]
+    Point = None  # type: ignore[assignment]
 try:
     from tqdm.asyncio import tqdm as async_tqdm
 except ImportError:
@@ -98,7 +92,6 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.core.config import (
-    DEFAULT_COUNTRIES,
     CANONICAL_CIS_MISSISSIPPI_PACKERA_SPECIES,
     CIS_MISSISSIPPI_STATES_PROVINCES,
     DEFAULT_CIS_MISSISSIPPI_LON,
@@ -117,16 +110,8 @@ from scripts.core.config import (
     DEFAULT_USDA_COUNTY_FILTER,
     DEFAULT_USDA_EXEMPT_GOLD,
     DEFAULT_WORKSPACE,
-    EXCLUDED_WESTERN_STATES,
-    MAJOR_HERBARIA_CODES,
-    PRIMARY_TYPE_STATUSES,
-    SECONDARY_TYPE_STATUSES,
-    SPECIALIST_PATTERNS,
-    VALID_GEOGRAPHIC_SCOPES,
-    VALID_TYPE_STATUSES,
     WESTERN_LONGITUDE_THRESHOLD,
     _DEFAULT_CONFIG,
-    normalize_countries_list,
 )
 from scripts.core.db import (
     get_db_connection,
@@ -136,7 +121,6 @@ from scripts.core.db import (
     upsert_taxon_synonyms,
     upsert_vouchers_records,
 )
-from scripts.core.logger import setup_logging
 from scripts.core.usda_plants_ranges import filter_vouchers_by_usda_county_range
 
 _SYNONYM_GENERA: Set[str] = {"Packera", "Senecio", "Cineraria"}
@@ -491,6 +475,7 @@ def _persist_dynamic_synonyms_for_taxon(canonical_packera: str) -> None:
     if (
         not canonical_packera
         or _is_gbif_species_mocked()
+        or os.environ.get("PLANTMATICS_DEMO_MODE") == "1"
         or os.environ.get("PACKERA_DEMO_MODE") == "1"
         or not is_canonical_or_explicit_db_context()
     ):
@@ -977,63 +962,25 @@ def standardize_packera_taxon(raw_name: Any) -> Optional[str]:
 
 from scripts.core.taxonomy_authority import (
     EXPORT_COLUMNS,
-    GENERIC_DETERMINER_TOKENS,
-    _COLLECTOR_REFERENCE_REGEX,
-    _HOLOTYPE_TIER_STATUSES,
     _INVALID_INSTITUTION_CODES,
-    _IPNI_AUTHOR_ABBREVIATIONS,
-    _ISOTYPE_TIER_STATUSES,
-    _MISSING_IDENTIFIED_BY_TOKENS,
-    _NEGATED_TYPE_RE,
-    _PARATYPE_TIER_STATUSES,
-    _SYNTYPE_TIER_STATUSES,
-    _fold_ascii,
-    _is_explicit_collector_reference,
-    _is_missing_identified_by,
-    _is_verified_type_status,
-    _resolve_row_standardized_packera,
-    _should_fallback_to_collector,
     apply_corpus_authority_tiers,
     classify_nomenclatural_type_rank,
-    classify_nomenclatural_type_subrank,
     discover_corpus_authorities,
-    extract_protologue_authors,
-    generate_exsiccatae_key,
-    get_image_resolution_score,
-    haversine_distance_meters,
     evaluate_eastern_na_cohort_filter,
+    extract_protologue_authors,
     is_cis_mississippi_record,
     is_excluded_western_region,
-    normalize_collector,
-    normalize_determiner_surnames,
-    normalize_event_date,
-    normalize_record_number,
     parse_determiner_tier,
     resolve_geographic_scope_settings,
     resolve_voucher_image_path,
     sanitize_filename,
-    select_cascading_outgroup_anchors,
-    setup_logger,
     spatially_balance_and_thin_vouchers,
     stratify_duplicates,
 )
 from scripts.core.epa_ecoregions import (
-    DEFAULT_EPA_L3_DIR,
-    DEFAULT_EPA_L3_GEOJSON,
-    DEFAULT_EPA_L3_GPKG,
-    DEFAULT_US_COUNTIES_GEOJSON,
-    EPA_L3_OFFICIAL_ZIP_URL,
-    _EPA_L3_INDEX_CACHE,
-    _HISTORIC_COUNTY_CONSOLIDATIONS,
     _US_STATE_ABBR_TO_FULL,
-    _build_offline_epa_l3_fallback_index,
-    _ensure_epa_level3_cache_files,
-    _normalize_us_county_name,
     _normalize_us_state_name,
-    _point_in_epa_l3,
     infer_regional_group,
-    load_epa_level3_spatial_index,
-    standardize_epa_l3_label,
 )
 
 
@@ -1456,7 +1403,10 @@ def migrate_existing_vouchers_to_webp(
             for jpg_path in jpg_files:
                 migrated_count += _convert_single_jpg(jpg_path)
         else:
-            env_workers = os.environ.get("PACKERA_MAX_WORKERS", "").strip()
+            env_workers = (
+                os.environ.get("PLANTMATICS_MAX_WORKERS", "").strip()
+                or os.environ.get("PACKERA_MAX_WORKERS", "").strip()
+            )
             max_workers = (
                 max(1, int(env_workers))
                 if env_workers.isdigit()

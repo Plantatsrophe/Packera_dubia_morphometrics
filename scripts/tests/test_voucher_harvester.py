@@ -18,29 +18,25 @@ import numpy as np
 import pandas as pd
 from PIL import Image
 
-from scripts.core.config import (
-    DEFAULT_MIN_MEGAPIXELS,
-    EXCLUDED_WESTERN_STATES,
-    WESTERN_LONGITUDE_THRESHOLD,
-)
-from scripts.core.taxonomy_authority import EXPORT_COLUMNS
-from scripts.core.harvester import (
-    VoucherHarvester,
-    export_curated_table,
-    extract_high_res_image_url,
+from scripts.core.epa_ecoregions import infer_regional_group
+from scripts.core.taxonomy_authority import (
+    EXPORT_COLUMNS,
     generate_exsiccatae_key,
-    harvest_taxa_occurrences,
     haversine_distance_meters,
-    infer_regional_group,
     is_excluded_western_region,
     normalize_collector,
     normalize_event_date,
     normalize_record_number,
-    optimize_herbarium_image_url,
     parse_determiner_tier,
-    sanitize_filename,
     spatially_balance_and_thin_vouchers,
     stratify_duplicates,
+)
+from scripts.core.harvester import (
+    VoucherHarvester,
+    export_curated_table,
+    extract_high_res_image_url,
+    harvest_taxa_occurrences,
+    optimize_herbarium_image_url,
     validate_image_quality,
 )
 
@@ -1112,7 +1108,7 @@ class TestDynamicAuthorityEngineAndSynonymExpansion(unittest.TestCase):
 
     def test_extract_protologue_authors_basionym_and_combination(self):
         """Verify Layer 2 extracts basionym/combination authors and IPNI expansions from scientificName strings."""
-        from scripts.core.harvester import extract_protologue_authors
+        from scripts.core.taxonomy_authority import extract_protologue_authors
 
         dubia_authors = extract_protologue_authors(["Packera dubia (Spreng.) Trock & Mabb."])
         self.assertTrue(
@@ -1187,7 +1183,7 @@ class TestDynamicAuthorityEngineAndSynonymExpansion(unittest.TestCase):
         Verify Layer 3 promotes a determiner with >= 5 annotations across >= 3 institutions
         (or type annotation) to Tier_1_Gold while keeping single-institution collectors in Silver/Bronze.
         """
-        from scripts.core.harvester import apply_corpus_authority_tiers, discover_corpus_authorities
+        from scripts.core.taxonomy_authority import apply_corpus_authority_tiers, discover_corpus_authorities
 
         rows = []
         # 1. Loan specialist: 5 sheets of Packera streptanthifolia across 3 institutions (COLO, RM, UTC)
@@ -1429,7 +1425,7 @@ class TestDynamicAuthorityEngineAndSynonymExpansion(unittest.TestCase):
 
     def test_select_cascading_outgroup_anchors_and_home_herbarium(self):
         """Verify preflight outgroup anchor cascade (Gold -> Silver -> Bronze) and configurable home_herbarium."""
-        from scripts.core.harvester import select_cascading_outgroup_anchors
+        from scripts.core.taxonomy_authority import select_cascading_outgroup_anchors
 
         df_pool = pd.DataFrame([
             # Outgroup A has NO Gold vouchers, only 2 Silver and 2 Bronze
@@ -1979,7 +1975,7 @@ class TestPhase1AuthorityHygieneAndExsiccataeConflict(unittest.TestCase):
 
     def test_discover_corpus_authorities_disqualifies_high_duplicate_disagreement(self):
         """Candidate corpus specialists with >25% cross-duplicate taxonomic disagreement across shared exsiccatae_key groups are disqualified."""
-        from scripts.core.harvester import discover_corpus_authorities
+        from scripts.core.taxonomy_authority import discover_corpus_authorities
 
         rows = []
         insts = ["NCU", "NY", "MO", "GH", "US", "BRIT"]
@@ -2126,7 +2122,7 @@ class TestPhase1AuthorityHygieneAndExsiccataeConflict(unittest.TestCase):
 
     def test_classify_nomenclatural_type_rank_and_cascading_outgroup_type_priority(self):
         """Verify classify_nomenclatural_type_rank(), classify_nomenclatural_type_subrank(), type-annotator leakage guard, and cascading outgroup type priority."""
-        from scripts.core.harvester import (
+        from scripts.core.taxonomy_authority import (
             classify_nomenclatural_type_rank,
             classify_nomenclatural_type_subrank,
             discover_corpus_authorities,
@@ -3251,7 +3247,7 @@ class TestStep1SystematicsAndDownstreamAuthorityAudit(unittest.TestCase):
         """Verify CoordinateCleaner rejection, cultivated filtering, Packera anonyma USDA symbol, Chesapeake VA ecoregion, and secondary duplicate media rescue."""
         from scripts.core.harvester import VoucherHarvester
         from scripts.core.usda_plants_ranges import resolve_usda_symbols_for_taxon
-        from scripts.core.epa_ecoregions import _HISTORIC_COUNTY_CONSOLIDATIONS, _normalize_us_county_name, infer_regional_group
+        from scripts.core.epa_ecoregions import _normalize_us_county_name, infer_regional_group
 
         # 1. Packera anonyma dynamic USDA symbol resolution (resolves via GBIF synonym Senecio smallii + algorithmic ICN generic transfer)
         with tempfile.TemporaryDirectory() as tmp_usda:

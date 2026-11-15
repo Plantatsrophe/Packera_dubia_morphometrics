@@ -34,7 +34,7 @@ import sys
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -745,14 +745,6 @@ def _parse_vcf_with_depths(
         np.vstack(rows_ref).T.astype(np.float32),
         np.vstack(rows_alt).T.astype(np.float32),
     )
-
-
-def _parse_vcf_to_dosage(
-    vcf_path: Path,
-) -> Tuple[List[str], List[str], np.ndarray]:
-    """Stream VCF / `.vcf.gz` into `(sample_ids, locus_ids, dosage_matrix[n_samples, n_loci])`."""
-    sids, lids, dmat, _, _ = _parse_vcf_with_depths(vcf_path)
-    return sids, lids, dmat
 
 
 def _parse_dosage_table(dosage_path: Path) -> Tuple[List[str], List[str], np.ndarray]:

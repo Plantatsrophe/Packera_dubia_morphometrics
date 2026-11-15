@@ -7,10 +7,14 @@
 # Description:
 #   Shared publication figure utilities across R pipeline phases (Steps 03, 04,
 #   06, and 07). Enforces:
-#     - Dual vector .pdf and 300-DPI .png atomic exports (write-then-replace)
+#     - 300-DPI .png atomic exports (write-then-replace)
 #     - Colorblind-safe Okabe-Ito palettes (#0072B2, #D55E00, #009E73, #CC79A7)
-#     - Dynamically italicized Packera taxon labels
+#     - Dynamically italicized Plantmatics/Packera taxon labels
 # ==============================================================================
+
+if (grDevices::dev.cur() == 1L) {
+  grDevices::pdf(NULL)
+}
 
 EXTENDED_COLORBLIND_HEX <- c(
   "#E69F00", "#56B4E9", "#F0E442", "#333333", "#882255",
@@ -19,60 +23,11 @@ EXTENDED_COLORBLIND_HEX <- c(
   "#E7298A", "#66A61E", "#E6AB02", "#A6761D", "#008080"
 )
 
-HOLLOW_PCH_CYCLE <- c(1L, 2L, 5L, 0L, 6L, 4L)
 if (!exists("fast_euclidean_permanova_trace", mode = "function")) {
   for (.dl_p in c("scripts/morphometrics/dissected_leaf_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "dissected_leaf_utils.R"))) {
     if (!is.na(.dl_p) && nzchar(.dl_p) && file.exists(.dl_p)) { source(.dl_p); break }
   }
 }
-
-apply_bh_fdr_correction <- function(df_or_p, p_col = NULL) {
-  if (is.null(df_or_p)) return(NULL)
-  if (is.numeric(df_or_p)) {
-    dims <- dim(df_or_p)
-    dnames <- dimnames(df_or_p)
-    adj <- stats::p.adjust(as.numeric(df_or_p), method = "BH")
-    if (!is.null(dims)) {
-      dim(adj) <- dims
-      dimnames(adj) <- dnames
-    }
-    return(adj)
-  }
-  if (is.data.frame(df_or_p)) {
-    cand_cols <- if (!is.null(p_col)) p_col else intersect(
-      c("p_value", "P_value", "P_Value", "Equivalency_p_value", "p_value_D", "p_value_I", "Pr(>F)"),
-      colnames(df_or_p)
-    )
-    for (col in cand_cols) {
-      if (col %in% colnames(df_or_p)) {
-        raw_p <- suppressWarnings(as.numeric(df_or_p[[col]]))
-        adj_p <- stats::p.adjust(raw_p, method = "BH")
-        df_or_p[[paste0(col, "_bh")]] <- signif(adj_p, 4)
-        if (!("p_adj_bh" %in% colnames(df_or_p))) {
-          df_or_p$p_adj_bh <- signif(adj_p, 4)
-        }
-      }
-    }
-    return(df_or_p)
-  }
-  df_or_p
-}
-
-TAXONOMIC_TREATMENT_PALETTE <- c(
-  "Confirmed Species"                   = "#009E73",
-  "Species_Confirmed"                   = "#009E73",
-  "Variety / Ecotype"                   = "#56B4E9",
-  "Subspecies_Ecotype"                  = "#56B4E9",
-  "Ecophenotypic_Plasticity"            = "#56B4E9",
-  "Hybrid / Introgressant"              = "#CC79A7",
-  "Hybrid_Intergrade_Swarm"             = "#CC79A7",
-  "Putative_Hybrid_or_Ecophenotype"     = "#CC79A7",
-  "Misidentification (Reassign)"        = "#E69F00",
-  "Misidentification_Reassign"          = "#E69F00",
-  "Putative Cryptic Species"            = "#D55E00",
-  "Putative_Cryptic_Species"            = "#D55E00",
-  "Misidentification / Cryptic Species" = "#D55E00"
-)
 
 compute_spatial_balance_weights <- function(df, bandwidth_km = 25.0, regional_bandwidth_km = 75.0, active_mask = NULL, recompute = FALSE) {
   if (is.null(df) || nrow(df) == 0L) return(numeric(0))
@@ -157,49 +112,73 @@ compute_spatial_balance_weights <- function(df, bandwidth_km = 25.0, regional_ba
 
 format_predictor_labels <- function(var_vec) {
   dict <- c(
-    "fine_bedrock_depth_cm"   = "Depth to Lithic Bedrock (cm)",
-    "ssurgo_bedrock_depth_cm" = "Depth to Lithic Bedrock (cm)",
-    "ssurgo_rock_outcrop_pct" = "SSURGO 50m Rock Outcrop (%)",
-    "fine_soil_sand"          = "Soil Sand Fraction (%)",
-    "soil_sand"               = "Soil Sand Fraction (%)",
-    "fine_soil_ph"            = "Soil pH (H2O)",
-    "soil_ph"                 = "Soil pH (H2O)",
-    "fine_soil_clay"          = "Soil Clay Fraction (%)",
-    "soil_clay"               = "Soil Clay Fraction (%)",
-    "ssurgo_aws_0_50cm"       = "Available Water Storage 0-50cm (cm)",
-    "topo_tpi_30m"            = "30m Topographic Position Index (TPI, m)",
-    "topo_twi_30m"            = "30m Topographic Wetness Index (TWI)",
-    "topo_hli_30m"            = "30m Heat Load Index (HLI)",
-    "ilr_texture_1"           = "Soil Texture ILR-1 (Sand vs Silt-Clay)",
-    "ilr_texture_2"           = "Soil Texture ILR-2 (Silt vs Clay)",
-    "fine_cfvo_pct"           = "Coarse Fragment Volume (%, 0-15cm)",
-    "topo_slope_deg"          = "30m Slope Gradient (deg)",
-    "soil_cec"                = "Cation Exchange Capacity (cmol/kg)",
-    "ssurgo_cec"              = "Cation Exchange Capacity (cmol/kg)",
-    "soil_bulk_density"          = "Soil Bulk Density (g/cm3)",
-    "lithic_outcrop_index"       = "Lithic Outcrop Exposure Index (0-100)",
-    "summer_moisture_deficit_idx"= "Summer Moisture Deficit Index",
-    "maritime_continentality_idx"= "Maritime Continentality Index",
-    "min_bedrock_depth_buffer_cm"= "Min Buffered Bedrock Depth (cm)",
-    "ph_q10_buffer"              = "Buffered Soil pH 10th Pct",
-    "max_cfvo_buffer_pct"        = "Max Buffered Coarse Fragments (%)",
-    "bio1_temp_mean"             = "Mean Annual Temp. (BIO1, C)",
-    "bio4_temp_seasonality"   = "Temp. Seasonality (BIO4)",
-    "bio12_precip_annual"     = "Annual Precipitation (BIO12, mm)",
-    "bio15_precip_seasonality"= "Precip. Seasonality (BIO15)",
-    "delta_doy"               = "Phenological Anomaly (Delta DOY, d)",
-    "doy"                     = "Flowering Day of Year (DOY)"
+    "fine_soil_ph"                     = "Rhizosphere Soil pH in H2O (0-15cm)",
+    "ilr_texture_1"                    = "Soil Texture ILR-1: Sand vs Silt-Clay (0-15cm)",
+    "ilr_texture_2"                    = "Soil Texture ILR-2: Silt vs Clay (0-15cm)",
+    "fine_soil_sand"                   = "Soil Sand Fraction (%, 0-15cm)",
+    "fine_soil_clay"                   = "Soil Clay Fraction (%, 0-15cm)",
+    "fine_soil_cec"                    = "Rhizosphere Soil CEC (cmol+/kg, 0-15cm)",
+    "fine_cfvo_pct"                    = "Coarse Fragment Volume (%, 0-15cm)",
+    "fine_bedrock_depth_cm"            = "Depth to Lithic Bedrock (cm)",
+    "is_azonal_lithology"              = "USGS SGMC Azonal Lithology Indicator",
+    "ssurgo_rock_outcrop_pct"          = "SSURGO Rock Outcrop Component (%)",
+    "ssurgo_bedrock_depth_cm"          = "SSURGO Lithic Bedrock Depth (cm)",
+    "ssurgo_aws_0_50cm"                = "Available Water Storage 0-50cm (cm)",
+    "topo_slope_deg"                   = "30m Terrain Slope (deg)",
+    "topo_tpi_30m"                     = "30m Topographic Position Index (TPI, m)",
+    "topo_hli_30m"                     = "30m Heat Load Index (HLI, McCune & Keon 2002)",
+    "topo_twi_30m"                     = "30m D8 Topographic Wetness Index (TWI)",
+    "soil_ph"                          = "SoilGrids 250m Soil pH (H2O)",
+    "soil_sand"                        = "SoilGrids 250m Sand Fraction (%)",
+    "soil_clay"                        = "SoilGrids 250m Clay Fraction (%)",
+    "soil_silt"                        = "SoilGrids 250m Silt Fraction (%)",
+    "soil_cec"                         = "SoilGrids 250m Cation Exchange (cmol+/kg)",
+    "soil_cfvo"                        = "SoilGrids 250m Coarse Fragments (%)",
+    "soil_bulk_density"                = "SoilGrids 250m Bulk Density (g/cm3)",
+    "bio1_temp_mean"                   = "Mean Annual Temp (BIO1, deg C)",
+    "bio2_mean_diurnal_range"          = "Mean Diurnal Temp Range (BIO2, deg C)",
+    "bio3_isothermality"               = "Isothermality (BIO3, BIO2/BIO7 x 100)",
+    "bio4_temp_seasonality"            = "Temp Seasonality (BIO4, SD x 100)",
+    "bio5_max_temp_warmest_month"      = "Max Temp Warmest Month (BIO5, deg C)",
+    "bio6_min_temp_coldest_month"      = "Min Temp Coldest Month (BIO6, deg C)",
+    "bio7_temp_annual_range"           = "Temp Annual Range (BIO7, deg C)",
+    "bio8_mean_temp_wettest_qtr"       = "Mean Temp Wettest Quarter (BIO8, deg C)",
+    "bio9_mean_temp_driest_qtr"        = "Mean Temp Driest Quarter (BIO9, deg C)",
+    "bio10_mean_temp_warmest_qtr"      = "Mean Temp Warmest Quarter (BIO10, deg C)",
+    "bio11_mean_temp_coldest_qtr"      = "Mean Temp Coldest Quarter (BIO11, deg C)",
+    "bio12_precip_annual"              = "Annual Precipitation (BIO12, mm)",
+    "bio13_precip_wettest_month"       = "Wettest-Month Precip (BIO13, mm)",
+    "bio14_precip_driest_month"        = "Driest-Month Precip (BIO14, mm)",
+    "bio15_precip_seasonality"         = "Precipitation Seasonality (BIO15, CV)",
+    "bio16_precip_wettest_qtr"         = "Wettest-Quarter Precip (BIO16, mm)",
+    "bio17_precip_driest_qtr"          = "Driest-Quarter Precip (BIO17, mm)",
+    "bio18_precip_warmest_qtr"         = "Warmest-Quarter Precip (BIO18, mm)",
+    "bio19_precip_coldest_qtr"         = "Coldest-Quarter Precip (BIO19, mm)",
+    "lithic_outcrop_index"             = "Lithic Outcrop Exposure Index (0-100)",
+    "summer_moisture_deficit_idx"      = "Summer Moisture Deficit Index",
+    "maritime_continentality_idx"      = "Maritime Continentality Index",
+    "min_bedrock_depth_buffer_cm"      = "Min Buffered Bedrock Depth (cm)",
+    "ph_q10_buffer"                    = "Buffered Soil pH 10th Pct",
+    "ph_q90_buffer"                    = "Buffered Soil pH 90th Pct",
+    "max_cfvo_buffer_pct"              = "Max Buffered Coarse Fragments (%)",
+    "azonal_lithology_presence_buffer" = "Buffered Azonal Lithology Presence",
+    "fine_soil_soc"                    = "Soil Organic Carbon (g/kg, 0-15cm)",
+    "topo_elev_m"                      = "30m Elevation (m a.s.l.)",
+    "delta_doy"                        = "Hopkins Phenological Anomaly (Delta DOY)",
+    "doy"                              = "Flowering Day of Year (DOY)",
+    "soil_ca_mg_molar_ratio"           = "Soil Ca:Mg Molar Ratio",
+    "soil_ultramafic_ni_cr_index"      = "Soil Ultramafic Ni-Cr Index",
+    "soil_carbonate_c_pct"             = "Soil Carbonate Carbon (%)",
+    "nwi_wetland_dist_m"               = "NWI Wetland Distance (m)",
+    "ultramafic_calcareous_gradient"   = "Ultramafic-Calcareous Geochem Gradient",
+    "wetland_seepage_index"            = "Wetland & Hydrologic Seepage Index"
   )
   vapply(as.character(var_vec), function(v) {
     if (is.na(v) || !nzchar(v)) return("Unknown Predictor")
-    if (v %in% names(dict)) return(unname(dict[v]))
-    if (grepl("^MEM[0-9]+$", v)) return(sprintf("Spatial Eigenfunction (%s)", v))
-    v
+    if (v %in% names(dict)) return(unname(dict[[v]]))
+    if (grepl("^MEM[0-9]+$", v)) return(sub("^MEM", "Spatial Eigenvector MEM-", v))
+    gsub("_", " ", v)
   }, character(1), USE.NAMES = FALSE)
-}
-
-adaptive_point_alpha <- function(n_pts) {
-  if (is.na(n_pts) || n_pts <= 1000L) 0.75 else 0.45
 }
 
 .pub_figures_script_dir <- tryCatch({
@@ -330,7 +309,7 @@ standardize_taxon_name <- function(raw_vec) {
     if (!nzchar(s_orig) || s %in% c("none", "nan", "null", "na", "unknown", "unassigned", "unassigned_packera", "packera")) {
       std_u[i] <- NA_character_; next
     }
-    if (grepl("^Morphotype_K[0-9]+$|^Ecotype_|\\[K[0-9]+\\]$", s_orig, ignore.case = TRUE)) {
+    if (grepl("^Morphotype_K[0-9]+$|^Ecotype_|^LatTertile_|_Coastal$|_Outcrop$|\\[K[0-9]+\\]$", s_orig, ignore.case = TRUE)) {
       std_u[i] <- s_orig; next
     }
     if (has_syn && (s %in% names(syn_map))) {
@@ -371,26 +350,12 @@ standardize_taxon_name <- function(raw_vec) {
   }
   std_u[match(chr_vec, u_vals)]
 }
-standardize_packera_taxon <- standardize_taxon_name
-
-format_active_complex_title <- function(taxa_vec, suffix) {
-  clean_vec <- as.character(taxa_vec)
-  clean_vec <- trimws(clean_vec[!is.na(clean_vec) & nzchar(trimws(clean_vec))])
-  clean_vec <- clean_vec[!(clean_vec %in% c("Unknown", "Unassigned_Packera", "NA"))]
-  unique_taxa <- unique(clean_vec)
-  env_focal <- trimws(Sys.getenv("PACKERA_FOCAL_TAXON", unset = ""))
-  if (nzchar(env_focal)) {
-    env_std <- standardize_taxon_name(env_focal)[1L]
-    if (is.na(env_std) || !nzchar(env_std)) env_std <- env_focal
-    return(sprintf("%s Complex: %s", env_std, suffix))
+standardize_packera_taxon <- function(species_vec, na_value = "Unknown") {
+  res <- standardize_taxon_name(species_vec)
+  if (!is.null(na_value)) {
+    res[is.na(res)] <- na_value
   }
-  if (length(unique_taxa) == 0L) {
-    return(sprintf("Packera Taxon Complex: %s", suffix))
-  }
-  if (length(unique_taxa) == 1L) {
-    return(sprintf("%s: %s", unique_taxa[1L], suffix))
-  }
-  sprintf("Packera Taxon Complex (%d Taxa): %s", length(unique_taxa), suffix)
+  res
 }
 
 .order_unique_packera_taxa <- function(taxa_vec, preserve_order = FALSE) {
@@ -419,167 +384,6 @@ get_dynamic_packera_palette <- function(taxa_vec = NULL, preserve_order = FALSE)
   cols <- rep_len(pal_pool, length(u_non_unk))
   names(cols) <- u_non_unk
   c(cols, "Unknown" = "#7F7F7F")
-}
-
-get_dynamic_packera_shapes <- function(taxa_vec = NULL, preserve_order = FALSE) {
-  if (is.null(taxa_vec) || length(taxa_vec) == 0L) return(c("Unknown" = 0L))
-  u_non_unk <- .order_unique_packera_taxa(taxa_vec, preserve_order = preserve_order)
-  if (length(u_non_unk) == 0L) return(c("Unknown" = 0L))
-  shps <- rep_len(c(1L, 2L, 5L, 0L, 6L, 4L), length(u_non_unk))
-  names(shps) <- u_non_unk
-  c(shps, "Unknown" = 0L)
-}
-
-get_dynamic_packera_ggplot_shapes <- function(taxa_vec = NULL, preserve_order = FALSE) {
-  if (is.null(taxa_vec) || length(taxa_vec) == 0L) return(c("Unknown" = 25))
-  u_non_unk <- .order_unique_packera_taxa(taxa_vec, preserve_order = preserve_order)
-  if (length(u_non_unk) == 0L) return(c("Unknown" = 0L))
-  shps <- rep_len(c(21, 24, 22, 23, 25), length(u_non_unk))
-  names(shps) <- u_non_unk
-  c(shps, "Unknown" = 25)
-}
-
-resolve_taxon_display_tier <- function(
-  df,
-  group_vec = NULL,
-  focal_taxon = Sys.getenv("PACKERA_FOCAL_TAXON", "Packera dubia"),
-  max_fg = 6L,
-  feat_cols = NULL
-) {
-  df_obj <- if (is.data.frame(df)) df else NULL
-  if (is.null(df_obj)) {
-    if (is.null(group_vec) && !is.null(df)) {
-      group_vec <- as.character(df)
-    }
-  } else if (is.null(group_vec)) {
-    cand_cols <- c("taxon_clean", "species_standardized", "species_clean", "taxon", "scientificName", "given_label", "recorded_taxon")
-    hit_cols <- intersect(cand_cols, colnames(df_obj))
-    if (length(hit_cols) > 0L) {
-      group_vec <- as.character(df_obj[[hit_cols[1L]]])
-    } else if (exists("resolve_plot_group_column", mode = "function")) {
-      group_vec <- resolve_plot_group_column(df_obj)
-    } else {
-      group_vec <- rep("Unassigned_Packera", nrow(df_obj))
-    }
-  }
-  grp_chr <- trimws(as.character(group_vec))
-  valid_m <- !is.na(grp_chr) & nzchar(grp_chr) & !(tolower(grp_chr) %in% c("unknown", "na", "none"))
-  u_grps <- unique(grp_chr[valid_m])
-  if (length(u_grps) == 0L) {
-    u_grps <- "Unassigned_Packera"
-  }
-
-  n_g <- vapply(u_grps, function(g) sum(valid_m & grp_chr == g, na.rm = TRUE), integer(1))
-  names(n_g) <- u_grps
-
-  focal_chr <- trimws(as.character(focal_taxon)[1L])
-  if (is.na(focal_chr) || !nzchar(focal_chr)) focal_chr <- "Packera dubia"
-
-  exact_hit <- u_grps[tolower(u_grps) == tolower(focal_chr)]
-  dubia_hit <- u_grps[grepl("^Packera\\s+dubia|^P\\.\\s*dubia", u_grps, ignore.case = TRUE)]
-  focal_candidates <- unique(c(exact_hit, dubia_hit))
-
-  if (length(focal_candidates) > 0L) {
-    focal_candidates <- focal_candidates[order(-n_g[focal_candidates], focal_candidates)]
-    slot1 <- focal_candidates[1L]
-  } else {
-    ord_n <- u_grps[order(-n_g[u_grps], u_grps)]
-    slot1 <- ord_n[1L]
-  }
-
-  rem_grps <- setdiff(u_grps, slot1)
-  if (length(rem_grps) > 0L) {
-    d2_vec <- rep(Inf, length(rem_grps))
-    names(d2_vec) <- rem_grps
-
-    if (!is.null(df_obj) && nrow(df_obj) == length(grp_chr) && nrow(df_obj) >= 3L) {
-      cand_f <- if (!is.null(feat_cols)) {
-        intersect(as.character(feat_cols), colnames(df_obj))
-      } else {
-        grep("^(Sym_)?PC[1-5]$|^can[1-3]$|^PC[1-5]_corrected$", colnames(df_obj), value = TRUE)
-      }
-      if (length(cand_f) > 0L) {
-        num_f <- cand_f[vapply(cand_f, function(cn) {
-          v <- suppressWarnings(as.numeric(df_obj[[cn]]))
-          sum(is.finite(v)) >= 3L && isTRUE(stats::sd(v, na.rm = TRUE) > 1e-7)
-        }, logical(1))]
-        if (length(num_f) > 0L) {
-          num_f <- utils::head(num_f, 5L)
-          X_mat <- do.call(cbind, lapply(num_f, function(cn) {
-            v <- suppressWarnings(as.numeric(df_obj[[cn]]))
-            v[!is.finite(v)] <- mean(v[is.finite(v)], na.rm = TRUE)
-            v[!is.finite(v)] <- 0.0
-            v
-          }))
-          m1 <- which(valid_m & grp_chr == slot1)
-          if (length(m1) >= 1L) {
-            mu1 <- colMeans(X_mat[m1, , drop = FALSE], na.rm = TRUE)
-            W_cov <- tryCatch(stats::cov(X_mat[valid_m, , drop = FALSE]), error = function(e) NULL)
-            W_inv <- NULL
-            if (!is.null(W_cov) && all(is.finite(W_cov))) {
-              W_reg <- W_cov + diag(max(1e-4, 0.05 * mean(diag(W_cov), na.rm = TRUE)), ncol(X_mat))
-              W_inv <- tryCatch(solve(W_reg), error = function(e) NULL)
-            }
-            for (rg in rem_grps) {
-              mg <- which(valid_m & grp_chr == rg)
-              if (length(mg) >= 1L) {
-                mug <- colMeans(X_mat[mg, , drop = FALSE], na.rm = TRUE)
-                dv <- mug - mu1
-                if (all(is.finite(dv))) {
-                  if (!is.null(W_inv)) {
-                    val_d2 <- as.numeric(t(dv) %*% W_inv %*% dv)
-                    d2_vec[rg] <- if (is.finite(val_d2) && val_d2 >= 0) val_d2 else sum(dv^2)
-                  } else {
-                    d2_vec[rg] <- sum(dv^2)
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-    has_d2 <- any(is.finite(d2_vec))
-    if (has_d2) {
-      rem_grps <- rem_grps[order(d2_vec[rem_grps], -n_g[rem_grps], rem_grps)]
-    } else {
-      rem_grps <- rem_grps[order(-n_g[rem_grps], rem_grps)]
-    }
-  }
-
-  ordered_groups <- c(slot1, rem_grps)
-  max_fg_int <- max(1L, as.integer(max_fg))
-  fg_groups <- utils::head(ordered_groups, max_fg_int)
-  bg_groups <- if (length(ordered_groups) > max_fg_int) utils::tail(ordered_groups, -max_fg_int) else character(0)
-
-  list(
-    ordered_groups = ordered_groups,
-    fg_groups = fg_groups,
-    bg_groups = bg_groups,
-    is_multi_crowded = length(ordered_groups) > max_fg_int,
-    palette = get_dynamic_packera_palette(ordered_groups, preserve_order = TRUE),
-    shapes = get_dynamic_packera_shapes(ordered_groups, preserve_order = TRUE)
-  )
-}
-
-format_italic_taxon_expr <- function(tx) {
-  tx_chr <- trimws(as.character(tx)[1L])
-  if (is.na(tx_chr) || !nzchar(tx_chr) || tx_chr %in% c("Unknown", "Unassigned", "Unassigned_Packera")) {
-    return("Unassigned")
-  }
-  if (grepl("^([A-Z][a-z]*\\.?\\s+[a-z-]+)\\s*(\\[K[0-9]+\\])$", tx_chr)) {
-    sp_part <- sub("^([A-Z][a-z]*\\.?\\s+[a-z-]+)\\s*(\\[K[0-9]+\\])$", "\\1", tx_chr)
-    k_part  <- sub("^([A-Z][a-z]*\\.?\\s+[a-z-]+)\\s*(\\[K[0-9]+\\])$", "\\2", tx_chr)
-    return(bquote(italic(.(sp_part)) ~ .(k_part)))
-  }
-  if (grepl("^[A-Z][a-z]*\\.?\\s+(?:[x×]\\s*)?[a-z-]+$", tx_chr)) {
-    return(bquote(italic(.(tx_chr))))
-  }
-  tx_chr
-}
-
-packera_italic_expressions <- function(taxa_vec) {
-  as.expression(lapply(as.character(taxa_vec), format_italic_taxon_expr))
 }
 
 resolve_plot_group_column <- function(df, cda_res = NULL, gmm_res = NULL) {
@@ -694,39 +498,8 @@ resolve_active_figures_dir <- function(explicit_dir = NULL, reference_path = NUL
   return(fdir)
 }
 
-atomic_save_dual_plot <- function(draw_fn, figures_dir, stem, width = 11, height = 5.5, dpi = 300) {
-  if (!dir.exists(figures_dir)) {
-    dir.create(figures_dir, recursive = TRUE, showWarnings = FALSE)
-  }
-  pdf_legacy <- file.path(figures_dir, paste0(stem, ".pdf"))
-  if (file.exists(pdf_legacy)) unlink(pdf_legacy, force = TRUE)
-  png_final <- file.path(figures_dir, paste0(stem, ".png"))
-  png_tmp <- file.path(figures_dir, paste0(".", stem, "_", Sys.getpid(), ".png.tmp"))
-
-  opened_ragg <- FALSE
-  if (requireNamespace("ragg", quietly = TRUE)) {
-    opened_ragg <- tryCatch({
-      ragg::agg_png(png_tmp, width = width, height = height, units = "in", res = dpi)
-      TRUE
-    }, error = function(e) FALSE)
-  }
-  if (!opened_ragg) {
-    grDevices::png(png_tmp, width = width, height = height, units = "in", res = dpi)
-  }
-  tryCatch({
-    draw_fn()
-  }, finally = {
-    grDevices::dev.off()
-  })
-  if (file.exists(png_tmp)) {
-    file.rename(png_tmp, png_final)
-  }
-  invisible(list(pdf = NULL, png = png_final))
-}
-
 # ==============================================================================
-# Inverse Elliptic Fourier Synthesis & Reusable 2D Ordination Helpers (Base R)
-# Always enforces strictly unfilled/hollow markers (pch = 1, 2, 0, 5 or bg = NA)
+# EFA Outline Reconstruction Helper (300-DPI PNG Suites)
 # ==============================================================================
 reconstruct_efa_outline <- function(harm_vec, nb_pts = 120L) {
   if (is.null(harm_vec) || length(harm_vec) == 0) {
@@ -784,640 +557,6 @@ reconstruct_efa_outline <- function(harm_vec, nb_pts = 120L) {
     y_centered <- -y_centered
   }
   cbind(x = x_centered, y = y_centered)
-}
-
-extract_standardized_harmonic_matrix <- function(df, max_k = NULL) {
-  if (is.null(df) || nrow(df) == 0) return(NULL)
-  if (is.null(max_k) || is.na(max_k)) {
-    h_cols <- grep("^[ABCD][0-9]+$", colnames(df), value = TRUE)
-    h_nums <- suppressWarnings(as.integer(gsub("[^0-9]", "", h_cols)))
-    max_k <- if (any(is.finite(h_nums))) max(12L, min(24L, max(h_nums, na.rm = TRUE))) else 12L
-  } else {
-    max_k <- max(6L, min(24L, as.integer(max_k)))
-  }
-  interleaved_nms <- as.vector(outer(c("A", "B", "C", "D"), seq_len(max_k), paste0))
-  avail <- intersect(interleaved_nms, colnames(df))
-  if (length(avail) < 4L) return(NULL)
-  mat <- as.matrix(df[, avail, drop = FALSE])
-  storage.mode(mat) <- "double"
-  mat[!is.finite(mat)] <- 0.0
-  mat
-}
-
-draw_outline_in_box <- function(
-  xy,
-  cx,
-  cy,
-  w_box,
-  h_box,
-  col_border = "grey55",
-  col_fill = grDevices::adjustcolor("grey85", alpha.f = 0.35),
-  lwd = 1.0,
-  lty = 1,
-  shared_scale = NULL,
-  shared_center = NULL
-) {
-  if (is.null(xy) || nrow(xy) < 3) return(invisible(NULL))
-  if (!is.null(shared_scale) && length(shared_scale) == 1L && is.finite(shared_scale) &&
-      !is.null(shared_center) && length(shared_center) >= 2L && all(is.finite(shared_center[1:2]))) {
-    px <- cx + (xy[, 1] - shared_center[1]) * shared_scale
-    py <- cy + (xy[, 2] - shared_center[2]) * shared_scale
-  } else {
-    rx <- range(xy[, 1], na.rm = TRUE)
-    ry <- range(xy[, 2], na.rm = TRUE)
-    sx <- max(diff(rx), 1e-6)
-    sy <- max(diff(ry), 1e-6)
-    scale_f <- min(w_box / sx, h_box / sy) * 0.86
-    px <- cx + (xy[, 1] - mean(rx)) * scale_f
-    py <- cy + (xy[, 2] - mean(ry)) * scale_f
-  }
-  if (!is.null(col_fill) && !is.na(col_fill)) {
-    graphics::polygon(px, py, col = col_fill, border = col_border, lwd = lwd, lty = lty)
-  } else {
-    graphics::lines(c(px, px[1]), c(py, py[1]), col = col_border, lwd = lwd, lty = lty)
-  }
-  invisible(cbind(px, py))
-}
-
-.compute_outline_grid_layout <- function(n_disp, draw_dividers = TRUE) {
-  n_d <- max(1L, min(9L, as.integer(n_disp)))
-  if (n_d == 1L) {
-    nr <- 1L; nc <- 1L
-    cx_vec <- 1.0; cy_vec <- 1.0
-  } else if (n_d == 2L) {
-    nr <- 1L; nc <- 2L
-    if (draw_dividers) graphics::abline(v = 1.0, col = "grey88", lty = 2)
-    cx_vec <- c(0.5, 1.5); cy_vec <- c(1.0, 1.0)
-  } else if (n_d == 3L) {
-    nr <- 2L; nc <- 2L
-    if (draw_dividers) {
-      graphics::abline(h = 1.0, col = "grey88", lty = 2)
-      graphics::segments(1.0, 1.0, 1.0, 2.0, col = "grey88", lty = 2)
-    }
-    cx_vec <- c(0.5, 1.5, 1.0); cy_vec <- c(1.48, 1.48, 0.48)
-  } else if (n_d == 4L) {
-    nr <- 2L; nc <- 2L
-    if (draw_dividers) graphics::abline(h = 1.0, v = 1.0, col = "grey88", lty = 2)
-    cx_vec <- c(0.5, 1.5, 0.5, 1.5); cy_vec <- c(1.48, 1.48, 0.48, 0.48)
-  } else if (n_d <= 6L) {
-    nr <- 2L; nc <- 3L
-    if (draw_dividers) {
-      graphics::abline(h = 1.0, col = "grey88", lty = 2)
-      graphics::abline(v = c(2.0 / 3.0, 4.0 / 3.0), col = "grey88", lty = 2)
-    }
-    cx_all <- rep(c(1.0 / 3.0, 1.0, 5.0 / 3.0), times = 2L)
-    cy_all <- rep(c(1.48, 0.48), each = 3L)
-    cx_vec <- cx_all[seq_len(n_d)]; cy_vec <- cy_all[seq_len(n_d)]
-  } else {
-    nr <- 3L; nc <- 3L
-    if (draw_dividers) {
-      graphics::abline(h = c(2.0 / 3.0, 4.0 / 3.0), col = "grey88", lty = 2)
-      graphics::abline(v = c(2.0 / 3.0, 4.0 / 3.0), col = "grey88", lty = 2)
-    }
-    cx_all <- rep(c(1.0 / 3.0, 1.0, 5.0 / 3.0), times = 3L)
-    cy_all <- rep(c(5.0 / 3.0, 1.0, 1.0 / 3.0), each = 3L)
-    cx_vec <- cx_all[seq_len(n_d)]; cy_vec <- cy_all[seq_len(n_d)]
-  }
-  cell_scale <- if (n_d <= 4L) 1.0 else if (n_d <= 6L) 0.72 else 0.58
-  list(
-    nr = nr, nc = nc,
-    cx = cx_vec, cy = cy_vec,
-    cell_scale = cell_scale,
-    title_dy = if (nr == 3L) 0.26 else 0.41,
-    sub_dy   = if (nr == 3L) 0.27 else 0.43,
-    body_dy  = if (nr == 3L) 0.02 else 0.05,
-    cex_title = if (n_d <= 4L) 0.78 else if (n_d <= 6L) 0.68 else 0.60,
-    cex_sub   = if (n_d <= 4L) 0.65 else if (n_d <= 6L) 0.56 else 0.50
-  )
-}
-
-repel_2d_labels <- function(
-  x0,
-  y0,
-  labels,
-  xlim,
-  ylim,
-  cex = 0.72,
-  n_iter = 25L,
-  draw_segments = TRUE,
-  seg_col = "grey45",
-  seg_lwd = 0.75,
-  anchor_x = NULL,
-  anchor_y = NULL
-) {
-  x_init <- suppressWarnings(as.numeric(x0))
-  y_init <- suppressWarnings(as.numeric(y0))
-  n <- min(length(x_init), length(y_init))
-  if (n == 0L) return(list(x = numeric(0), y = numeric(0)))
-  x_lbl <- x_init[seq_len(n)]
-  y_lbl <- y_init[seq_len(n)]
-  ax <- if (!is.null(anchor_x) && length(anchor_x) >= n) suppressWarnings(as.numeric(anchor_x[seq_len(n)])) else x_lbl
-  ay <- if (!is.null(anchor_y) && length(anchor_y) >= n) suppressWarnings(as.numeric(anchor_y[seq_len(n)])) else y_lbl
-  lbl_chr <- as.character(rep_len(labels, n))
-
-  span_x <- max(diff(xlim), 1e-6)
-  span_y <- max(diff(ylim), 1e-6)
-  x_min <- xlim[1] + 0.04 * span_x
-  x_max <- xlim[2] - 0.04 * span_x
-  y_min <- ylim[1] + 0.04 * span_y
-  y_max <- ylim[2] - 0.04 * span_y
-
-  sw <- tryCatch(graphics::strwidth(lbl_chr, cex = cex), error = function(e) rep(0.0, n))
-  sh <- tryCatch(graphics::strheight(lbl_chr, cex = cex), error = function(e) rep(0.0, n))
-  sw[!is.finite(sw) | sw <= 0] <- 0.012 * span_x * pmax(nchar(lbl_chr), 3L)
-  sh[!is.finite(sh) | sh <= 0] <- 0.040 * span_y
-  hw <- 0.56 * sw + 0.012 * span_x
-  hh <- 0.64 * sh + 0.010 * span_y
-
-  x_lbl <- pmin(x_max, pmax(x_min, x_lbl))
-  y_lbl <- pmin(y_max, pmax(y_min, y_lbl))
-
-  if (n >= 2L && n_iter >= 1L) {
-    for (iter in seq_len(as.integer(n_iter))) {
-      for (i in 1:(n - 1L)) {
-        for (j in (i + 1L):n) {
-          if (!is.finite(x_lbl[i]) || !is.finite(y_lbl[i]) || !is.finite(x_lbl[j]) || !is.finite(y_lbl[j])) next
-          dx <- x_lbl[i] - x_lbl[j]
-          dy <- y_lbl[i] - y_lbl[j]
-          ov_x <- (hw[i] + hw[j]) - abs(dx)
-          ov_y <- (hh[i] + hh[j]) - abs(dy)
-          if (ov_x > 0 && ov_y > 0) {
-            if (abs(dx) < 1e-9 && abs(dy) < 1e-9) {
-              ang <- (i - j) * 0.75
-              dx <- cos(ang) * 1e-4 * span_x
-              dy <- sin(ang) * 1e-4 * span_y
-            }
-            sx <- if (dx >= 0) 1.0 else -1.0
-            sy <- if (dy >= 0) 1.0 else -1.0
-            px_step <- 0.34 * ov_x * sx
-            py_step <- 0.44 * ov_y * sy
-            x_lbl[i] <- x_lbl[i] + px_step
-            x_lbl[j] <- x_lbl[j] - px_step
-            y_lbl[i] <- y_lbl[i] + py_step
-            y_lbl[j] <- y_lbl[j] - py_step
-          }
-        }
-      }
-      x_lbl <- pmin(x_max, pmax(x_min, x_lbl))
-      y_lbl <- pmin(y_max, pmax(y_min, y_lbl))
-    }
-  }
-
-  if (isTRUE(draw_segments)) {
-    move_d <- sqrt((x_lbl - ax)^2 + (y_lbl - ay)^2)
-    thresh <- 0.04 * min(span_x, span_y)
-    moved_idx <- which(is.finite(move_d) & (move_d > thresh))
-    if (length(moved_idx) > 0L) {
-      graphics::segments(ax[moved_idx], ay[moved_idx], x_lbl[moved_idx], y_lbl[moved_idx], col = seg_col, lwd = seg_lwd)
-    }
-  }
-
-  list(x = x_lbl, y = y_lbl)
-}
-
-draw_2d_confidence_ellipse <- function(
-  x,
-  y,
-  col = "#0072B2",
-  level = 0.95,
-  lwd = 2.0,
-  lty = 2,
-  n_pts = 100,
-  weights = NULL
-) {
-  x_num <- suppressWarnings(as.numeric(x))
-  y_num <- suppressWarnings(as.numeric(y))
-  valid <- is.finite(x_num) & is.finite(y_num)
-  if (sum(valid) < 3) return(invisible(NULL))
-
-  xv <- x_num[valid]
-  yv <- y_num[valid]
-  cx_el <- mean(xv)
-  cy_el <- mean(yv)
-  cov_mat <- NULL
-  if (!is.null(weights) && length(weights) == length(x_num)) {
-    w_sub <- suppressWarnings(as.numeric(weights[valid]))
-    w_ok <- is.finite(w_sub) & (w_sub > 0)
-    if (sum(w_ok) >= 3L) {
-      w_pos <- w_sub[w_ok]
-      n_eff <- (sum(w_pos)^2) / max(sum(w_pos^2), 1e-12)
-      if (is.finite(n_eff) && n_eff >= 2.2) {
-        cwt <- tryCatch(stats::cov.wt(cbind(xv[w_ok], yv[w_ok]), wt = w_pos, method = "unbiased"), error = function(e) NULL)
-        if (!is.null(cwt) && !is.null(cwt$cov) && all(is.finite(cwt$cov))) {
-          cov_mat <- cwt$cov
-          cx_el <- as.numeric(cwt$center[1])
-          cy_el <- as.numeric(cwt$center[2])
-        }
-      }
-    }
-  }
-  if (is.null(cov_mat)) {
-    cov_mat <- tryCatch(stats::cov(cbind(xv, yv)), error = function(e) NULL)
-  }
-  if (is.null(cov_mat) || any(!is.finite(cov_mat)) || max(diag(cov_mat)) < 1e-10) {
-    return(invisible(NULL))
-  }
-
-  eig <- tryCatch(eigen(cov_mat, symmetric = TRUE), error = function(e) NULL)
-  if (is.null(eig)) return(invisible(NULL))
-
-  evals <- pmax(eig$values, 1e-10)
-  radius <- sqrt(stats::qchisq(level, df = 2))
-  theta <- seq(0, 2 * pi, length.out = n_pts)
-  circle <- rbind(cos(theta), sin(theta))
-  transform_mat <- eig$vectors %*% diag(sqrt(evals), nrow = 2, ncol = 2)
-  ellipse_pts <- sweep(radius * (transform_mat %*% circle), 1, c(cx_el, cy_el), "+")
-  graphics::lines(ellipse_pts[1, ], ellipse_pts[2, ], col = col, lwd = lwd, lty = lty)
-  invisible(ellipse_pts)
-}
-
-plot_2d_ordination_scatter <- function(
-  x,
-  y,
-  col = "#0072B2",
-  pch = 1L,
-  cex = 0.85,
-  lwd = 1.0,
-  xlab = "Axis 1",
-  ylab = "Axis 2",
-  main = "",
-  subtitle = NULL,
-  group_vec = NULL,
-  group_cols = NULL,
-  ellipse_level = 0.95,
-  ellipse_weights = NULL,
-  centroids = NULL,
-  centroid_labels = NULL,
-  legend_args = NULL,
-  bg_draw_fn = NULL,
-  biplot_vectors = NULL,
-  biplot_labels = NULL,
-  is_type_vec = NULL
-) {
-  x_num <- suppressWarnings(as.numeric(x))
-  y_num <- suppressWarnings(as.numeric(y))
-  n_pts <- max(length(x_num), length(y_num))
-  if (n_pts == 0) return(invisible(NULL))
-
-  x_num[is.na(x_num) | !is.finite(x_num)] <- 0.0
-  y_num[is.na(y_num) | !is.finite(y_num)] <- 0.0
-
-  col_vec <- rep_len(as.character(col), n_pts)
-  pch_vec <- rep_len(as.integer(pch), n_pts)
-  # Enforce strictly unfilled/hollow symbols even if caller passes solid pch codes
-  pch_vec[pch_vec %in% c(16L, 19L, 20L)] <- 1L
-  pch_vec[pch_vec == 17L] <- 2L
-  pch_vec[pch_vec == 18L] <- 5L
-  pch_vec[pch_vec == 15L] <- 0L
-  cex_vec <- rep_len(as.numeric(cex), n_pts)
-  lwd_vec <- rep_len(as.numeric(lwd), n_pts)
-
-  pad_range <- function(v) {
-    r <- range(v, na.rm = TRUE)
-    if (!all(is.finite(r))) return(c(-1, 1))
-    span <- r[2] - r[1]
-    if (span < 1e-6) return(c(r[1] - 1.0, r[2] + 1.0))
-    c(r[1] - 0.14 * span, r[2] + 0.14 * span)
-  }
-
-  all_x <- x_num
-  all_y <- y_num
-  c_mat <- NULL
-  if (!is.null(centroids)) {
-    c_df <- as.matrix(centroids)
-    if (nrow(c_df) > 0 && ncol(c_df) >= 2) {
-      cx <- suppressWarnings(as.numeric(c_df[, 1]))
-      cy <- suppressWarnings(as.numeric(c_df[, 2]))
-      cx[!is.finite(cx)] <- 0.0
-      cy[!is.finite(cy)] <- 0.0
-      c_mat <- cbind(cx, cy)
-      rownames(c_mat) <- rownames(c_df)
-      all_x <- c(all_x, cx)
-      all_y <- c(all_y, cy)
-    }
-  }
-
-  xlim <- pad_range(all_x)
-  ylim <- pad_range(all_y)
-  has_sub <- !is.null(subtitle) && length(subtitle) > 0L && !is.na(subtitle[1]) && nzchar(trimws(as.character(subtitle[1])))
-
-  grp_chr <- if (!is.null(group_vec) && length(group_vec) == n_pts) trimws(as.character(group_vec)) else NULL
-  u_grps <- if (!is.null(grp_chr)) unique(grp_chr[!is.na(grp_chr) & nzchar(grp_chr) & grp_chr != "Unknown"]) else character(0)
-
-  # G = 2 Mirrored/Overlaid Canonical Histogram Mode (MorphoTools2::plotHist convention)
-  is_can2_degen <- (length(u_grps) == 2L) &&
-    grepl("^Can2", as.character(ylab), ignore.case = TRUE) &&
-    (isTRUE(stats::sd(y_num, na.rm = TRUE) < 1e-5) || grepl("\\(0\\.0%\\)", as.character(ylab)))
-
-  if (is_can2_degen) {
-    brks <- seq(xlim[1], xlim[2], length.out = 22L)
-    h_list <- list()
-    d_list <- list()
-    max_dens <- 0.25
-    for (g_val in u_grps) {
-      xg <- x_num[!is.na(grp_chr) & grp_chr == g_val]
-      hg <- tryCatch(graphics::hist(xg, breaks = brks, plot = FALSE), error = function(e) NULL)
-      dg <- if (length(xg) >= 2L && isTRUE(stats::sd(xg, na.rm = TRUE) > 1e-6)) {
-        tryCatch(stats::density(xg, from = xlim[1], to = xlim[2]), error = function(e) NULL)
-      } else NULL
-      h_list[[g_val]] <- hg
-      d_list[[g_val]] <- dg
-      if (!is.null(hg) && length(hg$density) > 0L) max_dens <- max(max_dens, max(hg$density, na.rm = TRUE))
-      if (!is.null(dg) && length(dg$y) > 0L) max_dens <- max(max_dens, max(dg$y, na.rm = TRUE))
-    }
-    ylim_hist <- c(0.0, max_dens * 1.28)
-    graphics::plot(
-      xlim, ylim_hist,
-      type = "n",
-      xlim = xlim,
-      ylim = ylim_hist,
-      xlab = xlab,
-      ylab = "Canonical Score Density (Can1)",
-      main = if (has_sub) "" else main,
-      font.main = 2
-    )
-    if (has_sub) {
-      if (!is.null(main) && nzchar(trimws(as.character(main)))) {
-        graphics::title(main = main, line = 1.45, font.main = 2)
-      }
-      graphics::mtext(trimws(as.character(subtitle[1])), side = 3, line = 0.28, cex = 0.73, col = "grey20", font = 1)
-    }
-    graphics::grid(col = "grey88", lty = "solid")
-    for (g_val in u_grps) {
-      m <- !is.na(grp_chr) & (grp_chr == g_val)
-      g_col <- if (!is.null(group_cols) && g_val %in% names(group_cols)) group_cols[[g_val]] else col_vec[which(m)[1L]]
-      hg <- h_list[[g_val]]
-      dg <- d_list[[g_val]]
-      if (!is.null(hg) && length(hg$density) > 0L) {
-        graphics::rect(
-          hg$breaks[-length(hg$breaks)], 0.0, hg$breaks[-1L], hg$density,
-          col = grDevices::adjustcolor(g_col, alpha.f = 0.28),
-          border = grDevices::adjustcolor(g_col, alpha.f = 0.75),
-          lwd = 1.1
-        )
-      }
-      if (!is.null(dg)) {
-        graphics::lines(dg$x, dg$y, col = g_col, lwd = 2.2)
-      }
-      mu_g <- mean(x_num[m], na.rm = TRUE)
-      if (is.finite(mu_g)) {
-        graphics::abline(v = mu_g, col = g_col, lty = 2, lwd = 2.0)
-        graphics::text(mu_g, max_dens * 1.15, labels = sub("^Packera\\s+", "P. ", g_val), col = g_col, cex = 0.76, font = 4)
-      }
-    }
-    if (!is.null(is_type_vec) && length(is_type_vec) > 0L) {
-      t_bool <- as.logical(rep_len(is_type_vec, n_pts))
-      t_bool[is.na(t_bool)] <- FALSE
-      type_idx <- which(t_bool)
-      if (length(type_idx) > 0L) {
-        graphics::arrows(
-          x_num[type_idx], max_dens * 0.20, x_num[type_idx], 0.0,
-          length = 0.07, lwd = 2.0, col = col_vec[type_idx]
-        )
-        graphics::points(x_num[type_idx], rep(max_dens * 0.20, length(type_idx)), pch = 5L, col = "#111111", cex = 1.25, lwd = 1.6)
-      }
-    }
-    if (!is.null(legend_args) && is.list(legend_args)) {
-      do.call(graphics::legend, legend_args)
-    }
-    return(invisible(list(xlim = xlim, ylim = ylim_hist)))
-  }
-
-  graphics::plot(
-    x_num, y_num,
-    type = "n",
-    xlim = xlim,
-    ylim = ylim,
-    xlab = xlab,
-    ylab = ylab,
-    main = if (has_sub) "" else main,
-    font.main = 2
-  )
-  if (has_sub) {
-    if (!is.null(main) && nzchar(trimws(as.character(main)))) {
-      graphics::title(main = main, line = 1.45, font.main = 2)
-    }
-    graphics::mtext(trimws(as.character(subtitle[1])), side = 3, line = 0.28, cex = 0.73, col = "grey20", font = 1)
-  }
-  graphics::grid(col = "grey88", lty = "solid")
-  graphics::abline(h = 0, v = 0, lty = 3, col = "grey70")
-
-  if (is.function(bg_draw_fn)) {
-    tryCatch(bg_draw_fn(xlim, ylim), error = function(e) NULL)
-  }
-
-  # G > 6 Focal-Plus-Top-k Context Layering
-  tier_ord <- NULL
-  fg_grps <- u_grps
-  bg_grps <- character(0)
-  if (length(u_grps) > 6L) {
-    tier_ord <- resolve_taxon_display_tier(
-      data.frame(PC1 = x_num, PC2 = y_num, stringsAsFactors = FALSE),
-      group_vec = grp_chr,
-      max_fg = 6L,
-      feat_cols = c("PC1", "PC2")
-    )
-    fg_grps <- tier_ord$fg_groups
-    bg_grps <- tier_ord$bg_groups
-
-    for (bg_val in bg_grps) {
-      m_bg <- which(!is.na(grp_chr) & (grp_chr == bg_val))
-      if (length(m_bg) >= 3L) {
-        ch_idx <- tryCatch(grDevices::chull(x_num[m_bg], y_num[m_bg]), error = function(e) NULL)
-        if (!is.null(ch_idx) && length(ch_idx) >= 3L) {
-          ch_pts <- m_bg[c(ch_idx, ch_idx[1L])]
-          graphics::polygon(
-            x_num[ch_pts], y_num[ch_pts],
-            col = NA,
-            border = grDevices::adjustcolor("#888888", alpha.f = 0.45),
-            lty = 2, lwd = 1.0
-          )
-        }
-      }
-    }
-    bg_mask <- !is.na(grp_chr) & (grp_chr %in% bg_grps)
-    if (any(bg_mask)) {
-      graphics::points(
-        x_num[bg_mask], y_num[bg_mask],
-        col = grDevices::adjustcolor("#999999", alpha.f = 0.32),
-        pch = 1L, bg = NA, cex = 0.58, lwd = 0.85
-      )
-    }
-    fg_mask <- !bg_mask
-    if (any(fg_mask)) {
-      fg_alpha <- adaptive_point_alpha(sum(fg_mask))
-      fg_col_vec <- col_vec[fg_mask]
-      fg_pch_vec <- pch_vec[fg_mask]
-      for (fg_val in fg_grps) {
-        mf <- which(grp_chr[fg_mask] == fg_val)
-        if (length(mf) > 0L) {
-          c_use <- if (!is.null(group_cols) && fg_val %in% names(group_cols)) group_cols[[fg_val]] else tier_ord$palette[[fg_val]]
-          fg_col_vec[mf] <- grDevices::adjustcolor(c_use, alpha.f = fg_alpha)
-          fg_pch_vec[mf] <- tier_ord$shapes[[fg_val]]
-        }
-      }
-      graphics::points(
-        x_num[fg_mask], y_num[fg_mask],
-        col = fg_col_vec,
-        pch = fg_pch_vec,
-        bg = NA,
-        cex = cex_vec[fg_mask],
-        lwd = lwd_vec[fg_mask]
-      )
-    }
-  } else {
-    graphics::points(
-      x_num, y_num,
-      col = col_vec,
-      pch = pch_vec,
-      bg = NA,
-      cex = cex_vec,
-      lwd = lwd_vec
-    )
-  }
-
-  if (!is.null(is_type_vec) && length(is_type_vec) > 0L) {
-    t_bool <- as.logical(rep_len(is_type_vec, n_pts))
-    t_bool[is.na(t_bool)] <- FALSE
-    type_idx <- which(t_bool)
-    if (length(type_idx) > 0L) {
-      graphics::points(
-        x_num[type_idx], y_num[type_idx],
-        col = col_vec[type_idx], pch = 5L, bg = NA, cex = 1.45, lwd = 2.0
-      )
-      graphics::points(
-        x_num[type_idx], y_num[type_idx],
-        col = "#111111", pch = 1L, bg = NA, cex = 1.85, lwd = 1.4
-      )
-    }
-  }
-
-  if (!is.null(grp_chr) && length(fg_grps) > 0L) {
-    for (g_val in fg_grps) {
-      m <- !is.na(grp_chr) & (grp_chr == g_val)
-      if (sum(m) >= 3) {
-        g_col <- if (!is.null(group_cols) && g_val %in% names(group_cols)) {
-          group_cols[[g_val]]
-        } else if (!is.null(tier_ord) && g_val %in% names(tier_ord$palette)) {
-          tier_ord$palette[[g_val]]
-        } else {
-          col_vec[which(m)[1]]
-        }
-        w_m <- if (!is.null(ellipse_weights) && length(ellipse_weights) == n_pts) ellipse_weights[m] else NULL
-        draw_2d_confidence_ellipse(x_num[m], y_num[m], col = g_col, level = ellipse_level, lwd = 2.0, lty = 1, weights = w_m)
-      }
-    }
-  }
-
-  if (!is.null(biplot_vectors)) {
-    b_mat <- tryCatch(as.matrix(biplot_vectors), error = function(e) NULL)
-    if (!is.null(b_mat) && nrow(b_mat) > 0 && ncol(b_mat) >= 2) {
-      bx <- suppressWarnings(as.numeric(b_mat[, 1]))
-      by <- suppressWarnings(as.numeric(b_mat[, 2]))
-      bx[!is.finite(bx)] <- 0.0; by[!is.finite(by)] <- 0.0
-      vec_len <- sqrt(bx^2 + by^2)
-      max_len <- max(vec_len, 1e-6)
-      rad_scale <- 0.36 * min(diff(xlim), diff(ylim)) / max_len
-      vx <- bx * rad_scale
-      vy <- by * rad_scale
-      top_idx <- utils::head(order(vec_len, decreasing = TRUE), 4L)
-      keep_v <- seq_along(vec_len) %in% top_idx & (sqrt(vx^2 + vy^2) > 0.06 * min(diff(xlim), diff(ylim)))
-      if (any(keep_v)) {
-        graphics::arrows(
-          0, 0, vx[keep_v], vy[keep_v],
-          length = 0.07, lwd = 1.8, col = "#222222"
-        )
-        v_lbls <- if (!is.null(biplot_labels) && length(biplot_labels) == nrow(b_mat)) {
-          biplot_labels[keep_v]
-        } else if (!is.null(rownames(b_mat))) {
-          rownames(b_mat)[keep_v]
-        } else {
-          paste0("V", which(keep_v))
-        }
-        tx_x0 <- vx[keep_v] * 1.14
-        tx_y0 <- vy[keep_v] * 1.14
-        rep_v <- repel_2d_labels(
-          x0 = tx_x0, y0 = tx_y0, labels = v_lbls,
-          xlim = xlim, ylim = ylim, cex = 0.72, n_iter = 25L,
-          draw_segments = TRUE, seg_col = "grey45", seg_lwd = 0.75,
-          anchor_x = vx[keep_v], anchor_y = vy[keep_v]
-        )
-        graphics::text(rep_v$x, rep_v$y, labels = v_lbls, cex = 0.72, font = 2, col = "#111111")
-      }
-    }
-  }
-
-  if (!is.null(c_mat) && nrow(c_mat) > 0) {
-    lbls <- if (!is.null(centroid_labels)) as.character(centroid_labels) else rownames(c_mat)
-    c_use_mat <- c_mat
-    c_use_lbls <- lbls
-    if (!is.null(c_use_lbls) && length(c_use_lbls) == nrow(c_use_mat)) {
-      rownames(c_use_mat) <- c_use_lbls
-    }
-    norm_lbl_key <- function(v) gsub("[_[:space:]]+", " ", tolower(trimws(as.character(v))))
-    if (length(u_grps) > 6L && length(fg_grps) > 0L && !is.null(c_use_lbls) && length(c_use_lbls) == nrow(c_use_mat)) {
-      short_fg <- sub("^Packera\\s+", "P. ", fg_grps)
-      keep_c <- (norm_lbl_key(c_use_lbls) %in% norm_lbl_key(fg_grps)) | (norm_lbl_key(c_use_lbls) %in% norm_lbl_key(short_fg))
-      if (!any(keep_c)) keep_c <- seq_len(min(6L, nrow(c_use_mat)))
-      c_use_mat <- c_use_mat[keep_c, , drop = FALSE]
-      if (nrow(c_use_mat) > 6L) c_use_mat <- c_use_mat[seq_len(6L), , drop = FALSE]
-      c_use_lbls <- rownames(c_use_mat)
-    }
-    graphics::points(c_use_mat[, 1], c_use_mat[, 2], pch = 3, col = "black", cex = 1.8, lwd = 2.4)
-    if (!is.null(c_use_lbls) && length(c_use_lbls) == nrow(c_use_mat)) {
-      cx0 <- c_use_mat[, 1]
-      cy0 <- c_use_mat[, 2]
-      rep_c <- repel_2d_labels(
-        x0 = cx0,
-        y0 = cy0 + 0.032 * diff(ylim),
-        labels = c_use_lbls,
-        xlim = xlim,
-        ylim = ylim,
-        cex = 0.76,
-        n_iter = 25L,
-        draw_segments = TRUE,
-        seg_col = "grey45",
-        seg_lwd = 0.75,
-        anchor_x = cx0,
-        anchor_y = cy0
-      )
-      for (k_c in seq_along(c_use_lbls)) {
-        lbl_txt <- c_use_lbls[k_c]
-        rx <- rep_c$x[k_c]
-        ry <- rep_c$y[k_c]
-        sw_lbl <- graphics::strwidth(lbl_txt, cex = 0.72, font = 2)
-        sh_lbl <- graphics::strheight(lbl_txt, cex = 0.72, font = 2)
-        graphics::rect(
-          rx - sw_lbl * 0.56, ry - sh_lbl * 0.65, rx + sw_lbl * 0.56, ry + sh_lbl * 0.65,
-          col = grDevices::adjustcolor("white", alpha.f = 0.84), border = NA
-        )
-        graphics::text(rx, ry, labels = lbl_txt, cex = 0.76, font = 4, col = "black")
-      }
-    }
-  }
-
-  if (!is.null(legend_args) && is.list(legend_args)) {
-    if (!is.null(tier_ord) && tier_ord$is_multi_crowded) {
-      fg_cols_leg <- vapply(fg_grps, function(g) {
-        if (!is.null(group_cols) && g %in% names(group_cols)) group_cols[[g]] else tier_ord$palette[[g]]
-      }, character(1))
-      fg_pch_leg <- vapply(fg_grps, function(g) tier_ord$shapes[[g]], integer(1))
-      pos_leg <- if (length(legend_args) >= 1L && is.character(legend_args[[1L]])) legend_args[[1L]] else "topright"
-      graphics::legend(
-        pos_leg,
-        legend = c(packera_italic_expressions(fg_grps), "Background Congeners (Chull)"),
-        col = c(fg_cols_leg, "#888888"),
-        pch = c(fg_pch_leg, 1L),
-        lty = c(rep(NA, length(fg_grps)), 2L),
-        pt.bg = NA,
-        cex = if (!is.null(legend_args$cex)) legend_args$cex else 0.70,
-        bty = "n"
-      )
-    } else {
-      do.call(graphics::legend, legend_args)
-    }
-  }
-  invisible(list(xlim = xlim, ylim = ylim))
 }
 
 export_step03_fourier_pc_tables <- function(specimen_df, efa_df, output_csv_path) {
@@ -1543,7 +682,7 @@ compute_ari_pure <- function(labels_true, labels_pred) {
 }
 
 # ==============================================================================
-# Modular 300-DPI PNG Publication Figure Suite Delegation (Steps 03-06)
+# Modular 300-DPI PNG Publication Figure Suite Delegation (Steps 03-07)
 # Strictly 300-DPI PNG outputs (zero .pdf files); ggplot2 + patchwork + sf
 # ==============================================================================
 .resolve_scripts_figures_dir <- function() {
@@ -1571,7 +710,8 @@ generate_step03_pub_figures <- function(
   output_csv_path = NULL,
   sym_pca_fit = NULL
 ) {
-  if (identical(Sys.getenv("PACKERA_SKIP_FIGURES", unset = ""), "1")) return(invisible(""))
+  if (identical(Sys.getenv("PLANTMATICS_SKIP_FIGURES", unset = ""), "1") ||
+      identical(Sys.getenv("PACKERA_SKIP_FIGURES", unset = ""), "1")) return(invisible(""))
   fdir <- resolve_active_figures_dir(figures_dir, output_csv_path)
   render_step03_figures_suite(
     efa_df = efa_df,
@@ -1584,9 +724,10 @@ generate_step03_pub_figures <- function(
   )
 }
 
-render_allometry_diagnostic_pdf <- function(sub_df, r2_size, p_size, r2_int, output_pdf, p_int = 1.0) {
-  if (identical(Sys.getenv("PACKERA_SKIP_FIGURES", unset = ""), "1")) return(invisible(""))
-  out_png <- if (!is.null(output_pdf) && nzchar(output_pdf)) normalize_png_path(output_pdf) else "outputs/figures/fig04a_foliar_allometry_audit.png"
+render_allometry_diagnostic_png <- function(sub_df, r2_size, p_size, r2_int, output_png, p_int = 1.0) {
+  if (identical(Sys.getenv("PLANTMATICS_SKIP_FIGURES", unset = ""), "1") ||
+      identical(Sys.getenv("PACKERA_SKIP_FIGURES", unset = ""), "1")) return(invisible(""))
+  out_png <- if (!is.null(output_png) && nzchar(output_png)) normalize_png_path(output_png) else "outputs/figures/fig04a_foliar_allometry_audit.png"
   render_step04_allometry_png(
     sub_df = sub_df,
     r2_size = r2_size,
@@ -1597,9 +738,10 @@ render_allometry_diagnostic_pdf <- function(sub_df, r2_size, p_size, r2_int, out
   )
 }
 
-render_cda_biplot_4panel_pdf <- function(audit_df, cda_res, gmm_res, output_pdf, feature_cols = NULL, manova_res = NULL) {
-  if (identical(Sys.getenv("PACKERA_SKIP_FIGURES", unset = ""), "1")) return(invisible(""))
-  out_png <- if (!is.null(output_pdf) && nzchar(output_pdf)) normalize_png_path(output_pdf) else "outputs/figures/fig04b_gmm_cda_morphometrics.png"
+render_cda_biplot_4panel_png <- function(audit_df, cda_res, gmm_res, output_png, feature_cols = NULL, manova_res = NULL) {
+  if (identical(Sys.getenv("PLANTMATICS_SKIP_FIGURES", unset = ""), "1") ||
+      identical(Sys.getenv("PACKERA_SKIP_FIGURES", unset = ""), "1")) return(invisible(""))
+  out_png <- if (!is.null(output_png) && nzchar(output_png)) normalize_png_path(output_png) else "outputs/figures/fig04b_gmm_cda_morphometrics.png"
   render_step04_gmm_cda_png(
     audit_df = audit_df,
     cda_res = cda_res,
@@ -1620,7 +762,8 @@ generate_step04_pub_figures <- function(
   manova_res = NULL,
   batch_csv = NULL
 ) {
-  if (identical(Sys.getenv("PACKERA_SKIP_FIGURES", unset = ""), "1")) return(invisible(TRUE))
+  if (identical(Sys.getenv("PLANTMATICS_SKIP_FIGURES", unset = ""), "1") ||
+      identical(Sys.getenv("PACKERA_SKIP_FIGURES", unset = ""), "1")) return(invisible(TRUE))
   fdir <- resolve_active_figures_dir(figures_dir, reference_path)
   canon_04b <- file.path(fdir, "fig04b_gmm_cda_morphometrics.png")
   ref_png <- if (!is.null(reference_path) && nzchar(reference_path)) normalize_png_path(reference_path) else ""

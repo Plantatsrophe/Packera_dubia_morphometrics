@@ -167,6 +167,10 @@ FORBIDDEN_OBSOLETE_SAM2_AND_PRUNED_HELPER_TOKENS = (
     "fig_empirical_taxon_complex_network",
     "vision_xai_audit",
     "dinov2_feature_cache",
+    "cda_biplot_pdf",
+    "generate_cda_biplot_pdf",
+    "render_allometry_diagnostic_pdf",
+    "render_cda_biplot_4panel_pdf",
     # LeafMachine2 tokens
     *FORBIDDEN_LEGACY_LM2_TOKENS,
 )
@@ -390,6 +394,78 @@ class TestCodeHygiene(unittest.TestCase):
             "Active source files must not hardcode the legacy workstation repository path:\n"
             + "\n".join(violations),
         )
+
+    def test_no_duplicate_python_defs_in_same_scope(self):
+        """Assert zero shadowed or duplicate def/async def/class definitions within any module or class body."""
+        def _is_overload(node: ast.AST) -> bool:
+            for dec in getattr(node, "decorator_list", []):
+                if isinstance(dec, ast.Name) and dec.id == "overload":
+                    return True
+                if isinstance(dec, ast.Attribute) and dec.attr == "overload":
+                    return True
+            return False
+
+        def _check_body(body: List[ast.stmt], scope_label: str, dupes: List[str]) -> None:
+            seen: dict[str, int] = {}
+            for stmt in body:
+                if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    if _is_overload(stmt):
+                        continue
+                    if stmt.name in seen:
+                        dupes.append(f"{scope_label}:{stmt.lineno} duplicates {stmt.name} (first at L{seen[stmt.name]})")
+                    else:
+                        seen[stmt.name] = stmt.lineno
+                    if isinstance(stmt, ast.ClassDef):
+                        _check_body(stmt.body, f"{scope_label}.{stmt.name}", dupes)
+
+        dupes: List[str] = []
+        py_files = [PROJECT_ROOT / "main.py"] + sorted(
+            p for p in (PROJECT_ROOT / "scripts").rglob("*.py")
+            if ARCHIVE_MARKER not in p.parts
+        )
+        for py_path in py_files:
+            if not py_path.exists():
+                continue
+            tree = ast.parse(py_path.read_text(encoding="utf-8"), filename=str(py_path))
+            _check_body(tree.body, str(py_path.relative_to(PROJECT_ROOT)), dupes)
+
+        self.assertEqual(dupes, [], "Duplicate Python definitions found in same scope:\n" + "\n".join(dupes))
+
+    def test_no_broken_symlinks(self):
+        """Assert zero broken symlinks across models/, scripts/, and runs/latest*."""
+        broken: List[str] = []
+        for root_dir in (PROJECT_ROOT / "models", PROJECT_ROOT / "scripts"):
+            if root_dir.exists():
+                for entry in root_dir.rglob("*"):
+                    if "__pycache__" in entry.parts:
+                        continue
+                    if entry.is_symlink() and not entry.exists():
+                        broken.append(str(entry.relative_to(PROJECT_ROOT)))
+        runs_dir = PROJECT_ROOT / "runs"
+        if runs_dir.exists():
+            for entry in runs_dir.glob("latest*"):
+                if entry.is_symlink() and not entry.exists():
+                    broken.append(str(entry.relative_to(PROJECT_ROOT)))
+        self.assertEqual(broken, [], "Broken symlinks detected:\n" + "\n".join(broken))
+
+    def test_no_pdf_figure_artifacts(self):
+        """Assert zero Rplots.pdf or figure .pdf artifacts at repo root or figure directories."""
+        found_pdfs: List[str] = []
+        rplots = PROJECT_ROOT / "Rplots.pdf"
+        if rplots.exists() or rplots.is_symlink():
+            found_pdfs.append("Rplots.pdf")
+        out_figs = PROJECT_ROOT / "outputs" / "figures"
+        if out_figs.exists():
+            for pdf_p in out_figs.rglob("*.pdf"):
+                found_pdfs.append(str(pdf_p.relative_to(PROJECT_ROOT)))
+        runs_dir = PROJECT_ROOT / "runs"
+        if runs_dir.exists():
+            for fig_dir in runs_dir.glob("*/outputs/figures"):
+                if fig_dir.is_symlink():
+                    continue
+                for pdf_p in fig_dir.rglob("*.pdf"):
+                    found_pdfs.append(str(pdf_p.relative_to(PROJECT_ROOT)))
+        self.assertEqual(found_pdfs, [], "Unexpected PDF figure artifacts found:\n" + "\n".join(sorted(found_pdfs)))
 
 
 if __name__ == "__main__":

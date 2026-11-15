@@ -11,7 +11,7 @@ from pathlib import Path
 import re
 import sys
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple, Union
-from urllib import error as _uerr, parse as _uparse, request as _ureq
+from urllib import error as _uerr, parse as _uparse
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -23,6 +23,7 @@ from scripts.core.db import (
     upsert_natureserve_subnational_ranges, upsert_taxon_backbone_profiles,
 )
 from scripts.core.epa_ecoregions import _CANADIAN_PROV_ABBR_TO_FULL, _US_STATE_ABBR_TO_FULL, _normalize_us_state_name
+from scripts.core.io_utils import atomic_write_csv_rows, atomic_write_text, default_http_get, to_text
 
 PROFILE_CSV_NAME = "public_taxon_backbone_profiles.csv"
 RANGE_CSV_NAME = "public_natureserve_subnational_ranges.csv"
@@ -60,38 +61,20 @@ def _validate_flat_taxonomy_dir(tax_dir: Path) -> None:
     tax_dir.mkdir(parents=True, exist_ok=True)
 
 
-def _atomic_write(dest: Path, text: Optional[str] = None, fieldnames: Optional[Sequence[str]] = None, rows: Optional[Sequence[Mapping[str, Any]]] = None) -> None:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_name(f".{dest.name}.tmp")
-    with open(tmp, "w", encoding="utf-8", newline="") as fh:
-        if fieldnames is not None:
-            writer = csv.DictWriter(fh, fieldnames=list(fieldnames), extrasaction="ignore", lineterminator="\n")
-            writer.writeheader()
-            writer.writerows({k: ("" if r.get(k) is None else r.get(k)) for k in fieldnames} for r in (rows or ()))
-        else:
-            fh.write(text or "")
-        fh.flush()
-        os.fsync(fh.fileno())
-    os.replace(tmp, dest)
-
-
 def _http_request_json(url: str, *, http_get_fn: Optional[Callable[[str], Any]] = None, post_body: Optional[Mapping[str, Any]] = None, timeout: float = 20.0) -> Optional[Any]:
     try:
         if http_get_fn is not None:
             raw = http_get_fn(url)
             if isinstance(raw, (dict, list)):
                 return raw
-            if isinstance(raw, (bytes, bytearray)):
-                raw = raw.decode("utf-8", errors="replace")
-            return json.loads(raw) if isinstance(raw, str) and raw.strip() else None
-        headers = {"User-Agent": _USER_AGENT, "Accept": "application/json"}
+            txt = to_text(raw) if isinstance(raw, (bytes, bytearray, str)) else ""
+            return json.loads(txt) if txt.strip() else None
+        headers = {"Accept": "application/json"}
         data = json.dumps(post_body).encode("utf-8") if post_body is not None else None
         if data is not None:
             headers["Content-Type"] = "application/json"
-        req = _ureq.Request(url, data=data, headers=headers, method=("POST" if data else "GET"))
-        with _ureq.urlopen(req, timeout=timeout) as resp:
-            txt = resp.read().decode("utf-8", errors="replace").strip()
-            return json.loads(txt) if txt else None
+        txt = to_text(default_http_get(url, timeout=timeout, user_agent=_USER_AGENT, headers=headers, data=data)).strip()
+        return json.loads(txt) if txt else None
     except (_uerr.URLError, TimeoutError, json.JSONDecodeError, OSError, ValueError) as exc:
         print(f"[WARN] HTTP request failed for {url}: {exc}")
         return None
@@ -408,9 +391,9 @@ def download_taxonomic_backbone(
         enrich_bhl_protologues(profiles, bhl_api_key=bhl_api_key, http_get_fn=bhl_http_fn)
         ranks, ns_rows = fetch_natureserve_ranges(sorted(profiles), eff_genus, http_get_fn=natureserve_http_fn)
         prof_list = [{**profiles[sp], **{k: v for k, v in ranks.get(sp, {}).items() if v}} for sp in sorted(profiles)]
-        _atomic_write(prof_csv, fieldnames=PROFILE_FIELDS, rows=prof_list)
-        _atomic_write(range_csv, fieldnames=RANGE_FIELDS, rows=ns_rows)
-        _atomic_write(manifest_json, text=json.dumps({"target_genus": eff_genus, "generated_at": _now_iso(), "n_profiles": len(prof_list), "n_natureserve_ranges": len(ns_rows), "files": [PROFILE_CSV_NAME, RANGE_CSV_NAME]}, indent=2) + "\n")
+        atomic_write_csv_rows(prof_csv, PROFILE_FIELDS, prof_list)
+        atomic_write_csv_rows(range_csv, RANGE_FIELDS, ns_rows)
+        atomic_write_text(manifest_json, json.dumps({"target_genus": eff_genus, "generated_at": _now_iso(), "n_profiles": len(prof_list), "n_natureserve_ranges": len(ns_rows), "files": [PROFILE_CSV_NAME, RANGE_CSV_NAME]}, indent=2) + "\n")
     sync_ok = db_path is not None or bool(os.environ.get("PLANTMATICS_DB_PATH") or os.environ.get("PACKERA_DB_PATH")) or is_canonical_or_explicit_db_context(eff_dir, workspace_root=PROJECT_ROOT)
     if not sync_ok:
         print("[WARN] Standalone taxonomy dir without explicit --db; skipping canonical DB sync.")

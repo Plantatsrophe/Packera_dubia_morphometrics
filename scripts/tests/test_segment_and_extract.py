@@ -18,7 +18,7 @@ from __future__ import annotations
 import shutil
 import tempfile
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 from pathlib import Path
 
 import cv2
@@ -189,6 +189,8 @@ class TestSegmentAndExtract(unittest.TestCase):
         area = cv2.contourArea(pts, oriented=True)
         self.assertLess(area, 0, "Resampled standardized contour must be strictly clockwise.")
 
+
+class TestStep02InferenceResumption(unittest.TestCase):
     """Test suite for Step 02 inference resumption, artifact skipping, and CLI flags."""
 
     def setUp(self) -> None:
@@ -2308,8 +2310,9 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
           1. Step 02 scales dynamically across 18 taxa (including subsp., var., and hybrid ranks),
              writes 300-DPI PNGs only (zero .pdf files), caches unlimited lm3_assets/ + ect_overlays/,
              and exports capped whole-sheet diagnostic overlays (lm3_sheet_overlays/).
-          2. Steps 03-06 modular R suite (scripts/figures/*.R) defines all 10 R canonical PNG plates
-             with balanced R delimiters and zero grDevices::pdf() calls.
+          2. Steps 03-07 modular R suite (scripts/figures/*.R) defines all 12 R canonical PNG plates
+             (14 total plates including fig02a and fig02b) with balanced R delimiters and zero
+             file-backed grDevices::pdf() calls.
         """
         from PIL import Image
         from scripts.vision.step02_figures import generate_step02_publication_figures
@@ -2401,9 +2404,11 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
         }
         r_fig_dir = PROJECT_ROOT / "scripts" / "figures"
         combined_r_src = "\n".join(p.read_text(encoding="utf-8") for p in sorted(r_fig_dir.glob("*.R")))
+        import re
         for png_name in expected_r_pngs:
             self.assertIn(png_name, combined_r_src)
-        self.assertNotIn("grDevices::pdf(", combined_r_src)
+        combined_no_null = re.sub(r"grDevices::pdf\(\s*NULL\s*\)", "", combined_r_src)
+        self.assertNotIn("grDevices::pdf(", combined_no_null)
 
     def test_eroded_blade_cie_l_tomentum_and_paper_strap_masking(self) -> None:
         """Verify compute_eroded_blade_cie_l_metrics separates floccose white tomentum from glabrous blades and masks white paper mounting straps, petioles, and holes."""

@@ -2,8 +2,8 @@
 """USGS DS-801 soil geochemistry, USFWS NWI wetland/seep, and USACE NWPL provisioner."""
 from __future__ import annotations
 
-import argparse, csv, io, json, math, os, re, sqlite3, sys, tempfile, threading, zipfile
-import urllib.parse, urllib.request
+import argparse, csv, io, json, math, os, re, sqlite3, sys, threading, zipfile
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from pathlib import Path
@@ -12,6 +12,8 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+from scripts.core.io_utils import atomic_write_csv_rows, default_http_get, to_text
 
 _UA = "Plantmatics/1.0 (https://github.com/plantmatics; mailto:plantmatics@users.noreply.github.com)"
 _DS801_INDEX_URL = "https://pubs.usgs.gov/ds/801/downloads/"
@@ -53,27 +55,7 @@ def _lat_lon_key(lat: float, lon: float) -> str:
 
 
 def _default_http_get(url: str, timeout: int = 30) -> bytes:
-    with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": _UA}), timeout=timeout) as resp:
-        return resp.read()
-
-
-def _to_text(raw: Union[bytes, str]) -> str:
-    return raw if isinstance(raw, str) else raw.decode("utf-8", errors="replace")
-
-
-def _atomic_write_text(dest: Path, text: str) -> None:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=f".tmp_{dest.stem}_", suffix=".tmp", dir=str(dest.parent))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
-            fh.write(text)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp_name, dest)
-    except Exception:
-        if os.path.exists(tmp_name):
-            os.unlink(tmp_name)
-        raise
+    return default_http_get(url, timeout=float(timeout), user_agent=_UA)
 
 
 def _parse_geochem_num(val: Any) -> Optional[float]:
@@ -179,13 +161,13 @@ def ensure_usgs_ds801_soils(
     getter = http_get_fn or _default_http_get
     links: List[Tuple[str, str]] = []
     try:
-        sb = json.loads(_to_text(getter(_DS801_SB_URL, timeout=25)))
+        sb = json.loads(to_text(getter(_DS801_SB_URL, timeout=25)))
         links.extend((str(f.get("name", "")), str(f["url"])) for f in (sb.get("files") or [])
                      if isinstance(f, dict) and f.get("url") and str(f.get("name", "")).lower().endswith((".csv", ".txt", ".zip")))
     except Exception:
         pass
     try:
-        html = _to_text(getter(_DS801_INDEX_URL, timeout=25))
+        html = to_text(getter(_DS801_INDEX_URL, timeout=25))
         links.extend((Path(h).name, urllib.parse.urljoin(_DS801_INDEX_URL, h)) for h in re.findall(r'href=["\']([^"\']+\.(?:csv|txt|zip))["\']', html, re.I))
     except Exception:
         pass
@@ -215,11 +197,11 @@ def ensure_usgs_ds801_soils(
     if not by_site:
         print("[WARN] USGS DS-801 geochemistry unavailable offline; skipping DS-801 staging.", file=sys.stderr)
         return []
-    buf = io.StringIO()
-    wr = csv.DictWriter(buf, fieldnames=list(_DS801_COLS))
-    wr.writeheader()
-    wr.writerows({k: ("" if rec.get(k) is None else rec[k]) for k in _DS801_COLS} for rec in by_site.values())
-    _atomic_write_text(csv_path, buf.getvalue())
+    atomic_write_csv_rows(
+        csv_path,
+        _DS801_COLS,
+        ({k: ("" if rec.get(k) is None else rec[k]) for k in _DS801_COLS} for rec in by_site.values()),
+    )
     return list(by_site.values())
 
 
@@ -267,7 +249,7 @@ def query_nwi_point_or_cache(
         "spatialRel": "esriSpatialRelIntersects", "outFields": "ATTRIBUTE,WETLAND_TYPE", "returnGeometry": "true", "f": "json",
     })
     try:
-        payload = json.loads(_to_text(getter(f"{_NWI_QUERY_URL}?{params}", timeout=20)))
+        payload = json.loads(to_text(getter(f"{_NWI_QUERY_URL}?{params}", timeout=20)))
     except Exception as exc:
         print(f"[WARN] NWI REST query failed at {key}: {exc}", file=sys.stderr)
         return {"lat_lon_key": key, "is_nwi_wetland": None, "nwi_wetland_system": None, "nwi_wetland_dist_m": None}
@@ -311,7 +293,7 @@ def fetch_nwpl_wetland_ratings(
         by_sp: Dict[str, List[Tuple[str, float]]] = {}
         for url in (f"{_NWPL_STATIC_BASE}/api/species?scientificName={q}", f"https://plantsservices.sc.egov.usda.gov/api/CharacteristicsSearch?scientificName={q}"):
             try:
-                obj = json.loads(_to_text(getter(url, timeout=25)))
+                obj = json.loads(to_text(getter(url, timeout=25)))
             except Exception:
                 continue
             for item in (obj if isinstance(obj, list) else (obj.get("data") or obj.get("species") or obj.get("records") or [])):
@@ -337,11 +319,7 @@ def fetch_nwpl_wetland_ratings(
                 "nwpl_region": ";".join(sorted({r for r, _ in entries if not east or r in _EASTERN_NWPL_REGIONS})) or "EAST",
             }
         if ratings:
-            buf = io.StringIO()
-            wr = csv.DictWriter(buf, fieldnames=list(_NWPL_COLS))
-            wr.writeheader()
-            wr.writerows(ratings.values())
-            _atomic_write_text(out_csv, buf.getvalue())
+            atomic_write_csv_rows(out_csv, _NWPL_COLS, ratings.values())
         else:
             print(f"[WARN] USACE NWPL wetland ratings unavailable for {genus} (continuing).", file=sys.stderr)
     if conn is not None and ratings and conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='taxon_backbone_profiles'").fetchone():

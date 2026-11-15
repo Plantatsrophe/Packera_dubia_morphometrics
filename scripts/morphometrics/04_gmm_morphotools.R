@@ -30,19 +30,13 @@ parse_args_robust <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
 # 2. Taxonomic Concept Standardization & Dynamic Column Discovery
 
 for (.pf_p in c("scripts/morphometrics/pub_figures_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "pub_figures_utils.R"))) {
-  if (!exists("compute_spatial_balance_weights", mode = "function") && !is.na(.pf_p) && nzchar(.pf_p) && file.exists(.pf_p)) { source(.pf_p); break }
+  if ((!exists("compute_spatial_balance_weights", mode = "function") || !exists("standardize_packera_taxon", mode = "function")) && !is.na(.pf_p) && nzchar(.pf_p) && file.exists(.pf_p)) { source(.pf_p); break }
 }
 for (.aw_p in c("scripts/morphometrics/authority_weighting_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "authority_weighting_utils.R"))) if (!exists("compute_empirical_bayes_authority_weights", mode = "function") && !is.na(.aw_p) && nzchar(.aw_p) && file.exists(.aw_p)) { source(.aw_p); break }
 for (.pm_p in c("scripts/morphometrics/plasticity_mitigation_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "plasticity_mitigation_utils.R"))) if (!exists("merge_plastic_gmm_components_ridgeline", mode = "function") && !is.na(.pm_p) && nzchar(.pm_p) && file.exists(.pm_p)) { source(.pm_p); break }
 for (.db_p in c("scripts/core/db_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "..", "core", "db_utils.R"))) {
   if (!exists("fetch_step04_morphometrics_from_db", mode = "function") && !is.na(.db_p) && nzchar(.db_p) && file.exists(.db_p)) { source(.db_p); break }
 }
-.base_std_taxon <- if (exists("standardize_taxon_name", mode = "function")) standardize_taxon_name else NULL
-standardize_packera_taxon <- function(species_vec) {
-  if (!is.null(.base_std_taxon)) { res <- .base_std_taxon(species_vec); return(ifelse(is.na(res), "Unknown", res)) }
-  as.character(species_vec)
-}
-
 discover_sorted_morph_cols <- function(x, pattern, require_finite = TRUE) {
   nms <- if (is.data.frame(x) || is.matrix(x)) colnames(x) else as.character(x); hits <- grep(pattern, nms, value = TRUE)
   if (length(hits) > 1L) hits <- hits[order(suppressWarnings(as.integer(gsub("[^0-9]", "", hits))), hits)]
@@ -51,10 +45,10 @@ discover_sorted_morph_cols <- function(x, pattern, require_finite = TRUE) {
 }
 
 # 2b. Foliar Allometry Multivariate Testing & Residual Correction
-generate_allometry_diagnostic_plot <- function(sub_df, r2_size, p_size, r2_int, output_pdf, p_int = 1.0) {
-  if (!exists("render_allometry_diagnostic_pdf", mode = "function") && file.exists("scripts/morphometrics/pub_figures_utils.R")) source("scripts/morphometrics/pub_figures_utils.R")
-  if (exists("render_allometry_diagnostic_pdf", mode = "function")) render_allometry_diagnostic_pdf(sub_df, r2_size, p_size, r2_int, output_pdf, p_int = p_int)
-  message("Shape allometry regression plot saved -> ", output_pdf)
+generate_allometry_diagnostic_plot <- function(sub_df, r2_size, p_size, r2_int, output_png, p_int = 1.0) {
+  if (!exists("render_allometry_diagnostic_png", mode = "function") && file.exists("scripts/morphometrics/pub_figures_utils.R")) source("scripts/morphometrics/pub_figures_utils.R")
+  if (exists("render_allometry_diagnostic_png", mode = "function")) render_allometry_diagnostic_png(sub_df, r2_size, p_size, r2_int, output_png, p_int = p_int)
+  message("Shape allometry regression plot saved -> ", output_png)
 }
 
 test_and_correct_allometry <- function(morpho_df, correct_mode = "auto", permutations = 999, seed = 42, r2_threshold = 0.10,
@@ -634,7 +628,7 @@ run_gmm_morphotools_pipeline <- function(opts) {
   lead_cols <- intersect(c("catalogNumber", "plant_individual_id", "leaf_id", "basal_leaf_count", "cauline_leaf_count", "morph_tier_source", "pixels_per_mm", "is_calibrated_mm", "species_raw", "species_standardized", "identifiedBy", "determiner_tier", "type_status", "is_type_specimen", "is_promoted_bronze", "has_empirical_type_anchor", "authority_weight", "spatial_balance_weight", "population_deme_id", "deme_n_specimens", "cda_predicted_taxon", "cda_posterior_prob", "cda_oof_posterior_prob", "cl_target_threshold", "self_morph_mahal_d2", "self_morph_df", "cda_second_taxon", "cda_second_posterior_prob", "cda_posterior_margin", "type_morph_mahal_d2", "nearest_type_morph_taxon", "nearest_type_basionym", "nearest_type_basionym_d2", "type_morph_concordance", "is_typical_morphotype", "min_congener_mahal_d2", "min_congener_taxon", "open_set_novelty_p", "open_set_df", "is_confident_label_noise", "loocv_accuracy", "selected_morph_features", "is_passive", "morphometric_outlier_flag", "misidentification_flag", "triage_priority", "discordance_reason", "gmm_cluster", "gmm_uncertainty", "can1", "can2", "can3", "ecoregion_cda_predicted", "ecoregion_cda_posterior_prob", "ecoregion_can1", "ecoregion_can2", pc_cols, "Cauline_PC1", "Cauline_PC2", "Cauline_PC3", "ECT_PC1", "ECT_PC2", "ECT_PC3", "Cauline_ECT_PC1", "Cauline_ECT_PC2", "ect_lobe_complexity", "cauline_ect_lobe_complexity", "heteroblasty_ect_distance", "PC1_raw_individual", "PC2_raw_individual", "centroid_size", "log_centsize", "solidity", "q25_solidity", "dissection_index", "dissected_leaf_fraction", "within_rosette_efa_dispersion", "heteroblasty_efa_distance", "cauline_solidity_med", "cauline_dissection_index_med", "cauline_aspect_ratio_med", "cauline_blade_length_mm", "basal_vs_cauline_length_ratio", "basal_vs_cauline_solidity_delta", "petiole_length_mm", "petiole_length_mm_std", "blade_length_mm", "petiole_to_blade_ratio", "petiole_to_blade_ratio_std", "blade_cie_l_norm", "blade_cie_l_sd", "AR_inv", "AR_inv_std", "log1p_capitulum_count", "log1p_capitulum_count_std", "plant_height_cm", "plant_height_cm_std", "scape_to_basal_leaf_ratio", "scape_to_basal_leaf_ratio_std", "is_bent_stem", "reproductive_trait_status", "capitula_count", "involucre_height_px", "involucre_width_px", "involucre_height_mm", "involucre_width_mm"), names(audited_df))
   out_df <- audited_df[, c(lead_cols, setdiff(names(audited_df), lead_cols))]; dir.create(dirname(opts$output_flags), recursive = TRUE, showWarnings = FALSE); tmp_flags <- paste0(opts$output_flags, ".", Sys.getpid(), ".tmp"); .write_csv_s04(out_df, tmp_flags, na = ""); file.rename(tmp_flags, opts$output_flags)
   if (exists("persist_step04_to_sqlite", mode = "function")) tryCatch(persist_step04_to_sqlite(out_df, opts$vouchers, focal_taxon = opts$focal_taxon, intraspecific_mode = is_intra_mode), error = function(e) warning("SQLite Step 04 persistence note: ", e$message))
-  generate_cda_biplot_pdf(audited_df, cda_res, gmm_res, opts$output_plot, selected_features, manova_res = manova_res)
+  generate_cda_biplot_png(audited_df, cda_res, gmm_res, opts$output_plot, selected_features, manova_res = manova_res)
   tryCatch({ if (exists("generate_step04_pub_figures", mode = "function")) generate_step04_pub_figures(audited_df, cda_res, gmm_res, NULL, opts$output_plot, eco_cda_res = eco_cda_res, manova_res = manova_res, batch_csv = opts$output_batch_audit) }, error = function(e) warning("Step 04 publication figures export warning: ", e$message))
   return(invisible(out_df))
 }

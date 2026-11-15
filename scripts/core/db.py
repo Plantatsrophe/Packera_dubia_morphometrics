@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import csv
 from datetime import datetime, timezone
-import hashlib
 import io
 import json
 import logging
@@ -481,23 +480,13 @@ def get_duckdb_connection(
 # =============================================================================
 
 from scripts.core.db_schema import (
-    MASTER_VIEW_DDL,
-    PACKERA_SCHEMA_USER_VERSION,
-    PLANTMATICS_SCHEMA_USER_VERSION,
-    SCHEMA_DDL,
     _CANONICAL_EXTRACTED_LEAVES_COLS,
     _CANONICAL_PLANT_INDIVIDUALS_COLS,
     _CANONICAL_VOUCHER_REPRO_COLS,
     _DYNAMIC_TABLE_MIGRATION_SPECS,
-    _MASTER_VIEW_REQUIRED_TABLES,
-    _VOUCHERS_MIGRATION_COLUMNS,
-    _build_master_view_ddl,
-    _build_schema_ddl,
     _migrate_dynamic_schema_columns,
-    _migrate_vouchers_schema_columns,
     _table_needs_canonical_rebuild,
     init_db_schema,
-    migrate_database_schema,
 )
 
 
@@ -2623,55 +2612,6 @@ def persist_spatial_rf_predictions(
     )
 
 
-def persist_taxon_complexes(
-    conn: sqlite3.Connection,
-    run_id: str,
-    rows: Sequence[Mapping[str, Any]],
-    demo: bool = False,
-) -> int:
-    """Upsert Step 07 empirical species-complex delimitation rows into `taxon_complexes`."""
-    if demo or not rows:
-        return 0
-    eff_run = str(run_id).strip() or "canonical"
-    ensure_pipeline_run(conn, run_id=eff_run)
-    prepared: List[Dict[str, Any]] = []
-    for r in rows:
-        sp = _to_str(r.get("species_standardized"))
-        if not sp:
-            continue
-        rec: Dict[str, Any] = {"run_id": eff_run, "species_standardized": sp}
-        for sc in ("complex_label", "nearest_neighbor_taxon", "second_neighbor_taxon"):
-            if sc in r:
-                rec[sc] = _to_str(r.get(sc))
-        for ic in (
-            "n_vouchers", "n_gold_silver_anchors", "n_type_specimens",
-            "consensus_complex_id", "leiden_complex_id", "ward_complex_id",
-            "n_misidentification_reassign", "n_hybrid_introgressant", "n_putative_cryptic",
-        ):
-            if ic in r:
-                rec[ic] = _to_int(r.get(ic))
-        if "integrative_congruence" in r:
-            rec["integrative_congruence"] = _to_bool_int(r.get("integrative_congruence"))
-        for fc in (
-            "silhouette_width", "within_complex_mean_affinity",
-            "nearest_neighbor_affinity", "second_neighbor_affinity",
-            "hopkins_pheno_overlap", "eco_schoener_overlap",
-            "w_morph_kappa", "w_edaphic_kappa", "w_pheno_kappa",
-        ):
-            if fc in r:
-                rec[fc] = _to_float(r.get(fc))
-        prepared.append(rec)
-    if not prepared:
-        return 0
-    return upsert_rows_generic(
-        conn,
-        table_name="taxon_complexes",
-        rows=prepared,
-        pk_cols=("run_id", "species_standardized"),
-        preserve_existing_on_null=False,
-    )
-
-
 # =============================================================================
 # Bidirectional Bootstrap Migration (`ingest_existing_csvs_to_db`)
 # =============================================================================
@@ -2690,7 +2630,7 @@ def ingest_existing_run_tables_into_db(
     demo: bool = False,
 ) -> Dict[str, int]:
     """
-    Ingest Step 03-06 run-scoped CSV outputs (`leaf_efa_harmonics_individual.csv`,
+    Ingest Step 03-07 run-scoped CSV outputs (`leaf_efa_harmonics_individual.csv`,
     `leaf_efa_harmonics.csv`, `morphometric_flags.csv`,
     `multimodal_conflict_flags.csv`, `triage_queue.csv`)
     into Tier B SQLite tables with full dynamic `A1..D24`, `PC1..PC15`,
@@ -3343,9 +3283,9 @@ def purge_segments_and_runs(
     vacuum: bool = True,
 ) -> Dict[str, int]:
     """
-    Purges all Step 02 to 06 segmentation artifacts (masks, contours, ECT matrices,
+    Purges all Step 02 to 07 segmentation artifacts (masks, contours, ECT matrices,
     cropped patches, non-Step-01 tables, figures, reports, and run directories) and
-    clears Step 02 to 06 SQLite tables while preserving Step 01 harvested vouchers,
+    clears Step 02 to 07 SQLite tables while preserving Step 01 harvested vouchers,
     raw voucher imagery, taxon synonyms, `taxon_backbone_profiles`,
     `natureserve_subnational_ranges`, `cytological_records`,
     `taxon_cytology_summary`, `data/taxonomy/`, `data/cytology/`, and `environmental_cache`.
@@ -3447,7 +3387,7 @@ def purge_segments_and_runs(
             conn.close()
 
     summary = {"removed_files": int(removed_files), "purged_db_rows": int(purged_rows)}
-    logger.info("Purged Step 02-06 segments and run artifacts: %s", summary)
+    logger.info("Purged Step 02-07 segments and run artifacts: %s", summary)
     return summary
 
 
@@ -3589,5 +3529,5 @@ def purge_runs_only(
             conn.close()
 
     summary = {"removed_files": int(removed_files), "purged_db_rows": int(purged_rows)}
-    logger.info("Purged Step 03-06 run outputs only (Step 01 & Step 02 segmentation preserved): %s", summary)
+    logger.info("Purged Step 03-07 run outputs only (Step 01 & Step 02 segmentation preserved): %s", summary)
     return summary

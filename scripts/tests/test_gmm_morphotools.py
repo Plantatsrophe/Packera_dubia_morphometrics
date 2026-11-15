@@ -15,22 +15,14 @@ Description:
 ===============================================================================
 """
 
-import importlib
-import re
-import shutil
-import subprocess
 import tempfile
 import unittest
+from pathlib import Path
 
 from scripts.tests._r_session import rscript_available, run_warm_r_cmd
-import zlib
-from pathlib import Path
-from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
-
-from scripts.core.config import PipelineConfig
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -255,24 +247,6 @@ class TestGMMAndMorphoTools(unittest.TestCase):
 
     def setUp(self) -> None:
         self.r_script_path = PROJECT_ROOT / "scripts" / "morphometrics" / "04_gmm_morphotools.R"
-
-    @staticmethod
-    def _extract_pdf_text_streams(pdf_path: Path) -> str:
-        """Decompress all FlateDecode streams in an R-generated vector PDF for text verification."""
-        raw = pdf_path.read_bytes()
-        chunks = [raw.decode("latin1", errors="ignore")]
-        for m in re.finditer(rb"stream\r?\n(.*?)endstream", raw, flags=re.DOTALL):
-            payload = m.group(1).rstrip(b"\r\n")
-            for cand in (payload, m.group(1)):
-                try:
-                    txt = zlib.decompress(cand).decode("latin1", errors="ignore")
-                    txt = re.sub(r"\)\s*-?\d+(?:\.\d+)?\s*\(", "", txt)
-                    txt = txt.replace(r"\(", "(").replace(r"\)", ")")
-                    chunks.append(txt)
-                    break
-                except zlib.error:
-                    continue
-        return "\n".join(chunks)
 
     def test_batched_r_helpers_epa_manova_dawid_skene_and_k_full_cda(self):
         """Verify batched R unit checks for EPA Level III helper, single-species MANOVA collinearity, Dawid-Skene EM, and K_full (>3 axes) CDA."""
@@ -1829,7 +1803,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                 stopifnot(is.na(cda_two$loocv_accuracy))
                 aud_two <- audit_misidentifications(df_one, cda_two, gmm_two, selected_features = c("PC1", "PC2"))
                 intra_png <- file.path({repr(str(tmp_p))}, "intra_no_fake_loocv.png")
-                render_cda_biplot_4panel_pdf(aud_two, cda_two, gmm_two, intra_png, c("PC1", "PC2"))
+                render_cda_biplot_4panel_png(aud_two, cda_two, gmm_two, intra_png, c("PC1", "PC2"))
                 stopifnot(file.exists(intra_png))
 
                 # 6. Cross-run SQLite open-set recognition invariance under PC sign flips

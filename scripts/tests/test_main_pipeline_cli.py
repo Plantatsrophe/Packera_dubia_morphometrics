@@ -18,7 +18,6 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import main
-from config import DEFAULT_CONFIG_PATH, load_config
 from scripts.core.artifact_manager import (
     compute_sha256,
     download_file_with_progress,
@@ -1072,7 +1071,7 @@ REUSE_CANONICAL_DATA="false"
 
 
     def test_purge_runs_only_preserves_step01_and_step02_segmentation(self) -> None:
-        """Verify --purge-runs-only / purge_runs_only wipes Step 03-06 run outputs & Tier B tables while preserving Step 01 & Step 02 segmentation."""
+        """Verify --purge-runs-only / purge_runs_only wipes Step 03-07 run outputs & Tier B tables while preserving Step 01 & Step 02 segmentation."""
         import sqlite3
         import subprocess
         from scripts.core.db import get_db_connection, purge_runs_only
@@ -1176,9 +1175,9 @@ REUSE_CANONICAL_DATA="false"
             ):
                 self.assertTrue((tables / s01_02_tbl).is_file(), f"Step 01/02 table {s01_02_tbl} must be preserved!")
 
-            # Verify 100% of Step 03-06 run/output artifacts wiped
-            for s03_06_tbl in ("leaf_efa_harmonics.csv", "morphometric_flags.csv", "multimodal_conflict_flags.csv", "triage_queue.csv"):
-                self.assertFalse((tables / s03_06_tbl).exists(), f"Step 03-06 table {s03_06_tbl} must be purged!")
+            # Verify 100% of Step 03-07 run/output artifacts wiped
+            for s03_07_tbl in ("leaf_efa_harmonics.csv", "morphometric_flags.csv", "multimodal_conflict_flags.csv", "triage_queue.csv"):
+                self.assertFalse((tables / s03_07_tbl).exists(), f"Step 03-07 table {s03_07_tbl} must be purged!")
             self.assertEqual(list((ws / "runs").iterdir()), [])
             self.assertEqual(list((ws / "outputs" / "reports").iterdir()), [])
 

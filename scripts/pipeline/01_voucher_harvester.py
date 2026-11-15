@@ -6,10 +6,9 @@ Project: Packera Species Delimitation & Morphometrics Pipeline
 Affiliation: University of North Carolina at Chapel Hill Herbarium (NCU)
 
 Description:
-    Pipeline module entry point re-exporting the voucher harvester CLI,
-    dynamic genus-wide GBIF Packera species discovery, and dynamic taxon
-    standardizer from scripts.data_prep.01_voucher_harvester and
-    scripts.core.harvester.
+    Pipeline module entry point re-exporting the voucher harvester CLI
+    (`build_cli_parser`, `parse_args`, `main`), `PipelineConfig`, and
+    `standardize_packera_taxon`.
 ===============================================================================
 """
 
@@ -24,12 +23,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.core.config import PipelineConfig
-from scripts.core.harvester import (
-    VoucherHarvester,
-    discover_genus_packera_species_gbif,
-    setup_logger,
-    standardize_packera_taxon,
-)
+from scripts.core.harvester import standardize_packera_taxon
 
 _data_prep_harvester = importlib.import_module("scripts.data_prep.01_voucher_harvester")
 build_cli_parser = _data_prep_harvester.build_cli_parser

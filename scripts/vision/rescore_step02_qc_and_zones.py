@@ -23,8 +23,6 @@ import logging
 import math
 import os
 import sys
-import tempfile
-from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -39,6 +37,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from scripts.core.config import PipelineConfig
 from scripts.core.db import get_db_connection
+from scripts.core.io_utils import atomic_write_text
 from scripts.vision.leaf_geometry_utils import (
     compute_lm3_shape_metrics,
     export_standardized_contour,
@@ -73,22 +72,6 @@ def _resolve_mask_file(raw_mask_path: Any, data_dir: Path) -> Optional[Path]:
         if cand.is_file():
             return cand
     return None
-
-
-def _atomic_write_csv(df: pd.DataFrame, target: Path) -> None:
-    target.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(dir=str(target.parent), prefix=f".{target.stem}_", suffix=".csv.tmp")
-    tmp_p = Path(tmp_name)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
-            df.to_csv(fh, index=False)
-            fh.flush()
-            os.fsync(fh.fileno())
-        tmp_p.replace(target)
-    except Exception:
-        if tmp_p.exists():
-            tmp_p.unlink(missing_ok=True)
-        raise
 
 
 def _resolve_voucher_image_file(raw_image_path: Any, catalog_number: str, data_dir: Path) -> Optional[Path]:
@@ -643,7 +626,7 @@ def rescore_tier_a_leaves(
                                 c_df.at[ci, "is_calibrated_mm"] = True
                             if "scale_source" in c_df.columns:
                                 c_df.at[ci, "scale_source"] = "ruler_calibrated"
-                    _atomic_write_csv(c_df, curated_csv)
+                    atomic_write_text(curated_csv, c_df.to_csv(index=False))
             repro_csv = tables_dir / "voucher_reproductive_metrics.csv"
             if repro_csv.is_file() and repro_csv.stat().st_size > 0:
                 vr_df = pd.read_csv(repro_csv, low_memory=False)
@@ -658,7 +641,7 @@ def rescore_tier_a_leaves(
                             ):
                                 if px_col in vr_df.columns and mm_col in vr_df.columns and pd.notna(vr_df.at[vi, px_col]):
                                     vr_df.at[vi, mm_col] = round(float(vr_df.at[vi, px_col]) / px_new, 4)
-                    _atomic_write_csv(vr_df, repro_csv)
+                    atomic_write_text(repro_csv, vr_df.to_csv(index=False))
 
         if eff_manifest.is_file() and eff_manifest.stat().st_size > 0:
             m_df = pd.read_csv(eff_manifest, low_memory=False)
@@ -719,7 +702,7 @@ def rescore_tier_a_leaves(
                             else:
                                 if col_s in r_u:
                                     m_df.at[mi, col_s] = r_u[col_s]
-                _atomic_write_csv(m_df, eff_manifest)
+                atomic_write_text(eff_manifest, m_df.to_csv(index=False))
                 logger.info(f"Synchronized updated QC and zone columns to {eff_manifest}")
 
         n_pass = int((el_df["efa_qc_pass"] == 1).sum())

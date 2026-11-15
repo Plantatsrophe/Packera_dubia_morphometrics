@@ -31,8 +31,10 @@ def run_audit(
     pattern: str = "test_*.py",
 ) -> unittest.TestResult:
     """Discovers and executes active unit tests in scripts/tests, asserting 100% pass rate."""
-    prev_fast = os.environ.get("PACKERA_FAST_AUDIT")
+    prev_plantmatics_fast = os.environ.get("PLANTMATICS_FAST_AUDIT")
+    prev_packera_fast = os.environ.get("PACKERA_FAST_AUDIT")
     if fast:
+        os.environ["PLANTMATICS_FAST_AUDIT"] = "1"
         os.environ["PACKERA_FAST_AUDIT"] = "1"
 
     try:
@@ -54,10 +56,14 @@ def run_audit(
     finally:
         close_all_warm_r_sessions()
         if fast:
-            if prev_fast is None:
+            if prev_plantmatics_fast is None:
+                os.environ.pop("PLANTMATICS_FAST_AUDIT", None)
+            else:
+                os.environ["PLANTMATICS_FAST_AUDIT"] = prev_plantmatics_fast
+            if prev_packera_fast is None:
                 os.environ.pop("PACKERA_FAST_AUDIT", None)
             else:
-                os.environ["PACKERA_FAST_AUDIT"] = prev_fast
+                os.environ["PACKERA_FAST_AUDIT"] = prev_packera_fast
 
     total_run = result.testsRun
     num_failures = len(result.failures)

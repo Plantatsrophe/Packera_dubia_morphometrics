@@ -15,12 +15,10 @@ Description:
 from __future__ import annotations
 
 import math
-from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 import cv2
 import numpy as np
-import pandas as pd
 from scripts.vision.lm3_compat import DBSCAN
 
 def _mask_basal_apical_fallback(mask: np.ndarray) -> Tuple[Tuple[int, int], Tuple[int, int]]:

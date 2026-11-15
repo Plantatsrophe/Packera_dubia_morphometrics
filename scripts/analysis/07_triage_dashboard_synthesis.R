@@ -45,10 +45,10 @@ suppressPackageStartupMessages({
 })
 
 for (.aw_p in c("scripts/morphometrics/authority_weighting_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "..", "morphometrics", "authority_weighting_utils.R"))) {
-  if (!exists(".identify_type_specimen_vec", mode = "function") && !is.na(.aw_p) && nzchar(.aw_p) && file.exists(.aw_p)) { source(.aw_p); break }
+  if ((!exists(".identify_type_specimen_vec", mode = "function") || !exists("resolve_ecological_authority_weights", mode = "function")) && !is.na(.aw_p) && nzchar(.aw_p) && file.exists(.aw_p)) { source(.aw_p); break }
 }
 for (.pf_p in c("scripts/morphometrics/pub_figures_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "..", "morphometrics", "pub_figures_utils.R"))) {
-  if (!exists("generate_step07_pub_figures", mode = "function") && !is.na(.pf_p) && nzchar(.pf_p) && file.exists(.pf_p)) { source(.pf_p); break }
+  if ((!exists("generate_step07_pub_figures", mode = "function") || !exists("standardize_packera_taxon", mode = "function")) && !is.na(.pf_p) && nzchar(.pf_p) && file.exists(.pf_p)) { source(.pf_p); break }
 }
 for (.db_p in c("scripts/core/db_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "..", "core", "db_utils.R"))) {
   if (!exists("persist_step07_to_sqlite", mode = "function") && !is.na(.db_p) && nzchar(.db_p) && file.exists(.db_p)) { source(.db_p); break }
@@ -94,13 +94,8 @@ for (.gw_p in c("scripts/analysis/edaphic_geochem_wetland_utils.R", file.path(di
 # ------------------------------------------------------------------------------
 # 1. CLI Argument Parsing & Taxonomic Normalization
 # ------------------------------------------------------------------------------
-.env_plantmatics_or_packera <- function(p_key, k_key) {
-  v <- Sys.getenv(p_key, unset = "")
-  if (nzchar(trimws(v))) v else Sys.getenv(k_key, unset = "")
-}
-
 parse_args_robust <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
-  run_dir <- .env_plantmatics_or_packera("PLANTMATICS_RUN_DIR", "PACKERA_RUN_DIR")
+  run_dir <- env_plantmatics_or_packera("PLANTMATICS_RUN_DIR", "PACKERA_RUN_DIR")
   rp <- function(rel) if (nzchar(run_dir)) file.path(run_dir, rel) else rel
   option_list <- list(
     optparse::make_option(c("-v", "--vouchers"), type = "character", default = rp("data/tables/curated_vouchers.csv")),
@@ -154,24 +149,6 @@ parse_args_robust <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
        focal_taxon = "", intraspecific_mode = FALSE, demo = FALSE)
 }
 
-.base_std_taxon <- if (exists("standardize_taxon_name", mode = "function")) standardize_taxon_name else NULL
-standardize_packera_taxon <- function(s_vec) {
-  if (!is.null(.base_std_taxon)) { res <- .base_std_taxon(s_vec); return(ifelse(is.na(res), "Unknown", res)) }
-  vapply(as.character(s_vec), function(s) {
-    if (is.na(s) || !nzchar(trimws(s))) return("Unknown")
-    sc <- trimws(s)
-    if (tolower(sc) %in% c("none", "nan", "null", "na", "unknown", "unassigned", "unassigned_packera")) return("Unknown")
-    if (grepl("^Morphotype_K[0-9]+$|^Ecotype_|^LatTertile_|_Coastal$|_Outcrop$|\\[K[0-9]+\\]$", sc, ignore.case = TRUE)) return(sc)
-    sl <- tolower(sc)
-    if (grepl("^(?:packera|p\\.)\\s*(?:(?:cf\\.?|aff\\.?)\\s+)?(?:x\\s+|×\\s*)?[a-z-]+", sl)) {
-      ep <- sub("^(?:packera|p\\.)\\s*(?:(?:cf\\.?|aff\\.?)\\s+)?(?:x\\s+|×\\s*)?([a-z-]+).*$", "\\1", sl)
-      ep <- sub("^[×-]+", "", ep)
-      if (nzchar(ep) && !(ep %in% c("sp", "spp", "cf", "aff", "indet", "unknown", "na"))) return(paste("Packera", ep))
-    }
-    "Unknown"
-  }, character(1), USE.NAMES = FALSE)
-}
-
 # ------------------------------------------------------------------------------
 # 2. Hopkins-Corrected Circular Anthesis Phenology (Hopkins 1918; Pewsey et al. 2013)
 # ------------------------------------------------------------------------------
@@ -223,34 +200,12 @@ resolve_active_anthesis_mask <- function(df) {
   if (col_nm %in% names(df)) as.character(df[[col_nm]]) else rep(default, n)
 }
 
-resolve_ecological_authority_weights <- function(df, allow_bronze_prior = TRUE) {
+resolve_step07_ecological_authority_weights <- function(df, allow_bronze_prior = TRUE) {
   n <- nrow(df)
   if (n == 0L) return(numeric(0))
-  if (file.exists("scripts/morphometrics/authority_weighting_utils.R") &&
-      !exists("compute_empirical_bayes_authority_weights", mode = "function")) {
-    try(source("scripts/morphometrics/authority_weighting_utils.R"), silent = TRUE)
-  }
-  w_out <- NULL
-  if (exists("compute_empirical_bayes_authority_weights", mode = "function")) {
-    eb_w <- tryCatch(
-      compute_empirical_bayes_authority_weights(
-        df,
-        mode = if (isTRUE(allow_bronze_prior)) "continuous_prior_posterior" else "active_passive",
-        target_modality = "ecological"
-      ),
-      error = function(e) NULL
-    )
-    if (!is.null(eb_w) && length(eb_w) == n && any(is.finite(eb_w) & eb_w > 0)) {
-      w_out <- round(if (isTRUE(allow_bronze_prior)) pmax(0.01, eb_w) else eb_w, 4)
-    }
-  }
-  if (is.null(w_out)) {
-    tier_raw <- if ("determiner_tier" %in% names(df)) as.character(df$determiner_tier) else rep("Tier_3_Bronze", n)
-    tier_raw[is.na(tier_raw) | !nzchar(tier_raw)] <- "Tier_3_Bronze"
-    tier_std <- ifelse(grepl("Tier_1|Gold|Tier 1", tier_raw, ignore.case = TRUE), "Tier_1_Gold",
-                ifelse(grepl("Tier_2|Silver|Tier 2", tier_raw, ignore.case = TRUE), "Tier_2_Silver", "Tier_3_Bronze"))
-    is_t_fb <- if ("is_type_specimen" %in% names(df)) (!is.na(df$is_type_specimen) & as.logical(df$is_type_specimen)) else rep(FALSE, n)
-    w_out <- round(ifelse(is_t_fb, 3.0, ifelse(tier_std == "Tier_1_Gold", 2.0, ifelse(tier_std == "Tier_2_Silver", 0.75, if (isTRUE(allow_bronze_prior)) 0.50 else 0.0))), 4)
+  w_out <- resolve_ecological_authority_weights(df, allow_bronze_prior = allow_bronze_prior)
+  if (isTRUE(allow_bronze_prior) && length(w_out) == n) {
+    w_out <- round(pmax(0.01, w_out), 4)
   }
   if (any(.has_step07_geno_row_mask(df))) {
     nms <- names(df)
@@ -1144,7 +1099,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
 
   opts_cyto <- opts
   if (is.null(opts_cyto$db_path)) {
-    db_env_cy <- .env_plantmatics_or_packera("PLANTMATICS_DB_PATH", "PACKERA_DB_PATH")
+    db_env_cy <- env_plantmatics_or_packera("PLANTMATICS_DB_PATH", "PACKERA_DB_PATH")
     if (nzchar(db_env_cy)) opts_cyto$db_path <- db_env_cy
   }
   if (is.null(opts_cyto$report_out) && !is.null(opts_cyto$output_report) && nzchar(opts_cyto$output_report)) {
@@ -1153,7 +1108,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
   cyto_dir_arg <- if (!is.null(opts_cyto$cytology_dir) && nzchar(opts_cyto$cytology_dir)) {
     opts_cyto$cytology_dir
   } else {
-    env_cdir <- .env_plantmatics_or_packera("PLANTMATICS_CYTOLOGY_DIR", "PACKERA_CYTOLOGY_DIR")
+    env_cdir <- env_plantmatics_or_packera("PLANTMATICS_CYTOLOGY_DIR", "PACKERA_CYTOLOGY_DIR")
     if (nzchar(env_cdir)) env_cdir else "data/cytology"
   }
   has_prepop_cyto <- is.null(opts$cytological_records_df) && is.null(opts$taxon_cytology_summary_df) && (
@@ -1396,10 +1351,10 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
   can_evaluate_hybrids <- !is_intra && (length(cohort_species) >= 2L)
 
   has_any_geo_in_df <- any(nzchar(state_vec_geo)) || any(is.finite(lat_vec_geo) & is.finite(lon_vec_geo))
-  use_ext_geo_db <- nzchar(Sys.getenv("RUN_ID", unset = "")) || nzchar(.env_plantmatics_or_packera("PLANTMATICS_DB_PATH", "PACKERA_DB_PATH")) || has_any_geo_in_df
+  use_ext_geo_db <- nzchar(Sys.getenv("RUN_ID", unset = "")) || nzchar(env_plantmatics_or_packera("PLANTMATICS_DB_PATH", "PACKERA_DB_PATH")) || has_any_geo_in_df
   usda_states_by_tx <- list()
   db_syntopy_rows <- NULL
-  if (use_ext_geo_db && Sys.getenv("PACKERA_DEMO_MODE", unset = "") != "1" && exists("connect_packera_db", mode = "function") && requireNamespace("DBI", quietly = TRUE)) {
+  if (use_ext_geo_db && trimws(env_plantmatics_or_packera("PLANTMATICS_DEMO_MODE", "PACKERA_DEMO_MODE")) != "1" && exists("connect_packera_db", mode = "function") && requireNamespace("DBI", quietly = TRUE)) {
     tryCatch({
       c_geo <- connect_packera_db(read_only = TRUE, demo = FALSE)
       on.exit(tryCatch(if (!is.null(c_geo) && DBI::dbIsValid(c_geo)) DBI::dbDisconnect(c_geo), error = function(e) NULL), add = TRUE)
@@ -1432,7 +1387,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
           if (any(ok_u)) usda_states_by_tx <- lapply(split(u_st[ok_u], u_tx[ok_u]), unique)
         }
       }
-      if ((can_evaluate_hybrids || is_intra) && (nzchar(Sys.getenv("RUN_ID", unset = "")) || nzchar(.env_plantmatics_or_packera("PLANTMATICS_DB_PATH", "PACKERA_DB_PATH"))) &&
+      if ((can_evaluate_hybrids || is_intra) && (nzchar(Sys.getenv("RUN_ID", unset = "")) || nzchar(env_plantmatics_or_packera("PLANTMATICS_DB_PATH", "PACKERA_DB_PATH"))) &&
           !is.null(c_geo) && DBI::dbExistsTable(c_geo, "vouchers")) {
         v_flds <- tryCatch(DBI::dbListFields(c_geo, "vouchers"), error = function(e) character(0))
         sp_std_sel <- if ("species_standardized" %in% v_flds) "v.species_standardized, " else ""
@@ -2102,7 +2057,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
     pass_osr_d2 <- if (length(fin_c) > 0L) {
       stats::median(min_cong_d2_dv[fin_c] - osr_chisq95_vec[fin_c], na.rm = TRUE) > 0.0
     } else {
-      !is_intra || !nzchar(.env_plantmatics_or_packera("PLANTMATICS_DB_PATH", "PACKERA_DB_PATH"))
+      !is_intra || !nzchar(env_plantmatics_or_packera("PLANTMATICS_DB_PATH", "PACKERA_DB_PATH"))
     }
     fin_p <- idx_cl[is.finite(osr_p_dv[idx_cl]) & is.finite(min_cong_d2_dv[idx_cl])]
     pass_osr_p <- if (length(fin_p) > 0L) (stats::median(osr_p_dv[fin_p], na.rm = TRUE) < 0.05) else TRUE
@@ -2325,7 +2280,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
     } else if (is.finite(osr_p_dv[i])) {
       osr_p_dv[i] < 0.05
     } else {
-      !is_intra || !nzchar(.env_plantmatics_or_packera("PLANTMATICS_DB_PATH", "PACKERA_DB_PATH"))
+      !is_intra || !nzchar(env_plantmatics_or_packera("PLANTMATICS_DB_PATH", "PACKERA_DB_PATH"))
     }
 
     has_obs_edaph_i <- (!is.na(edaph_sp_dv[i]) && nzchar(trimws(edaph_sp_dv[i]))) ||
@@ -3185,7 +3140,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
   }
 
   # Same-Sheet (catalogNumber) Gathering Coherence Post-Filter across sibling plant_individual_id ramets
-  aw_sheet_vec <- resolve_ecological_authority_weights(df, allow_bronze_prior = TRUE)
+  aw_sheet_vec <- resolve_step07_ecological_authority_weights(df, allow_bronze_prior = TRUE)
   chisq99_type_morph <- stats::qchisq(0.99, df = p_type_morph)
   for (s_idx in sheet_idx_list) {
     if (length(s_idx) < 2L) next
@@ -3335,13 +3290,12 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
                isTRUE(tryCatch(DBI::dbIsValid(c_geo), error = function(e) FALSE))) {
       step07_gw_conn <- c_geo
     } else if (!isTRUE(opts$demo) &&
-               Sys.getenv("PACKERA_DEMO_MODE", unset = "") != "1" &&
-               Sys.getenv("PLANTMATICS_DEMO_MODE", unset = "") != "1" &&
+               trimws(env_plantmatics_or_packera("PLANTMATICS_DEMO_MODE", "PACKERA_DEMO_MODE")) != "1" &&
                exists("connect_packera_db", mode = "function") &&
                requireNamespace("DBI", quietly = TRUE) &&
                (nzchar(as.character(if (!is.null(opts_cyto$db_path)) opts_cyto$db_path else "")) ||
                 nzchar(Sys.getenv("RUN_ID", unset = "")) ||
-                nzchar(.env_plantmatics_or_packera("PLANTMATICS_DB_PATH", "PACKERA_DB_PATH")) ||
+                nzchar(env_plantmatics_or_packera("PLANTMATICS_DB_PATH", "PACKERA_DB_PATH")) ||
                 (!is.null(opts$vouchers) && exists("is_sqlite_active_for_inputs", mode = "function") && is_sqlite_active_for_inputs(opts$vouchers, demo = isTRUE(opts$demo))))) {
       step07_gw_conn <- tryCatch(connect_packera_db(db_path = opts_cyto$db_path, read_only = TRUE, demo = FALSE), error = function(e) NULL)
       if (!is.null(step07_gw_conn)) {
@@ -3671,7 +3625,7 @@ build_triage_queue <- function(opts) {
     "capitula_count", "log1p_capitulum_count", "involucre_height_mm", "involucre_width_mm", "AR_inv", "blade_cie_l_norm", "blade_cie_l_sd"
   )
 
-  run_dir_env <- .env_plantmatics_or_packera("PLANTMATICS_RUN_DIR", "PACKERA_RUN_DIR")
+  run_dir_env <- env_plantmatics_or_packera("PLANTMATICS_RUN_DIR", "PACKERA_RUN_DIR")
   def_dt_dir <- normalizePath(if (nzchar(run_dir_env)) file.path(run_dir_env, "data/tables") else "data/tables", mustWork = FALSE)
   vouch_dir <- normalizePath(dirname(opts$vouchers), mustWork = FALSE)
   is_isolated_vouch_dir <- !identical(vouch_dir, def_dt_dir)
@@ -3904,7 +3858,7 @@ build_triage_queue <- function(opts) {
   }
   opts_cyto_q <- opts
   if (is.null(opts_cyto_q$db_path)) {
-    db_env_q <- .env_plantmatics_or_packera("PLANTMATICS_DB_PATH", "PACKERA_DB_PATH")
+    db_env_q <- env_plantmatics_or_packera("PLANTMATICS_DB_PATH", "PACKERA_DB_PATH")
     if (nzchar(db_env_q)) opts_cyto_q$db_path <- db_env_q
   }
   if (is.null(opts_cyto_q$report_out) && !is.null(opts_cyto_q$output_report) && nzchar(opts_cyto_q$output_report)) {
@@ -3913,7 +3867,7 @@ build_triage_queue <- function(opts) {
   cyto_dir_q <- if (!is.null(opts_cyto_q$cytology_dir) && nzchar(opts_cyto_q$cytology_dir)) {
     opts_cyto_q$cytology_dir
   } else {
-    env_cdir_q <- .env_plantmatics_or_packera("PLANTMATICS_CYTOLOGY_DIR", "PACKERA_CYTOLOGY_DIR")
+    env_cdir_q <- env_plantmatics_or_packera("PLANTMATICS_CYTOLOGY_DIR", "PACKERA_CYTOLOGY_DIR")
     if (nzchar(env_cdir_q)) env_cdir_q else "data/cytology"
   }
   if (exists("run_step07_cytology_integration", mode = "function")) {
@@ -4029,10 +3983,10 @@ load_and_merge_modalities <- build_triage_queue
   list(taxon = f_std, slug = f_slug)
 }
 
-render_synthesis_figure_png <- function(df, out_pdf, cda_summary = NULL, focal_taxon = "", output_complex_plot = NULL) {
+render_synthesis_figure_png <- function(df, out_path, cda_summary = NULL, focal_taxon = "", output_complex_plot = NULL) {
   if (!exists("render_step07_synthesis_plate_png", mode = "function") && file.exists("scripts/morphometrics/pub_figures_utils.R")) source("scripts/morphometrics/pub_figures_utils.R")
   if (!exists("render_focal_revision_synthesis_plate_png", mode = "function") && file.exists("scripts/morphometrics/pub_synthesis_plates.R")) source("scripts/morphometrics/pub_synthesis_plates.R")
-  out_png <- if (!is.null(out_pdf) && nzchar(out_pdf)) sub("\\.pdf$", ".png", out_pdf, ignore.case = TRUE) else "outputs/figures/fig07a_integrative_taxonomic_synthesis.png"
+  out_png <- if (!is.null(out_path) && nzchar(out_path)) sub("\\.pdf$", ".png", out_path, ignore.case = TRUE) else "outputs/figures/fig07a_integrative_taxonomic_synthesis.png"
   full_df <- if (!is.null(attr(df, "full_complex_df"))) attr(df, "full_complex_df") else df
   if (exists("render_step07_synthesis_plate_png", mode = "function")) {
     render_step07_synthesis_plate_png(full_df, out_png, cda_summary = cda_summary, focal_taxon = focal_taxon)
@@ -4046,7 +4000,7 @@ render_synthesis_figure_png <- function(df, out_pdf, cda_summary = NULL, focal_t
       .copy_focal_taxon_artifact(out_png, focal_png)
     }
   }
-  if (is.null(attr(df, "complex_discovery")) && !identical(Sys.getenv("PACKERA_SKIP_FIGURES", unset = ""), "1") &&
+  if (is.null(attr(df, "complex_discovery")) && !identical(trimws(env_plantmatics_or_packera("PLANTMATICS_SKIP_FIGURES", "PACKERA_SKIP_FIGURES")), "1") &&
       exists("render_step07b_complex_network_png", mode = "function")) {
     c_out <- if (!is.null(output_complex_plot) && nzchar(output_complex_plot)) sub("\\.pdf$", ".png", output_complex_plot, ignore.case = TRUE) else file.path(dirname(out_png), "fig07b_taxon_complex_delimitation_network.png")
     c_lbl <- if (nzchar(f_info$taxon)) f_info$taxon else as.character(df$species_standardized[1L])

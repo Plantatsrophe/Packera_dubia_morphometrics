@@ -18,8 +18,6 @@ Description:
 
 from __future__ import annotations
 
-import shutil
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -48,7 +46,7 @@ class TestMultimodalSpatialRF(unittest.TestCase):
         cls.con_out = cls._class_tmp_path / "contingency.csv"
         cls.pca_env_dir = cls._class_tmp_path / "pca_env_plots"
         cls.pca_env_dir.mkdir(parents=True, exist_ok=True)
-        cls.pca_out_pdf = cls.pca_env_dir / "fig05a_ecological_niche_and_rf_importance.png"
+        cls.pca_out_png = cls.pca_env_dir / "fig05a_ecological_niche_and_rf_importance.png"
         cls.r_unit_proc = None
 
         if rscript_available():
@@ -356,12 +354,17 @@ class TestMultimodalSpatialRF(unittest.TestCase):
 
               env_vars <- c("fine_bedrock_depth_cm", "bio1_temp_mean", "fine_soil_ph", "fine_soil_sand", "topo_twi_30m")
               srf_res <- compute_spatial_rf_mems(resolved, env_vars, n_trees = 50, intraspecific_mode = TRUE)
-              top_sel <- select_top_rf_predictors(srf_res$importance, resolved)
-              stopifnot(top_sel$top_env_1 %in% c("fine_bedrock_depth_cm", "bio1_temp_mean", "topo_twi_30m"))
-              stopifnot(top_sel$top_edaph_1 %in% c("fine_bedrock_depth_cm", "topo_twi_30m"))
+              imp_env <- srf_res$importance[!grepl("^MEM[0-9]+$", srf_res$importance$Predictor), , drop = FALSE]
+              imp_env <- imp_env[order(imp_env$MeanDecreaseAccuracy, decreasing = TRUE), , drop = FALSE]
+              stopifnot(nrow(imp_env) >= 1L)
+              stopifnot(imp_env$Predictor[1L] %in% c("fine_bedrock_depth_cm", "bio1_temp_mean", "topo_twi_30m"))
+              imp_ed_only <- imp_env[imp_env$Group == "[A] Fine-Grain Edaphic & Outcrop Lithology", , drop = FALSE]
+              stopifnot(nrow(imp_ed_only) >= 1L && imp_ed_only$Predictor[1L] %in% c("fine_bedrock_depth_cm", "topo_twi_30m"))
+              pred_lbl <- format_predictor_labels("fine_bedrock_depth_cm")
+              stopifnot(nzchar(pred_lbl) && pred_lbl != "fine_bedrock_depth_cm")
 
               niche_res <- run_warren_niche_identity_tests(resolved, env_vars, n_perm = 10, intraspecific_mode = TRUE)
-              export_spatial_rf_figures(resolved, srf_res, niche_res, "{cls.pca_out_pdf.as_posix()}")
+              export_spatial_rf_figures(resolved, srf_res, niche_res, "{cls.pca_out_png.as_posix()}")
               cat("ORGANIC_PCA_ENV_AND_PLOTS_OK\\n")
             }})
 
@@ -562,7 +565,7 @@ class TestMultimodalSpatialRF(unittest.TestCase):
         self.assertIn("Dominant_Lithology_Class", con_csv_df.columns)
         self.assertIn("P_Value_BH", con_csv_df.columns)
 
-        self.assertTrue(self.pca_out_pdf.exists(), "fig05a_ecological_niche_and_rf_importance.png must be generated.")
+        self.assertTrue(self.pca_out_png.exists(), "fig05a_ecological_niche_and_rf_importance.png must be generated.")
         self.assertEqual(list(self.pca_env_dir.glob("*.pdf")), [])
 
     def test_authority_anchored_spatial_block_cv_zero_synthetic_cache_and_step07_contract(self):
@@ -1285,8 +1288,9 @@ class TestMultimodalSpatialRF(unittest.TestCase):
             imp_ilr <- rf_c1$importance
             ilr_grp <- imp_ilr$Group[imp_ilr$Predictor == "ilr_texture_1"]
             stopifnot(identical(as.character(ilr_grp), "[A] Fine-Grain Edaphic & Outcrop Lithology"))
-            top_ilr <- select_top_rf_predictors(imp_ilr, df_clean)
-            stopifnot(top_ilr$top_edaph_1 %in% c("fine_soil_ph", "ilr_texture_1"))
+            imp_ilr_ed <- imp_ilr[!grepl("^MEM[0-9]+$", imp_ilr$Predictor) & imp_ilr$Group == "[A] Fine-Grain Edaphic & Outcrop Lithology", , drop = FALSE]
+            imp_ilr_ed <- imp_ilr_ed[order(imp_ilr_ed$MeanDecreaseAccuracy, decreasing = TRUE), , drop = FALSE]
+            stopifnot(nrow(imp_ilr_ed) >= 1L && imp_ilr_ed$Predictor[1L] %in% c("fine_soil_ph", "ilr_texture_1"))
             t0_mx <- proc.time()[["elapsed"]]
             mx_sep <- .fit_single_maxent_model(
               p_vec = c(rep(1L, 15), rep(0L, 15)),

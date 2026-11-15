@@ -87,9 +87,6 @@ class _NumpyDBSCAN:
         self.labels_ = labels
         return self
 
-    def fit_predict(self, X: Any) -> np.ndarray:
-        return self.fit(X).labels_
-
 
 DBSCAN = _SklearnDBSCAN if _SklearnDBSCAN is not None else _NumpyDBSCAN
 
@@ -813,7 +810,6 @@ from leafmachine3.core.imaging import crop_to_box, mask_bbox, polygon_mask, rota
 from leafmachine3.core.landmark_metrics import compute_measurements  # noqa: E402
 from leafmachine3.core.leaf_outline import extract_contour  # noqa: E402
 from leafmachine3.core.momocs_prep import (  # noqa: E402
-    prepare_mask,
     resample_closed,
     signed_area as momocs_signed_area,
 )

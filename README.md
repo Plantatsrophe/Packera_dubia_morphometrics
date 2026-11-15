@@ -441,6 +441,7 @@ Plantmatics/
     │   ├── epa_ecoregions.py                        # US EPA Level III Ecoregion point-in-polygon and county fallback engine
     │   ├── usda_plants_ranges.py                    # USDA PLANTS symbol resolver, 50 km county distribution tagger, and NatureServe range fallback
     │   ├── artifact_manager.py                      # SHA-256 model checkpoint verifier and downloader
+    │   ├── io_utils.py                              # Stdlib atomic file writers, flat-path guards, and HTTP helpers
     │   └── logger.py                                # Standardized console and file logger
     ├── data_prep/
     │   ├── 01_voucher_harvester.py                  # Step 01 CLI parser and occurrence harvester entrypoint
@@ -450,6 +451,7 @@ Plantmatics/
     │   ├── download_public_packera_sequences.py     # Flat Dryad, NCBI nuccore (plastid/ITS/waxy), ENA/SRA, and BOLD public Packera harvester
     │   ├── ena_paraloss_discovery.py                # Dynamic ENA tax_tree SRA discovery and Compositae-ParaLoss-1272 locus catalog fetcher
     │   ├── download_public_cytology.py              # Flat CCDB and NBDC ICNA chromosome parser, taxon summary builder, and SQLite linker
+    │   ├── prune_eastern_cohort.py                  # Non-Eastern NA cohort pruning and orphan voucher cleanup utility
     │   ├── 06_ingest_genetic_data.py                # Step 06 flat-directory nextRAD/VCF parser, HDplot + ParaLoss-1272 weights, and G1..G4 linker
     │   └── skim_offtarget_organellar.py             # Optional offline cpDNA/nrITS/waxy FASTQ skimmer into flat data/genomics/
     ├── vision/
@@ -516,7 +518,7 @@ Developer workflow conventions, R script line-count budgets, and pre-commit QA r
 # Run rapid Python-only preflight checks (~25s, skips Rscript workers cleanly)
 .venv/bin/python scripts/tests/run_audit.py --fast
 
-# Or run targeted suites via pytest / unittest
+# Or run a targeted test module via unittest
 .venv/bin/python -m unittest scripts/tests/test_code_hygiene.py
 ```
 

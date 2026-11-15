@@ -766,7 +766,7 @@ run_step07_complex_discovery <- function(full_df, opts = list()) {
       source("scripts/morphometrics/pub_figures_utils.R")
     }
     if (exists("render_step07_complex_discovery_png", mode = "function")) {
-      tryCatch(render_step07_complex_discovery_png(W = W, part_res = part_res, out_pdf = opts$output_complex_plot), error = function(e) warning("Step 07 complex network figure warning: ", e$message))
+      tryCatch(render_step07_complex_discovery_png(W = W, part_res = part_res, out_path = opts$output_complex_plot), error = function(e) warning("Step 07 complex network figure warning: ", e$message))
     }
   }
   if (!isTRUE(opts$demo) && exists("persist_step07_complexes_to_sqlite", mode = "function")) {

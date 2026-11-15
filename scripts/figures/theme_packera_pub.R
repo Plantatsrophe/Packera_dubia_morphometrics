@@ -4,6 +4,23 @@
 # ICN Rank-Aware Typography, Equal-Area sf Basemaps & Native LM3 Asset Loader
 # ==============================================================================
 
+if (grDevices::dev.cur() == 1L) {
+  grDevices::pdf(NULL)
+}
+
+if (!exists("env_plantmatics_or_packera", mode = "function")) {
+  env_plantmatics_or_packera <- function(p_key, k_key = NULL, unset = "") {
+    if (is.null(k_key) || !nzchar(k_key)) {
+      k_key <- sub("^PLANTMATICS_", "PACKERA_", p_key)
+    }
+    v <- Sys.getenv(p_key, unset = "")
+    if (nzchar(trimws(v))) return(v)
+    v2 <- Sys.getenv(k_key, unset = "")
+    if (nzchar(trimws(v2))) return(v2)
+    unset
+  }
+}
+
 PACKERA_TOL_OKABE_12 <- c(
   "#0072B2", # Blue
   "#D55E00", # Vermilion
@@ -41,7 +58,9 @@ normalize_png_path <- function(out_path) {
 save_packera_png_300 <- function(plot_or_fn, out_path, width = 12.5, height = 8.0, dpi = 300L, also_copy_to = NULL) {
   png_final <- normalize_png_path(out_path)
   if (!nzchar(png_final)) return(invisible(""))
-  if (identical(Sys.getenv("PACKERA_SKIP_FIGURES", unset = ""), "1")) return(invisible(png_final))
+  if (identical(trimws(env_plantmatics_or_packera("PLANTMATICS_SKIP_FIGURES", "PACKERA_SKIP_FIGURES")), "1")) {
+    return(invisible(png_final))
+  }
   fdir <- dirname(png_final)
   dir.create(fdir, recursive = TRUE, showWarnings = FALSE)
   stem <- tools::file_path_sans_ext(basename(png_final))
@@ -63,11 +82,11 @@ save_packera_png_300 <- function(plot_or_fn, out_path, width = 12.5, height = 8.
     TRUE
   }
 
+  prev_dev <- grDevices::dev.cur()
+  opened_dev <- NA_integer_
   ok_render <- tryCatch({
     open_png_device(png_tmp)
-    on.exit({
-      if (grDevices::dev.cur() > 1L) tryCatch(grDevices::dev.off(), error = function(e) NULL)
-    }, add = TRUE)
+    opened_dev <- grDevices::dev.cur()
     if (is.function(plot_or_fn)) {
       res_p <- plot_or_fn()
       if (inherits(res_p, "gg") || inherits(res_p, "ggplot") || inherits(res_p, "patchwork")) {
@@ -76,12 +95,17 @@ save_packera_png_300 <- function(plot_or_fn, out_path, width = 12.5, height = 8.
     } else {
       print(plot_or_fn)
     }
-    grDevices::dev.off()
-    on.exit(NULL)
     TRUE
   }, error = function(e) {
     warning("save_packera_png_300 warning (", basename(png_final), "): ", e$message)
     FALSE
+  }, finally = {
+    if (is.finite(opened_dev) && opened_dev > 1L && opened_dev != prev_dev && opened_dev %in% grDevices::dev.list()) {
+      tryCatch(grDevices::dev.off(opened_dev), error = function(e) NULL)
+    }
+    if (prev_dev > 1L && prev_dev %in% grDevices::dev.list()) {
+      tryCatch(grDevices::dev.set(prev_dev), error = function(e) NULL)
+    }
   })
 
   if (isTRUE(ok_render) && file.exists(png_tmp) && file.info(png_tmp)$size > 0) {

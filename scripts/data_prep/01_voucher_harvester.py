@@ -27,12 +27,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.core.config import PipelineConfig
-from scripts.core.harvester import (
-    VoucherHarvester,
-    discover_genus_packera_species_gbif,
+from scripts.core.harvester import VoucherHarvester
+from scripts.core.taxonomy_authority import (
     resolve_geographic_scope_settings,
     setup_logger,
-    standardize_packera_taxon,
 )
 
 

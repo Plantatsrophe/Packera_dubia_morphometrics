@@ -3700,7 +3700,7 @@ audit_institutional_batch_effects <- function(morpho_df, output_csv = "outputs/r
 }
 
 # Publication-Quality 2D CDA & 2D GMM Biplot Renderer Hook
-generate_cda_biplot_pdf <- function(audit_df, cda_res, gmm_res, output_pdf, feature_cols = NULL, manova_res = NULL) {
-  if (!exists("render_cda_biplot_4panel_pdf", mode = "function") && file.exists("scripts/morphometrics/pub_figures_utils.R")) source("scripts/morphometrics/pub_figures_utils.R")
-  if (exists("render_cda_biplot_4panel_pdf", mode = "function")) render_cda_biplot_4panel_pdf(audit_df, cda_res, gmm_res, output_pdf, feature_cols, manova_res = manova_res)
+generate_cda_biplot_png <- function(audit_df, cda_res, gmm_res, output_png, feature_cols = NULL, manova_res = NULL) {
+  if (!exists("render_cda_biplot_4panel_png", mode = "function") && file.exists("scripts/morphometrics/pub_figures_utils.R")) source("scripts/morphometrics/pub_figures_utils.R")
+  if (exists("render_cda_biplot_4panel_png", mode = "function")) render_cda_biplot_4panel_png(audit_df, cda_res, gmm_res, output_png, feature_cols, manova_res = manova_res)
 }

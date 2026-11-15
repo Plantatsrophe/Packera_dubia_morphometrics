@@ -28,6 +28,10 @@ suppressPackageStartupMessages({
   if (requireNamespace("optparse", quietly = TRUE)) library(optparse)
 })
 
+if (grDevices::dev.cur() == 1L) {
+  grDevices::pdf(NULL)
+}
+
 .src_step06_rel <- function(rel_path) {
   cands <- c(
     rel_path,

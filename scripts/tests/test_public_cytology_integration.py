@@ -236,7 +236,7 @@ class TestPublicCytologyIntegration(unittest.TestCase):
             finally:
                 conn.close()
 
-    @unittest.skipIf(os.environ.get("PACKERA_FAST_AUDIT") == "1" or shutil.which("Rscript") is None, "Skipping R test in fast audit or without Rscript")
+    @unittest.skipIf(os.environ.get("PLANTMATICS_FAST_AUDIT") == "1" or os.environ.get("PACKERA_FAST_AUDIT") == "1" or shutil.which("Rscript") is None, "Skipping R test in fast audit or without Rscript")
     def test_step07_cytology_integration_decision_matrix_and_propagation_r(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             csv_out = Path(tmp) / "cytotype_concordance_summary.csv"

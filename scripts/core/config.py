@@ -58,7 +58,7 @@ RUN_SCOPED_PATH_FIELDS: Set[str] = {
     "masks_dir",
     "leaf_efa_harmonics_csv",
     "morphometric_flags_csv",
-    "cda_biplot_pdf",
+    "cda_biplot_png",
     "revision_report_md",
     "gmm_report_csv",
     "summary_log",
@@ -348,7 +348,7 @@ class PathsConfig:
     masks_dir: Path = PROJECT_ROOT / "data" / "masks"
     leaf_efa_harmonics_csv: Path = PROJECT_ROOT / "data" / "tables" / "leaf_efa_harmonics.csv"
     morphometric_flags_csv: Path = PROJECT_ROOT / "data" / "tables" / "morphometric_flags.csv"
-    cda_biplot_pdf: Path = PROJECT_ROOT / "outputs" / "figures" / "fig07a_integrative_taxonomic_synthesis.png"
+    cda_biplot_png: Path = PROJECT_ROOT / "outputs" / "figures" / "fig07a_integrative_taxonomic_synthesis.png"
     revision_report_md: Path = PROJECT_ROOT / "outputs" / "reports" / "Packera_Taxonomic_Revision_Summary.md"
     gmm_report_csv: Path = PROJECT_ROOT / "outputs" / "reports" / "gmm_bayes_factors_summary.csv"
     summary_log: Path = PROJECT_ROOT / "outputs" / "reports" / "voucher_ingestion_summary.log"
@@ -586,9 +586,6 @@ class PipelineConfig:
     def __getitem__(self, key: str) -> Any:
         return self._raw_dict[key]
 
-    def __contains__(self, key: str) -> bool:
-        return key in self._raw_dict
-
     def get(self, key: str, default: Any = None) -> Any:
         return self._raw_dict.get(key, default)
 
@@ -611,7 +608,7 @@ class PipelineConfig:
             masks_dir=rdir / "data" / "masks",
             leaf_efa_harmonics_csv=rdir / "data" / "tables" / "leaf_efa_harmonics.csv",
             morphometric_flags_csv=rdir / "data" / "tables" / "morphometric_flags.csv",
-            cda_biplot_pdf=rdir / "outputs" / "figures" / "fig07a_integrative_taxonomic_synthesis.png",
+            cda_biplot_png=rdir / "outputs" / "figures" / "fig07a_integrative_taxonomic_synthesis.png",
             revision_report_md=rdir / "outputs" / "reports" / "Packera_Taxonomic_Revision_Summary.md",
             gmm_report_csv=rdir / "outputs" / "reports" / "gmm_bayes_factors_summary.csv",
             summary_log=rdir / "logs" / "pipeline.log",
@@ -1033,7 +1030,7 @@ def resolve_cpu_threads(
 ) -> Optional[int]:
     """
     Resolve CPU worker thread count via priority chain:
-    CLI (--threads / -j) -> ENV (PACKERA_MAX_WORKERS) -> config.yaml (compute.threads) -> default.
+    CLI (--threads / -j) -> ENV (PLANTMATICS_MAX_WORKERS / PACKERA_MAX_WORKERS) -> config.yaml (compute.threads) -> default.
     """
     if cli_val is not None:
         try:
@@ -1042,7 +1039,10 @@ def resolve_cpu_threads(
                 return v
         except (TypeError, ValueError):
             pass
-    env_val = os.environ.get("PACKERA_MAX_WORKERS", "").strip()
+    env_val = (
+        os.environ.get("PLANTMATICS_MAX_WORKERS", "").strip()
+        or os.environ.get("PACKERA_MAX_WORKERS", "").strip()
+    )
     if env_val:
         try:
             v = int(env_val)
@@ -1066,7 +1066,7 @@ def resolve_gpu_batch_size(
 ) -> int:
     """
     Resolve GPU/inference batch size via priority chain:
-    CLI (--gpu-batch-size / --batch-size) -> ENV (PACKERA_GPU_BATCH_SIZE) ->
+    CLI (--gpu-batch-size / --batch-size) -> ENV (PLANTMATICS_GPU_BATCH_SIZE / PACKERA_GPU_BATCH_SIZE) ->
     config.yaml (compute.gpu_batch_size) -> stage-optimal default.
     """
     if cli_val is not None:
@@ -1076,7 +1076,10 @@ def resolve_gpu_batch_size(
                 return v
         except (TypeError, ValueError):
             pass
-    env_val = os.environ.get("PACKERA_GPU_BATCH_SIZE", "").strip()
+    env_val = (
+        os.environ.get("PLANTMATICS_GPU_BATCH_SIZE", "").strip()
+        or os.environ.get("PACKERA_GPU_BATCH_SIZE", "").strip()
+    )
     if env_val:
         try:
             v = int(env_val)

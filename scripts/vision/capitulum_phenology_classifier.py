@@ -34,7 +34,7 @@ Execution Constraints:
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Tuple
 
 import cv2
 import numpy as np

@@ -848,7 +848,8 @@ run_multivariate_manova_audit <- function(
   output_pairwise_csv = "outputs/reports/manova_pairwise_posthoc.csv",
   include_gmm_clusters = FALSE
 ) {
-  run_dir <- trimws(Sys.getenv("PACKERA_RUN_DIR", unset = ""))
+  run_dir <- trimws(Sys.getenv("PLANTMATICS_RUN_DIR", unset = ""))
+  if (!nzchar(run_dir)) run_dir <- trimws(Sys.getenv("PACKERA_RUN_DIR", unset = ""))
   if (nzchar(run_dir)) {
     if (missing(output_group_csv) && !is.null(output_group_csv)) {
       output_group_csv <- file.path(run_dir, "outputs/reports/manova_group_significance.csv")
@@ -1199,10 +1200,6 @@ run_multivariate_manova_audit <- function(
     output_group_csv = output_group_csv,
     output_pairwise_csv = output_pairwise_csv
   )
-}
-
-.short_epa_ecoregion_label <- function(eco_vec) {
-  gsub("_", " ", as.character(eco_vec))
 }
 
 render_fig04c_supervised_ecoregion_cda <- function(

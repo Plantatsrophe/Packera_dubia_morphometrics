@@ -29,7 +29,6 @@ import sys
 import time
 import unittest
 from pathlib import Path
-from typing import Any, Dict, List
 
 import cv2
 import numpy as np
@@ -49,7 +48,6 @@ from scripts.vision.capitulum_phenology_classifier import (
     VOUCHER_BUD,
     VOUCHER_FRUIT,
     VOUCHER_STERILE,
-    VOUCHER_UNKNOWN,
     classify_single_capitulum,
     classify_voucher_phenology,
     extract_biomarker_involucre_posture,
@@ -150,12 +148,6 @@ def create_fixture_c_compact_green_bud(h: int = 120, w: int = 120) -> np.ndarray
     ax_y = max(4, int(round(h * 0.217)))
     cv2.ellipse(img, (w // 2, h // 2), (ax_x, ax_y), 0, 0, 360, color=(35, 90, 30), thickness=-1)
     return img
-
-
-# Backwards compatibility aliases
-create_synthetic_anthesis_capitulum = create_fixture_a_fresh_flowering_head
-create_synthetic_fruiting_capitulum = create_fixture_b_fruiting_head
-create_synthetic_bud_capitulum = create_fixture_c_compact_green_bud
 
 
 class TestCapitulumPhenologyClassifier(unittest.TestCase):

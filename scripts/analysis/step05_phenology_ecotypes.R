@@ -603,13 +603,13 @@ compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = 
   return(list(df = df, baseline = baseline, anova = aov_fit, tukey = tukey_res, summary = summary_report))
 }
 
-export_phenological_latitudinal_figures <- function(df, baseline, out_pdf) {
+export_phenological_latitudinal_figures <- function(df, baseline, out_path) {
   if (!exists("render_step05b_hopkins_phenology_png", mode = "function")) {
     for (.f in c("scripts/figures/theme_packera_pub.R", "scripts/figures/step05_figures.R")) {
       if (file.exists(.f)) source(.f)
     }
   }
-  out_png <- if (!is.null(out_pdf) && nzchar(out_pdf)) normalize_png_path(out_pdf) else "outputs/figures/fig05b_hopkins_circular_phenology.png"
+  out_png <- if (!is.null(out_path) && nzchar(out_path)) normalize_png_path(out_path) else "outputs/figures/fig05b_hopkins_circular_phenology.png"
   message(sprintf("Generating 300-DPI circular & Hopkins bioclimatic phenology figure -> %s", out_png))
   render_step05b_hopkins_phenology_png(
     df = df,
@@ -622,136 +622,6 @@ export_phenological_latitudinal_figures <- function(df, baseline, out_pdf) {
 # ------------------------------------------------------------------------------
 # 3. Cross-Modal Consensus & Conflict Auditing Engine
 # ------------------------------------------------------------------------------
-compute_mean_silhouette_base <- function(cl_vec, D_mat) {
-  u_cl <- unique(cl_vec)
-  if (length(u_cl) < 2L || nrow(D_mat) < 4L) return(-1.0)
-  n_pts <- length(cl_vec)
-  sil <- numeric(n_pts)
-  for (i in seq_len(n_pts)) {
-    same_idx <- setdiff(which(cl_vec == cl_vec[i]), i)
-    a_i <- if (length(same_idx) > 0L) mean(D_mat[i, same_idx]) else 0.0
-    b_i <- Inf
-    for (ck in setdiff(u_cl, cl_vec[i])) {
-      oth_idx <- which(cl_vec == ck)
-      if (length(oth_idx) > 0L) {
-        b_i <- min(b_i, mean(D_mat[i, oth_idx]))
-      }
-    }
-    denom <- max(a_i, b_i, 1e-12)
-    sil[i] <- if (is.finite(b_i)) (b_i - a_i) / denom else 0.0
-  }
-  mean(sil, na.rm = TRUE)
-}
-
-compute_geo_knn_kappa <- function(coords_lon_lat, cluster_vec, k_nn = 5L, max_dist_km = 180.0) {
-  lon <- suppressWarnings(as.numeric(coords_lon_lat[, 1]))
-  lat <- suppressWarnings(as.numeric(coords_lon_lat[, 2]))
-  cl <- as.integer(factor(cluster_vec))
-  ok <- is.finite(lon) & is.finite(lat) & !is.na(cl)
-  if (sum(ok) < 8L || length(unique(cl[ok])) < 2L) return(NA_real_)
-  lon <- lon[ok]; lat <- lat[ok]; cl <- cl[ok]
-  n <- length(cl)
-  k_use <- min(as.integer(k_nn), n - 1L)
-  if (k_use < 1L) return(NA_real_)
-
-  rad <- pi / 180.0
-  lat_r <- lat * rad; lon_r <- lon * rad
-  dlat <- outer(lat_r, lat_r, "-")
-  dlon <- outer(lon_r, lon_r, "-")
-  hav <- sin(dlat * 0.5)^2 + outer(cos(lat_r), cos(lat_r), "*") * sin(dlon * 0.5)^2
-  dist_km <- matrix(2.0 * 6371.0 * asin(pmin(1.0, sqrt(pmax(0.0, hav)))), nrow = n, ncol = n)
-  diag(dist_km) <- Inf
-
-  nn_maj <- integer(n)
-  sympatric_conflict <- logical(n)
-  for (i in seq_len(n)) {
-    d_i <- dist_km[i, ]
-    ord_i <- order(d_i)[seq_len(k_use)]
-    near_i <- ord_i[is.finite(d_i[ord_i]) & d_i[ord_i] <= max_dist_km]
-    if (length(near_i) == 0L) near_i <- ord_i[1L]
-    tbl_i <- table(cl[near_i])
-    nn_maj[i] <- as.integer(names(tbl_i)[which.max(tbl_i)][1L])
-    close_10km <- which(d_i <= 10.0)
-    sympatric_conflict[i] <- length(close_10km) > 0L && any(cl[close_10km] != cl[i])
-  }
-
-  p_obs <- mean(nn_maj == cl)
-  lvls <- sort(unique(cl))
-  p_exp <- sum(vapply(lvls, function(lv) mean(cl == lv) * mean(nn_maj == lv), numeric(1)))
-  kappa_geo <- if ((1.0 - p_exp) > 1e-6) (p_obs - p_exp) / (1.0 - p_exp) else 0.0
-  attr(kappa_geo, "sympatric_10km_rate") <- mean(sympatric_conflict)
-  kappa_geo
-}
-
-evaluate_phenotypic_ecotype_coupling <- function(df, cluster_vec) {
-  n <- nrow(df)
-  cl_fac <- factor(cluster_vec)
-  if (n < 10L || length(levels(cl_fac)) < 2L) {
-    return(list(has_independent_modality = FALSE, pass = FALSE, morph_p = NA_real_, morph_r2_adj = NA_real_, pheno_p = NA_real_, pheno_diff_days = 0.0))
-  }
-  morph_cands <- unique(c(
-    grep("^(PC|ECT_PC)[1-4]$", names(df), value = TRUE),
-    intersect(c("can1", "can2", "aspect_ratio", "petiole_to_blade_ratio", "solidity", "dissection_index"), names(df))
-  ))
-  morph_cols <- morph_cands[vapply(morph_cands, function(cn) {
-    v <- suppressWarnings(as.numeric(df[[cn]]))
-    sum(is.finite(v)) >= 8L && stats::sd(v[is.finite(v)]) > 1e-6
-  }, logical(1))]
-
-  morph_p <- NA_real_
-  morph_r2_adj <- NA_real_
-  if (length(morph_cols) >= 1L) {
-    Y_m <- scale(as.matrix(df[, morph_cols, drop = FALSE]))
-    for (j in seq_len(ncol(Y_m))) {
-      bad <- !is.finite(Y_m[, j])
-      if (any(bad)) Y_m[bad, j] <- 0.0
-    }
-    lat_v <- if ("latitude" %in% names(df)) suppressWarnings(as.numeric(df$latitude)) else rep(0.0, n)
-    lon_v <- if ("longitude" %in% names(df)) suppressWarnings(as.numeric(df$longitude)) else rep(0.0, n)
-    lat_v[!is.finite(lat_v)] <- stats::median(lat_v, na.rm = TRUE)
-    lon_v[!is.finite(lon_v)] <- stats::median(lon_v, na.rm = TRUE)
-
-    # Partial multivariate F-test of morphology ~ cluster | (latitude + longitude)
-    X0 <- stats::model.matrix(~ lat_v + lon_v)
-    X1 <- stats::model.matrix(~ lat_v + lon_v + cl_fac)
-    rss0 <- sum( qr.resid(qr(X0), Y_m)^2 )
-    rss1 <- sum( qr.resid(qr(X1), Y_m)^2 )
-    df1 <- ncol(X1) - ncol(X0)
-    df2 <- max(1L, n - ncol(X1))
-    if (rss0 > 1e-8 && df1 >= 1L && df2 >= 4L) {
-      r2_part <- max(0.0, (rss0 - rss1) / rss0)
-      morph_r2_adj <- 1.0 - (1.0 - r2_part) * ((n - ncol(X0)) / df2)
-      f_val <- ((rss0 - rss1) / df1) / max(rss1 / df2, 1e-8)
-      morph_p <- stats::pf(f_val, df1 = df1 * ncol(Y_m), df2 = df2 * ncol(Y_m), lower.tail = FALSE)
-    }
-  }
-
-  pheno_p <- NA_real_
-  pheno_diff <- 0.0
-  has_pheno <- "delta_doy" %in% names(df) && sum(is.finite(suppressWarnings(as.numeric(df$delta_doy)))) >= 10L
-  if (has_pheno) {
-    dd <- suppressWarnings(as.numeric(df$delta_doy))
-    ok_d <- is.finite(dd) & !is.na(cl_fac)
-    if (sum(ok_d) >= 10L && length(unique(cl_fac[ok_d])) >= 2L) {
-      meds <- tapply(dd[ok_d], cl_fac[ok_d], stats::median, na.rm = TRUE)
-      pheno_diff <- max(meds, na.rm = TRUE) - min(meds, na.rm = TRUE)
-      pheno_p <- tryCatch(stats::kruskal.test(dd[ok_d] ~ droplevels(cl_fac[ok_d]))$p.value, error = function(e) NA_real_)
-    }
-  }
-
-  has_indep <- (length(morph_cols) >= 1L) || has_pheno
-  pass_morph <- is.finite(morph_p) && is.finite(morph_r2_adj) && (morph_p < 0.01) && (morph_r2_adj >= 0.05)
-  pass_pheno <- is.finite(pheno_p) && (pheno_p < 0.01) && (pheno_diff >= 10.0)
-  list(
-    has_independent_modality = has_indep,
-    pass = isTRUE(pass_morph || pass_pheno),
-    morph_p = morph_p,
-    morph_r2_adj = morph_r2_adj,
-    pheno_p = pheno_p,
-    pheno_diff_days = pheno_diff
-  )
-}
-
 compute_isolation_by_environment <- function(df, edaph_vars = character(0), clim_vars = character(0), mem_mat = NULL, n_perm = 99L) {
   # Non-circular Isolation-by-Environment (IBE; Wang & Bradburd 2014) variance decomposition
   # testing continuous Morphological + Phenological divergence as a function of

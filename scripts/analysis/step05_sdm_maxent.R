@@ -11,15 +11,9 @@
   }
 }
 
-export_dynamic_fig05_ecological_niche_phenology <- function(df, srf_res = NULL, niche_res = NULL, out_plot_path = NULL, pheno_res = NULL) {
+export_spatial_rf_figures <- function(df, srf_res, niche_res, out_path, pheno_res = NULL) {
   .ensure_step05_fig_modules()
-  out_png <- if (!is.null(out_plot_path) && nzchar(out_plot_path)) normalize_png_path(out_plot_path) else "outputs/figures/fig05a_ecological_niche_and_rf_importance.png"
-  render_step05a_ecological_niche_png(df = df, srf_res = srf_res, niche_res = niche_res, out_plot_path = out_png)
-}
-
-export_spatial_rf_figures <- function(df, srf_res, niche_res, out_pdf, pheno_res = NULL) {
-  .ensure_step05_fig_modules()
-  out_png <- if (!is.null(out_pdf) && nzchar(out_pdf)) normalize_png_path(out_pdf) else "outputs/figures/fig05a_ecological_niche_and_rf_importance.png"
+  out_png <- if (!is.null(out_path) && nzchar(out_path)) normalize_png_path(out_path) else "outputs/figures/fig05a_ecological_niche_and_rf_importance.png"
   message(sprintf("Generating 300-DPI Spatial RF & Ecological Niche plate -> %s", out_png))
   render_step05a_ecological_niche_png(df = df, srf_res = srf_res, niche_res = niche_res, out_plot_path = out_png)
 }
@@ -1049,7 +1043,7 @@ fit_and_project_maxent_sdm_maps <- function(
     if (!is.null(focal_artifacts) && !is.null(focal_artifacts$rast_mx) && !is.null(focal_artifacts$rast_ens)) {
       resp_vars <- intersect(unique(c(top_clim_pred, top_edaph_pred, clim_cand, edaph_cand, kept_vars)), colnames(focal_artifacts$X_comb))
       resp_vars <- resp_vars[seq_len(min(3L, length(resp_vars)))]
-      resp_lbls <- format_step05_predictor_labels(resp_vars)
+      resp_lbls <- if (exists("format_predictor_labels", mode = "function")) format_predictor_labels(resp_vars) else gsub("_", " ", resp_vars)
 
       pres_mat <- focal_artifacts$X_comb[focal_artifacts$p_vec == 1L, , drop = FALSE]
       if (nrow(pres_mat) == 0L) pres_mat <- focal_artifacts$X_comb

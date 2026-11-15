@@ -7,10 +7,15 @@ import io
 import json
 import sys
 import urllib.parse
-import urllib.request
 import zipfile
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from scripts.core.io_utils import default_http_get, to_text
 
 _UA = "Plantmatics/1.0 (https://github.com/plantmatics; mailto:plantmatics@users.noreply.github.com)"
 _DEFAULT_PACKERA_TAXID = "189364"
@@ -21,13 +26,7 @@ PARALOSS_COLS = ("locus_id", "gene_family", "paralogy_class", "target_length_bp"
 
 
 def _default_http_get(url: str, timeout: int = 30) -> bytes:
-    req = urllib.request.Request(url, headers={"User-Agent": _UA})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read()
-
-
-def _to_text(payload: Union[bytes, str]) -> str:
-    return payload if isinstance(payload, str) else payload.decode("utf-8", errors="replace")
+    return default_http_get(url, timeout=float(timeout), user_agent=_UA)
 
 
 def _to_bytes(payload: Union[bytes, str]) -> bytes:
@@ -45,7 +44,7 @@ def resolve_ena_ncbi_taxid(
     getter = http_get_fn or _default_http_get
     q_genus = urllib.parse.quote(genus)
     try:
-        raw = _to_text(getter(f"https://www.ebi.ac.uk/ena/taxonomy/rest/scientific-name/{q_genus}", timeout=25))
+        raw = to_text(getter(f"https://www.ebi.ac.uk/ena/taxonomy/rest/scientific-name/{q_genus}", timeout=25))
         data = json.loads(raw)
         items = data if isinstance(data, list) else ([data] if isinstance(data, dict) else [])
         for item in items:
@@ -56,7 +55,7 @@ def resolve_ena_ncbi_taxid(
         pass
     try:
         term = urllib.parse.quote(f"{genus}[Scientific Name]")
-        raw = _to_text(getter(f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=taxonomy&term={term}&retmode=json", timeout=25))
+        raw = to_text(getter(f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=taxonomy&term={term}&retmode=json", timeout=25))
         ids = json.loads(raw).get("esearchresult", {}).get("idlist") or []
         for tid in ids:
             if str(tid).strip().isdigit():
@@ -111,7 +110,7 @@ def fetch_ena_tax_tree_sra_rows(
     if tax_id:
         try:
             url = f"https://www.ebi.ac.uk/ena/portal/api/search?result=read_run&query=tax_tree({tax_id})&fields={fields}&limit=0&format=tsv"
-            _add(_parse_ena_tsv_rows(_to_text(getter(url, timeout=45))))
+            _add(_parse_ena_tsv_rows(to_text(getter(url, timeout=45))))
         except Exception as exc:
             print(f"[INFO] ENA tax_tree({tax_id}) query failed ({exc}); checking seed BioProjects.", file=sys.stderr)
 
@@ -126,14 +125,14 @@ def fetch_ena_tax_tree_sra_rows(
             f"https://www.ebi.ac.uk/ena/portal/api/filereport?accession={q_bp}&result=read_run&fields={fields}&format=tsv",
         ):
             try:
-                bp_rows = _parse_ena_tsv_rows(_to_text(getter(url, timeout=45)), default_bioproject=bp)
+                bp_rows = _parse_ena_tsv_rows(to_text(getter(url, timeout=45)), default_bioproject=bp)
                 if bp_rows:
                     break
             except Exception as exc:
                 print(f"[INFO] ENA BioProject query failed for {bp} ({exc}); trying fallback.", file=sys.stderr)
         if not bp_rows and ncbi_get_fn is not None:
             try:
-                es = json.loads(_to_text(ncbi_get_fn("esearch.fcgi", {
+                es = json.loads(to_text(ncbi_get_fn("esearch.fcgi", {
                     "db": "sra", "term": f"{bp}[BioProject]", "retmax": 400, "usehistory": "y", "retmode": "json",
                 }))).get("esearchresult", {})
                 ids = [str(x) for x in (es.get("idlist") or [])]
@@ -143,7 +142,7 @@ def fetch_ena_tax_tree_sra_rows(
                 elif es.get("webenv") and es.get("querykey"):
                     ef_p.update({"WebEnv": es["webenv"], "query_key": es["querykey"], "retmax": 400})
                 if "id" in ef_p or "WebEnv" in ef_p:
-                    ef_txt = _to_text(ncbi_get_fn("efetch.fcgi", ef_p))
+                    ef_txt = to_text(ncbi_get_fn("efetch.fcgi", ef_p))
                     for r in csv.DictReader(ef_txt.splitlines()):
                         acc = str(r.get("Run") or r.get("run_accession") or "").strip()
                         if acc:
@@ -203,7 +202,7 @@ def _parse_paraloss_payload(payload: bytes) -> List[Dict[str, str]]:
                 if any(name.lower().endswith(ext) for ext in (".tsv", ".csv", ".txt", ".fasta", ".fa", ".fna", ".json")):
                     rows.extend(_parse_paraloss_payload(zf.read(name)))
         return rows
-    text = _to_text(payload).strip()
+    text = to_text(payload).strip()
     if not text:
         return []
     if text[0] in "{[":
@@ -260,7 +259,7 @@ def fetch_compositae_paraloss1272_catalog(
     candidate_urls: List[str] = list(_PARALOSS_DIRECT_URLS)
     for api_url in _PARALOSS_FIGSHARE_ARTICLES:
         try:
-            meta = json.loads(_to_text(getter(api_url, timeout=25)))
+            meta = json.loads(to_text(getter(api_url, timeout=25)))
             files = meta.get("files") if isinstance(meta, dict) else None
             if isinstance(files, list):
                 ranked = sorted(

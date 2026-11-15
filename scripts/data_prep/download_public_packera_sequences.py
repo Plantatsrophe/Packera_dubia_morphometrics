@@ -13,6 +13,12 @@ import urllib.error, urllib.parse, urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from scripts.core.io_utils import atomic_write_bytes, ensure_flat_filename
+
 _UA = "Plantmatics/1.0 (https://github.com/plantmatics; mailto:plantmatics@users.noreply.github.com)"
 _DRYAD_DOI = "doi%3A10.5061%2Fdryad.bg79cnppn"
 _DRYAD_ZIPS = ("speciestree_files.zip", "PhyTop_results.zip", "RelTime_trees.zip", "alignment_files.zip")
@@ -67,38 +73,22 @@ class _CrossHostAuthStripRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 
 def _ensure_flat_filename(genomics_dir: Path, filename: str) -> Path:
-    if not filename or "/" in filename or "\\" in filename or Path(filename).name != filename:
-        raise ValueError(f"Refusing non-flat path inside genomics directory: {filename!r}")
-    if not filename.startswith("public_packera_"):
+    clean_name = ensure_flat_filename(filename)
+    if not clean_name.startswith("public_packera_"):
         raise ValueError(f"Public genomics filename must start with 'public_packera_': {filename!r}")
     g_res = genomics_dir.resolve()
-    dest = g_res / filename
+    dest = g_res / clean_name
     if dest.parent != g_res or (dest.exists() and dest.is_dir()):
         raise ValueError(f"Refusing subdirectory inside genomics directory: {dest}")
-    return genomics_dir / filename
+    return genomics_dir / clean_name
 
 
 def _atomic_save(genomics_dir: Path, filename: str, source: Union[bytes, Path], force: bool = False) -> Tuple[Path, bool]:
     dest = _ensure_flat_filename(genomics_dir, filename)
     if not force and dest.exists() and dest.is_file() and dest.stat().st_size > 0:
         return dest, False
-    genomics_dir.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=".tmp_pub_", suffix=".tmp", dir=str(genomics_dir))
-    try:
-        with os.fdopen(fd, "wb") as dst_fh:
-            if isinstance(source, Path):
-                with open(source, "rb") as src_fh:
-                    shutil.copyfileobj(src_fh, dst_fh, length=65536)
-            else:
-                dst_fh.write(source)
-            dst_fh.flush()
-            os.fsync(dst_fh.fileno())
-        os.replace(tmp_name, dest)
-    except Exception:
-        if os.path.exists(tmp_name):
-            os.unlink(tmp_name)
-        raise
-    return dest, True
+    payload = Path(source).read_bytes() if isinstance(source, Path) else source
+    return atomic_write_bytes(dest, payload), True
 
 
 def _http_request(url: str, *, headers: Optional[Dict[str, str]] = None, timeout: int = 60,

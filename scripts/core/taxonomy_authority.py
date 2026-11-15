@@ -55,7 +55,6 @@ from scripts.core.config import (
     SECONDARY_TYPE_STATUSES,
     SPECIALIST_PATTERNS,
     VALID_GEOGRAPHIC_SCOPES,
-    VALID_TYPE_STATUSES,
     WESTERN_LONGITUDE_THRESHOLD,
     normalize_countries_list,
 )

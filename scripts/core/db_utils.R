@@ -19,11 +19,26 @@
 PLANTMATICS_SCHEMA_USER_VERSION <- 20261127L
 PACKERA_SCHEMA_USER_VERSION <- PLANTMATICS_SCHEMA_USER_VERSION
 
+env_plantmatics_or_packera <- function(p_key, k_key = NULL, unset = "") {
+  if (is.null(k_key) || !nzchar(k_key)) {
+    k_key <- sub("^PLANTMATICS_", "PACKERA_", p_key)
+  }
+  v <- Sys.getenv(p_key, unset = "")
+  if (nzchar(trimws(v))) {
+    return(v)
+  }
+  v2 <- Sys.getenv(k_key, unset = "")
+  if (nzchar(trimws(v2))) {
+    return(v2)
+  }
+  unset
+}
+
 resolve_packera_workers <- function(max_workers = 32L, n_tasks = NULL) {
   if (!identical(.Platform$OS.type, "unix") || !requireNamespace("parallel", quietly = TRUE)) {
     return(1L)
   }
-  env_w <- suppressWarnings(as.integer(Sys.getenv("PACKERA_MAX_WORKERS", unset = "")))
+  env_w <- suppressWarnings(as.integer(trimws(env_plantmatics_or_packera("PLANTMATICS_MAX_WORKERS", "PACKERA_MAX_WORKERS"))))
   if (is.na(env_w) || env_w < 1L) {
     det_phys <- tryCatch(parallel::detectCores(logical = FALSE), error = function(e) NA_integer_)
     det_log <- tryCatch(parallel::detectCores(logical = TRUE), error = function(e) 1L)
@@ -554,19 +569,11 @@ PACKERA_DB_WC_BIO_COLS <- c(
 }
 
 .get_env_run_dir_r <- function() {
-  r_new <- trimws(Sys.getenv("PLANTMATICS_RUN_DIR", unset = ""))
-  if (nzchar(r_new)) {
-    return(r_new)
-  }
-  trimws(Sys.getenv("PACKERA_RUN_DIR", unset = ""))
+  trimws(env_plantmatics_or_packera("PLANTMATICS_RUN_DIR", "PACKERA_RUN_DIR"))
 }
 
 .get_env_db_path_r <- function() {
-  d_new <- trimws(Sys.getenv("PLANTMATICS_DB_PATH", unset = ""))
-  if (nzchar(d_new)) {
-    return(d_new)
-  }
-  trimws(Sys.getenv("PACKERA_DB_PATH", unset = ""))
+  trimws(env_plantmatics_or_packera("PLANTMATICS_DB_PATH", "PACKERA_DB_PATH"))
 }
 
 .migrated_legacy_sqlite_env_r <- new.env(parent = emptyenv())
@@ -2365,28 +2372,6 @@ persist_step07_complexes_to_sqlite <- function(
     )
   )
   invisible(TRUE)
-}
-
-.discover_step07_eco_cols <- function(col_names) {
-  if (is.null(col_names) || length(col_names) == 0L) {
-    return(character(0))
-  }
-  eco_pattern <- paste0(
-    "^(bio[0-9]+_|fine_|ssurgo_|soil_|topo_|polaris_|solus_|sgmc_|ilr_texture_|elevation_m$|primary_.*_predictors$)",
-    "|(^|_)(schoener_d|edaphic_z_score|climatic_z_score|type_edaphic_z_score|nearest_type_niche_taxon|matches_type_lithology|delta_doy|hopkins_|substrate_specialist_flag|rf_prediction_source|n_observed_modalities)"
-  )
-  setdiff(
-    grep(eco_pattern, col_names, value = TRUE, ignore.case = TRUE),
-    c("catalogNumber", "plant_individual_id")
-  )
-}
-
-.discover_step07_dynamic_morph_cols <- function(col_names) {
-  if (is.null(col_names) || length(col_names) == 0L) {
-    return(character(0))
-  }
-  morph_pattern <- "^(PC[0-9]+|Cauline_PC[0-9]+|ECT_PC[0-9]+|Cauline_ECT_PC[0-9]+|[AD][0-9]+|within_rosette_efa_dispersion|efd_harmonic_opt|efd_k95_pcs|selected_morph_features|ect_lobe_complexity|cauline_ect_lobe_complexity|heteroblasty_ect_distance)$"
-  grep(morph_pattern, col_names, value = TRUE)
 }
 
 persist_step06_genomics_to_sqlite <- function(

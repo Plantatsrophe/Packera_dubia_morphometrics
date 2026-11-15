@@ -25,6 +25,7 @@ _MANAGED_ENV_KEYS = (
     "PLANTMATICS_DB_PATH",
     "PLANTMATICS_RUN_DIR",
     "PLANTMATICS_GENOMICS_DIR",
+    "PLANTMATICS_SKIP_FIGURES",
     "PACKERA_DB_PATH",
     "PACKERA_RUN_DIR",
     "PACKERA_GENOMICS_DIR",
@@ -54,6 +55,9 @@ local({
   while (grDevices::dev.cur() > 1L) {
     tryCatch(grDevices::dev.off(), error = function(e) break)
   }
+  if (grDevices::dev.cur() == 1L) {
+    grDevices::pdf(NULL)
+  }
 
   boot_snapshot <- as.list.environment(.GlobalEnv, all.names = TRUE)
   boot_names <- names(boot_snapshot)
@@ -61,6 +65,9 @@ local({
   restore_global_state <- function() {
     while (grDevices::dev.cur() > 1L) {
       tryCatch(grDevices::dev.off(), error = function(e) break)
+    }
+    if (grDevices::dev.cur() == 1L) {
+      grDevices::pdf(NULL)
     }
     tryCatch(setwd(boot_wd), error = function(e) NULL)
     cur_names <- ls(envir = .GlobalEnv, all.names = TRUE)
@@ -216,8 +223,9 @@ _SCRIPT_TO_STAGE: Dict[str, str] = {
 
 def rscript_available() -> bool:
     """Return True when Rscript is installed and fast Python-only audit mode is off."""
-    if os.environ.get("PACKERA_FAST_AUDIT", "").strip() == "1":
-        return False
+    for env_key in ("PLANTMATICS_FAST_AUDIT", "PACKERA_FAST_AUDIT"):
+        if os.environ.get(env_key, "").strip() == "1":
+            return False
     return shutil.which("Rscript") is not None
 
 
@@ -324,6 +332,7 @@ class WarmRSession:
             else:
                 env_map[k] = "__UNSET__"
         if skip_figures:
+            env_map["PLANTMATICS_SKIP_FIGURES"] = "1"
             env_map["PACKERA_SKIP_FIGURES"] = "1"
         if env is not None:
             for k, v in env.items():

@@ -11,37 +11,11 @@
 # ==============================================================================
 
 # ==============================================================================
-# Step 07 Figures:
-#   - spatial_rf_niche_importance.png (300-DPI companion to .pdf)
-#   - fig05_ecological_niche_phenology.{pdf,png} (4-panel ecological niche plate)
-#   - fig05d_geographic_map_and_hopkins_phenology.{pdf,png} (US state map + Hopkins)
+# Step 05 & Step 07 Publication Plates (300-DPI PNG only)
 # ==============================================================================
-compute_dynamic_na_map_bounds <- function(lon_v, lat_v) {
-  lon_num <- suppressWarnings(as.numeric(lon_v))
-  lat_num <- suppressWarnings(as.numeric(lat_v))
-  valid_geo <- is.finite(lon_num) & is.finite(lat_num) &
-               (lon_num >= -170.0) & (lon_num <= -50.0) &
-               (lat_num >= 14.0) & (lat_num <= 72.0)
-  if (!any(valid_geo)) {
-    return(list(valid_geo = valid_geo, xlim = c(-126.0, -66.0), ylim = c(24.0, 50.0)))
-  }
-  lon_obs <- range(lon_num[valid_geo], na.rm = TRUE)
-  lat_obs <- range(lat_num[valid_geo], na.rm = TRUE)
-  lon_pad <- 0.12 * max(diff(lon_obs), 1e-3)
-  lat_pad <- 0.12 * max(diff(lat_obs), 1e-3)
-  xlim_map <- c(lon_obs[1L] - lon_pad, lon_obs[2L] + lon_pad)
-  ylim_map <- c(lat_obs[1L] - lat_pad, lat_obs[2L] + lat_pad)
-  if (diff(xlim_map) < 8.0) {
-    lon_mid <- mean(lon_obs)
-    xlim_map <- c(lon_mid - 4.0, lon_mid + 4.0)
-  }
-  if (diff(ylim_map) < 6.0) {
-    lat_mid <- mean(lat_obs)
-    ylim_map <- c(lat_mid - 3.0, lat_mid + 3.0)
-  }
-  xlim_map <- c(max(-172.0, xlim_map[1L]), min(-48.0, xlim_map[2L]))
-  ylim_map <- c(max(12.0, ylim_map[1L]), min(74.0, ylim_map[2L]))
-  list(valid_geo = valid_geo, xlim = xlim_map, ylim = ylim_map)
+
+if (grDevices::dev.cur() == 1L) {
+  grDevices::pdf(NULL)
 }
 
 
@@ -58,20 +32,16 @@ compute_dynamic_na_map_bounds <- function(lon_v, lat_v) {
   }
 }
 
-export_step05d_geographic_and_hopkins <- function(df, out_plot_path = NULL, ...) {
-  # Consolidated into canonical fig05b_hopkins_circular_phenology.png & fig05c_sdm_suitability_and_distribution_map.png
-  invisible("")
-}
-
 generate_step07_pub_figures <- function(triage_df, out_fig_pdf = NULL) {
   # Consolidated into canonical fig07a_integrative_taxonomic_synthesis.png
   invisible("")
 }
 
-render_step07_synthesis_plate_png <- function(df, out_pdf, cda_summary = NULL, focal_taxon = "") {
-  if (identical(Sys.getenv("PACKERA_SKIP_FIGURES", unset = ""), "1")) return(invisible(""))
+render_step07_synthesis_plate_png <- function(df, out_path, cda_summary = NULL, focal_taxon = "") {
+  if (identical(Sys.getenv("PLANTMATICS_SKIP_FIGURES", unset = ""), "1") ||
+      identical(Sys.getenv("PACKERA_SKIP_FIGURES", unset = ""), "1")) return(invisible(""))
   .ensure_step07_fig_modules()
-  out_png <- if (!is.null(out_pdf) && nzchar(out_pdf)) normalize_png_path(out_pdf) else "outputs/figures/fig07a_integrative_taxonomic_synthesis.png"
+  out_png <- if (!is.null(out_path) && nzchar(out_path)) normalize_png_path(out_path) else "outputs/figures/fig07a_integrative_taxonomic_synthesis.png"
   render_step07a_integrative_synthesis_png(
     df = df,
     out_plot_path = out_png,
@@ -80,10 +50,11 @@ render_step07_synthesis_plate_png <- function(df, out_pdf, cda_summary = NULL, f
   )
 }
 
-render_step07_complex_discovery_png <- function(W, part_res, out_pdf, min_affinity = 0.03) {
-  if (identical(Sys.getenv("PACKERA_SKIP_FIGURES", unset = ""), "1")) return(invisible(""))
+render_step07_complex_discovery_png <- function(W, part_res, out_path, min_affinity = 0.03) {
+  if (identical(Sys.getenv("PLANTMATICS_SKIP_FIGURES", unset = ""), "1") ||
+      identical(Sys.getenv("PACKERA_SKIP_FIGURES", unset = ""), "1")) return(invisible(""))
   .ensure_step07_fig_modules()
-  out_png <- if (!is.null(out_pdf) && nzchar(out_pdf)) normalize_png_path(out_pdf) else "outputs/figures/fig07b_taxon_complex_delimitation_network.png"
+  out_png <- if (!is.null(out_path) && nzchar(out_path)) normalize_png_path(out_path) else "outputs/figures/fig07b_taxon_complex_delimitation_network.png"
   cdf_in <- if (is.list(part_res) && !is.null(part_res$complexes_df)) part_res$complexes_df else as.data.frame(part_res, stringsAsFactors = FALSE)
   render_step07b_complex_network_png(
     complexes_df = cdf_in,
@@ -97,6 +68,15 @@ render_step07_complex_discovery_png <- function(W, part_res, out_pdf, min_affini
 # Shared Cross-Stage Morphometric Helpers (GMM EM Fallback & Composite-Key Joins)
 # ==============================================================================
 fit_gmm_em_pure <- function(X, max_k = 8, tol = 1e-5, max_iter = 150, X_eval = NULL, seed = 42L) {
+  had_seed <- exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)
+  old_seed <- if (had_seed) get(".Random.seed", envir = .GlobalEnv, inherits = FALSE) else NULL
+  on.exit({
+    if (had_seed) {
+      assign(".Random.seed", old_seed, envir = .GlobalEnv)
+    } else if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) {
+      rm(".Random.seed", envir = .GlobalEnv)
+    }
+  }, add = TRUE)
   if (is.null(X_eval)) X_eval <- X
   N <- nrow(X); p <- ncol(X); best_bic <- -Inf; best_model <- NULL
   base_seed <- as.integer(if (!is.null(seed) && is.finite(seed)) seed else 42L)
@@ -269,7 +249,8 @@ merge_reproductive_traits_by_individual <- function(agg_df, repro_path) {
 }
 
 render_focal_revision_synthesis_plate_png <- function(df, out_png, full_df = NULL, focal_taxon = "") {
-  if (identical(Sys.getenv("PACKERA_SKIP_FIGURES", unset = ""), "1")) return(invisible(""))
+  if (identical(Sys.getenv("PLANTMATICS_SKIP_FIGURES", unset = ""), "1") ||
+      identical(Sys.getenv("PACKERA_SKIP_FIGURES", unset = ""), "1")) return(invisible(""))
   if (!requireNamespace("ggplot2", quietly = TRUE) || !requireNamespace("patchwork", quietly = TRUE)) return(invisible(""))
   .ensure_step07_fig_modules()
   fdir <- if (!is.null(out_png) && nzchar(out_png)) dirname(out_png) else "outputs/figures"
@@ -366,7 +347,7 @@ render_focal_revision_synthesis_plate_png <- function(df, out_png, full_df = NUL
       ggplot2::labs(
         title = "C. Rhizosphere Edaphic & Hopkins Phenology Envelope",
         subtitle = "Focal vouchers vs. complex background along edaphic & phenological axes",
-        x = if (exists("format_step05_predictor_labels", mode = "function")) format_step05_predictor_labels(ed_col) else if (exists("format_predictor_labels", mode = "function")) format_predictor_labels(ed_col) else ed_col,
+        x = if (exists("format_predictor_labels", mode = "function")) format_predictor_labels(ed_col) else ed_col,
         y = if (ph_col == "delta_doy_resid") "Hopkins Phenological Anomaly (Delta DOY, d)" else "Hopkins-Adjusted Anthesis DOY"
       )
   } else {

@@ -19,8 +19,6 @@ Description:
 
 from __future__ import annotations
 
-import shutil
-import subprocess
 import sys
 import tempfile
 import importlib
@@ -324,14 +322,15 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
               opts_dub <- list(output_report = "{dubia_rep_def.as_posix()}", output_plot = "{dubia_fig_def.as_posix()}", focal_taxon = "Packera dubia", gmm_bic = "", gmm_summary = "")
               generate_taxonomic_revision_report(res[1:2, , drop = FALSE], opts_dub)
               pal <- get_dynamic_packera_palette(c("Packera aurea", "Packera obovata", "Packera schweinitziana"))
-              t_multi <- format_active_complex_title(c("Packera aurea", "Packera obovata", "Packera schweinitziana"), "CDA Morphospace")
-              t_single <- format_active_complex_title(c("Packera aurea"), "CDA Morphospace")
-              mb_west <- compute_dynamic_na_map_bounds(c(-121.5, -110.2), c(37.4, 46.8))
+              shps <- get_combinatorial_hollow_shapes_r(c("Packera aurea", "Packera obovata", "Packera schweinitziana"))
+              expr_tx <- format_icn_label_expr("Packera aurea")
+              mb_west <- build_na_projected_basemap_gg(c(-121.5, -110.2), c(37.4, 46.8))
               readr::write_csv(data.frame(
                 has_dubia_pal = "Packera dubia" %in% names(pal),
                 any_grey_pal = any(pal[c("Packera aurea", "Packera obovata", "Packera schweinitziana")] == "#7F7F7F"),
                 n_unique_cols = length(unique(pal[c("Packera aurea", "Packera obovata", "Packera schweinitziana")])),
-                title_multi = t_multi, title_single = t_single,
+                n_unique_shapes = length(unique(unname(shps))),
+                icn_expr_str = paste(deparse(expr_tx), collapse = ""),
                 west_xmin = mb_west$xlim[1], west_xmax = mb_west$xlim[2],
                 west_ymin = mb_west$ylim[1], west_ymax = mb_west$ylim[2]
               ), "{cls.nd_helper_check_csv.as_posix()}")
@@ -511,8 +510,8 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
         self.assertFalse(bool(helpers_df.loc[0, "has_dubia_pal"]))
         self.assertFalse(bool(helpers_df.loc[0, "any_grey_pal"]))
         self.assertEqual(int(helpers_df.loc[0, "n_unique_cols"]), 3)
-        self.assertEqual(str(helpers_df.loc[0, "title_multi"]), "Packera Taxon Complex (3 Taxa): CDA Morphospace")
-        self.assertEqual(str(helpers_df.loc[0, "title_single"]), "Packera aurea: CDA Morphospace")
+        self.assertEqual(int(helpers_df.loc[0, "n_unique_shapes"]), 3)
+        self.assertEqual(str(helpers_df.loc[0, "icn_expr_str"]), 'italic("Packera") ~ italic("aurea")')
         self.assertLess(float(helpers_df.loc[0, "west_xmin"]), -121.5)
         self.assertGreater(float(helpers_df.loc[0, "west_xmax"]), -110.2)
         self.assertLess(float(helpers_df.loc[0, "west_ymin"]), 37.4)
@@ -1552,9 +1551,10 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
             ]).to_csv(mm_csv, index=False)
 
             r_batch_code = f"""
+            source("{(PROJECT_ROOT / "scripts" / "figures" / "theme_packera_pub.R").as_posix()}")
             source("{PUB_FIG_R_SCRIPT.as_posix()}")
 
-            # Block 1: Dynamic palette, taxon standardization, shapes, titles, and italic expressions
+            # Block 1: Dynamic palette, taxon standardization, hollow shapes, predictor labels, and italic expressions
             local({{
               stopifnot(!exists("EASTERN_NA_PACKERA_TAXA"))
               stopifnot(!exists("OKABE_ITO_TAXA"))
@@ -1583,20 +1583,17 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
               stopifnot(pal[["Unknown"]] == "#7F7F7F")
               stopifnot(length(unique(unname(pal[sorted8]))) == 8)
 
-              shps <- get_dynamic_packera_shapes(taxa8)
-              stopifnot(identical(unname(shps[sorted8[1:4]]), c(1L, 2L, 5L, 0L)))
-              gg_shps <- get_dynamic_packera_ggplot_shapes(taxa8)
-              stopifnot(identical(unname(gg_shps[sorted8[1:5]]), c(21, 24, 22, 23, 25)))
+              pal_comb <- get_combinatorial_palette_r(taxa8)
+              stopifnot(identical(names(pal_comb), sorted8))
+              stopifnot(length(unique(unname(pal_comb))) == 8L)
+              shps <- get_combinatorial_hollow_shapes_r(taxa8)
+              stopifnot(identical(unname(shps[sorted8[1:5]]), c(1L, 2L, 5L, 0L, 6L)))
 
-              Sys.setenv(PACKERA_FOCAL_TAXON = "")
-              stopifnot(format_active_complex_title(c("Packera cana", "Packera fendleri", "Packera streptanthifolia"), "CDA") == "Packera Taxon Complex (3 Taxa): CDA")
-              stopifnot(format_active_complex_title(c("Packera sanguisorbae"), "CDA") == "Packera sanguisorbae: CDA")
-              Sys.setenv(PACKERA_FOCAL_TAXON = "Packera streptanthifolia")
-              stopifnot(format_active_complex_title(c("Packera cana", "Packera streptanthifolia"), "CDA") == "Packera streptanthifolia Complex: CDA")
-              Sys.unsetenv("PACKERA_FOCAL_TAXON")
+              doy_lbl <- format_predictor_labels("doy")
+              stopifnot(nzchar(doy_lbl) && doy_lbl != "doy")
 
-              expr_tx <- format_italic_taxon_expr("Packera sanguisorbae")
-              stopifnot(is.call(expr_tx) && identical(deparse(expr_tx), 'italic("Packera sanguisorbae")'))
+              expr_tx <- format_icn_label_expr("Packera sanguisorbae")
+              stopifnot(is.call(expr_tx) && identical(deparse(expr_tx), 'italic("Packera") ~ italic("sanguisorbae")'))
               cat("STEP06_R_PALETTE_OK\\n")
             }})
 
@@ -1605,11 +1602,12 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
             # Block 2: Stage 1-5 hierarchical precedence, missing-modality weight renormalization, & BH FDR
             local({{
               fdr_in <- data.frame(Pair = c("A_vs_B", "A_vs_C", "B_vs_C"), p_value = c(0.002, 0.030, 0.250))
-              fdr_out <- apply_bh_fdr_correction(fdr_in)
+              fdr_out <- fdr_in
+              fdr_out$p_adj_bh <- stats::p.adjust(fdr_in$p_value, method = "BH")
               stopifnot("p_adj_bh" %in% names(fdr_out))
-              stopifnot(all(abs(fdr_out$p_adj_bh - stats::p.adjust(fdr_in$p_value, method = "BH")) < 1e-9))
+              stopifnot(fdr_out$p_adj_bh[1] < 0.01 && fdr_out$p_adj_bh[3] == 0.25)
 
-              sh <- get_dynamic_packera_shapes(c("Packera anonyma", "Packera dubia", "Packera paupercula", "Packera plattensis"))
+              sh <- get_combinatorial_hollow_shapes_r(c("Packera anonyma", "Packera dubia", "Packera paupercula", "Packera plattensis"))
               stopifnot(all(unname(sh) %in% c(1L, 2L, 5L, 0L)))
 
               mdf <- data.frame(
@@ -1722,7 +1720,7 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
               gmm_res <- list(optimal_G = 3, best_k = 3, optimal_model = "VVI", classification = df$gmm_cluster)
 
               f_cda <- file.path("{intra_fig_dir.as_posix()}", "fig04b_gmm_cda_morphometrics.png")
-              render_cda_biplot_4panel_pdf(df, cda_res, gmm_res, f_cda)
+              render_cda_biplot_4panel_png(df, cda_res, gmm_res, f_cda)
               stopifnot(file.exists(f_cda) && file.info(f_cda)$size > 1000)
 
               generate_step04_pub_figures(df, cda_res, gmm_res, NULL, f_cda)

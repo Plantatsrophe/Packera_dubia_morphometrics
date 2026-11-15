@@ -494,26 +494,32 @@ if [[ "${DISCOVER_COMPLEXES}" == "true" && -n "${FOCAL_TAXON}" ]]; then
   AUTO_NEIGHBORS=true
 fi
 if [[ -n "${THREADS}" ]]; then
+  export PLANTMATICS_MAX_WORKERS="${THREADS}"
   export PACKERA_MAX_WORKERS="${THREADS}"
   COMPUTE_ARGS+=("--threads" "${THREADS}")
 fi
 if [[ -n "${GPU_BATCH_SIZE}" ]]; then
+  export PLANTMATICS_GPU_BATCH_SIZE="${GPU_BATCH_SIZE}"
   export PACKERA_GPU_BATCH_SIZE="${GPU_BATCH_SIZE}"
   COMPUTE_ARGS+=("--gpu-batch-size" "${GPU_BATCH_SIZE}")
 fi
 if [[ -n "${WAVE_SIZE}" ]]; then
+  export PLANTMATICS_WAVE_SIZE="${WAVE_SIZE}"
   export PACKERA_WAVE_SIZE="${WAVE_SIZE}"
   COMPUTE_ARGS+=("--wave-size" "${WAVE_SIZE}")
 fi
 if [[ -n "${PREFETCH_WORKERS}" ]]; then
+  export PLANTMATICS_PREFETCH_WORKERS="${PREFETCH_WORKERS}"
   export PACKERA_PREFETCH_WORKERS="${PREFETCH_WORKERS}"
   COMPUTE_ARGS+=("--prefetch-workers" "${PREFETCH_WORKERS}")
 fi
 if [[ -n "${PREP_WORKERS}" ]]; then
+  export PLANTMATICS_PREP_WORKERS="${PREP_WORKERS}"
   export PACKERA_PREP_WORKERS="${PREP_WORKERS}"
   COMPUTE_ARGS+=("--prep-workers" "${PREP_WORKERS}")
 fi
 if [[ -n "${POST_WORKERS}" ]]; then
+  export PLANTMATICS_POST_WORKERS="${POST_WORKERS}"
   export PACKERA_POST_WORKERS="${POST_WORKERS}"
   COMPUTE_ARGS+=("--post-workers" "${POST_WORKERS}")
 fi
@@ -533,7 +539,7 @@ if [[ "${PURGE_RUNS_ONLY}" == "true" && "${PURGE_SEGMENTS}" != "true" ]]; then
     _PURGE_PY="python3"
   fi
   echo "[Purge] Purging Step 03 to 07 run outputs and Tier B SQLite tables (preserving Step 01 & Step 02 segmentation)..."
-  _PURGE_WS="${PACKERA_WORKSPACE_ROOT:-${PROJECT_ROOT}}"
+  _PURGE_WS="${PLANTMATICS_WORKSPACE_ROOT:-${PACKERA_WORKSPACE_ROOT:-${PROJECT_ROOT}}}"
   "${_PURGE_PY}" -c "
 import sys
 from pathlib import Path
@@ -576,7 +582,7 @@ if [[ "${PURGE_SEGMENTS}" == "true" ]]; then
     _PURGE_PY="python3"
   fi
   echo "[Purge] Purging all previous Step 02 to 07 segments, masks, contours, run directories, and SQLite segmentation tables..."
-  _PURGE_WS="${PACKERA_WORKSPACE_ROOT:-${PROJECT_ROOT}}"
+  _PURGE_WS="${PLANTMATICS_WORKSPACE_ROOT:-${PACKERA_WORKSPACE_ROOT:-${PROJECT_ROOT}}}"
   "${_PURGE_PY}" -c "
 import sys
 from pathlib import Path
@@ -629,6 +635,7 @@ export RUN_ID
 export PLANTMATICS_RUN_DIR="${PROJECT_ROOT}/${RUN_DIR}"
 export PACKERA_RUN_DIR="${PLANTMATICS_RUN_DIR}"
 if [[ ${#DEMO_FLAG[@]} -gt 0 ]]; then
+  export PLANTMATICS_DEMO_MODE=1
   export PACKERA_DEMO_MODE=1
   export PLANTMATICS_DB_PATH="${CUSTOM_DB_PATH:-${PROJECT_ROOT}/${RUN_DIR}/data/demo_ephemeral.sqlite}"
   export PACKERA_DB_PATH="${PLANTMATICS_DB_PATH}"
@@ -789,7 +796,7 @@ if [[ "${REUSE_CANONICAL_DATA}" == "true" ]]; then
     DST_ASSET="${RUN_DIR}/data/${asset_sub}"
     if [[ -L "${DST_ASSET}" ]] || ! _dir_has_files "${DST_ASSET}"; then
       rm -rf "${DST_ASSET}"
-      ln -sfn "${SRC_ASSET}" "${DST_ASSET}"
+      ln -sfnr "${SRC_ASSET}" "${DST_ASSET}"
     fi
   done
   if [[ ${#DEMO_FLAG[@]} -eq 0 ]]; then
@@ -957,10 +964,10 @@ for _cand_root in ([Path('${PROJECT_ROOT}').resolve(), root_data.parent, Path.cw
         sys.path.insert(0, str(_cand_root))
 
 from scripts.core.config import resolve_canonical_run_id
-from scripts.core.harvester import (
+from scripts.core.harvester import standardize_packera_taxon
+from scripts.core.taxonomy_authority import (
     select_cascading_outgroup_anchors,
     spatially_balance_and_thin_vouchers,
-    standardize_packera_taxon,
 )
 
 ALLOWED_TREATMENT_SUBTYPES = {
@@ -1017,7 +1024,7 @@ if focal_std_req:
 # Restore requested-taxon vouchers that exist in the canonical SQLite vouchers table but are missing
 # from the curated_vouchers.csv snapshot (taxon-restricted harvests UPSERT into SQLite but are never
 # promoted to data/tables/curated_vouchers.csv, so --skip-harvest runs would otherwise silently drop them).
-if requested_taxa and os.environ.get('PACKERA_DEMO_MODE') != '1' and seed_data == root_data:
+if requested_taxa and os.environ.get('PLANTMATICS_DEMO_MODE') != '1' and os.environ.get('PACKERA_DEMO_MODE') != '1' and seed_data == root_data:
     from scripts.core.db import get_db_connection as _get_db_conn_sync, reconcile_curated_vouchers_csv_with_db
     sync_db_path = os.environ.get('PLANTMATICS_DB_PATH') or os.environ.get('PACKERA_DB_PATH') or str(root_data / 'plantmatics.sqlite')
     if Path(sync_db_path).is_file():
@@ -1101,7 +1108,7 @@ if exclude_misidentified:
         tokens = ['ALL']
 
     db_run_count = 0
-    if os.environ.get('PACKERA_DEMO_MODE') != '1':
+    if os.environ.get('PLANTMATICS_DEMO_MODE') != '1' and os.environ.get('PACKERA_DEMO_MODE') != '1':
         try:
             conn_mis = get_db_connection(db_path=target_db_path, init_schema=True, workspace_root=root_data.parent)
             try:
@@ -1223,7 +1230,7 @@ if usda_filter_arg == 'true' and (reuse_canonical or start_step_val >= 2):
     from scripts.core.db import load_taxon_synonyms
     from scripts.core.usda_plants_ranges import filter_vouchers_by_usda_county_range
     syn_map_pf = {}
-    if os.environ.get('PACKERA_DEMO_MODE') != '1' and Path(target_db_path).is_file():
+    if os.environ.get('PLANTMATICS_DEMO_MODE') != '1' and os.environ.get('PACKERA_DEMO_MODE') != '1' and Path(target_db_path).is_file():
         try:
             conn_syn = get_db_connection(db_path=target_db_path, read_only=True, workspace_root=root_data.parent)
             try:
@@ -1239,9 +1246,9 @@ if usda_filter_arg == 'true' and (reuse_canonical or start_step_val >= 2):
         synonym_to_canonical=syn_map_pf,
         county_buffer_km=usda_buffer_arg,
         exempt_gold=usda_exempt_gold_arg,
-        db_path=target_db_path if os.environ.get('PACKERA_DEMO_MODE') != '1' else None,
+        db_path=target_db_path if os.environ.get('PLANTMATICS_DEMO_MODE') != '1' and os.environ.get('PACKERA_DEMO_MODE') != '1' else None,
         workspace_dir=root_data.parent,
-        allow_network=(os.environ.get('PACKERA_DEMO_MODE') != '1'),
+        allow_network=(os.environ.get('PLANTMATICS_DEMO_MODE') != '1' and os.environ.get('PACKERA_DEMO_MODE') != '1'),
     )
     df = df_usda.drop(columns=[c for c in ('usda_symbol', 'usda_county_status') if c in df_usda.columns])
     print(
@@ -1423,7 +1430,7 @@ if has_subset_filter:
                 print(f'  Filtered {tbl_name}: {len(tdf_sub)} / {len(tdf)} rows')
 
 # Register pipeline_runs and populate run_active_cohort in SQLite (skipping canonical DB under --demo)
-if os.environ.get('PACKERA_DEMO_MODE') != '1':
+if os.environ.get('PLANTMATICS_DEMO_MODE') != '1' and os.environ.get('PACKERA_DEMO_MODE') != '1':
     run_id_val = resolve_canonical_run_id(
         run_dir=run_dir,
         explicit_run_id=os.environ.get('RUN_ID') or None,
@@ -1813,7 +1820,7 @@ write_run_metadata(
     end_time='${END_TIME}',
     cli_args=sys.argv[1:],
 )
-if os.environ.get('PACKERA_DEMO_MODE') != '1':
+if os.environ.get('PLANTMATICS_DEMO_MODE') != '1' and os.environ.get('PACKERA_DEMO_MODE') != '1':
     conn = get_db_connection(init_schema=True, workspace_root=Path('${PROJECT_ROOT}').resolve())
     try:
         ensure_pipeline_run(

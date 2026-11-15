@@ -20,8 +20,6 @@ Description:
 ===============================================================================
 """
 
-import shutil
-import subprocess
 import tempfile
 import unittest
 
@@ -512,7 +510,6 @@ class TestFourierExtractor(unittest.TestCase):
     def test_dynamic_sqlite_synonym_resolution_and_tier_b_cohort_hygiene(self):
         """Verify dynamic SQLite taxon_synonyms lookup in R and Tier B orphan/synonym refresh in populate_run_active_cohort."""
         import os
-        import sqlite3
         import sys
         if str(PROJECT_ROOT) not in sys.path:
             sys.path.insert(0, str(PROJECT_ROOT))

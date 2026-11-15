@@ -5,7 +5,7 @@ description: Enforces LeafMachine3 computer vision and morphometric guardrails, 
 
 # Pipeline Contract Audit and CV Guardrails (`UNC-BOT-SOP-2026-04-REV5`)
 
-Use this skill before committing code changes, after modifying pipeline stages (`01` through `06`), or when diagnosing missing-column, coordinate unscaling, or join-key discrepancies across Python and R scripts.
+Use this skill before committing code changes, after modifying pipeline stages (`01` through `07`), or when diagnosing missing-column, coordinate unscaling, or join-key discrepancies across Python and R scripts.
 
 
 
@@ -111,7 +111,7 @@ s03 = Path("scripts/morphometrics/03_fourier_extractor.R").read_text() + Path("s
 s04 = Path("scripts/morphometrics/04_gmm_morphotools.R").read_text()
 s_auth = Path("scripts/morphometrics/authority_weighting_utils.R").read_text()
 s05 = Path("scripts/analysis/05_multimodal_spatial_rf.R").read_text() + Path("scripts/analysis/edaphic_fine_grain_utils.R").read_text() + Path("scripts/analysis/step05_phenology_ecotypes.R").read_text()
-s06 = Path("scripts/analysis/06_genomic_phylogenomics.R").read_text()
+s06 = Path("scripts/analysis/06_genomic_phylogenomics.R").read_text() + Path("scripts/analysis/step06_public_backbone.R").read_text() + Path("scripts/analysis/step06_reticulation_coancestry.R").read_text() + Path("scripts/analysis/step06_coalescent_delimitation.py").read_text() + Path("scripts/data_prep/06_ingest_genetic_data.py").read_text()
 s07 = Path("scripts/analysis/07_triage_dashboard_synthesis.R").read_text()
 s_comp = Path("scripts/analysis/taxon_complex_discovery_utils.R").read_text()
 
@@ -135,10 +135,11 @@ checks = [
     ("05 pools Spatial Block-CV RF posteriors and computes edaphic_z_score", "spatial_block_cv_acc" in s05 and "edaphic_z_score" in s05),
     ("05 derives locus classicus reference set & type_edaphic_z_score", "compute_type_locality_ecological_control" in s05 and "type_edaphic_z_score" in s05),
     ("05 enforces authority weight resolution & passive Bronze projection", "Passive_Projection_Bronze" in s05 and "authority_weight" in s05),
-    ("06 validates contracts & coalesces non-georeferenced vouchers", "validate_upstream_contracts" in s06 and "taxonomic_treatment_broad" in s06 and "is_completed_voucher" in s06),
-    ("06 enforces cross-modal precision weighting", "Confirmed_Type_Control" in s06 and ("prec_morph" in s06 or "lookup_prec" in s06)),
-    ("06 enforces type control Rules A, B, and C", "Confirmed_Type_Control" in s06 and "Type_Synonymy_Candidate" in s06 and "is_sensu_stricto_locked_i" in s06),
-    ("06 complex discovery enforces type-anchored complex delimitation", "select_taxon_anchors" in s07 and "is_type_spec" in s07 and "gamma_k" in s07),
+    ("06 executes shrinkage DAPC/admixture, public backbone, and coalescent delimitation", ".fit_shrinkage_dapc" in s06 and ".solve_admixture_simplex" in s06 and "public_backbone_clade" in s06 and "gdi" in s06.lower()),
+    ("07 validates contracts & coalesces non-georeferenced vouchers", "validate_upstream_contracts" in s07 and "taxonomic_treatment_broad" in s07 and "is_completed_voucher" in s07),
+    ("07 enforces cross-modal precision weighting", "Confirmed_Type_Control" in s07 and ("prec_morph" in s07 or "lookup_prec" in s07)),
+    ("07 enforces type control Rules A, B, and C", "Confirmed_Type_Control" in s07 and "Type_Synonymy_Candidate" in s07 and "is_sensu_stricto_locked_i" in s07),
+    ("07 complex discovery enforces type-anchored complex delimitation", "select_taxon_anchors" in s_comp and "is_type_spec" in s_comp and "gamma_k" in s_comp),
 ]
 
 failed = False
@@ -165,7 +166,7 @@ import re, sys
 from pathlib import Path
 banned = [
     "clean" + "lab", "dino" + "v2", "vision_" + "xai", "05_clean" + "lab", "06_multimodal_" + "spatial",
-    "07_tri" + "age", "07_dis" + "cover", "08_dis" + "cover", "step07_" + "pub", "fig" + "08", "target_" + "species",
+    "08_dis" + "cover", "fig" + "08",
     "hard" + "coded", "operational" + "iz", "lever" + "ag", "util" + "iz", "holis" + "tic",
     "multi" + "faceted", "para" + "digm",
 ]
@@ -178,9 +179,9 @@ for p in [Path("README.md"), Path("docs/TAXONOMIC_SOP.md"), Path("AGENTS.md")]:
 if violations:
     print("[FAIL] Banned tokens found:\n" + "\n".join(violations))
     sys.exit(1)
-print("PASS: Docs clean and renumbered to Steps 01 to 06")
+print("PASS: Docs clean and renumbered to Steps 01 to 07")
 '
 
 .venv/bin/python scripts/tests/run_audit.py
-.venv/bin/python scripts/tests/run_audit.py --fast -q
+.venv/bin/python scripts/tests/run_audit.py --fast
 ```

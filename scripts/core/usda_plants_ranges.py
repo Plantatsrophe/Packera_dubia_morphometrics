@@ -34,7 +34,6 @@ import re
 import shutil
 import sqlite3
 import subprocess
-import tempfile
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple, Union
 import urllib.error
 import urllib.parse
@@ -56,6 +55,7 @@ except ImportError:
     Point = shape = nearest_points = unary_union = STRtree = None  # type: ignore[assignment]
 
 from scripts.core.config import resolve_target_genus
+from scripts.core.io_utils import atomic_write_text
 from scripts.core.db import (
     get_db_connection,
     is_canonical_or_explicit_db_context,
@@ -180,30 +180,6 @@ def _extract_clean_binomial(raw_name: Any) -> Tuple[Optional[str], bool]:
         return None, False
     is_infraspecific = bool(re.search(r"\b(?:var|subsp|ssp|f)\.?\s+[a-z-]{2,}", txt.lower()))
     return f"{genus} {epithet}", is_infraspecific
-
-
-def _atomic_write_text(target_path: Path, text: str) -> None:
-    """Atomically write UTF-8 text via a sibling temporary file + fsync + replace."""
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(
-        dir=str(target_path.parent),
-        prefix=f".{target_path.stem}_",
-        suffix=f"{target_path.suffix}.tmp",
-    )
-    tmp_path = Path(tmp_name)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
-            fh.write(text)
-            fh.flush()
-            os.fsync(fh.fileno())
-        tmp_path.replace(target_path)
-    except Exception:
-        if tmp_path.exists():
-            try:
-                tmp_path.unlink()
-            except OSError:
-                pass
-        raise
 
 
 def _http_get_text(url: str, timeout: float = 12.0) -> Optional[str]:
@@ -332,7 +308,7 @@ def load_or_fetch_plantlst_index(
         fetched = _http_get_text(USDA_PLANTLST_URL, timeout=timeout)
         if fetched and "Symbol" in fetched[:256]:
             try:
-                _atomic_write_text(plantlst_path, fetched)
+                atomic_write_text(plantlst_path, fetched)
             except Exception as exc:
                 if logger:
                     logger.debug(f"Could not cache plantlst.txt at {plantlst_path}: {exc}")
@@ -929,7 +905,8 @@ def fetch_or_load_usda_taxon_range(
 
     # 1. Check SQLite cache first unless force_refresh=True
     use_sqlite = db_path is not None or (
-        os.environ.get("PACKERA_DEMO_MODE") != "1"
+        os.environ.get("PLANTMATICS_DEMO_MODE") != "1"
+        and os.environ.get("PACKERA_DEMO_MODE") != "1"
         and is_canonical_or_explicit_db_context(eff_cache_dir, workspace_root=workspace_dir)
     )
     resolved_db: Optional[Union[str, Path]] = None
@@ -1018,7 +995,7 @@ def fetch_or_load_usda_taxon_range(
             csv_text = _fetch_usda_symbol_distribution_csv(sym, timeout=15.0)
             if csv_text:
                 try:
-                    _atomic_write_text(sym_csv_path, csv_text)
+                    atomic_write_text(sym_csv_path, csv_text)
                 except Exception as exc:
                     if logger:
                         logger.debug(f"Could not write cached USDA CSV {sym_csv_path}: {exc}")

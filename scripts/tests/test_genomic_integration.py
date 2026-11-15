@@ -44,8 +44,6 @@ import subprocess
 import sys
 import tempfile
 import unittest
-import urllib.error
-import urllib.parse
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -1442,7 +1440,7 @@ cat("BATCHED_PHASE2_R_OK\\n")
     def test_step06_public_backbone_outgroup_and_sqlite_columns(self) -> None:
         """(d) Verify Step 06 prevents focal tree shadowing, uses public backbone outgroup polarization, and persists 6 SQLite cols."""
         if not rscript_available():
-            self.skipTest("Rscript unavailable or PACKERA_FAST_AUDIT=1")
+            self.skipTest("Rscript unavailable or PLANTMATICS_FAST_AUDIT=1")
 
         def _seq(seed_int: int, length: int = 120) -> str:
             rng = np.random.default_rng(seed_int)

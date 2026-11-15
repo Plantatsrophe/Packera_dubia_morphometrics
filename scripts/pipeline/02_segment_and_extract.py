@@ -46,17 +46,13 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
-import json
 import logging
 import math
 import os
-import re
 import shutil
 import sys
 import tempfile
-import threading
 from collections import defaultdict
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 
@@ -91,9 +87,6 @@ from scripts.vision.lm3_data_loader import (
     RulerCalibrationMap,
     compute_area_mm2,
     DEFAULT_HERBARIUM_DPI,
-    DEFAULT_PX_PER_CM,
-    LM3_LEAF_CLASS_IDS,
-    LM3_PLANT_CLASSES,
     LM3_REPRODUCTIVE_CLASS_IDS,
     load_ruler_calibrations,
     normalize_pixels_per_mm,
@@ -118,10 +111,7 @@ from scripts.vision.lm3_compat import (
     _components,
     _largest_component,
     _outer_polygons,
-    compute_orientation,
-    ect_product_for,
     polygon_mask,
-    render_leaf_products,
 )
 
 logging.basicConfig(
@@ -594,7 +584,10 @@ class SegmentAndExtractPipeline:
         )
         _has_explicit_gpu_bs = (
             gpu_batch_size is not None
-            or bool(os.environ.get("PACKERA_GPU_BATCH_SIZE", "").strip())
+            or bool(
+                os.environ.get("PLANTMATICS_GPU_BATCH_SIZE", "").strip()
+                or os.environ.get("PACKERA_GPU_BATCH_SIZE", "").strip()
+            )
             or self.config.compute.gpu_batch_size is not None
         )
         self.force = force
@@ -811,7 +804,10 @@ class SegmentAndExtractPipeline:
         self.voucher_petiole_by_pid: Dict[str, Dict[int, Dict[str, Any]]] = {}
         self.voucher_contour_coords_by_leaf: Dict[str, Dict[int, List[List[float]]]] = {}
         self.stage2_batch_size: int = max(1, int(self.gpu_batch_size))
-        env_wave_size = os.environ.get("PACKERA_WAVE_SIZE", "").strip()
+        env_wave_size = (
+            os.environ.get("PLANTMATICS_WAVE_SIZE", "").strip()
+            or os.environ.get("PACKERA_WAVE_SIZE", "").strip()
+        )
         if wave_size is not None:
             self.stage1_wave_size: int = max(1, int(wave_size))
         elif env_wave_size:
@@ -821,9 +817,18 @@ class SegmentAndExtractPipeline:
         else:
             self.stage1_wave_size = 16
 
-        env_prefetch_w = os.environ.get("PACKERA_PREFETCH_WORKERS", "").strip()
-        env_prep_w = os.environ.get("PACKERA_PREP_WORKERS", "").strip()
-        env_post_w = os.environ.get("PACKERA_POST_WORKERS", "").strip()
+        env_prefetch_w = (
+            os.environ.get("PLANTMATICS_PREFETCH_WORKERS", "").strip()
+            or os.environ.get("PACKERA_PREFETCH_WORKERS", "").strip()
+        )
+        env_prep_w = (
+            os.environ.get("PLANTMATICS_PREP_WORKERS", "").strip()
+            or os.environ.get("PACKERA_PREP_WORKERS", "").strip()
+        )
+        env_post_w = (
+            os.environ.get("PLANTMATICS_POST_WORKERS", "").strip()
+            or os.environ.get("PACKERA_POST_WORKERS", "").strip()
+        )
         self.prefetch_workers_override: Optional[int] = (
             max(1, int(prefetch_workers))
             if prefetch_workers is not None
@@ -928,6 +933,7 @@ class SegmentAndExtractPipeline:
         roots = [self.output_dir]
         if (
             self.force
+            and os.environ.get("PLANTMATICS_DEMO_MODE") != "1"
             and os.environ.get("PACKERA_DEMO_MODE") != "1"
             and is_canonical_or_explicit_db_context(self.output_dir)
         ):
@@ -3609,12 +3615,6 @@ class SegmentAndExtractPipeline:
 Step02SegmentAndExtract = SegmentAndExtractPipeline
 
 from scripts.vision.step02_figures import (
-    _atomic_save_matplotlib_fig,
-    _discover_downstream_table,
-    _is_valid_smooth_closed_mask,
-    _parse_bool_val,
-    _resolve_asset_path,
-    _standardize_packera_species_py,
     generate_step02_publication_figures,
     regenerate_step02_figures_from_tables,
 )

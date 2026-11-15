@@ -24,7 +24,6 @@ Description:
 from __future__ import annotations
 
 import argparse
-import os
 import shutil
 import sqlite3
 import sys
@@ -32,6 +31,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import pandas as pd
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from scripts.core.io_utils import atomic_write_text
 
 
 def _resolve_project_root(explicit_root: Optional[str] = None) -> Path:
@@ -42,16 +47,6 @@ def _resolve_project_root(explicit_root: Optional[str] = None) -> Path:
         if (cand / "scripts" / "core" / "config.py").is_file():
             return cand
     return Path.cwd().resolve()
-
-
-def _write_csv_atomic(df: pd.DataFrame, target: Path) -> None:
-    target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_suffix(target.suffix + ".tmp")
-    with open(tmp, "w", encoding="utf-8", newline="") as fh:
-        df.to_csv(fh, index=False)
-        fh.flush()
-        os.fsync(fh.fileno())
-    tmp.replace(target)
 
 
 def _rebuild_step02_csvs_from_sqlite_if_missing(
@@ -82,7 +77,7 @@ def _rebuild_step02_csvs_from_sqlite_if_missing(
                 el_df = el_df[el_df["catalogNumber"].astype(str).str.strip().isin(keep_cats)].copy()
             if "contour_xy_json" in el_df.columns:
                 el_df = el_df.drop(columns=["contour_xy_json"])
-            _write_csv_atomic(el_df, leaf_csv)
+            atomic_write_text(leaf_csv, el_df.to_csv(index=False))
             rebuilt["extracted_leaf_manifest.csv"] = len(el_df)
 
     repro_csv = tables_dir / "voucher_reproductive_metrics.csv"
@@ -94,10 +89,10 @@ def _rebuild_step02_csvs_from_sqlite_if_missing(
             if "catalogNumber" in rp_df.columns:
                 rp_df = rp_df[rp_df["catalogNumber"].astype(str).str.strip().isin(keep_cats)].copy()
             if not repro_csv.is_file():
-                _write_csv_atomic(rp_df, repro_csv)
+                atomic_write_text(repro_csv, rp_df.to_csv(index=False))
                 rebuilt["voucher_reproductive_metrics.csv"] = len(rp_df)
             if not pheno_csv.is_file():
-                _write_csv_atomic(rp_df, pheno_csv)
+                atomic_write_text(pheno_csv, rp_df.to_csv(index=False))
                 rebuilt["voucher_phenological_states.csv"] = len(rp_df)
     return rebuilt
 
@@ -352,14 +347,14 @@ def prune_workspace_cohort(
             before_n = len(cdf)
             cdf_kept = cdf[cdf["catalogNumber"].astype(str).str.strip().isin(keep_cats)].copy()
             if len(cdf_kept) != before_n:
-                _write_csv_atomic(cdf_kept, cpath)
+                atomic_write_text(cpath, cdf_kept.to_csv(index=False))
                 rel_key = str(cpath.relative_to(workspace_root))
                 csv_updated_counts[rel_key] = (before_n, len(cdf_kept))
 
     # If canonical curated_vouchers.csv was absent, materialize it from retained SQLite vouchers
     if not curated_csv.is_file() and not v_df.empty:
         kept_v_df = v_df.loc[keep_mask].copy()
-        _write_csv_atomic(kept_v_df, curated_csv)
+        atomic_write_text(curated_csv, kept_v_df.to_csv(index=False))
         csv_updated_counts["data/tables/curated_vouchers.csv"] = (len(v_df), len(kept_v_df))
 
     if quarantine_raw and dropped_raw_paths:

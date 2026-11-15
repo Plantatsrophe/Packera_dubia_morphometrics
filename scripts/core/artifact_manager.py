@@ -57,7 +57,7 @@ def download_file_with_progress(
 
     req = urllib.request.Request(
         url,
-        headers={"User-Agent": "PackeraDubiaPipeline/1.0"},
+        headers={"User-Agent": "PlantmaticsPipeline/1.0"},
     )
 
     logger.info(f"Connecting to download source: {url}")

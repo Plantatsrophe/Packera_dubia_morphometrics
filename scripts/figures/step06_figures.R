@@ -210,7 +210,8 @@
 }
 
 render_fig06a_genomic_pcoa_tree_png <- function(out_png, pass_df, assign_df, q_mat, pco_eig_pct, tr, concordance_df, db_path, run_id) {
-  if (identical(Sys.getenv("PACKERA_SKIP_FIGURES", unset = ""), "1")) return(invisible(""))
+  if (identical(Sys.getenv("PLANTMATICS_SKIP_FIGURES", unset = ""), "1") ||
+      identical(Sys.getenv("PACKERA_SKIP_FIGURES", unset = ""), "1")) return(invisible(""))
   if (!requireNamespace("ggplot2", quietly = TRUE) || !requireNamespace("patchwork", quietly = TRUE)) return(invisible(""))
 
   plot_df <- dplyr::left_join(pass_df, assign_df[, setdiff(names(assign_df), c("catalogNumber", "population_id")), drop = FALSE], by = "genetic_sample_id")
@@ -273,7 +274,8 @@ render_fig06a_genomic_pcoa_tree_png <- function(out_png, pass_df, assign_df, q_m
 }
 
 render_fig06b_reticulation_gdi_png <- function(out_png, tri_df, fbranch_df, gdi_df, feems_edges_df, mmrr_summary_df, organellar_placement_df = NULL) {
-  if (identical(Sys.getenv("PACKERA_SKIP_FIGURES", unset = ""), "1")) return(invisible(""))
+  if (identical(Sys.getenv("PLANTMATICS_SKIP_FIGURES", unset = ""), "1") ||
+      identical(Sys.getenv("PACKERA_SKIP_FIGURES", unset = ""), "1")) return(invisible(""))
   if (!requireNamespace("ggplot2", quietly = TRUE) || !requireNamespace("patchwork", quietly = TRUE)) return(invisible(""))
 
   tri_bound <- data.frame(h = c(0.0, 0.5, 1.0, 0.0), q12 = c(0.0, 1.0, 0.0, 0.0))

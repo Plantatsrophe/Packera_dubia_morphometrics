@@ -31,7 +31,6 @@ import os
 from pathlib import Path
 import shutil
 import sqlite3
-import subprocess
 import sys
 import tempfile
 from typing import Any, Dict, List, Tuple
@@ -39,8 +38,6 @@ import unittest
 from unittest import mock
 
 from scripts.tests._r_session import rscript_available, run_warm_r_cmd
-
-import numpy as np
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -1172,7 +1169,7 @@ class TestSQLPipelineHandshake(unittest.TestCase):
             finally:
                 conn_a.close()
 
-            # Case B: purge_segments_and_runs drops & recreates clean Step 02-06 schema
+            # Case B: purge_segments_and_runs drops & recreates clean Step 02-07 schema
             ws_b = Path(tmp) / "purge_ws"
             (ws_b / "data" / "tables").mkdir(parents=True, exist_ok=True)
             (ws_b / "data" / "tables" / "curated_vouchers.csv").write_text("catalogNumber\nWILLI_82182\n", encoding="utf-8")

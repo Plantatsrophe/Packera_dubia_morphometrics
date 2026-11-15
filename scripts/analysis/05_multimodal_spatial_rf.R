@@ -36,11 +36,17 @@ suppressPackageStartupMessages({
   if (requireNamespace("optparse", quietly = TRUE)) library(optparse)
 })
 
-for (.pf_p in c("scripts/morphometrics/pub_figures_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "..", "morphometrics", "pub_figures_utils.R"))) {
-  if (!exists("atomic_save_dual_plot", mode = "function") && !is.na(.pf_p) && nzchar(.pf_p) && file.exists(.pf_p)) { source(.pf_p); break }
+if (grDevices::dev.cur() == 1L) {
+  grDevices::pdf(NULL)
 }
-if (!exists("compute_authority_precision_weights", mode = "function") && file.exists("scripts/morphometrics/authority_weighting_utils.R")) {
-  try(source("scripts/morphometrics/authority_weighting_utils.R"), silent = TRUE)
+
+for (.pf_p in c("scripts/morphometrics/pub_figures_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "..", "morphometrics", "pub_figures_utils.R"))) {
+  if ((!exists("get_dynamic_packera_palette", mode = "function") || !exists("standardize_packera_taxon", mode = "function") || !exists("format_predictor_labels", mode = "function")) && !is.na(.pf_p) && nzchar(.pf_p) && file.exists(.pf_p)) { source(.pf_p); break }
+}
+for (.aw_p in c("scripts/morphometrics/authority_weighting_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "..", "morphometrics", "authority_weighting_utils.R"))) {
+  if ((!exists("compute_authority_precision_weights", mode = "function") || !exists("resolve_ecological_authority_weights", mode = "function")) && !is.na(.aw_p) && nzchar(.aw_p) && file.exists(.aw_p)) {
+    source(.aw_p); break
+  }
 }
 if (!exists("extract_fine_grain_edaphic_metrics", mode = "function") && file.exists("scripts/analysis/edaphic_fine_grain_utils.R")) {
   source("scripts/analysis/edaphic_fine_grain_utils.R")
@@ -55,20 +61,6 @@ if (!exists("extract_fine_grain_edaphic_metrics", mode = "function") && file.exi
 
 for (.db_p in c("scripts/core/db_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "..", "core", "db_utils.R"))) {
   if (!exists("persist_step05_to_sqlite", mode = "function") && !is.na(.db_p) && nzchar(.db_p) && file.exists(.db_p)) { source(.db_p); break }
-}
-
-OKABE_ITO_FALLBACK_HEX <- c("#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00", "#56B4E9", "#F0E442", "#332288", "#88CCEE", "#44AA99")
-
-resolve_dynamic_group_palette <- function(groups_vec) {
-  u_grp <- unique(as.character(stats::na.omit(groups_vec)))
-  u_grp <- u_grp[nzchar(u_grp)]
-  if (length(u_grp) == 0L) return(character(0))
-  if (exists("get_dynamic_packera_palette", mode = "function")) {
-    pal <- get_dynamic_packera_palette(u_grp)
-    miss <- setdiff(u_grp, names(pal))
-    if (length(miss) == 0L && !any(is.na(pal[u_grp]))) return(pal)
-  }
-  stats::setNames(rep_len(OKABE_ITO_FALLBACK_HEX, length(u_grp)), u_grp)
 }
 
 WC_BIO_LOOKUP <- c(
@@ -93,132 +85,11 @@ WC_BIO_LOOKUP <- c(
   "19" = "bio19_precip_coldest_qtr"
 )
 
-STEP05_PREDICTOR_LABEL_DICT <- c(
-  "fine_soil_ph"                     = "Rhizosphere Soil pH in H2O (0-15cm)",
-  "ilr_texture_1"                    = "Soil Texture ILR-1: Sand vs Silt-Clay (0-15cm)",
-  "ilr_texture_2"                    = "Soil Texture ILR-2: Silt vs Clay (0-15cm)",
-  "fine_soil_sand"                   = "Soil Sand Fraction (%, 0-15cm)",
-  "fine_soil_clay"                   = "Soil Clay Fraction (%, 0-15cm)",
-  "fine_soil_cec"                    = "Rhizosphere Soil CEC (cmol+/kg, 0-15cm)",
-  "fine_cfvo_pct"                    = "Coarse Fragment Volume (%, 0-15cm)",
-  "fine_bedrock_depth_cm"            = "Depth to Lithic Bedrock (cm)",
-  "is_azonal_lithology"              = "USGS SGMC Azonal Lithology Indicator",
-  "ssurgo_rock_outcrop_pct"          = "SSURGO Rock Outcrop Component (%)",
-  "ssurgo_bedrock_depth_cm"          = "SSURGO Lithic Bedrock Depth (cm)",
-  "ssurgo_aws_0_50cm"                = "Available Water Storage 0-50cm (cm)",
-  "topo_slope_deg"                   = "30m Terrain Slope (deg)",
-  "topo_tpi_30m"                     = "30m Topographic Position Index (TPI, m)",
-  "topo_hli_30m"                     = "30m Heat Load Index (HLI, McCune & Keon 2002)",
-  "topo_twi_30m"                     = "30m D8 Topographic Wetness Index (TWI)",
-  "soil_ph"                          = "SoilGrids 250m Soil pH (H2O)",
-  "soil_sand"                        = "SoilGrids 250m Sand Fraction (%)",
-  "soil_clay"                        = "SoilGrids 250m Clay Fraction (%)",
-  "soil_silt"                        = "SoilGrids 250m Silt Fraction (%)",
-  "soil_cec"                         = "SoilGrids 250m Cation Exchange (cmol+/kg)",
-  "soil_cfvo"                        = "SoilGrids 250m Coarse Fragments (%)",
-  "soil_bulk_density"                = "SoilGrids 250m Bulk Density (g/cm3)",
-  "bio1_temp_mean"                   = "Mean Annual Temp (BIO1, deg C)",
-  "bio2_mean_diurnal_range"          = "Mean Diurnal Temp Range (BIO2, deg C)",
-  "bio3_isothermality"               = "Isothermality (BIO3, BIO2/BIO7 x 100)",
-  "bio4_temp_seasonality"            = "Temp Seasonality (BIO4, SD x 100)",
-  "bio5_max_temp_warmest_month"      = "Max Temp Warmest Month (BIO5, deg C)",
-  "bio6_min_temp_coldest_month"      = "Min Temp Coldest Month (BIO6, deg C)",
-  "bio7_temp_annual_range"           = "Temp Annual Range (BIO7, deg C)",
-  "bio8_mean_temp_wettest_qtr"       = "Mean Temp Wettest Quarter (BIO8, deg C)",
-  "bio9_mean_temp_driest_qtr"        = "Mean Temp Driest Quarter (BIO9, deg C)",
-  "bio10_mean_temp_warmest_qtr"      = "Mean Temp Warmest Quarter (BIO10, deg C)",
-  "bio11_mean_temp_coldest_qtr"      = "Mean Temp Coldest Quarter (BIO11, deg C)",
-  "bio12_precip_annual"              = "Annual Precipitation (BIO12, mm)",
-  "bio13_precip_wettest_month"       = "Wettest-Month Precip (BIO13, mm)",
-  "bio14_precip_driest_month"        = "Driest-Month Precip (BIO14, mm)",
-  "bio15_precip_seasonality"         = "Precipitation Seasonality (BIO15, CV)",
-  "bio16_precip_wettest_qtr"         = "Wettest-Quarter Precip (BIO16, mm)",
-  "bio17_precip_driest_qtr"          = "Driest-Quarter Precip (BIO17, mm)",
-  "bio18_precip_warmest_qtr"         = "Warmest-Quarter Precip (BIO18, mm)",
-  "bio19_precip_coldest_qtr"         = "Coldest-Quarter Precip (BIO19, mm)",
-  "lithic_outcrop_index"             = "Lithic Outcrop Exposure Index (0-100)",
-  "summer_moisture_deficit_idx"      = "Summer Moisture Deficit Index",
-  "maritime_continentality_idx"      = "Maritime Continentality Index",
-  "min_bedrock_depth_buffer_cm"      = "Min Buffered Bedrock Depth (cm)",
-  "ph_q10_buffer"                    = "Buffered Soil pH 10th Pct",
-  "ph_q90_buffer"                    = "Buffered Soil pH 90th Pct",
-  "max_cfvo_buffer_pct"              = "Max Buffered Coarse Fragments (%)",
-  "azonal_lithology_presence_buffer" = "Buffered Azonal Lithology Presence",
-  "fine_soil_soc"                    = "Soil Organic Carbon (g/kg, 0-15cm)",
-  "topo_elev_m"                      = "30m Elevation (m a.s.l.)",
-  "delta_doy"                        = "Hopkins Phenological Anomaly (Delta DOY)",
-  "soil_ca_mg_molar_ratio"           = "Soil Ca:Mg Molar Ratio",
-  "soil_ultramafic_ni_cr_index"      = "Soil Ultramafic Ni-Cr Index",
-  "soil_carbonate_c_pct"             = "Soil Carbonate Carbon (%)",
-  "nwi_wetland_dist_m"               = "NWI Wetland Distance (m)",
-  "ultramafic_calcareous_gradient"   = "Ultramafic-Calcareous Geochem Gradient",
-  "wetland_seepage_index"            = "Wetland & Hydrologic Seepage Index"
-)
-
-.upstream_format_predictor_labels <- if (exists("format_predictor_labels", mode = "function")) format_predictor_labels else NULL
-format_step05_predictor_labels <- function(var_names) {
-  vapply(as.character(var_names), function(nm) {
-    if (is.na(nm) || !nzchar(nm)) return("")
-    if (nm %in% names(STEP05_PREDICTOR_LABEL_DICT)) return(STEP05_PREDICTOR_LABEL_DICT[[nm]])
-    if (grepl("^MEM[0-9]+$", nm)) return(sub("^MEM", "Spatial Eigenvector MEM-", nm))
-    if (!is.null(.upstream_format_predictor_labels)) return(.upstream_format_predictor_labels(nm)[1])
-    gsub("_", " ", nm)
-  }, character(1), USE.NAMES = FALSE)
-}
-format_predictor_labels <- format_step05_predictor_labels
-
-if (!exists("resolve_ecological_authority_weights", mode = "function")) {
-  resolve_ecological_authority_weights <- function(df, allow_bronze_prior = FALSE) {
-    n <- nrow(df)
-    if (n == 0L) return(numeric(0))
-    if (file.exists("scripts/morphometrics/authority_weighting_utils.R") &&
-        !exists("compute_empirical_bayes_authority_weights", mode = "function")) {
-      try(source("scripts/morphometrics/authority_weighting_utils.R"), silent = TRUE)
-    }
-    ti_vec <- if (exists(".identify_type_specimen_vec", mode = "function")) {
-      .identify_type_specimen_vec(df)
-    } else {
-      is_t_fb <- if ("is_type_specimen" %in% names(df)) (!is.na(df$is_type_specimen) & as.logical(df$is_type_specimen)) else rep(FALSE, n)
-      list(type_rank = ifelse(is_t_fb, 2L, 0L), is_type_specimen = is_t_fb)
-    }
-    if (exists("compute_empirical_bayes_authority_weights", mode = "function")) {
-      eb_w <- tryCatch(
-        compute_empirical_bayes_authority_weights(
-          df,
-          mode = if (isTRUE(allow_bronze_prior)) "continuous_prior_posterior" else "active_passive",
-          target_modality = "ecological"
-        ),
-        error = function(e) NULL
-      )
-      if (!is.null(eb_w) && length(eb_w) == n) {
-        if (!isTRUE(allow_bronze_prior) && "is_confident_label_noise" %in% names(df)) {
-          cl_n <- as.logical(df$is_confident_label_noise); cl_n[is.na(cl_n)] <- FALSE
-          eb_w[cl_n & !ti_vec$is_type_specimen] <- 0.0
-        }
-        return(round(eb_w, 4))
-      }
-    }
-    tier_raw <- if ("determiner_tier" %in% names(df)) as.character(df$determiner_tier) else rep("Tier_1_Gold", n)
-    tier_raw[is.na(tier_raw) | !nzchar(tier_raw)] <- "Tier_3_Bronze"
-    is_pr <- rep(FALSE, n)
-    if ("is_promoted_bronze" %in% names(df)) { p1 <- as.logical(df$is_promoted_bronze); p1[is.na(p1)] <- FALSE; is_pr <- is_pr | p1 }
-    w_fb <- ifelse(ti_vec$is_type_specimen, 1.0,
-            ifelse(grepl("Tier_1|Gold", tier_raw, ignore.case = TRUE), 0.95,
-            ifelse(grepl("Tier_2|Silver", tier_raw, ignore.case = TRUE), 0.72,
-            ifelse(is_pr, 0.55, if (isTRUE(allow_bronze_prior)) 0.35 else 0.0))))
-    if (!isTRUE(allow_bronze_prior) && "is_confident_label_noise" %in% names(df)) {
-      cl_n <- as.logical(df$is_confident_label_noise); cl_n[is.na(cl_n)] <- FALSE
-      w_fb[cl_n & !ti_vec$is_type_specimen] <- 0.0
-    }
-    round(w_fb, 4)
-  }
-}
-
 # ------------------------------------------------------------------------------
 # 1. CLI Argument Parsing & Taxonomic Standardization
 # ------------------------------------------------------------------------------
 parse_args_robust <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
-  run_dir <- Sys.getenv("PACKERA_RUN_DIR", unset = "")
+  run_dir <- trimws(env_plantmatics_or_packera("PLANTMATICS_RUN_DIR", "PACKERA_RUN_DIR"))
   rp <- function(rel) if (nzchar(run_dir)) file.path(run_dir, rel) else rel
   option_list <- list(
     optparse::make_option(c("-v", "--vouchers"), type = "character",
@@ -329,27 +200,6 @@ parse_args_robust <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
     i <- i + 1L
   }
   opts
-}
-
-.base_std_taxon <- if (exists("standardize_taxon_name", mode = "function")) standardize_taxon_name else NULL
-standardize_packera_taxon <- function(s_vec) {
-  if (!is.null(.base_std_taxon)) {
-    res <- .base_std_taxon(s_vec)
-    return(ifelse(is.na(res), "Unknown", res))
-  }
-  vapply(as.character(s_vec), function(s) {
-    if (is.na(s) || !nzchar(trimws(s))) return("Unknown")
-    sc <- trimws(s)
-    if (tolower(sc) %in% c("none", "nan", "null", "na", "unknown", "unassigned", "unassigned_packera")) return("Unknown")
-    if (grepl("^Morphotype_K[0-9]+$|^Ecotype_|\\[K[0-9]+\\]$", sc, ignore.case = TRUE)) return(sc)
-    sl <- tolower(sc)
-    if (grepl("^(?:packera|p\\.)\\s*(?:(?:cf\\.?|aff\\.?)\\s+)?(?:x\\s+|×\\s*)?[a-z-]+", sl)) {
-      ep <- sub("^(?:packera|p\\.)\\s*(?:(?:cf\\.?|aff\\.?)\\s+)?(?:x\\s+|×\\s*)?([a-z-]+).*$", "\\1", sl)
-      ep <- sub("^[×-]+", "", ep)
-      if (nzchar(ep) && !(ep %in% c("sp", "spp", "cf", "aff", "indet", "unknown", "na"))) return(paste("Packera", ep))
-    }
-    "Unknown"
-  }, character(1), USE.NAMES = FALSE)
 }
 
 get_active_packera_taxa <- function(species_vec) {
@@ -945,7 +795,7 @@ extract_environmental_layers <- function(df, env_dir, demo = FALSE) {
 
   # Automated GeoTIFF Acquisition via geodata when local rasters are absent and --demo is FALSE
   if (!isTRUE(demo) && requireNamespace("geodata", quietly = TRUE) && requireNamespace("terra", quietly = TRUE) &&
-      (is_canonical_prod_path(env_dir) || identical(Sys.getenv("PACKERA_ENABLE_GEODATA_DOWNLOAD"), "TRUE"))) {
+      (is_canonical_prod_path(env_dir) || identical(trimws(env_plantmatics_or_packera("PLANTMATICS_ENABLE_GEODATA_DOWNLOAD", "PACKERA_ENABLE_GEODATA_DOWNLOAD")), "TRUE"))) {
     extracted_geo <- tryCatch({
       message(sprintf("Attempting automated WorldClim v2.1 (30 arc-sec tiles preferred) & SoilGrids 250m (0-5cm & 5-15cm) acquisition via geodata into '%s'...", env_dir))
       dir.create(env_dir, recursive = TRUE, showWarnings = FALSE)
@@ -3796,65 +3646,6 @@ run_warren_niche_identity_tests <- function(
   return(list(summary = summary_table, permutations = perm_table, collinearity_blocks = block_screen))
 }
 
-# ------------------------------------------------------------------------------
-# 6. Multi-Panel Publication Figure & Summary Export
-# ------------------------------------------------------------------------------
-select_top_rf_predictors <- function(imp_df, plot_df) {
-  avail_cols <- names(plot_df)
-  edaph_regex <- "^(fine_|ilr_texture_|ssurgo_|polaris_|solus_|topo_|soil_|sgmc_|is_azonal|ultramafic_calcareous_|wetland_seepage_)"
-
-  default_1 <- if ("fine_soil_sand" %in% avail_cols) "fine_soil_sand" else if ("soil_sand" %in% avail_cols) "soil_sand" else avail_cols[1]
-  default_2 <- if ("fine_soil_ph" %in% avail_cols) "fine_soil_ph" else if ("soil_ph" %in% avail_cols) "soil_ph" else avail_cols[min(2L, length(avail_cols))]
-
-  if (is.null(imp_df) || !is.data.frame(imp_df) || nrow(imp_df) == 0L || !("Predictor" %in% names(imp_df))) {
-    return(list(top_env_1 = default_1, top_env_2 = default_2, top_edaph_1 = default_1))
-  }
-
-  mda <- if ("MeanDecreaseAccuracy" %in% names(imp_df)) {
-    suppressWarnings(as.numeric(imp_df$MeanDecreaseAccuracy))
-  } else if ("Importance" %in% names(imp_df)) {
-    suppressWarnings(as.numeric(imp_df$Importance))
-  } else {
-    rep(0.0, nrow(imp_df))
-  }
-  mda[!is.finite(mda)] <- -Inf
-
-  preds <- as.character(imp_df$Predictor)
-  is_non_mem <- !grepl("^MEM", preds)
-  if ("Group" %in% names(imp_df)) {
-    is_non_mem <- is_non_mem & (imp_df$Group %in% c("[A] Fine-Grain Edaphic & Outcrop Lithology", "[B] Macro-Climate"))
-  }
-  in_df <- preds %in% avail_cols & vapply(preds, function(p) {
-    if (!(p %in% avail_cols)) return(FALSE)
-    v <- suppressWarnings(as.numeric(plot_df[[p]]))
-    any(is.finite(v))
-  }, logical(1))
-
-  keep_idx <- which(is_non_mem & in_df)
-  if (length(keep_idx) == 0L) {
-    return(list(top_env_1 = default_1, top_env_2 = default_2, top_edaph_1 = default_1))
-  }
-
-  ord_env <- keep_idx[order(mda[keep_idx], decreasing = TRUE)]
-  top_env_1 <- preds[ord_env[1]]
-  if (length(ord_env) >= 2L) {
-    top_env_2 <- preds[ord_env[2]]
-  } else {
-    cand_2 <- setdiff(c(default_2, default_1, intersect(c("bio1_temp_mean", "fine_bedrock_depth_cm"), avail_cols)), top_env_1)
-    top_env_2 <- if (length(cand_2) > 0L) cand_2[1] else top_env_1
-  }
-
-  edaph_mask <- if ("Group" %in% names(imp_df)) {
-    imp_df$Group[ord_env] == "[A] Fine-Grain Edaphic & Outcrop Lithology"
-  } else {
-    grepl(edaph_regex, preds[ord_env])
-  }
-  edaph_ranked <- preds[ord_env[edaph_mask]]
-  top_edaph_1 <- if (length(edaph_ranked) > 0L) edaph_ranked[1] else top_env_1
-
-  list(top_env_1 = top_env_1, top_env_2 = top_env_2, top_edaph_1 = top_edaph_1)
-}
-
 # Source modular Figure 05, Spatial RF plotting (fill = NA), and MaxEnt/SRF SDM projection helpers
 source(file.path(step05_dir, "step05_sdm_maxent.R"))
 
@@ -4101,7 +3892,7 @@ main <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
     demo = demo_mode
   )
   vouchers_df <- pheno_res$df
-  if (!identical(Sys.getenv("PACKERA_SKIP_FIGURES", unset = ""), "1")) {
+  if (!identical(trimws(env_plantmatics_or_packera("PLANTMATICS_SKIP_FIGURES", "PACKERA_SKIP_FIGURES")), "1")) {
     export_phenological_latitudinal_figures(vouchers_df, pheno_res$baseline, opts$pheno_plot)
   }
 
@@ -4270,7 +4061,7 @@ main <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
     }
   }
 
-  if (!identical(Sys.getenv("PACKERA_SKIP_FIGURES", unset = ""), "1")) {
+  if (!identical(trimws(env_plantmatics_or_packera("PLANTMATICS_SKIP_FIGURES", "PACKERA_SKIP_FIGURES")), "1")) {
     export_spatial_rf_figures(geo_vouchers_df, srf_res, niche_res, opts$output_plot, pheno_res = pheno_res)
   }
 
@@ -4281,7 +4072,7 @@ main <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
   } else {
     "Packera dubia"
   }
-  if (!identical(Sys.getenv("PACKERA_SKIP_FIGURES", unset = ""), "1")) tryCatch(
+  if (!identical(trimws(env_plantmatics_or_packera("PLANTMATICS_SKIP_FIGURES", "PACKERA_SKIP_FIGURES")), "1")) tryCatch(
     fit_and_project_maxent_sdm_maps(
       df = geo_vouchers_df,
       srf_res = srf_res,

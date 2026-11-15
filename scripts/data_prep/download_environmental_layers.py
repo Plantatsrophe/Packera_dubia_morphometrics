@@ -51,7 +51,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -1111,7 +1111,9 @@ def ensure_environmental_layers(
     if (
         demo
         or skip
+        or os.environ.get("PLANTMATICS_DEMO_MODE") == "1"
         or os.environ.get("PACKERA_DEMO_MODE") == "1"
+        or os.environ.get("PLANTMATICS_SKIP_ENV_DOWNLOAD") == "1"
         or os.environ.get("PACKERA_SKIP_ENV_DOWNLOAD") == "1"
     ):
         return {"status": "skipped", "layers": {}}

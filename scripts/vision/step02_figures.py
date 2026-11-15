@@ -36,7 +36,6 @@ import math
 import os
 import re
 import sys
-import textwrap
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 
@@ -1230,7 +1229,7 @@ def generate_step02_publication_figures(
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
+    from matplotlib.gridspec import GridSpec
 
     _step02_mod = sys.modules.get("scripts.pipeline.02_segment_and_extract")
     _save_fig_fn = (

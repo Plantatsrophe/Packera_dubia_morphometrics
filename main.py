@@ -77,9 +77,11 @@ def _apply_explicit_db_arg(args: Optional[argparse.Namespace], run_dir: Optional
         return
     threads_arg = getattr(args, "threads", None)
     if threads_arg is not None and int(threads_arg) >= 1:
+        os.environ["PLANTMATICS_MAX_WORKERS"] = str(int(threads_arg))
         os.environ["PACKERA_MAX_WORKERS"] = str(int(threads_arg))
     gpu_bs_arg = getattr(args, "gpu_batch_size", None)
     if gpu_bs_arg is not None and int(gpu_bs_arg) >= 1:
+        os.environ["PLANTMATICS_GPU_BATCH_SIZE"] = str(int(gpu_bs_arg))
         os.environ["PACKERA_GPU_BATCH_SIZE"] = str(int(gpu_bs_arg))
     db_arg = getattr(args, "db", None)
     if db_arg is not None and str(db_arg).strip():
@@ -88,6 +90,7 @@ def _apply_explicit_db_arg(args: Optional[argparse.Namespace], run_dir: Optional
         os.environ["PLANTMATICS_DB_PATH"] = resolved_db
         os.environ["PACKERA_DB_PATH"] = resolved_db
     elif getattr(args, "demo", False):
+        os.environ["PLANTMATICS_DEMO_MODE"] = "1"
         os.environ["PACKERA_DEMO_MODE"] = "1"
         if run_dir is not None:
             demo_db = str((run_dir / "data" / "demo_ephemeral.sqlite").resolve())
@@ -98,6 +101,7 @@ def _apply_explicit_db_arg(args: Optional[argparse.Namespace], run_dir: Optional
             os.environ["PLANTMATICS_DB_PATH"] = fallback_db
             os.environ["PACKERA_DB_PATH"] = fallback_db
     if getattr(args, "demo", False):
+        os.environ["PLANTMATICS_DEMO_MODE"] = "1"
         os.environ["PACKERA_DEMO_MODE"] = "1"
 
 
@@ -128,7 +132,7 @@ def _sync_run_cohort_in_db(
     end_timestamp: Optional[str] = None,
 ) -> None:
     """Register `pipeline_runs` and synchronize `run_active_cohort` in SQLite when active."""
-    if os.environ.get("PACKERA_DEMO_MODE") == "1":
+    if os.environ.get("PLANTMATICS_DEMO_MODE") == "1" or os.environ.get("PACKERA_DEMO_MODE") == "1":
         return
     if not is_canonical_or_explicit_db_context(run_dir, workspace_root=PROJECT_ROOT):
         return
@@ -1525,7 +1529,7 @@ def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     else:
         default_fig_name = "fig07a_integrative_taxonomic_synthesis.png"
         default_rep_name = "Packera_Taxonomic_Revision_Summary.md"
-        fallback_fig = cfg.get("paths", {}).get("cda_biplot_pdf", str(figures_dir / default_fig_name))
+        fallback_fig = cfg.get("paths", {}).get("cda_biplot_png", str(figures_dir / default_fig_name))
         fallback_rep = cfg.get("paths", {}).get("revision_report_md", f"outputs/reports/{default_rep_name}")
 
     synthesis_plot = Path(

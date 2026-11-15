@@ -15,6 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from scripts.core.db import get_db_connection, resolve_db_path, upsert_cytological_records, upsert_taxon_cytology_summary
 from scripts.core.harvester import _DYNAMIC_SYNONYM_TO_CANONICAL, standardize_packera_taxon
+from scripts.core.io_utils import atomic_write_bytes, atomic_write_csv_rows, ensure_flat_filename
 from scripts.core.taxonomy_authority import generate_exsiccatae_key, normalize_collector, normalize_record_number
 
 logger = logging.getLogger("plantmatics.download_public_cytology")
@@ -57,17 +58,11 @@ class _CrossHostAuthStripRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 
 def _ensure_flat_filename(root: Path, filename: str) -> Path:
-    root_res, name = root.resolve(), str(filename).strip()
-    if not name or "/" in name or "\\" in name or name in (".", ".."): raise ValueError(f"Unsafe flat filename: {filename!r}")
-    dest = (root_res / name).resolve()
-    if dest.parent != root_res: raise ValueError(f"Path escapes {root_res}: {dest}")
+    root_res = root.resolve()
+    dest = (root_res / ensure_flat_filename(filename)).resolve()
+    if dest.parent != root_res:
+        raise ValueError(f"Path escapes {root_res}: {dest}")
     return dest
-
-
-def _atomic_save(dest: Path, data: bytes) -> Path:
-    dest.parent.mkdir(parents=True, exist_ok=True); tmp = dest.with_name(f".{dest.name}.tmp.{os.getpid()}")
-    with open(tmp, "wb") as fh: fh.write(data); fh.flush(); os.fsync(fh.fileno())
-    tmp.replace(dest); return dest
 
 
 def _http_request(url: str, timeout: int = 25, retries: int = 3) -> bytes:
@@ -402,12 +397,6 @@ def _cross_link_and_summarize(records: List[Dict[str, Any]], ctx: Mapping[str, A
     return linked, summaries
 
 
-def _write_csv_bytes(rows: Sequence[Mapping[str, Any]], cols: Sequence[str]) -> bytes:
-    buf = io.StringIO(); w = csv.DictWriter(buf, fieldnames=list(cols), extrasaction="ignore", lineterminator="\n"); w.writeheader()
-    w.writerows({c: ("" if r.get(c) is None else r.get(c)) for c in cols} for r in rows)
-    return buf.getvalue().encode("utf-8")
-
-
 def main(argv: Optional[Sequence[str]] = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     p = argparse.ArgumentParser(description="Download and cross-link public Packera cytological records.")
@@ -429,8 +418,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.local_cytology_csv: raw_records.extend(_read_local_csv(Path(args.local_cytology_csv).resolve(), smap))
     linked, summaries = _cross_link_and_summarize(raw_records, ctx)
     if args.force or not rec_dest.exists() or linked or args.sync_db_only:
-        _atomic_save(rec_dest, _write_csv_bytes(linked, RECORD_COLUMNS)); _atomic_save(sum_dest, _write_csv_bytes(summaries, SUMMARY_COLUMNS))
-        _atomic_save(man_dest, (json.dumps({"generated_at_utc": datetime.now(timezone.utc).isoformat(), "sources": ["sync-db-only"] if args.sync_db_only else list(args.sources), "n_records": len(linked), "n_taxa": len(summaries)}, indent=2) + "\n").encode("utf-8"))
+        atomic_write_csv_rows(rec_dest, RECORD_COLUMNS, linked)
+        atomic_write_csv_rows(sum_dest, SUMMARY_COLUMNS, summaries)
+        atomic_write_bytes(man_dest, (json.dumps({"generated_at_utc": datetime.now(timezone.utc).isoformat(), "sources": ["sync-db-only"] if args.sync_db_only else list(args.sources), "n_records": len(linked), "n_taxa": len(summaries)}, indent=2) + "\n").encode("utf-8"))
     if not args.no_db and eff_db is not None:
         conn = get_db_connection(db_path=eff_db, init_schema=True, workspace_root=PROJECT_ROOT)
         try:
