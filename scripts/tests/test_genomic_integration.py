@@ -4,13 +4,13 @@ Unit and end-to-end integration tests for Standalone Step 06 (Genomic &
 Phylogenomic Evidence Stream) and Step 07 (Integrative Synthesis & Triage).
 
 Covers:
-  1. `.gitignore` tracking of `!data/genomics/.gitkeep` and flat payload ignores.
+  1. `.gitignore` tracking of `!data/genomics/.gitkeep` and genomic payload ignores.
   2. SQLite WAL schema migrations (`20261121 -> 20261127`, `20261122 -> 20261127`,
      `20261123 -> 20261127`, `20261124 -> 20261127`, `20261126 -> 20261127`, and `PLANTMATICS_SCHEMA_USER_VERSION - 1 -> 20261127`),
      all Phase 2 and public-reference columns in `genomic_samples`, `genetic_lineage_assignments`,
      `curation_triage`, and `v_integrative_triage_master` cardinality (`plant_individuals` preserved),
      plus `purge --runs-only` Tier A preservation vs Tier B cleanup.
-  3. Empty/transient `data/genomics/` detection, flat-directory write guards, and
+  3. Empty/transient `data/genomics/` detection across subdirectories, Tier A genomics write guards, and
      `main.run_genomics_stream` zero-overhead no-op vs Phase 2 CLI orchestration.
   4. Multi-ploidy allele depth parsing (`_extract_cell_depths`), nQuire-style
      cytotype inference (`_infer_sample_cytotype`), empirical-Bayes `polyRAD`
@@ -138,8 +138,9 @@ class TestGenomicIntegration(unittest.TestCase):
             self.assertNotEqual(res_keep.returncode, 0, "data/genomics/.gitkeep must remain unignored")
             for probe in (
                 "data/genomics/synthetic_test.vcf",
-                "data/genomics/synthetic_reads_R1.fastq.gz",
-                "data/genomics/RAxML_bestTree.synthetic",
+                "data/genomics/snpsaurus_nextrad/synthetic_test.vcf",
+                "data/genomics/nextrad_raw_reads/synthetic_reads_R1.fastq.gz",
+                "data/genomics/snpsaurus_nextrad/RAxML_bestTree.synthetic",
             ):
                 res_ign = subprocess.run(
                     [git_bin, "check-ignore", probe],
@@ -449,15 +450,17 @@ class TestGenomicIntegration(unittest.TestCase):
             (geno_dir / ".hidden.vcf").write_text("##fileformat=VCFv4.2\n", encoding="utf-8")
             (geno_dir / "raw_sample_R1.fastq.gz").write_bytes(b"raw")
             (geno_dir / "aligned.bam").write_bytes(b"bam")
+            (geno_dir / "nextrad_raw_reads").mkdir(parents=True, exist_ok=True)
+            (geno_dir / "nextrad_raw_reads" / "sample.F.fq.g").write_bytes(b"raw")
 
             assets = INGEST_MOD.discover_genomic_inputs(geno_dir)
             self.assertFalse(assets.has_genetic_payload)
 
             res = INGEST_MOD.run_genomic_ingestion(genomics_dir=geno_dir, out_dir=out_dir)
             self.assertEqual(res["status"], "skipped_empty")
-            self.assertEqual(len(list(geno_dir.iterdir())), 7, "Empty no-op must never write into data/genomics/")
+            self.assertEqual(len(list(geno_dir.iterdir())), 8, "Empty no-op must never write into data/genomics/")
 
-            # Flat directory guard: writing parsed outputs into a subdir of genomics_dir must fail fast
+            # Tier A write guard: writing parsed outputs into a subdir of genomics_dir must fail fast
             with self.assertRaises(ValueError):
                 INGEST_MOD.run_genomic_ingestion(genomics_dir=geno_dir, out_dir=geno_dir / "parsed_subdir")
 
@@ -478,8 +481,9 @@ class TestGenomicIntegration(unittest.TestCase):
                 self.assertIsNone(ret_empty)
                 m_run.assert_not_called()
 
-            # Populated VCF -> runs 06_ingest_genetic_data.py then standalone 06_genomic_phylogenomics.R
-            (geno_dir / "packera_test.vcf").write_text(
+            # Populated VCF inside snpsaurus_nextrad/ -> runs 06_ingest_genetic_data.py then standalone 06_genomic_phylogenomics.R
+            (geno_dir / "snpsaurus_nextrad").mkdir(parents=True, exist_ok=True)
+            (geno_dir / "snpsaurus_nextrad" / "packera_test.vcf").write_text(
                 _build_synthetic_vcf_text(
                     ["PACTOMSCG1M", "PACSCHNCB1M"],
                     [("loc1", [("0/0", 20, 20, 0), ("1/1", 20, 0, 20)])],
@@ -687,13 +691,14 @@ class TestGenomicIntegration(unittest.TestCase):
 
             skim_res = skim_mod.run_offtarget_organellar_skim(fastq_source=zip_path, genomics_dir=geno_dir)
             self.assertEqual(skim_res["status"], "skimmed")
-            self.assertEqual([p for p in geno_dir.iterdir() if p.is_dir()], [], "genomics_dir must remain 100% flat")
-            self.assertTrue((geno_dir / "skimmed_plastid_consensus.fasta").is_file())
-            self.assertTrue((geno_dir / "skimmed_its_consensus.fasta").is_file())
-            self.assertTrue((geno_dir / "cytonuclear_discordance.csv").is_file())
+            self.assertEqual([p.name for p in geno_dir.iterdir() if p.is_dir()], ["public_organellar_and_loci"])
+            org_dir = geno_dir / "public_organellar_and_loci"
+            self.assertTrue((org_dir / "skimmed_plastid_consensus.fasta").is_file())
+            self.assertTrue((org_dir / "skimmed_its_consensus.fasta").is_file())
+            self.assertTrue((org_dir / "cytonuclear_discordance.csv").is_file())
 
             cyto_rows = {}
-            with open(geno_dir / "cytonuclear_discordance.csv", "r", encoding="utf-8", newline="") as fh:
+            with open(org_dir / "cytonuclear_discordance.csv", "r", encoding="utf-8", newline="") as fh:
                 for row in csv.DictReader(fh):
                     cyto_rows[row["genetic_sample_id"]] = row
             self.assertEqual(cyto_rows["PACTOMSCG1M"]["cytonuclear_discordant"], "1")
@@ -725,7 +730,8 @@ class TestGenomicIntegration(unittest.TestCase):
                 ("PACANOOHS1M", _mutate(anc, 0, 6)),
                 ("PACANOOHS2M", _mutate(anc, 1, 7)),
             ]
-            phy_path = geno_dir / "packera_invariant.phylip"
+            (geno_dir / "snpsaurus_nextrad").mkdir(parents=True, exist_ok=True)
+            phy_path = geno_dir / "snpsaurus_nextrad" / "packera_invariant.phylip"
             phy_lines = [f" {len(phy_records)} {len(phy_records[0][1])}"] + [f"{nm:<16}{sq}" for nm, sq in phy_records]
             phy_path.write_text("\n".join(phy_lines) + "\n", encoding="utf-8")
 
@@ -1319,27 +1325,32 @@ cat("BATCHED_PHASE2_R_OK\\n")
                 summary = PUBLIC_DL_MOD.download_public_packera_sequences(genomics_dir=geno_dir)
 
             self.assertEqual(summary["dryad_status"], "downloaded")
-            self.assertEqual([p for p in geno_dir.iterdir() if p.is_dir()], [], "genomics_dir must have 0 subdirectories")
-            expected_files = {
-                "public_packera_MO_Astral_lpp.tre",
-                "public_packera_ASTRALPro_Astral_lpp.tre",
-                "public_packera_PhyTop_MO.tsv",
-                "public_packera_18complete_plastomes.fasta",
-                "public_packera_plastomes_and_cpdna.fasta",
-                "public_packera_its_ets.fasta",
-                "public_packera_waxy_nuclear.fasta",
-                "public_packera_sra_runs.csv",
-                "public_packera_bold_barcodes.fasta",
-                "public_packera_dryad_manifest.json",
-                "public_packera_sources_manifest.json",
+            self.assertEqual(
+                {p.name for p in geno_dir.iterdir() if p.is_dir()},
+                {"public_nuclear_backbone", "public_phytop_conflict", "public_organellar_and_loci", "public_catalogs"},
+            )
+            self.assertEqual([p for p in geno_dir.iterdir() if p.is_file()], [])
+            expected_rel_files = {
+                "public_nuclear_backbone/public_packera_MO_Astral_lpp.tre",
+                "public_nuclear_backbone/public_packera_ASTRALPro_Astral_lpp.tre",
+                "public_phytop_conflict/public_packera_PhyTop_MO.tsv",
+                "public_organellar_and_loci/public_packera_18complete_plastomes.fasta",
+                "public_organellar_and_loci/public_packera_plastomes_and_cpdna.fasta",
+                "public_organellar_and_loci/public_packera_its_ets.fasta",
+                "public_organellar_and_loci/public_packera_waxy_nuclear.fasta",
+                "public_organellar_and_loci/public_packera_bold_barcodes.fasta",
+                "public_catalogs/public_packera_sra_runs.csv",
+                "public_catalogs/public_packera_dryad_manifest.json",
+                "public_catalogs/public_packera_sources_manifest.json",
             }
-            actual_files = {p.name for p in geno_dir.iterdir() if p.is_file()}
-            self.assertTrue(expected_files.issubset(actual_files), f"Missing downloaded files: {expected_files - actual_files}")
-            self.assertIn("Packera_dubia", (geno_dir / "public_packera_plastomes_and_cpdna.fasta").read_text(encoding="utf-8"))
-            self.assertIn("Packera_dubia", (geno_dir / "public_packera_waxy_nuclear.fasta").read_text(encoding="utf-8"))
-            sra_txt = (geno_dir / "public_packera_sra_runs.csv").read_text(encoding="utf-8")
+            actual_rel_files = {p.relative_to(geno_dir).as_posix() for p in geno_dir.rglob("*") if p.is_file()}
+            self.assertTrue(expected_rel_files.issubset(actual_rel_files), f"Missing downloaded files: {expected_rel_files - actual_rel_files}")
+            self.assertIn("Packera_dubia", (geno_dir / "public_organellar_and_loci" / "public_packera_plastomes_and_cpdna.fasta").read_text(encoding="utf-8"))
+            self.assertIn("Packera_dubia", (geno_dir / "public_organellar_and_loci" / "public_packera_waxy_nuclear.fasta").read_text(encoding="utf-8"))
+            sra_txt = (geno_dir / "public_catalogs" / "public_packera_sra_runs.csv").read_text(encoding="utf-8")
             self.assertIn("SRR22900001", sra_txt)
             self.assertIn("SRR22900002", sra_txt)
+            self.assertIn("public_nuclear_backbone/public_packera_MO_Astral_lpp.tre", summary["files"])
 
     def test_public_reference_files_only_stay_noop_no_payload(self) -> None:
         """(b) Verify public_packera_* references alone keep has_genetic_payload False and Step 06 ingestion skipped_empty."""
@@ -1349,24 +1360,26 @@ cat("BATCHED_PHASE2_R_OK\\n")
             out_dir = tmp / "parsed_out"
             geno_dir.mkdir(parents=True, exist_ok=True)
 
-            pub_names = (
-                "public_packera_MO_Astral_lpp.tre",
-                "public_packera_MO_concat_best.fasta",
-                "public_packera_18complete_plastomes.fasta",
-                "public_packera_sra_runs.csv",
-                "public_packera_dryad_manifest.json",
-                "public_packera_bold_barcodes.fasta",
+            pub_rel_paths = (
+                "public_nuclear_backbone/public_packera_MO_Astral_lpp.tre",
+                "public_nuclear_backbone/public_packera_MO_concat_best.fasta",
+                "public_organellar_and_loci/public_packera_18complete_plastomes.fasta",
+                "public_catalogs/public_packera_sra_runs.csv",
+                "public_catalogs/public_packera_dryad_manifest.json",
+                "public_organellar_and_loci/public_packera_bold_barcodes.fasta",
             )
-            for fname in pub_names:
-                (geno_dir / fname).write_text("placeholder\n", encoding="utf-8")
+            for rel_p in pub_rel_paths:
+                dst = geno_dir / rel_p
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst.write_text("placeholder\n", encoding="utf-8")
 
             assets = INGEST_MOD.discover_genomic_inputs(geno_dir)
             self.assertFalse(assets.has_genetic_payload)
-            self.assertEqual({p.name for p in assets.public_reference_files}, set(pub_names))
+            self.assertEqual({p.name for p in assets.public_reference_files}, {Path(rp).name for rp in pub_rel_paths})
 
             res = INGEST_MOD.run_genomic_ingestion(genomics_dir=geno_dir, out_dir=out_dir)
             self.assertEqual(res["status"], "skipped_empty")
-            self.assertEqual(len(list(geno_dir.iterdir())), len(pub_names))
+            self.assertEqual(len([p for p in geno_dir.rglob("*") if p.is_file()]), len(pub_rel_paths))
 
     def test_skim_offtarget_organellar_baits_public_refs_including_waxy(self) -> None:
         """(c) Verify skim_offtarget_organellar.py baits public plastid, ITS, and waxy FASTA refs and records matches."""
@@ -1386,15 +1399,17 @@ cat("BATCHED_PHASE2_R_OK\\n")
             geno_dir.mkdir(parents=True, exist_ok=True)
             raw_dir.mkdir(parents=True, exist_ok=True)
 
-            (geno_dir / "public_packera_18complete_plastomes.fasta").write_text(
+            org_dir = geno_dir / "public_organellar_and_loci"
+            org_dir.mkdir(parents=True, exist_ok=True)
+            (org_dir / "public_packera_18complete_plastomes.fasta").write_text(
                 f">MK_CP_SER Packera serpenticola\n{cp_ser}\n>MK_CP_AUR Packera aurea\n{cp_aur}\n",
                 encoding="utf-8",
             )
-            (geno_dir / "public_packera_its_ets.fasta").write_text(
+            (org_dir / "public_packera_its_ets.fasta").write_text(
                 f">MT_ITS_SER Packera serpenticola\n{its_ser}\n>MT_ITS_AUR Packera aurea\n{its_aur}\n",
                 encoding="utf-8",
             )
-            (geno_dir / "public_packera_waxy_nuclear.fasta").write_text(
+            (org_dir / "public_packera_waxy_nuclear.fasta").write_text(
                 f">JX_WAXY_SER Packera serpenticola\n{waxy_ser}\n>JX_WAXY_AUR Packera aurea\n{waxy_aur}\n",
                 encoding="utf-8",
             )
@@ -1414,20 +1429,20 @@ cat("BATCHED_PHASE2_R_OK\\n")
 
             res = skim_mod.run_offtarget_organellar_skim(fastq_source=zip_path, genomics_dir=geno_dir)
             self.assertEqual(res["status"], "skimmed")
-            self.assertEqual([p for p in geno_dir.iterdir() if p.is_dir()], [])
+            self.assertEqual([p.name for p in geno_dir.iterdir() if p.is_dir()], ["public_organellar_and_loci"])
             for out_fa in (
                 "skimmed_plastid_consensus.fasta",
                 "skimmed_its_consensus.fasta",
                 "skimmed_waxy_consensus.fasta",
             ):
-                p = geno_dir / out_fa
+                p = org_dir / out_fa
                 self.assertTrue(p.is_file(), f"Missing skimmed consensus FASTA: {out_fa}")
                 txt = p.read_text(encoding="utf-8")
                 self.assertIn(">PACSERNCS1M|", txt)
                 self.assertIn(">PACAURFK1M|", txt)
 
             cyto_rows: dict[str, dict[str, str]] = {}
-            with open(geno_dir / "cytonuclear_discordance.csv", "r", encoding="utf-8", newline="") as fh:
+            with open(org_dir / "cytonuclear_discordance.csv", "r", encoding="utf-8", newline="") as fh:
                 for row in csv.DictReader(fh):
                     cyto_rows[row["genetic_sample_id"]] = row
             self.assertEqual(cyto_rows["PACSERNCS1M"]["public_plastome_match"], "Packera serpenticola")
@@ -1542,21 +1557,23 @@ cat("BATCHED_PHASE2_R_OK\\n")
                         f"cp_{sid[3:6]}", f"ITS_{sid[3:6]}", "0",
                     ])
 
-            raxml_tree = geno_dir / "RAxML_bestTree.test"
+            for rel_sd in ("snpsaurus_nextrad", "public_nuclear_backbone", "public_phytop_conflict", "public_organellar_and_loci"):
+                (geno_dir / rel_sd).mkdir(parents=True, exist_ok=True)
+            raxml_tree = geno_dir / "snpsaurus_nextrad" / "RAxML_bestTree.test"
             raxml_tree.write_text(
                 "(((PACTOMSCG1M:0.01,PACTOMVAL2M:0.01):0.04,(PACSCHNCB1M:0.01,PACSCHNCB2M:0.01):0.04):0.05,(PACMILVAL1M:0.01,PACMILMIT1M:0.01):0.10,(PACAURFK1M:0.01,PACAURFK2M:0.01):0.25);\n",
                 encoding="utf-8",
             )
-            mo_tree = geno_dir / "public_packera_MO_Astral_lpp.tre"
+            mo_tree = geno_dir / "public_nuclear_backbone" / "public_packera_MO_Astral_lpp.tre"
             mo_tree.write_text(
                 "(((Packera_dubia:0.04,Packera_schweinitziana:0.04):0.06,Packera_millefolium:0.10):0.15,Packera_aurea:0.25);\n",
                 encoding="utf-8",
             )
-            (geno_dir / "public_packera_ASTRALPro_Astral_lpp.tre").write_text(
+            (geno_dir / "public_nuclear_backbone" / "public_packera_ASTRALPro_Astral_lpp.tre").write_text(
                 "(((Packera_dubia:0.05,Packera_schweinitziana:0.05):0.06,Packera_millefolium:0.11):0.14,Packera_aurea:0.25);\n",
                 encoding="utf-8",
             )
-            (geno_dir / "public_packera_PhyTop_MO.tsv").write_text(
+            (geno_dir / "public_phytop_conflict" / "public_packera_PhyTop_MO.tsv").write_text(
                 "taxon\tils_index\tih_index\n"
                 "Packera dubia\t0.21\t0.08\n"
                 "Packera schweinitziana\t0.19\t0.05\n"
@@ -1564,27 +1581,27 @@ cat("BATCHED_PHASE2_R_OK\\n")
                 "Packera aurea\t0.11\t0.02\n",
                 encoding="utf-8",
             )
-            (geno_dir / "public_packera_18complete_plastomes.fasta").write_text(
+            (geno_dir / "public_organellar_and_loci" / "public_packera_18complete_plastomes.fasta").write_text(
                 f">MK_CP_DUB Packera dubia\n{cp_dub}\n>MK_CP_AUR Packera aurea\n{cp_aur}\n",
                 encoding="utf-8",
             )
-            (geno_dir / "public_packera_its_ets.fasta").write_text(
+            (geno_dir / "public_organellar_and_loci" / "public_packera_its_ets.fasta").write_text(
                 f">MT_ITS_DUB Packera dubia\n{its_dub}\n>MT_ITS_AUR Packera aurea\n{its_aur}\n",
                 encoding="utf-8",
             )
-            (geno_dir / "public_packera_waxy_nuclear.fasta").write_text(
+            (geno_dir / "public_organellar_and_loci" / "public_packera_waxy_nuclear.fasta").write_text(
                 f">JX_WAXY_DUB Packera dubia\n{waxy_dub}\n>JX_WAXY_AUR Packera aurea\n{waxy_aur}\n",
                 encoding="utf-8",
             )
-            (geno_dir / "skimmed_plastid_consensus.fasta").write_text(
+            (geno_dir / "public_organellar_and_loci" / "skimmed_plastid_consensus.fasta").write_text(
                 f">PACTOMSCG1M|clade=cp_1\n{cp_dub}\n>PACAURFK1M|clade=cp_2\n{cp_aur}\n",
                 encoding="utf-8",
             )
-            (geno_dir / "skimmed_its_consensus.fasta").write_text(
+            (geno_dir / "public_organellar_and_loci" / "skimmed_its_consensus.fasta").write_text(
                 f">PACTOMSCG1M|ribotype=ITS_1\n{its_dub}\n>PACAURFK1M|ribotype=ITS_2\n{its_aur}\n",
                 encoding="utf-8",
             )
-            (geno_dir / "skimmed_waxy_consensus.fasta").write_text(
+            (geno_dir / "public_organellar_and_loci" / "skimmed_waxy_consensus.fasta").write_text(
                 f">PACTOMSCG1M|waxy=Waxy_1\n{waxy_dub}\n>PACAURFK1M|waxy=Waxy_2\n{waxy_aur}\n",
                 encoding="utf-8",
             )

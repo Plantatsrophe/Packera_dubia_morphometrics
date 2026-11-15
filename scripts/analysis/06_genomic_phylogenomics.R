@@ -623,8 +623,10 @@ run_step06_genomic_phylogenomics <- function(opts) {
     tree_files <- tree_files[!grepl("^public_packera_", basename(as.character(tree_files)), ignore.case = TRUE)]
   }
   if (length(tree_files) == 0L && dir.exists(raw_geno_dir)) {
-    tree_files <- list.files(raw_geno_dir, pattern = "^RAxML_bestTree|\\.(treefile|tre|nwk|tree)$", full.names = TRUE)
-    tree_files <- tree_files[!grepl("^public_packera_", basename(as.character(tree_files)), ignore.case = TRUE)]
+    cand_tf <- sort(list.files(raw_geno_dir, full.names = TRUE, recursive = TRUE))
+    b_tf <- basename(cand_tf)
+    tree_files <- cand_tf[grepl("^RAxML_bestTree|\\.(treefile|tre|nwk|tree)$", b_tf, ignore.case = TRUE) &
+                          !grepl("^public_packera_", b_tf, ignore.case = TRUE)]
   }
 
   q_ext <- .read_admixture_q_if_present(q_files, common_ids, keep_taxa, probs_mat)

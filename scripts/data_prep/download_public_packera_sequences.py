@@ -2,8 +2,9 @@
 """
 Module: scripts/data_prep/download_public_packera_sequences.py
 Project: Plantmatics - Packera Species Delimitation & Morphometrics Pipeline
-Description: Retrieves flat public Packera sequences, phylogenomic trees, SRA/ENA
-  manifests, and BOLD barcodes into `data/genomics/public_packera_*` via tmpdir staging.
+Description: Retrieves public Packera sequences, phylogenomic trees, PhyTop
+  conflict tables, SRA/ENA manifests, and BOLD barcodes into relational
+  subdirectories under `data/genomics/` via tmpdir staging.
 """
 
 from __future__ import annotations
@@ -72,19 +73,37 @@ class _CrossHostAuthStripRedirectHandler(urllib.request.HTTPRedirectHandler):
         return new_req
 
 
-def _ensure_flat_filename(genomics_dir: Path, filename: str) -> Path:
+_PUBLIC_NUCLEAR_BACKBONE_FILES = frozenset({
+    "public_packera_MO_Astral_lpp.tre", "public_packera_ASTRALPro_Astral_lpp.tre",
+    "public_packera_wASTRAL_Astral_lpp.tre", "public_packera_MO_concat_best.fasta", "public_packera_1to1_concat_best.fasta",
+})
+_PUBLIC_ORGANELLAR_LOCI_FILES = frozenset({
+    "public_packera_111mapping_plastomes.fasta", "public_packera_111mapping_plastomes.tre",
+    "public_packera_18complete_plastomes.fasta", "public_packera_plastomes_and_cpdna.fasta",
+    "public_packera_its_ets.fasta", "public_packera_waxy_nuclear.fasta", "public_packera_bold_barcodes.fasta",
+})
+
+
+def _resolve_public_dest(genomics_dir: Path, filename: str) -> Path:
     clean_name = ensure_flat_filename(filename)
     if not clean_name.startswith("public_packera_"):
         raise ValueError(f"Public genomics filename must start with 'public_packera_': {filename!r}")
-    g_res = genomics_dir.resolve()
-    dest = g_res / clean_name
-    if dest.parent != g_res or (dest.exists() and dest.is_dir()):
-        raise ValueError(f"Refusing subdirectory inside genomics directory: {dest}")
-    return genomics_dir / clean_name
+    subdir = (
+        "public_phytop_conflict" if clean_name.startswith("public_packera_PhyTop_") else
+        "public_reltime_trees" if clean_name.startswith("public_packera_RelTime_") else
+        "public_nuclear_backbone" if clean_name in _PUBLIC_NUCLEAR_BACKBONE_FILES else
+        "public_organellar_and_loci" if clean_name in _PUBLIC_ORGANELLAR_LOCI_FILES else
+        "public_catalogs"
+    )
+    target_dir = genomics_dir if genomics_dir.name == subdir else (genomics_dir / subdir)
+    dest = target_dir.resolve() / clean_name
+    if dest.exists() and dest.is_dir():
+        raise ValueError(f"Refusing directory collision inside genomics directory: {dest}")
+    return target_dir / clean_name
 
 
 def _atomic_save(genomics_dir: Path, filename: str, source: Union[bytes, Path], force: bool = False) -> Tuple[Path, bool]:
-    dest = _ensure_flat_filename(genomics_dir, filename)
+    dest = _resolve_public_dest(genomics_dir, filename)
     if not force and dest.exists() and dest.is_file() and dest.stat().st_size > 0:
         return dest, False
     payload = Path(source).read_bytes() if isinstance(source, Path) else source
@@ -180,7 +199,7 @@ def _fetch_ncbi_nuccore(genomics_dir: Path, force: bool) -> Dict[str, int]:
 
 
 def _fetch_sra_manifest(genomics_dir: Path, tmpd: Path, force: bool, target_genus: Optional[str] = None) -> List[Dict[str, str]]:
-    genus = str(target_genus or _resolve_target_genus()).strip() or "Packera"
+    genus = str(target_genus or _resolve_target_meta("resolve_target_genus", "TARGET_GENUS", "Packera")).strip() or "Packera"
     rows = fetch_ena_tax_tree_sra_rows(
         genus, _SRA_BIOPROJECTS, http_get_fn=_http_request, ncbi_get_fn=_ncbi_get,
     )
@@ -198,8 +217,9 @@ def _skim_sra_accessions(accessions: Sequence[str], sra_rows: Sequence[Dict[str,
     if not targets:
         return 0
     rows = list(sra_rows)
-    if not rows and (genomics_dir / "public_packera_sra_runs.csv").is_file():
-        with open(genomics_dir / "public_packera_sra_runs.csv", "rt", encoding="utf-8", errors="replace") as fh:
+    sra_csv = next((p for p in (_resolve_public_dest(genomics_dir, "public_packera_sra_runs.csv"), genomics_dir / "public_packera_sra_runs.csv") if p.is_file()), None)
+    if not rows and sra_csv is not None:
+        with open(sra_csv, "rt", encoding="utf-8", errors="replace") as fh:
             rows = list(csv.DictReader(fh))
     skim_dir = tmpd / "skim_fastqs"
     skim_dir.mkdir(parents=True, exist_ok=True)
@@ -278,7 +298,7 @@ def _route_dryad_file(src: Path, zip_name: str) -> Optional[str]:
 
 def _fetch_dryad(genomics_dir: Path, tmpd: Path, dryad_zip_dir: Optional[Path], force: bool) -> Tuple[str, int]:
     manifest_files: List[Dict[str, Any]] = []
-    manifest_path = genomics_dir / "public_packera_dryad_manifest.json"
+    manifest_path = next((p for p in (_resolve_public_dest(genomics_dir, "public_packera_dryad_manifest.json"), genomics_dir / "public_packera_dryad_manifest.json") if p.is_file()), _resolve_public_dest(genomics_dir, "public_packera_dryad_manifest.json"))
     try:
         v_raw = _http_request(f"https://datadryad.org/api/v2/datasets/{_DRYAD_DOI}/versions", timeout=45)
         if v_list := json.loads(v_raw.decode("utf-8")).get("_embedded", {}).get("stash:versions", []):
@@ -414,7 +434,7 @@ def download_public_packera_sequences(
     counts = {"nuccore_plastid": 0, "nuccore_its": 0, "nuccore_waxy": 0, "sra_runs": 0, "paraloss1272_loci": 0, "dryad_files": 0, "bold_records": 0, "sra_skimmed_fastqs": 0}
     dryad_status = "skipped"
     prev_sources: List[str] = []
-    manifest_path = genomics_dir / "public_packera_sources_manifest.json"
+    manifest_path = next((p for p in (_resolve_public_dest(genomics_dir, "public_packera_sources_manifest.json"), genomics_dir / "public_packera_sources_manifest.json") if p.is_file()), _resolve_public_dest(genomics_dir, "public_packera_sources_manifest.json"))
     if manifest_path.is_file():
         try:
             prev = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -444,14 +464,14 @@ def download_public_packera_sequences(
             dryad_status, counts["dryad_files"] = _fetch_dryad(genomics_dir, tmpd, dryad_zip_dir=dryad_zip_dir, force=force)
         if "bold" in src_list:
             counts["bold_records"] = _fetch_bold(genomics_dir, force=force)
-    files_meta = {p.name: {"size_bytes": p.stat().st_size} for p in sorted(genomics_dir.iterdir()) if p.is_file() and p.name.startswith("public_packera_") and p.name != "public_packera_sources_manifest.json"}
+    files_meta = {p.relative_to(genomics_dir).as_posix(): {"size_bytes": p.stat().st_size} for p in sorted(genomics_dir.rglob("public_packera_*")) if p.is_file() and p.name != "public_packera_sources_manifest.json"}
     summary: Dict[str, Any] = {"timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "genomics_dir": str(genomics_dir), "target_genus": genus, "target_family": family, "sources_run": list(dict.fromkeys([*prev_sources, *src_list])), "dryad_status": dryad_status, "counts": counts, "files": files_meta}
     _atomic_save(genomics_dir, "public_packera_sources_manifest.json", json.dumps(summary, indent=2).encode("utf-8"), force=True)
     return summary
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="Download flat public Packera reference sequences into data/genomics/.")
+    parser = argparse.ArgumentParser(description="Download public Packera reference sequences into relational data/genomics/ subdirectories.")
     parser.add_argument("--genomics-dir", type=Path, default=Path(__file__).resolve().parents[2] / "data" / "genomics")
     parser.add_argument("--sources", nargs="+", default=["ncbi", "dryad", "bold"], help="Sources to query (ncbi, dryad, bold, paraloss)")
     parser.add_argument("--genus", default=_resolve_target_meta("resolve_target_genus", "TARGET_GENUS", "Packera"), help="Target genus for dynamic ENA taxon-tree SRA discovery")

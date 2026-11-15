@@ -8,7 +8,7 @@ Description:
   Independent Step 06 Tier A Genomic Evidence Stream ingestion, HDplot paralog
   filter, Empirical Bayes polyploid dosage estimation, cytotype mixture scoring,
   organellar/cytonuclear ingestion, and 4-tier voucher linker.
-  Auto-discovers flat staged files inside `data/genomics/`.
+  Auto-discovers staged files across relational subdirectories inside `data/genomics/`.
 
   Invariants:
     - Executes cleanly as a zero-overhead no-op when `data/genomics/` contains no
@@ -380,17 +380,20 @@ _RAW_SEQ_SUFFIXES = (".fastq", ".fastq.gz", ".fq", ".fq.gz", ".fq.g", ".fastq.g"
 
 
 def discover_genomic_inputs(genomics_dir: Path) -> StagedGenomicAssets:
-    """Discover flat staged variant, dosage, metadata, alignment, organellar, public reference, admixture, and phylogeny inputs."""
+    """Discover staged variant, dosage, metadata, alignment, organellar, public reference, admixture, and phylogeny inputs across subdirectories."""
     assets = StagedGenomicAssets([], [], [], [], [], [], [], [], [], [])
     if not genomics_dir.exists() or not genomics_dir.is_dir():
         return assets
 
-    for p in sorted(genomics_dir.iterdir()):
+    for p in sorted(genomics_dir.rglob("*")):
         if not p.is_file():
+            continue
+        rel_parts = p.relative_to(genomics_dir).parts
+        if any(part.startswith(".") for part in rel_parts):
             continue
         name = p.name
         low = name.lower()
-        if name.startswith(".") or low.endswith(_TRANSIENT_DOWNLOAD_SUFFIXES) or low.endswith(_RAW_SEQ_SUFFIXES):
+        if low.endswith(_TRANSIENT_DOWNLOAD_SUFFIXES) or low.endswith(_RAW_SEQ_SUFFIXES):
             continue
         if low in (
             "parsed_genomic_samples.csv",
@@ -1468,8 +1471,13 @@ def _load_paraloss1272_catalog(genomics_dir: Optional[Path]) -> Dict[str, Tuple[
     """Load staged `public_packera_paraloss1272_loci.csv` locus weights when available."""
     if genomics_dir is None:
         return {}
-    cat_path = Path(genomics_dir) / "public_packera_paraloss1272_loci.csv"
-    if not cat_path.is_file() or cat_path.stat().st_size == 0:
+    gdir = Path(genomics_dir)
+    fname = "public_packera_paraloss1272_loci.csv"
+    cat_path = next(
+        (p for p in (gdir / "public_catalogs" / fname, gdir / fname) if p.is_file() and p.stat().st_size > 0),
+        next((p for p in sorted(gdir.rglob(fname)) if p.is_file() and p.stat().st_size > 0), None),
+    )
+    if cat_path is None:
         return {}
     catalog: Dict[str, Tuple[int, float]] = {}
     try:
@@ -1738,7 +1746,7 @@ def run_genomic_ingestion(
     gen_res = genomics_dir.resolve()
     out_res = out_dir.resolve()
     if out_res != gen_res and gen_res in out_res.parents:
-        raise ValueError(f"Refusing to create subdirectory {out_dir} inside flat genomics directory {genomics_dir}")
+        raise ValueError(f"Refusing to write Tier B parsed outputs {out_dir} inside Tier A genomics directory {genomics_dir}")
 
     assets = discover_genomic_inputs(genomics_dir)
     if not assets.has_genetic_payload:

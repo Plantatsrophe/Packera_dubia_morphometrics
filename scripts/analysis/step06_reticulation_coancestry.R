@@ -19,6 +19,7 @@
     raw_genomics_dir,
     pattern = "\\.(phylip|phy|nex|nexus)$",
     full.names = TRUE,
+    recursive = TRUE,
     ignore.case = TRUE
   )
   cand <- cand[!grepl("^(vcfref_|ref_packera|public_packera_)", basename(cand), ignore.case = TRUE)]

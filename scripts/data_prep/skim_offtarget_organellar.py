@@ -10,9 +10,8 @@ Description:
   compressed archives without unpacking raw reads into `data/genomics/`.
   Auto-detects `get_organelle_from_reads.py` or `bbmap.sh` when available, with a
   pure-Python 17-mer baiting & pileup consensus fallback seeded by Asteraceae
-  organellar/ITS references and `vcfref_packera_blast.txt`. Writes flat outputs
-  directly into `data/genomics/` (`skimmed_plastid_consensus.fasta`,
-  `skimmed_its_consensus.fasta`, `cytonuclear_discordance.csv`).
+  organellar/ITS/waxy references and `vcfref_packera_blast.txt`. Writes outputs
+  into `data/genomics/public_organellar_and_loci/`.
 """
 
 from __future__ import annotations
@@ -103,6 +102,11 @@ def _read_fasta(path: Path, keep_label: bool = False) -> Dict[str, str]:
     return out
 
 
+def _find_geno_file(genomics_dir: Path, fname: str) -> Optional[Path]:
+    direct = genomics_dir / fname
+    return direct if direct.is_file() else next((p for p in sorted(genomics_dir.rglob(fname)) if p.is_file()), None)
+
+
 def _collect_organellar_seeds(genomics_dir: Path) -> Tuple[Dict[str, str], Dict[str, str], Dict[str, str]]:
     """Gather plastid, ITS, and nuclear waxy seed contigs from BLAST hits, staged FASTAs, public Packera archives, and conserved anchors."""
     plastid_seeds = dict(_SEED_PLASTID_ANCHORS)
@@ -110,12 +114,11 @@ def _collect_organellar_seeds(genomics_dir: Path) -> Tuple[Dict[str, str], Dict[
     waxy_seeds = dict(_SEED_WAXY_ANCHORS)
 
     ref_seqs: Dict[str, str] = {}
-    for cand in (genomics_dir / "ref_packera.fasta", genomics_dir / "vcfref_packera_rm.txt.fasta"):
-        if cand.exists():
+    for fname in ("ref_packera.fasta", "vcfref_packera_rm.txt.fasta"):
+        if (cand := _find_geno_file(genomics_dir, fname)) is not None:
             ref_seqs.update(_read_fasta(cand))
 
-    bain = genomics_dir / "bain_jansen_sequences.fasta"
-    if bain.exists():
+    if (bain := _find_geno_file(genomics_dir, "bain_jansen_sequences.fasta")) is not None:
         for k, v in _read_fasta(bain, keep_label=True).items():
             if len(v) >= 60:
                 its_seeds[f"bain_{k}"] = v
@@ -126,14 +129,12 @@ def _collect_organellar_seeds(genomics_dir: Path) -> Tuple[Dict[str, str], Dict[
         ("public_packera_its_ets.fasta", its_seeds),
         ("public_packera_waxy_nuclear.fasta", waxy_seeds),
     ):
-        cand = genomics_dir / fname
-        if cand.is_file():
+        if (cand := _find_geno_file(genomics_dir, fname)) is not None:
             for k, v in _read_fasta(cand, keep_label=True).items():
                 if len(v) >= 60:
                     bucket[k] = v
 
-    bold_fa = genomics_dir / "public_packera_bold_barcodes.fasta"
-    if bold_fa.is_file():
+    if (bold_fa := _find_geno_file(genomics_dir, "public_packera_bold_barcodes.fasta")) is not None:
         for k, v in _read_fasta(bold_fa, keep_label=True).items():
             if len(v) < 60:
                 continue
@@ -145,8 +146,7 @@ def _collect_organellar_seeds(genomics_dir: Path) -> Tuple[Dict[str, str], Dict[
             else:
                 plastid_seeds[k] = v
 
-    blast_txt = genomics_dir / "vcfref_packera_blast.txt"
-    if blast_txt.exists() and ref_seqs:
+    if (blast_txt := _find_geno_file(genomics_dir, "vcfref_packera_blast.txt")) is not None and ref_seqs:
         with open(blast_txt, "rt", encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 low = line.lower()
@@ -426,7 +426,7 @@ def run_offtarget_organellar_skim(
     genomics_dir: Path,
     nuclear_tree: Optional[Path] = None,
 ) -> Dict[str, Any]:
-    """Skim off-target plastid, ITS, and nuclear waxy reads and emit flat outputs in `genomics_dir`."""
+    """Skim off-target plastid, ITS, and nuclear waxy reads into `public_organellar_and_loci/`."""
     if fastq_source is None or not fastq_source.exists():
         msg = f"[skim-organellar] FASTQ source absent ({fastq_source}); skipping cleanly."
         logger.info(msg)
@@ -462,9 +462,10 @@ def run_offtarget_organellar_skim(
         public_plastome_matches=pub_cp_match, public_its_matches=pub_its_match, waxy_lineage_matches=waxy_match,
     )
 
-    genomics_dir.mkdir(parents=True, exist_ok=True)
-    cp_fasta, its_fasta, waxy_fasta = genomics_dir / "skimmed_plastid_consensus.fasta", genomics_dir / "skimmed_its_consensus.fasta", genomics_dir / "skimmed_waxy_consensus.fasta"
-    cyto_csv = genomics_dir / "cytonuclear_discordance.csv"
+    out_dir = genomics_dir if genomics_dir.name == "public_organellar_and_loci" else (genomics_dir / "public_organellar_and_loci")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cp_fasta, its_fasta, waxy_fasta = out_dir / "skimmed_plastid_consensus.fasta", out_dir / "skimmed_its_consensus.fasta", out_dir / "skimmed_waxy_consensus.fasta"
+    cyto_csv = out_dir / "cytonuclear_discordance.csv"
     for out_fa, cons_map, tag, lbl_map, fallback in (
         (cp_fasta, cp_cons, "clade", cp_clades, "cp_Unassigned"),
         (its_fasta, its_cons, "ribotype", its_ribo, "ITS_Unassigned"),
@@ -476,7 +477,7 @@ def run_offtarget_organellar_skim(
     cols = ["genetic_sample_id", "nuclear_taxon", "plastid_clade", "its_ribotype", "cytonuclear_discordant", "public_plastome_match", "public_its_match", "waxy_lineage_match"]
     (pd.DataFrame(cyto_rows) if cyto_rows else pd.DataFrame(columns=cols)).to_csv(cyto_csv, index=False)
 
-    logger.info("Skimmed %d plastid, %d ITS, and %d waxy consensuses (%d cytonuclear records) into flat %s.", len(cp_cons), len(its_cons), len(waxy_cons), len(cyto_rows), genomics_dir)
+    logger.info("Skimmed %d plastid, %d ITS, and %d waxy consensuses (%d cytonuclear records) into %s.", len(cp_cons), len(its_cons), len(waxy_cons), len(cyto_rows), out_dir)
     return {"status": "skimmed", "n_samples": len(reads_by_sample), "n_plastid": len(cp_cons), "n_its": len(its_cons), "n_waxy": len(waxy_cons), "cytonuclear_csv": str(cyto_csv)}
 
 

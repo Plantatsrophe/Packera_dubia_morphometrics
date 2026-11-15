@@ -83,6 +83,18 @@
   tr
 }
 
+.find_geno_file <- function(dirs, fname) {
+  for (d in dirs) {
+    if (is.null(d) || !nzchar(d) || !dir.exists(d)) next
+    p <- file.path(d, fname)
+    if (file.exists(p)) return(p)
+    cand <- sort(list.files(d, full.names = TRUE, recursive = TRUE))
+    hits <- cand[tolower(basename(cand)) == tolower(fname)]
+    if (length(hits) > 0L) return(hits[1L])
+  }
+  ""
+}
+
 load_public_packera_backbone <- function(raw_geno_dir) {
   empty_trees <- list(MO = NULL, ASTRALPro = NULL, wASTRAL = NULL, plastome111 = NULL)
   if (is.null(raw_geno_dir) || !nzchar(raw_geno_dir) || !dir.exists(raw_geno_dir)) {
@@ -97,14 +109,14 @@ load_public_packera_backbone <- function(raw_geno_dir) {
   trees <- empty_trees
   found_files <- character(0)
   for (nm in names(tree_map)) {
-    p <- file.path(raw_geno_dir, tree_map[[nm]])
-    if (file.exists(p)) {
+    p <- .find_geno_file(raw_geno_dir, tree_map[[nm]])
+    if (nzchar(p) && file.exists(p)) {
       found_files <- c(found_files, p)
       trees[[nm]] <- .read_clean_public_tree(p)
     }
   }
-  pt_files <- sort(list.files(raw_geno_dir, pattern = "^public_packera_PhyTop_.*\\.(tsv|csv)$",
-                              full.names = TRUE, ignore.case = TRUE))
+  all_gf <- sort(list.files(raw_geno_dir, full.names = TRUE, recursive = TRUE))
+  pt_files <- all_gf[grepl("^public_packera_PhyTop_.*\\.(tsv|csv)$", basename(all_gf), ignore.case = TRUE)]
   phytop_tables <- list()
   for (pf in pt_files) {
     df_pt <- .read_delim_safe(pf)
@@ -249,10 +261,6 @@ select_backbone_guided_outgroup <- function(uniq_taxa, p_dist, backbone = NULL) 
 .place_organellar_loci <- function(raw_geno_dir, out_dir, sample_ids) {
   search_dirs <- unique(Filter(function(d) nzchar(d) && dir.exists(d),
                                c(raw_geno_dir, out_dir, dirname(out_dir), file.path(dirname(out_dir), "genomics"))))
-  find_first <- function(fname) {
-    for (d in search_dirs) { p <- file.path(d, fname); if (file.exists(p)) return(p) }
-    ""
-  }
   locus_specs <- list(
     list(locus = "plastid", qfile = "skimmed_plastid_consensus.fasta",
          refs = c("public_packera_111mapping_plastomes.fasta", "public_packera_18complete_plastomes.fasta", "public_packera_plastomes_and_cpdna.fasta")),
@@ -263,12 +271,12 @@ select_backbone_guided_outgroup <- function(uniq_taxa, p_dist, backbone = NULL) 
   )
   rows <- list()
   for (sp in locus_specs) {
-    qp <- find_first(sp$qfile)
+    qp <- .find_geno_file(search_dirs, sp$qfile)
     qdf <- .read_fasta_named(qp)
     if (nrow(qdf) == 0L) next
     ref_list <- list()
     for (rf in sp$refs) {
-      rp <- find_first(rf)
+      rp <- .find_geno_file(search_dirs, rf)
       rdf <- .read_fasta_named(rp)
       if (nrow(rdf) > 0L) {
         rdf$ref_source <- rf

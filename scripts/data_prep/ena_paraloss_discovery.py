@@ -242,19 +242,18 @@ def fetch_compositae_paraloss1272_catalog(
     http_get_fn: Optional[Callable[..., Union[bytes, str]]] = None,
     force: bool = False,
 ) -> int:
-    """Fetch and stage flat Compositae-ParaLoss-1272 single-copy locus metadata for Asteraceae."""
+    """Fetch and stage Compositae-ParaLoss-1272 single-copy locus metadata for Asteraceae."""
     if str(target_family or "").strip().lower() != "asteraceae":
         return 0
     genomics_dir = Path(genomics_dir)
-    out_path = genomics_dir / "public_packera_paraloss1272_loci.csv"
-    if out_path.is_file() and out_path.stat().st_size > 0 and not force:
-        try:
-            with open(out_path, encoding="utf-8") as fh:
-                existing = sum(1 for _ in csv.DictReader(fh))
-            if existing > 0:
-                return existing
-        except Exception:
-            pass
+    for cand in (genomics_dir / "public_catalogs" / "public_packera_paraloss1272_loci.csv", genomics_dir / "public_packera_paraloss1272_loci.csv"):
+        if cand.is_file() and cand.stat().st_size > 0 and not force:
+            try:
+                existing = sum(1 for _ in csv.DictReader(cand.read_text(encoding="utf-8").splitlines()))
+                if existing > 0:
+                    return existing
+            except Exception:
+                pass
     getter = http_get_fn or _default_http_get
     candidate_urls: List[str] = list(_PARALOSS_DIRECT_URLS)
     for api_url in _PARALOSS_FIGSHARE_ARTICLES:

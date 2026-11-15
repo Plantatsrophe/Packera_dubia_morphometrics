@@ -1290,7 +1290,7 @@ def run_genomics_cli(args: argparse.Namespace, cfg: PipelineConfig) -> None:
 
 
 def run_skim_organellar_cli(args: argparse.Namespace, cfg: PipelineConfig) -> None:
-    """CLI entrypoint for offline off-target plastid/ITS skimming into flat data/genomics/."""
+    """CLI entrypoint for offline off-target plastid/ITS/waxy skimming into data/genomics/public_organellar_and_loci/."""
     _ = cfg
     skim_script = PROJECT_ROOT / "scripts" / "data_prep" / "skim_offtarget_organellar.py"
     verify_file_exists(skim_script, "Off-target Organellar Skimmer Python script")
@@ -1305,7 +1305,7 @@ def run_skim_organellar_cli(args: argparse.Namespace, cfg: PipelineConfig) -> No
 
 
 def run_download_public_genomics_cli(args: argparse.Namespace, cfg: PipelineConfig) -> None:
-    """CLI entrypoint for downloading flat public Packera sequences and trees into data/genomics/."""
+    """CLI entrypoint for downloading public Packera sequences and trees into data/genomics/ subdirectories."""
     _ = cfg
     dl_script = PROJECT_ROOT / "scripts" / "data_prep" / "download_public_packera_sequences.py"
     verify_file_exists(dl_script, "Public Packera Sequence Downloader Python script")
@@ -2035,14 +2035,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_geno.add_argument("--genomics-dir", type=Path, default=None, help="Directory holding staged genomic files (default: data/genomics)")
 
     # Subcommand: skim-organellar (offline off-target chloroplast/ITS skimming)
-    p_skim = subparsers.add_parser("skim-organellar", help="Offline skimming of off-target plastid/ITS reads into flat data/genomics/")
+    p_skim = subparsers.add_parser("skim-organellar", help="Offline skimming of off-target plastid/ITS/waxy reads into data/genomics/public_organellar_and_loci/")
     p_skim.add_argument("--fastq-source", type=Path, default=None, help="Optional .zip, .tar.gz, or directory containing raw FASTQ reads")
-    p_skim.add_argument("--genomics-dir", type=Path, default=None, help="Flat destination data/genomics/ directory")
+    p_skim.add_argument("--genomics-dir", type=Path, default=None, help="Destination data/genomics/ directory")
     p_skim.add_argument("--nuclear-tree", type=Path, default=None, help="Optional nuclear Newick tree for cytonuclear comparison")
 
-    # Subcommand: download-public-genomics (public NCBI/SRA/Dryad/BOLD staging into flat data/genomics/)
-    p_dl_pub = subparsers.add_parser("download-public-genomics", help="Download public Packera sequences, trees, and SRA manifests into flat data/genomics/")
-    p_dl_pub.add_argument("--genomics-dir", type=Path, default=None, help="Flat destination data/genomics/ directory")
+    # Subcommand: download-public-genomics (public NCBI/SRA/Dryad/BOLD staging into relational data/genomics/ subdirectories)
+    p_dl_pub = subparsers.add_parser("download-public-genomics", help="Download public Packera sequences, trees, and SRA manifests into relational data/genomics/ subdirectories")
+    p_dl_pub.add_argument("--genomics-dir", type=Path, default=None, help="Destination data/genomics/ directory")
     p_dl_pub.add_argument("--sources", nargs="+", default=None, help="Public sources to query (ncbi, dryad, bold, paraloss)")
     p_dl_pub.add_argument("--genus", type=str, default=None, help="Target genus for dynamic ENA taxon-tree SRA discovery")
     p_dl_pub.add_argument("--family", type=str, default=None, help="Target family for Compositae-ParaLoss-1272 metadata")

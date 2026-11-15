@@ -136,7 +136,7 @@ class TestExternalDataSourcesOffline(unittest.TestCase):
                     gen_dir, sources=("sra", "paraloss"), force=True, target_genus="Packera", target_family="Asteraceae",
                 )
 
-            sra_csv = gen_dir / "public_packera_sra_runs.csv"
+            sra_csv = gen_dir / "public_catalogs" / "public_packera_sra_runs.csv"
             self.assertTrue(sra_csv.is_file())
             self.assertIn("PRJNA1046046", sra_csv.read_text(encoding="utf-8"))
 
