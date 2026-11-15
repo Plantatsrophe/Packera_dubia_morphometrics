@@ -468,8 +468,8 @@ render_step07b_complex_network_png <- function(
   p_heat <- ggplot2::ggplot(hm_grid, ggplot2::aes(x = .data$Col, y = .data$Row, fill = .data$Affinity)) +
     ggplot2::geom_tile(color = "white", linewidth = 0.35) +
     ggplot2::scale_fill_viridis_c(option = "magma", limits = c(0, 1), name = "Affinity\nW_ij") +
-    ggplot2::scale_x_discrete(labels = icn_discrete_labeller(abbreviate_genus = TRUE)) +
-    ggplot2::scale_y_discrete(labels = icn_discrete_labeller(abbreviate_genus = TRUE)) +
+    ggplot2::scale_x_discrete(labels = if (is_deme_net) ggplot2::waiver() else icn_discrete_labeller(abbreviate_genus = TRUE)) +
+    ggplot2::scale_y_discrete(labels = if (is_deme_net) ggplot2::waiver() else icn_discrete_labeller(abbreviate_genus = TRUE)) +
     theme_packera_pub(base_size = 9.4) +
     ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 40, hjust = 1, face = "plain")) +
     ggplot2::labs(
@@ -625,9 +625,11 @@ render_step07b_complex_network_png <- function(
     anno_07b
   out_saved <- save_packera_png_300(plate_06b, canon_07b, width = 14.2, height = dyn_h_06b, also_copy_to = out_complex_path)
   if (!file.exists(canon_07b) || isTRUE(file.info(canon_07b)$size == 0)) {
-    p_heat_fb <- p_heat +
-      ggplot2::scale_y_discrete(labels = function(x) abbreviate_icn_taxon(x, abbreviate_genus = TRUE)) +
-      ggplot2::theme(axis.text.y = ggplot2::element_text(face = "italic"))
+    p_heat_fb <- if (is_deme_net) p_heat else (
+      p_heat +
+        ggplot2::scale_y_discrete(labels = function(x) abbreviate_icn_taxon(x, abbreviate_genus = TRUE)) +
+        ggplot2::theme(axis.text.y = ggplot2::element_text(face = "italic"))
+    )
     plate_06b_fb <- (p_heat_fb | build_net_panel(FALSE)) +
       patchwork::plot_layout(widths = c(1.08, 1.0)) +
       anno_07b

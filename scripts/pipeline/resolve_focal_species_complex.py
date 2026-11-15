@@ -573,7 +573,10 @@ def compile_complex_resolution_summary(
     clean_rows = stage_triage_map.get("Stage_3_Intraspecific_Clean", [])
 
     type_controls = [
-        r for r in clean_rows if str(r.get("taxonomic_treatment_subtype", "")).strip() == "Confirmed_Type_Control"
+        r
+        for r in clean_rows
+        if str(r.get("taxonomic_treatment_subtype", "")).strip() == "Confirmed_Type_Control"
+        or str(r.get("taxonomic_status_call", "")).strip() == "Confirmed_Type_Control"
     ]
     pull_subtypes = {
         "Putative_Cryptic_Species",
