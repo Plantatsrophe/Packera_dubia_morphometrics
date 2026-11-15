@@ -2471,3 +2471,85 @@ class TestStep07GenomicPropagationContract(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
+
+class TestStep06OrganellarAndReplicateRegression(unittest.TestCase):
+    """Regression checks for organellar ETS/complete-plastome matching and Step 06 replicate collapsing."""
+
+    def test_organellar_ets_filter_and_complete_plastome_stride1_matching(self) -> None:
+        import random
+        from scripts.data_prep.skim_offtarget_organellar import _match_best_public_lineage
+
+        rng = random.Random(42)
+        bases = "ACGT"
+        its_body = "".join(rng.choice(bases) for _ in range(450))
+        its_query = its_body[:260] + "".join(rng.choice(bases) for _ in range(40)) + its_body[300:]
+        its_refs = {
+            "GU818219.1 Packera porteri external transcribed spacer, partial sequence": its_query,
+            "MK123456.1 Packera hartiana internal transcribed spacer 1, 5.8S, internal transcribed spacer 2": its_body,
+        }
+        self.assertEqual(_match_best_public_lineage(its_query, its_refs), "Packera hartiana")
+
+        plastome = "".join(rng.choice(bases) for _ in range(130000))
+        decoy = "".join(rng.choice(bases) for _ in range(3000))
+        cp_refs = {
+            "NC_099999.1 Packera subnuda complete chloroplast genome": plastome,
+            "KX000001.1 Packera porteri psbA-trnH intergenic spacer": decoy,
+        }
+        kcache = {}
+        q_even = plastome[20000:26000]
+        q_odd = plastome[20001:26001]
+        self.assertEqual(_match_best_public_lineage(q_even, cp_refs, _kcache=kcache), "Packera subnuda")
+        self.assertEqual(_match_best_public_lineage(q_odd, cp_refs, _kcache=kcache), "Packera subnuda")
+
+    def test_coalescent_delimitation_collapses_technical_replicates_and_broadcasts_gdi(self) -> None:
+        import pandas as pd
+        from scripts.analysis.step06_coalescent_delimitation import run_coalescent_delimitation
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            geno_dir = root / "genomics"
+            phy_dir = geno_dir / "snpsaurus_nextrad"
+            out_dir = root / "out"
+            phy_dir.mkdir(parents=True, exist_ok=True)
+            seq_dub = "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT"
+            seq_ano = "TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA"
+            seq_dub_m = "NNNN" + seq_dub[4:]
+            phy_lines = [
+                "6 96",
+                f"TEST_TOMSC1M {seq_dub_m}",
+                f"TEST_TOMSC1P {seq_dub}",
+                f"TEST_TOMGA1M {seq_dub}",
+                f"TEST_ANOJE1M {seq_ano}",
+                f"TEST_ANOJE1P {seq_ano}",
+                f"TEST_ANONC1M {seq_ano}",
+            ]
+            (phy_dir / "packera_invariant.phylip").write_text("\n".join(phy_lines) + "\n", encoding="utf-8")
+            parsed_csv = out_dir / "parsed_samples.csv"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame([
+                {"genetic_sample_id": "TEST_TOMSC1M", "species_standardized": "Packera dubia", "replicate_pair_id": "REP_TOM_SC1", "hq_reads": 150000, "missing_genotype_rate": 0.15, "geno_quality_pass": 1, "is_putative_novel_or_hybrid_query": 0},
+                {"genetic_sample_id": "TEST_TOMSC1P", "species_standardized": "Packera dubia", "replicate_pair_id": "REP_TOM_SC1", "hq_reads": 300000, "missing_genotype_rate": 0.05, "geno_quality_pass": 1, "is_putative_novel_or_hybrid_query": 0},
+                {"genetic_sample_id": "TEST_TOMGA1M", "species_standardized": "Packera dubia", "replicate_pair_id": "REP_TOM_GA1", "hq_reads": 220000, "missing_genotype_rate": 0.08, "geno_quality_pass": 1, "is_putative_novel_or_hybrid_query": 0},
+                {"genetic_sample_id": "TEST_ANOJE1M", "species_standardized": "Packera anonyma", "replicate_pair_id": "REP_ANO_JE1", "hq_reads": 180000, "missing_genotype_rate": 0.10, "geno_quality_pass": 1, "is_putative_novel_or_hybrid_query": 0},
+                {"genetic_sample_id": "TEST_ANOJE1P", "species_standardized": "Packera anonyma", "replicate_pair_id": "REP_ANO_JE1", "hq_reads": 250000, "missing_genotype_rate": 0.06, "geno_quality_pass": 1, "is_putative_novel_or_hybrid_query": 0},
+                {"genetic_sample_id": "TEST_ANONC1M", "species_standardized": "Packera anonyma", "replicate_pair_id": "REP_ANO_NC1", "hq_reads": 240000, "missing_genotype_rate": 0.07, "geno_quality_pass": 1, "is_putative_novel_or_hybrid_query": 0},
+            ]).to_csv(parsed_csv, index=False)
+
+            res = run_coalescent_delimitation(
+                genomics_dir=geno_dir,
+                out_dir=out_dir,
+                parsed_samples_csv=parsed_csv,
+                block_len=24,
+                n_boot=10,
+            )
+            self.assertEqual(res["status"], "completed_alignment")
+            self.assertEqual(res["n_samples"], 4)
+            samp_df = pd.read_csv(out_dir / "coalescent_gdi_samples.csv").set_index("genetic_sample_id")
+            self.assertEqual(set(samp_df.index), {"TEST_TOMSC1M", "TEST_TOMSC1P", "TEST_TOMGA1M", "TEST_ANOJE1M", "TEST_ANOJE1P", "TEST_ANONC1M"})
+            self.assertAlmostEqual(float(samp_df.loc["TEST_TOMSC1M", "coalescent_gdi"]), float(samp_df.loc["TEST_TOMSC1P", "coalescent_gdi"]), places=6)
+            self.assertAlmostEqual(float(samp_df.loc["TEST_ANOJE1M", "coalescent_gdi"]), float(samp_df.loc["TEST_ANOJE1P", "coalescent_gdi"]), places=6)
+
+
+if __name__ == "__main__":
+    unittest.main()
+

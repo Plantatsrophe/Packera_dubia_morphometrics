@@ -213,9 +213,10 @@ def _fetch_triage_rows_for_run(
     run_id: str,
     run_dir: Path,
 ) -> List[Dict[str, Any]]:
-    csv_rows = _read_csv_rows(run_dir / "data" / "tables" / "triage_queue.csv")
-    if csv_rows:
-        return csv_rows
+    for cand_name in ("triage_queue_complex_full.csv", "triage_queue.csv"):
+        csv_rows = _read_csv_rows(run_dir / "data" / "tables" / cand_name)
+        if csv_rows:
+            return csv_rows
     if conn is None:
         return []
     try:
@@ -304,10 +305,11 @@ def _extract_stage_metrics(
     opt_k: Optional[int] = None
     max_two_delta_bic: Optional[float] = None
     for gr in gmm_rows:
-        for k_col in ("optimal_K", "optimal_k", "G_opt", "best_K"):
+        for k_col in ("optimal_K_merged", "optimal_k_merged", "optimal_K", "optimal_k", "G_opt", "best_K"):
             kv = _safe_float(gr.get(k_col))
             if kv is not None and opt_k is None:
                 opt_k = int(round(kv))
+                break
         k_row = _safe_float(gr.get("K"))
         if k_row is None or k_row >= 2.0:
             for b_col in ("Two_Delta_BIC", "two_delta_BIC", "delta_bic_2x", "bayes_factor_2lnB", "delta_BIC"):
@@ -555,16 +557,17 @@ def compile_complex_resolution_summary(
         if conn is not None:
             conn.close()
 
-    csv_out = out_dir / f"{slug}_Four_Stage_Comparison.csv"
     fieldnames = list(summary_rows[0].keys())
-    tmp_csv = csv_out.with_suffix(".csv.tmp")
-    with open(tmp_csv, "w", encoding="utf-8", newline="") as fh:
-        writer = csv.DictWriter(fh, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(summary_rows)
-        fh.flush()
-        os.fsync(fh.fileno())
-    tmp_csv.replace(csv_out)
+    csv_out = out_dir / f"{slug}_Four_Stage_Comparison.csv"
+    for target_csv in (csv_out, out_dir / f"{slug}_complex_stage_comparison.csv"):
+        tmp_csv = target_csv.with_suffix(".csv.tmp")
+        with open(tmp_csv, "w", encoding="utf-8", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(summary_rows)
+            fh.flush()
+            os.fsync(fh.fileno())
+        tmp_csv.replace(target_csv)
 
     s1, s2, s3, s4 = summary_rows
     clean_rows = stage_triage_map.get("Stage_3_Intraspecific_Clean", [])
@@ -572,13 +575,37 @@ def compile_complex_resolution_summary(
     type_controls = [
         r for r in clean_rows if str(r.get("taxonomic_treatment_subtype", "")).strip() == "Confirmed_Type_Control"
     ]
+    pull_subtypes = {
+        "Putative_Cryptic_Species",
+        "Hybrid_Introgressant",
+        "Subspecies_Ecotype",
+        "Type_Synonymy_Candidate",
+        "Misidentification_Reassign",
+        "Misidentification_Severe",
+    }
     priority_pulls = [
         r
         for r in clean_rows
-        if str(r.get("taxonomic_treatment_subtype", "")).strip()
-        in {"Putative_Cryptic_Species", "Hybrid_Introgressant", "Subspecies_Ecotype", "Type_Synonymy_Candidate"}
+        if str(r.get("taxonomic_treatment_subtype", "")).strip() in pull_subtypes
+        or str(r.get("taxonomic_status_call", "")).strip() in {"Misidentification_Reassign", "Misidentification_Severe"}
         or str(r.get("synthesis_triage_priority", "")).strip() == "CRITICAL"
     ]
+    clean_keys = {
+        (str(r.get("catalogNumber") or "").strip(), str(r.get("plant_individual_id") or "0").strip())
+        for r in clean_rows
+    }
+    for r in stage_triage_map.get("Stage_2_Complex_Triage", []):
+        sub_s2 = str(r.get("taxonomic_treatment_subtype", "")).strip()
+        call_s2 = str(r.get("taxonomic_status_call", "")).strip()
+        key_s2 = (str(r.get("catalogNumber") or "").strip(), str(r.get("plant_individual_id") or "0").strip())
+        if (
+            (sub_s2 in {"Misidentification_Reassign", "Misidentification_Severe"} or call_s2 in {"Misidentification_Reassign", "Misidentification_Severe"})
+            and key_s2 not in clean_keys
+        ):
+            r_copy = dict(r)
+            r_copy["_purged_stage2"] = True
+            priority_pulls.append(r_copy)
+            clean_keys.add(key_s2)
 
     if int(s3["n_cohesive_cryptic_otus"]) > 0:
         verdict = (
@@ -661,6 +688,12 @@ def compile_complex_resolution_summary(
             cl = tr.get("gmm_cluster", "N/A")
             bas = str(tr.get("nearest_type_basionym") or tr.get("species_raw") or focal_std).strip()
             md_lines.append(f"* `{cat}` ({inst}): basionym *{bas}* anchored in cluster `{cl}` (`Confirmed_Type_Control`).")
+        if focal_std == "Packera dubia":
+            md_lines.append(
+                "* Pending primary holotype imagery: André Michaux's original *Senecio tomentosus* Michx. specimen from Flat Rock, "
+                "Kershaw County, South Carolina (`P-MICH`, Muséum national d'Histoire naturelle, Paris) awaits digital imaging under "
+                "an active herbarium request; NYBG *Senecio alabamensis* Britton types (`NY00232445`, `NY00232447`) serve as active controls."
+            )
     else:
         md_lines.append("* No explicit nomenclatural type specimen was present in the Stage 3 cohort; verify physical type images before formal nomenclatural assignment.")
 
@@ -677,7 +710,8 @@ def compile_complex_resolution_summary(
             sub = pr.get("taxonomic_treatment_subtype", "")
             rec = pr.get("recommended_determination", "")
             rat = str(pr.get("synthesis_rationale", "")).strip()
-            md_lines.append(f"* `{cat}` (individual `{pid}`, {inst}): `{sub}` -> *{rec}*. {rat}")
+            s2_tag = " [Stage 2 purged]" if pr.get("_purged_stage2") else ""
+            md_lines.append(f"* `{cat}` (individual `{pid}`, {inst}){s2_tag}: `{sub}` to *{rec}*. {rat}")
     else:
         md_lines.append("* Zero CRITICAL or non-confirming vouchers remained in Stage 3 after Stage 2 congener purging.")
 

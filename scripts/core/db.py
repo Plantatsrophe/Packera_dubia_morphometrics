@@ -575,7 +575,7 @@ def upsert_taxon_synonyms(
     """Persist discovered GBIF / configuration taxon synonym mappings into `taxon_synonyms`."""
     if not synonym_to_canonical:
         return 0
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     authors_map: Dict[str, str] = {}
     if author_strings_by_canonical:
         for canon, auths in author_strings_by_canonical.items():
@@ -1516,7 +1516,7 @@ def ensure_pipeline_run(
     rid = str(run_id).strip() or "canonical"
     rdir_str = str(run_dir) if run_dir is not None else None
     cli_json = json.dumps(list(cli_arguments)) if cli_arguments is not None else None
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     im_ins = 1 if intraspecific_mode else 0
     im_opt = None if intraspecific_mode is None else (1 if intraspecific_mode else 0)
 

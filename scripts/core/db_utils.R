@@ -905,7 +905,7 @@ ensure_pipeline_run_r <- function(conn, run_id = resolve_packera_run_id(), focal
     return(invisible(FALSE))
   }
   rid <- resolve_packera_run_id(run_id)
-  now_iso <- format(Sys.time(), "%Y-%m-%dT%H:%M:%S%z")
+  now_iso <- format(as.POSIXct(Sys.time(), tz = "UTC"), "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")
   rdir <- .get_env_run_dir_r()
   if (!nzchar(rdir)) rdir <- NA_character_
   ft <- if (!is.null(focal_taxon) && nzchar(trimws(focal_taxon))) trimws(focal_taxon) else NA_character_

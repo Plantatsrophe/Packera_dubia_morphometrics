@@ -1114,7 +1114,7 @@ def _match_field_record(
     if same_sp:
         return same_sp[0]
 
-    return candidates[0]
+    return None
 
 
 def _coerce_flag_int(val: Any) -> int:
@@ -1340,6 +1340,7 @@ def _link_sample_to_voucher(
 ) -> Dict[str, Any]:
     """Resolve 4-tier voucher linkage (`G1_Direct_Voucher` .. `G4_Ungeoreferenced_Tip`) with exsiccatae duplicate ranking."""
     voucher_by_cat = {str(v.get("catalogNumber") or ""): v for v in vouchers if v.get("catalogNumber")}
+    voucher_by_cat_ci = {str(v.get("catalogNumber") or "").upper(): v for v in vouchers if v.get("catalogNumber")}
     eff_index = exsiccatae_index if exsiccatae_index is not None else _build_exsiccatae_index(vouchers)
 
     def _siblings_for_voucher(v: Mapping[str, Any]) -> List[Mapping[str, Any]]:
@@ -1358,18 +1359,31 @@ def _link_sample_to_voucher(
             return min(imaged, key=_duplicate_rank_key)
         return pinned_v
 
-    # 1. Explicit user_genetic_metadata catalogNumber -> G1_Direct_Voucher (upgrade to imaged duplicate if unimaged)
+    # 1. Explicit user_genetic_metadata catalogNumber -> G1_Direct_Voucher (or explicit linkage_tier)
+    valid_tiers = {
+        "G1_Direct_Voucher",
+        "G1_Exsiccatae_Isoduplicate",
+        "G2_Population_Voucher_Proxy",
+        "G3_Georeferenced_Unvouchered",
+        "G4_Ungeoreferenced_Tip",
+    }
+    u_tier = str(user_meta.get("linkage_tier") or "").strip() if user_meta else ""
+    if u_tier not in valid_tiers:
+        u_tier = ""
     if user_meta and user_meta.get("catalogNumber"):
         u_cat = str(user_meta["catalogNumber"]).strip()
-        matched = voucher_by_cat.get(u_cat)
+        matched = voucher_by_cat.get(u_cat) or voucher_by_cat_ci.get(u_cat.upper())
         if matched:
             resolved = _upgrade_pinned_if_unimaged(matched)
             return {
                 "catalogNumber": str(resolved.get("catalogNumber")),
                 "voucher": resolved,
-                "linkage_tier": "G1_Direct_Voucher",
+                "linkage_tier": u_tier or "G1_Direct_Voucher",
                 "exsiccatae_key": _resolve_output_exsiccatae_key(resolved, user_meta, field_row),
             }
+    if u_tier in ("G3_Georeferenced_Unvouchered", "G4_Ungeoreferenced_Tip"):
+        out_ex = _resolve_output_exsiccatae_key(None, user_meta, field_row)
+        return {"catalogNumber": None, "voucher": None, "linkage_tier": u_tier, "exsiccatae_key": out_ex}
 
     # 2a. Explicit exsiccatae_key or collector+number from user_meta (or exact sample-matched field_row) -> G1_Direct_Voucher
     u_exp, u_norm, u_dateless = _extract_meta_exsiccatae_keys(user_meta)
@@ -1403,9 +1417,15 @@ def _link_sample_to_voucher(
                 }
 
     # 2b. Exact Project_ID / sample_id == catalogNumber or recordNumber -> G1_Direct_Voucher
+    sp_eq_main = _canonical_taxon_equiv_key(parsed.get("species_standardized"))
     probe_ids = [sample_id]
     if user_meta and user_meta.get("project_id"):
         probe_ids.append(str(user_meta["project_id"]))
+    if field_row and field_row.get("project_id"):
+        fpid = strip_smart_quotes(field_row["project_id"])
+        fsp_eq = _canonical_taxon_equiv_key(field_row.get("species_standardized"))
+        if not (sp_eq_main and fsp_eq and sp_eq_main != fsp_eq):
+            probe_ids.extend([fpid, re.sub(r"-\d{8}$", "", fpid)])
     for pid in probe_ids:
         pid_clean = strip_smart_quotes(pid).upper()
         if not pid_clean:
@@ -1415,9 +1435,10 @@ def _link_sample_to_voucher(
         for v in vouchers:
             cat_c = strip_smart_quotes(v.get("catalogNumber") or "").upper()
             rec_c = strip_smart_quotes(v.get("recordNumber") or "").upper()
+            vsp_eq = _canonical_taxon_equiv_key(v.get("species_standardized"))
             if pid_clean == cat_c:
                 cat_hits.append(v)
-            elif rec_c and (pid_clean == rec_c or pid_clean.startswith(rec_c + "-")):
+            elif rec_c and (pid_clean == rec_c or pid_clean.startswith(rec_c + "-")) and not (sp_eq_main and vsp_eq and sp_eq_main != vsp_eq):
                 rec_hits.append(v)
         if cat_hits:
             resolved = _upgrade_pinned_if_unimaged(cat_hits[0])

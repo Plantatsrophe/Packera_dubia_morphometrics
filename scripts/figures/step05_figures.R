@@ -655,12 +655,19 @@ render_step05c_sdm_suitability_png <- function(
     }
   }
 
-  f_tx <- if (nzchar(trimws(as.character(focal_taxon))) && (trimws(as.character(focal_taxon)) %in% vdf$plot_group)) {
-    trimws(as.character(focal_taxon))
+  f_raw <- trimws(as.character(focal_taxon))
+  f_tx <- if (nzchar(f_raw)) {
+    f_raw
   } else {
     active_groups[1L]
   }
-  pts_f <- if (has_focal_sdm && f_tx %in% vdf$plot_group) vdf[vdf$plot_group == f_tx, , drop = FALSE] else vdf
+  pts_f <- if (has_focal_sdm && f_tx %in% vdf$plot_group) {
+    vdf[vdf$plot_group == f_tx, , drop = FALSE]
+  } else if (has_focal_sdm && ("species_standardized" %in% names(vdf)) && (f_tx %in% vdf$species_standardized)) {
+    vdf[vdf$species_standardized == f_tx, , drop = FALSE]
+  } else {
+    vdf
+  }
   info_max <- if (has_focal_sdm) raster_to_proj_df(focal_rasters$maxent) else list(df = data.frame(), projected = FALSE)
   info_ens <- if (has_focal_sdm) raster_to_proj_df(focal_rasters$ensemble) else list(df = data.frame(), projected = FALSE)
 

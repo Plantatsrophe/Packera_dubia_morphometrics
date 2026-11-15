@@ -435,7 +435,7 @@ render_step04_gmm_cda_png <- function(
         data = tab_pos,
         ggplot2::aes(x = .data$Cluster, y = .data$Taxon, label = .data$lbl),
         size = if (length(active_groups) > 15L) 2.2 else 2.7,
-        color = ifelse(tab_pos$Pct > 55, "white", "#111827"),
+        color = ifelse(tab_pos$Pct > 50, "#111827", "white"),
         inherit.aes = FALSE
       )
     }

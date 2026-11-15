@@ -142,14 +142,10 @@ run_step07_cytology_integration <- function(df, conn = NULL, cytology_dir = "dat
 
   rec_df <- .load_cytology_table(opts$cytological_records_df, conn, opts$db_path, opts$demo, "cytological_records", file.path(cytology_dir, "public_packera_cytology_records.csv"))
   tax_df <- .load_cytology_table(opts$taxon_cytology_summary_df, conn, opts$db_path, opts$demo, "taxon_cytology_summary", file.path(cytology_dir, "public_packera_taxon_cytology_summary.csv"))
-  g_pl <- .parse_ploidy_int(.pick_col_raw(df, c("geno_ploidy_level", "ploidy_level")))
-  inf_raw <- .norm_cyto_str(.pick_col_chr(df, c("inferred_cytotype"), ""))
-  inf_pl <- ifelse(tolower(inf_raw) %in% c("2x", "3x", "4x", "5x", "6x", "8x"), .parse_ploidy_int(inf_raw), NA_integer_)
-  has_step06 <- any((!is.na(g_pl) & g_pl %in% c(2L, 3L, 4L, 5L, 6L, 8L)) | !is.na(inf_pl))
   has_rec <- is.data.frame(rec_df) && nrow(rec_df) > 0L
   has_tax <- is.data.frame(tax_df) && nrow(tax_df) > 0L
 
-  if (!has_rec && !has_tax && !has_step06) {
+  if (!has_rec && !has_tax) {
     attr(df, "cytology_markdown_lines") <- character(0); attr(df, "cytotype_barrier_labels") <- character(0)
     return(df)
   }
@@ -193,17 +189,6 @@ run_step07_cytology_integration <- function(df, conn = NULL, cytology_dir = "dat
     }
   }
 
-  qc_ok <- if ("geno_quality_pass" %in% names(df)) .safe_bool_cyto(df$geno_quality_pass) else rep(TRUE, n)
-  nq_d <- if ("nquire_delta_logl" %in% names(df)) suppressWarnings(as.numeric(df$nquire_delta_logl)) else rep(NA_real_, n)
-  s6_valid_g <- !is.na(g_pl) & g_pl %in% c(2L, 3L, 4L, 5L, 6L, 8L)
-  s6_valid_inf <- !is.na(inf_pl) & (is.na(nq_d) | abs(nq_d) >= 4.0)
-  s6_ok <- qc_ok & (s6_valid_g | s6_valid_inf)
-  s6_pl <- ifelse(s6_valid_g, g_pl, ifelse(s6_valid_inf, inf_pl, NA_integer_))
-  for (i in which(!is_typed & s6_ok & !is.na(s6_pl))) {
-    v_pl[i] <- as.integer(s6_pl[i]); is_typed[i] <- TRUE
-    if (is.na(tier[i])) tier[i] <- "Step06_Genomic_Cytotype"
-  }
-
   tax_rep_map <- list(); tax_multi_map <- list()
   if (has_tax) {
     t_sp <- .pick_col_chr(tax_df, c("species_standardized"), "")
@@ -232,9 +217,6 @@ run_step07_cytology_integration <- function(df, conn = NULL, cytology_dir = "dat
     tx_cyt_str[idx_sp] <- rep_final; tx_multi_vec[idx_sp] <- if (is_m) 1L else 0L
     untyped <- idx_sp[!is_typed[idx_sp]]; need_tier <- untyped[is.na(tier[untyped])]
     if (length(need_tier) > 0L) tier[need_tier] <- if (is_m) "C4_Taxon_MultiCytotype" else "C3_Taxon_Monomorphic"
-  }
-  for (i in which(tier == "Step06_Genomic_Cytotype" & !is.na(tx_multi_vec))) {
-    tier[i] <- if (tx_multi_vec[i] == 1L) "C4_Taxon_MultiCytotype" else "C3_Taxon_Monomorphic"
   }
 
   barrier_pass <- rep(0L, n); barrier_labels <- character(0)

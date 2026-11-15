@@ -3676,7 +3676,7 @@ audit_institutional_batch_effects <- function(morpho_df, output_csv = "outputs/r
   if (!("species_standardized" %in% names(audit_subset))) audit_subset$species_standardized <- if ("scientificName" %in% names(audit_subset)) audit_subset$scientificName else "Unassigned_Packera"
   audit_subset$species_standardized <- droplevels(factor(audit_subset$species_standardized))
   if (nlevels(audit_subset$institutionCode) < 2) return(NULL)
-  fits <- list(); rows_out <- list(); raw_ps <- numeric(0)
+  fits <- list(); rows_out <- list(); raw_ps <- numeric(0); pre_eb_map <- attr(morpho_df, "pre_eb_batch_partial_eta_sq")
   for (feat in test_feats) {
     sub_f <- audit_subset[is.finite(audit_subset[[feat]]), , drop = FALSE]; sub_f$institutionCode <- droplevels(sub_f$institutionCode); sub_f$species_standardized <- droplevels(sub_f$species_standardized)
     if (nrow(sub_f) < 6L || nlevels(sub_f$institutionCode) < 2L || stats::var(sub_f[[feat]], na.rm = TRUE) <= 1e-12) next
@@ -3685,16 +3685,20 @@ audit_institutional_batch_effects <- function(morpho_df, output_csv = "outputs/r
     fit_f <- stats::lm(fml, data = sub_f, weights = w_bf); s_f <- summary(fit_f); aov_f <- stats::anova(fit_f)
     ii <- which(rownames(aov_f) == "institutionCode")[1]; ri <- which(rownames(aov_f) == "Residuals")[1]; if (is.na(ii) || is.na(ri)) next
     r2_f <- aov_f$`Sum Sq`[ii] / max(aov_f$`Sum Sq`[ii] + aov_f$`Sum Sq`[ri], 1e-12); pv_f <- as.numeric(aov_f$`Pr(>F)`[ii])
+    pre_eta_f <- if (!is.null(pre_eb_map) && feat %in% names(pre_eb_map) && is.finite(pre_eb_map[[feat]])) as.numeric(pre_eb_map[[feat]]) else r2_f
     fits[[feat]] <- fit_f; raw_ps <- c(raw_ps, pv_f)
     rows_out[[length(rows_out) + 1L]] <- data.frame(
       Response = c(feat, feat), Term = c("institutionCode", "Residuals"), Df = c(aov_f$Df[ii], aov_f$Df[ri]),
       Sum_Sq = round(c(aov_f$`Sum Sq`[ii], aov_f$`Sum Sq`[ri]), 4), Mean_Sq = round(c(aov_f$`Mean Sq`[ii], aov_f$`Mean Sq`[ri]), 4),
       F_value = c(round(aov_f$`F value`[ii], 4), NA), p_value = c(signif(pv_f, 4), NA), P_value = c(signif(pv_f, 4), NA), p_value_bh = c(NA_real_, NA_real_),
       R_squared = round(c(r2_f, NA), 4), Adj_R_squared = round(c(s_f$adj.r.squared, NA), 4),
+      partial_eta_sq = round(c(r2_f, NA), 4), pre_eb_partial_eta_sq = round(c(pre_eta_f, NA), 4),
       Batch_Effect_Status = c(ifelse(r2_f < 0.05, "Pass (<0.05)", "Exceeds 0.05"), NA), stringsAsFactors = FALSE)
   }
   if (length(rows_out) == 0L) return(NULL)
-  anova_df <- do.call(rbind, rows_out); anova_df$p_value_bh[anova_df$Term == "institutionCode"] <- signif(stats::p.adjust(raw_ps, method = "BH"), 4)
+  anova_df <- do.call(rbind, rows_out); inst_rows <- which(anova_df$Term == "institutionCode"); q_bh <- stats::p.adjust(raw_ps, method = "BH")
+  anova_df$p_value_bh[inst_rows] <- signif(q_bh, 4)
+  anova_df$Batch_Effect_Status[inst_rows] <- ifelse(anova_df$partial_eta_sq[inst_rows] >= 0.05 & q_bh < 0.05, "Exceeds 0.05 (q_BH < 0.05)", ifelse(anova_df$partial_eta_sq[inst_rows] < 0.05, "Pass (<0.05)", "Pass (q_BH >= 0.05)"))
   if (!is.null(output_csv) && nzchar(output_csv)) { dir.create(dirname(output_csv), recursive = TRUE, showWarnings = FALSE); tmp_ba <- paste0(output_csv, ".", Sys.getpid(), ".tmp"); write.csv(anova_df, file = tmp_ba, row.names = FALSE); file.rename(tmp_ba, output_csv) }
   return(invisible(list(lm_pc1 = fits[["PC1"]], lm_pc2 = fits[["PC2"]], models = fits, anova_table = anova_df)))
 }

@@ -416,8 +416,9 @@ def _build_native_lm3_crop_masks(
 def estimate_sheet_paper_cie_l_ref(image_bgr: Optional[np.ndarray]) -> float:
     """
     Estimates the clean mounting-paper CIE L* white-point reference (0..100 scale)
-    for a herbarium sheet by taking the 75th percentile of bright, low-chroma
-    background pixels on an 8x strided grid.
+    for a herbarium sheet using an interior border band (3%..15% from image edges,
+    excluding outer black scan borders and central specimen foliage) filtered for
+    neutral low-chroma mounting paper (`C*_ab <= 12`, `70 <= L* <= 99`) at P90.
     """
     if image_bgr is None or not isinstance(image_bgr, np.ndarray) or image_bgr.ndim != 3 or image_bgr.size == 0:
         return 90.0
@@ -429,12 +430,24 @@ def estimate_sheet_paper_cie_l_ref(image_bgr: Optional[np.ndarray]) -> float:
     a_c = lab[:, :, 1].astype(np.float32) - 128.0
     b_c = lab[:, :, 2].astype(np.float32) - 128.0
     chroma = np.hypot(a_c, b_c)
-    paper_cand = l_cie[(l_cie >= 55.0) & (chroma <= 28.0)]
+    sh, sw = l_cie.shape
+    if sh >= 24 and sw >= 24:
+        r0, r1 = max(1, int(round(0.03 * sh))), max(3, int(round(0.15 * sh)))
+        c0, c1 = max(1, int(round(0.03 * sw))), max(3, int(round(0.15 * sw)))
+        yy, xx = np.ogrid[:sh, :sw]
+        outer_ok = (yy >= r0) & (yy < sh - r0) & (xx >= c0) & (xx < sw - c0)
+        core_mask = (yy >= r1) & (yy < sh - r1) & (xx >= c1) & (xx < sw - c1)
+        border_band = outer_ok & ~core_mask
+    else:
+        border_band = np.ones((sh, sw), dtype=bool)
+    paper_cand = l_cie[border_band & (l_cie >= 70.0) & (l_cie <= 99.0) & (chroma <= 12.0)]
+    if paper_cand.size < 32:
+        paper_cand = l_cie[(l_cie >= 65.0) & (l_cie <= 99.0) & (chroma <= 18.0)]
     if paper_cand.size >= 16:
-        ref = float(np.percentile(paper_cand, 75.0))
+        ref = float(np.percentile(paper_cand, 90.0))
     else:
         ref = float(np.percentile(l_cie, 85.0))
-    return float(np.clip(ref, 55.0, 99.0))
+    return float(np.clip(ref, 65.0, 99.0))
 
 
 def compute_eroded_blade_cie_l_metrics(

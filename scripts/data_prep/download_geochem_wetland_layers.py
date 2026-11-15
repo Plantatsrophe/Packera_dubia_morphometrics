@@ -352,7 +352,13 @@ def fetch_nwpl_wetland_ratings(
     if conn is not None and ratings and conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='taxon_backbone_profiles'").fetchone():
         cols = {r[1] for r in conn.execute("PRAGMA table_info(taxon_backbone_profiles)").fetchall()}
         if {"species_standardized", "nwpl_indicator_code", "nwpl_wetland_score"}.issubset(cols):
-            conn.executemany("UPDATE taxon_backbone_profiles SET nwpl_indicator_code = ?, nwpl_wetland_score = ? WHERE species_standardized = ?", [(r["nwpl_indicator_code"], r["nwpl_wetland_score"], r["species_standardized"]) for r in ratings.values()])
+            resolved = {sp: (r["nwpl_indicator_code"], r["nwpl_wetland_score"]) for sp, r in ratings.items()}
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='taxon_synonyms'").fetchone():
+                syn = {str(a).strip().lower(): str(b).strip() for a, b in conn.execute("SELECT raw_name_lower, canonical_packera FROM taxon_synonyms WHERE canonical_packera IS NOT NULL").fetchall() if a and b}
+                for sp, r in ratings.items():
+                    canon = syn.get(sp.lower())
+                    if canon and canon not in resolved: resolved[canon] = (r["nwpl_indicator_code"], r["nwpl_wetland_score"])
+            conn.executemany("UPDATE taxon_backbone_profiles SET nwpl_indicator_code = ?, nwpl_wetland_score = ? WHERE species_standardized = ?", [(c, s, sp) for sp, (c, s) in resolved.items()])
             conn.commit()
     return ratings
 

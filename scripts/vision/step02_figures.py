@@ -1551,7 +1551,7 @@ def generate_step02_publication_figures(
                 sp_edge.set_linewidth(0.8)
 
             if c_idx == 0:
-                wrapped_sp = format_icn_taxon_mathtext(sp_name, abbreviate_genus=(len(sp_name) > 20))
+                wrapped_sp = format_icn_taxon_mathtext(sp_name, abbreviate_genus=True)
                 ax.set_ylabel(
                     f"{wrapped_sp}\n(n = {len(sp_all)} leaves)",
                     fontsize=8.4,

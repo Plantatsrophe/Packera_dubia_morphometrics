@@ -2873,5 +2873,58 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
             self.assertEqual(str(man_after.loc[1, "leaf_zone"]), "basal")
             self.assertEqual(str(man_after.loc[3, "leaf_zone"]), "cauline")
 
+    def test_rescore_recompute_photometry_preserves_existing_values_when_crop_missing(self) -> None:
+        import sqlite3
+        from scripts.core.db import get_db_connection
+        from scripts.vision.rescore_step02_qc_and_zones import rescore_tier_a_leaves
+
+        with tempfile.TemporaryDirectory() as tmp_d:
+            data_dir = Path(tmp_d) / "data"
+            for sub in ("raw_vouchers", "masks", "contours", "tables"):
+                (data_dir / sub).mkdir(parents=True, exist_ok=True)
+            img_path = data_dir / "raw_vouchers" / "PHOT_1.png"
+            mask_path = data_dir / "masks" / "PHOT_1_leaf1.png"
+            cv2.imwrite(str(img_path), np.full((200, 300, 3), 240, dtype=np.uint8))
+            mask = np.zeros((80, 60), dtype=np.uint8)
+            cv2.ellipse(mask, (30, 40), (16, 26), 0, 0, 360, 255, -1)
+            cv2.imwrite(str(mask_path), mask)
+
+            db_file = data_dir / "plantmatics.sqlite"
+            conn = get_db_connection(db_path=db_file, init_schema=True)
+            try:
+                with conn:
+                    conn.execute(
+                        "INSERT INTO vouchers (catalogNumber, scientificName, species_standardized, determiner_tier, qc_status, image_path, is_calibrated_mm) VALUES ('PHOT_1', 'Packera dubia', 'Packera dubia', 'Tier_1_Gold', 'PASS', ?, 1);",
+                        (str(img_path),),
+                    )
+                    conn.execute("INSERT INTO plant_individuals (catalogNumber, plant_individual_id, crown_x, crown_y, plant_height_px, is_bent_stem) VALUES ('PHOT_1', 0, 150.0, 170.0, 140.0, 0);")
+                    conn.execute("INSERT INTO voucher_reproductive_phenology (catalogNumber, plant_individual_id, capitula_count) VALUES ('PHOT_1', 0, 2);")
+                    conn.execute(
+                        """
+                        INSERT INTO extracted_leaves (
+                            catalogNumber, plant_individual_id, leaf_id, leaf_zone, leaf_zone_confidence,
+                            dist_from_crown_norm, solidity, circularity, aspect_ratio, blade_length_px,
+                            petiole_length_px, petiole_to_blade_ratio, area_px, bilateral_dice, si_a,
+                            lm3_gates_pass, n_lamina_components, cy_rel_plant_bbox, mask_path, crop_path,
+                            contour_xy_json, blade_cie_l_norm, blade_cie_l_sd
+                        ) VALUES ('PHOT_1', 0, 1, 'basal', 0.90, 0.05, 0.94, 0.84, 1.62, 52.0, 30.0, 0.58, 1300.0, 0.95, 0.02, 1, 1, 0.85, ?, NULL, '[[30,66],[14,40],[30,14],[46,40]]', 0.712, 0.045);
+                        """,
+                        (str(mask_path),),
+                    )
+            finally:
+                conn.close()
+
+            man_csv = data_dir / "tables" / "extracted_leaf_manifest.csv"
+            pd.DataFrame([{"catalogNumber": "PHOT_1", "plant_individual_id": 0, "leaf_id": 1, "leaf_zone": "basal", "solidity": 0.94, "blade_cie_l_norm": 0.712, "blade_cie_l_sd": 0.045}]).to_csv(man_csv, index=False)
+            stats = rescore_tier_a_leaves(db_path=db_file, data_dir=data_dir, manifest_csv=man_csv, recompute_photometry=True, workers=2)
+            self.assertEqual(stats["photometry_recomputed"], 0)
+            with sqlite3.connect(str(db_file)) as c_chk:
+                l_norm, l_sd = c_chk.execute("SELECT blade_cie_l_norm, blade_cie_l_sd FROM extracted_leaves WHERE catalogNumber='PHOT_1';").fetchone()
+            self.assertAlmostEqual(float(l_norm), 0.712, places=5)
+            self.assertAlmostEqual(float(l_sd), 0.045, places=5)
+            man_out = pd.read_csv(man_csv)
+            self.assertAlmostEqual(float(man_out.loc[0, "blade_cie_l_norm"]), 0.712, places=5)
+            self.assertAlmostEqual(float(man_out.loc[0, "blade_cie_l_sd"]), 0.045, places=5)
+
 if __name__ == "__main__":
     unittest.main()

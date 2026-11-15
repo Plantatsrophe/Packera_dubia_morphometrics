@@ -245,10 +245,10 @@ evaluate_step07_hydro_edaphic_and_basionym_guards <- function(master_df, db_conn
   for (i in seq_len(n)) {
     if (!(is.finite(ca_mg[i]) || is.finite(ni_cr[i]) || is.finite(carb_c[i]) || is.finite(uc_grad[i]) ||
           is.finite(is_wet[i]) || is.finite(dist_m[i]) || is.finite(wsi[i]) || !is.na(sgmc[i]))) next
-    if ((!is.na(is_wet[i]) && is_wet[i] == 1) || (is.finite(wsi[i]) && wsi[i] >= 0.65)) {
-      regime[i] <- "Palustrine_Wetland_Fen"
-    } else if ((is.finite(ca_mg[i]) && ca_mg[i] <= 0.7) || (is.finite(uc_grad[i]) && uc_grad[i] >= 0.9) || (is.finite(ni_cr[i]) && ni_cr[i] >= 4.0)) {
+    if ((is.finite(ca_mg[i]) && ca_mg[i] <= 0.7) || (is.finite(uc_grad[i]) && uc_grad[i] >= 0.9) || (is.finite(ni_cr[i]) && ni_cr[i] >= 4.0)) {
       regime[i] <- "Ultramafic_Serpentine_Barren"
+    } else if ((!is.na(is_wet[i]) && is_wet[i] == 1) || (is.finite(wsi[i]) && wsi[i] >= 0.65)) {
+      regime[i] <- "Palustrine_Wetland_Fen"
     } else if ((is.finite(ca_mg[i]) && ca_mg[i] >= 2.0) || (is.finite(carb_c[i]) && carb_c[i] >= 0.5) || (is.finite(uc_grad[i]) && uc_grad[i] <= -0.35)) {
       regime[i] <- "Calcareous_Carbonate_Glade"
     } else if ((is.finite(ca_mg[i]) && ca_mg[i] < 1.2 && (!is.finite(ni_cr[i]) || ni_cr[i] < 4.0)) ||

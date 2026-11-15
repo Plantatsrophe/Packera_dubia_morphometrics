@@ -40,12 +40,12 @@ compute_continuous_boyce_index <- function(suitability_all, suitability_pres, n_
     attr(res, "boyce_curve") <- empty_curve
     return(res)
   }
-  n_b <- max(5L, as.integer(n_bins))
-  win_w <- max((s_max - s_min) / 10.0, 1e-4)
-  centers <- seq(s_min + 0.5 * win_w, s_max - 0.5 * win_w, length.out = n_b)
-  pe_ratio <- rep(NA_real_, n_b)
   n_p <- length(s_pres)
   n_a <- length(s_all)
+  n_b <- if (n_p < 25L) min(max(6L, n_p), as.integer(n_bins)) else max(5L, as.integer(n_bins))
+  win_w <- max((s_max - s_min) / if (n_p < 25L) 4.0 else 10.0, 1e-4)
+  centers <- seq(s_min + 0.5 * win_w, s_max - 0.5 * win_w, length.out = n_b)
+  pe_ratio <- rep(NA_real_, n_b)
   for (i in seq_len(n_b)) {
     lo <- centers[i] - 0.5 * win_w
     hi <- centers[i] + 0.5 * win_w
@@ -54,6 +54,26 @@ compute_continuous_boyce_index <- function(suitability_all, suitability_pres, n_
     if (e_i > 0) pe_ratio[i] <- p_i / e_i
   }
   ok <- is.finite(pe_ratio) & is.finite(centers)
+  if (sum(ok) < 5L || stats::sd(pe_ratio[ok]) < 1e-10) {
+    u_all <- unique(round(s_all, 6))
+    if (length(u_all) >= 6L) {
+      n_q <- min(12L, max(5L, length(u_all) %/% 4L))
+      q_edges <- as.numeric(stats::quantile(s_all, probs = seq(0.0, 1.0, length.out = n_q + 2L), na.rm = TRUE))
+      q_lo <- q_edges[seq_len(n_q)]
+      q_hi <- q_edges[seq_len(n_q) + 2L]
+      q_ctr <- 0.5 * (q_lo + q_hi)
+      q_pe <- rep(NA_real_, n_q)
+      for (qi in seq_len(n_q)) {
+        p_q <- sum(s_pres >= q_lo[qi] & s_pres <= q_hi[qi]) / n_p
+        e_q <- sum(s_all >= q_lo[qi] & s_all <= q_hi[qi]) / n_a
+        if (e_q > 0) q_pe[qi] <- p_q / e_q
+      }
+      q_ok <- is.finite(q_pe) & is.finite(q_ctr)
+      if (sum(q_ok) >= 4L && stats::sd(q_pe[q_ok]) >= 1e-10) {
+        centers <- q_ctr; pe_ratio <- q_pe; ok <- q_ok
+      }
+    }
+  }
   curve_df <- data.frame(suitability = centers[ok], pe_ratio = pe_ratio[ok], stringsAsFactors = FALSE)
   if (sum(ok) < 3L || stats::sd(pe_ratio[ok]) < 1e-10) {
     res <- 0.0
@@ -938,6 +958,27 @@ fit_and_project_maxent_sdm_maps <- function(
     cbi_rf <- compute_continuous_boyce_index(oof_rf, oof_rf[p_vec == 1L], n_bins = 20L)
     cbi_ens <- compute_continuous_boyce_index(oof_ens, oof_ens[p_vec == 1L], n_bins = 20L)
 
+    .pick_tg_top_pred <- function(cands, X_all, mx_m, rf_m, fallback_nm) {
+      c_use <- intersect(cands, colnames(X_all))
+      if (length(c_use) == 0L) return(fallback_nm)
+      if (length(c_use) == 1L) return(c_use[1L])
+      base_p <- 0.5 * mx_m$predict_cloglog(X_all) + 0.5 * rf_m$predict_prob(X_all)
+      scores <- vapply(c_use, function(vn) {
+        X_med <- X_all
+        col_v <- suppressWarnings(as.numeric(X_med[[vn]]))
+        fin <- is.finite(col_v)
+        if (sum(fin) < 2L || stats::sd(col_v[fin]) < 1e-10) return(0.0)
+        X_med[[vn]] <- rep(stats::median(col_v[fin], na.rm = TRUE), nrow(X_med))
+        alt_p <- 0.5 * mx_m$predict_cloglog(X_med) + 0.5 * rf_m$predict_prob(X_med)
+        sc <- mean(abs(base_p - alt_p), na.rm = TRUE)
+        if (!is.finite(sc)) 0.0 else as.numeric(sc)
+      }, numeric(1))
+      if (all(scores <= 1e-10)) return(c_use[1L])
+      c_use[which.max(scores)]
+    }
+    tg_top_clim_pred <- .pick_tg_top_pred(clim_cand, X_comb, mx_full, rf_full, top_clim_pred)
+    tg_top_edaph_pred <- .pick_tg_top_pred(edaph_cand, X_comb, mx_full, rf_full, top_edaph_pred)
+
     perf_rows[[length(perf_rows) + 1L]] <- data.frame(
       Taxon_or_Morphotype = tg,
       N_Presences = as.integer(n_pres),
@@ -949,8 +990,8 @@ fit_and_project_maxent_sdm_maps <- function(
       CBI_SpatialRF = round(as.numeric(cbi_rf), 4),
       AUC_Block_Ensemble = round(auc_ens, 4),
       CBI_Ensemble = round(as.numeric(cbi_ens), 4),
-      Top_Climatic_Predictor = as.character(top_clim_pred),
-      Top_Edaphic_Predictor = as.character(top_edaph_pred),
+      Top_Climatic_Predictor = as.character(tg_top_clim_pred),
+      Top_Edaphic_Predictor = as.character(tg_top_edaph_pred),
       stringsAsFactors = FALSE
     )
 
@@ -1008,6 +1049,8 @@ fit_and_project_maxent_sdm_maps <- function(
       cbi_mx = cbi_mx,
       cbi_rf = cbi_rf,
       cbi_ens = cbi_ens,
+      top_clim_pred = tg_top_clim_pred,
+      top_edaph_pred = tg_top_edaph_pred,
       X_comb = X_comb,
       p_vec = p_vec
     )
@@ -1015,6 +1058,9 @@ fit_and_project_maxent_sdm_maps <- function(
     if (is.null(focal_artifacts)) {
       focal_artifacts <- tg_art
     }
+  }
+  if (!is.null(focal_taxon) && nzchar(focal_taxon) && (focal_taxon %in% names(all_sdm_artifacts))) {
+    focal_artifacts <- all_sdm_artifacts[[focal_taxon]]
   }
 
   perf_df <- if (length(perf_rows) > 0L) {
@@ -1041,7 +1087,7 @@ fit_and_project_maxent_sdm_maps <- function(
     .ensure_step05_fig_modules()
     dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
     if (!is.null(focal_artifacts) && !is.null(focal_artifacts$rast_mx) && !is.null(focal_artifacts$rast_ens)) {
-      resp_vars <- intersect(unique(c(top_clim_pred, top_edaph_pred, clim_cand, edaph_cand, kept_vars)), colnames(focal_artifacts$X_comb))
+      resp_vars <- intersect(unique(c(focal_artifacts$top_clim_pred, focal_artifacts$top_edaph_pred, clim_cand, edaph_cand, kept_vars)), colnames(focal_artifacts$X_comb))
       resp_vars <- resp_vars[seq_len(min(3L, length(resp_vars)))]
       resp_lbls <- if (exists("format_predictor_labels", mode = "function")) format_predictor_labels(resp_vars) else gsub("_", " ", resp_vars)
 

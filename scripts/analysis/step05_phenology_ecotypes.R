@@ -342,12 +342,14 @@ compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = 
   if (n_raw_anthesis >= 5L) {
     circ_mean_doy <- compute_circular_mean_doy(df$doy[raw_anthesis_cand])
     cand_offsets <- circular_signed_doy_offset(df$doy[raw_anthesis_cand], circ_mean_doy)
-    arc_lo <- max(-182.625, as.numeric(stats::quantile(cand_offsets, 0.005, na.rm = TRUE)) - 21.0)
-    arc_hi <- min(182.625, as.numeric(stats::quantile(cand_offsets, 0.995, na.rm = TRUE)) + 21.0)
+    mad_doy <- stats::mad(cand_offsets, constant = 1.4826, na.rm = TRUE)
+    half_arc <- min(120.0, max(45.0, 3.5 * if (is.finite(mad_doy) && mad_doy > 0) mad_doy else 21.0))
+    arc_lo <- max(-half_arc, as.numeric(stats::quantile(cand_offsets, 0.005, na.rm = TRUE)) - 21.0)
+    arc_hi <- min(half_arc, as.numeric(stats::quantile(cand_offsets, 0.995, na.rm = TRUE)) + 21.0)
     all_offsets <- circular_signed_doy_offset(df$doy, circ_mean_doy)
     pass_doy_gate <- valid_doy & is.finite(all_offsets) & (all_offsets >= arc_lo) & (all_offsets <= arc_hi)
-    message(sprintf("[INFO] Cohort-adaptive circular anthesis gate: circ_mean_doy=%.1f, arc=[%+.1f, %+.1f] d, lat=[%.2f, %.2f] (N_cand=%d).",
-                    circ_mean_doy, arc_lo, arc_hi, lat_min_gate, lat_max_gate, n_raw_anthesis))
+    message(sprintf("[INFO] Cohort-adaptive circular anthesis gate: circ_mean_doy=%.1f, arc=[%+.1f, %+.1f] d (half_arc=%.1f d), lat=[%.2f, %.2f] (N_cand=%d).",
+                    circ_mean_doy, arc_lo, arc_hi, half_arc, lat_min_gate, lat_max_gate, n_raw_anthesis))
   } else {
     cfg_bounds <- read_config_phenology_bounds(config_path)
     min_d <- cfg_bounds$min_flowering_doy
@@ -477,7 +479,7 @@ compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = 
   }
 
   df$delta_doy <- NA_real_
-  has_both <- valid_doy & !is.na(df$expected_doy) & is.finite(df$expected_doy)
+  has_both <- valid_doy & df$is_verified_anthesis & !is.na(df$expected_doy) & is.finite(df$expected_doy)
   if (any(has_both)) {
     df$delta_doy[has_both] <- circular_signed_doy_offset(df$doy[has_both], df$expected_doy[has_both])
   }
@@ -492,9 +494,9 @@ compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = 
   df$hopkins_adjusted_doy <- ifelse(
     has_both & is.finite(ref_doy_base),
     wrap_doy_365(ref_doy_base + df$delta_doy),
-    ifelse(valid_doy, df$doy, NA_real_)
+    ifelse(valid_doy & df$is_verified_anthesis, df$doy, NA_real_)
   )
-  valid_hdoy <- !is.na(df$hopkins_adjusted_doy) & is.finite(df$hopkins_adjusted_doy)
+  valid_hdoy <- !is.na(df$hopkins_adjusted_doy) & is.finite(df$hopkins_adjusted_doy) & df$is_verified_anthesis
   df$sin_doy <- ifelse(valid_hdoy, round(sin(2.0 * pi * df$hopkins_adjusted_doy / 365.25), 6), NA_real_)
   df$cos_doy <- ifelse(valid_hdoy, round(cos(2.0 * pi * df$hopkins_adjusted_doy / 365.25), 6), NA_real_)
 
@@ -502,6 +504,7 @@ compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = 
   df$pheno_timing_category[has_both & df$delta_doy < -7.0] <- "Early_Flowering"
   df$pheno_timing_category[has_both & df$delta_doy > 7.0] <- "Late_Flowering"
   df$pheno_timing_category[has_both & abs(df$delta_doy) <= 7.0] <- "Synchronous_with_Cline"
+  df$pheno_timing_category[!df$is_verified_anthesis] <- "Excluded_Non_Anthesis"
 
   if (!is.null(output_csv)) {
     keep_cols <- c("catalogNumber", "plant_individual_id", "institutionCode", "scientificName", "species_raw",
@@ -538,19 +541,24 @@ compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = 
     f_stat <- NA_real_; p_val_aov <- NA_real_; df_b <- NA_real_; df_w <- NA_real_
   }
 
+  aov_eta2 <- if (is.finite(f_stat) && is.finite(df_b) && is.finite(df_w) && (f_stat * df_b + df_w) > 0) {
+    round((f_stat * df_b) / (f_stat * df_b + df_w), 4)
+  } else NA_real_
   summary_records <- list()
   summary_records[[1]] <- data.frame(
     Analysis_Section = "Baseline_Regression", Taxon_or_Comparison = "DOY ~ decimalLatitude (Verified Anthesis)",
-    Sample_Size = baseline$n, Mean_Delta_DOY = round(baseline$slope, 3), SD_Delta_DOY = round(baseline$intercept, 3),
-    Median_Delta_DOY = round(baseline$r_squared, 4), IQR_Delta_DOY = NA_real_, CI_Lower_95 = NA_real_, CI_Upper_95 = NA_real_,
+    Sample_Size = baseline$n, Mean_Delta_DOY = NA_real_, SD_Delta_DOY = NA_real_,
+    Median_Delta_DOY = NA_real_, IQR_Delta_DOY = NA_real_, CI_Lower_95 = NA_real_, CI_Upper_95 = NA_real_,
+    Statistic_Primary = round(baseline$slope, 3), Statistic_Secondary = round(baseline$intercept, 3), Effect_or_R2 = round(baseline$r_squared, 4),
     P_Value = if (!is.na(baseline$p_value)) sprintf("%.4e", baseline$p_value) else "NA",
     Interpretation = sprintf("Empirical anthesis advance slope = +%.2f days/degree N (Hopkins' Law)", baseline$slope),
     stringsAsFactors = FALSE
   )
   summary_records[[2]] <- data.frame(
     Analysis_Section = "One_Way_ANOVA", Taxon_or_Comparison = "Across Target Taxa (Verified Anthesis)",
-    Sample_Size = nrow(target_flowering), Mean_Delta_DOY = round(f_stat, 3), SD_Delta_DOY = df_b,
-    Median_Delta_DOY = df_w, IQR_Delta_DOY = NA_real_, CI_Lower_95 = NA_real_, CI_Upper_95 = NA_real_,
+    Sample_Size = nrow(target_flowering), Mean_Delta_DOY = NA_real_, SD_Delta_DOY = NA_real_,
+    Median_Delta_DOY = NA_real_, IQR_Delta_DOY = NA_real_, CI_Lower_95 = NA_real_, CI_Upper_95 = NA_real_,
+    Statistic_Primary = round(f_stat, 3), Statistic_Secondary = df_b, Effect_or_R2 = aov_eta2,
     P_Value = if (!is.na(p_val_aov)) sprintf("%.4e", p_val_aov) else "NA",
     Interpretation = if (!is.na(p_val_aov) && p_val_aov < 0.05) "Significant phenological divergence between taxa" else "No significant divergence or insufficient sample size",
     stringsAsFactors = FALSE
@@ -566,6 +574,7 @@ compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = 
         IQR_Delta_DOY = round(iq, 3),
         CI_Lower_95 = if (is.finite(se)) round(m - 1.96 * se, 3) else NA_real_,
         CI_Upper_95 = if (is.finite(se)) round(m + 1.96 * se, 3) else NA_real_,
+        Statistic_Primary = NA_real_, Statistic_Secondary = NA_real_, Effect_or_R2 = NA_real_,
         P_Value = "",
         Interpretation = if (m < -3) "Early blooming relative to latitude" else if (m > 3) "Late blooming relative to latitude" else "Conforms to latitudinal cline",
         stringsAsFactors = FALSE
@@ -588,6 +597,7 @@ compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = 
         Analysis_Section = "Tukey_HSD_PostHoc", Taxon_or_Comparison = comp_label,
         Sample_Size = nrow(target_flowering), Mean_Delta_DOY = round(diff_val, 3), SD_Delta_DOY = NA_real_,
         Median_Delta_DOY = NA_real_, IQR_Delta_DOY = NA_real_, CI_Lower_95 = round(lwr, 3), CI_Upper_95 = round(upr, 3),
+        Statistic_Primary = round(diff_val, 3), Statistic_Secondary = NA_real_, Effect_or_R2 = NA_real_,
         P_Value = sprintf("%.4e", p_adj),
         Interpretation = if (p_adj < 0.05) sprintf("Statistically significant temporal separation (%.1f days)", abs(diff_val)) else "Phenologically synchronous / overlapping",
         stringsAsFactors = FALSE

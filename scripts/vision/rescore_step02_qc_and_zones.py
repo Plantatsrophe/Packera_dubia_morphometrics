@@ -18,12 +18,13 @@ Description:
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import logging
 import math
 import os
 import sys
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -215,11 +216,24 @@ def _is_inverted_mount_group(grp: pd.DataFrame) -> bool:
     return False
 
 
+def _resolve_crop_file(raw_crop_path: Any, data_dir: Path) -> Optional[Path]:
+    s = str(raw_crop_path or "").strip()
+    if not s or s.lower() in {"nan", "none", "na"}:
+        return None
+    p = Path(s)
+    for cand in (p, PROJECT_ROOT / s, data_dir / "crops" / p.name, PROJECT_ROOT / "data" / "crops" / p.name):
+        if cand.is_file():
+            return cand
+    return None
+
+
 def rescore_tier_a_leaves(
     db_path: Optional[Path] = None,
     data_dir: Optional[Path] = None,
     manifest_csv: Optional[Path] = None,
     segment_partial_leaves: Optional[bool] = None,
+    recompute_photometry: bool = False,
+    workers: Optional[int] = None,
 ) -> Dict[str, int]:
     """Re-evaluates leaf QC gates, hairline sinus bridges, ruler scales, and basal/cauline zones."""
     cfg = PipelineConfig.from_yaml()
@@ -278,7 +292,7 @@ def rescore_tier_a_leaves(
             (rec, str(eff_data_dir), seg_partial)
             for rec in el_df[avail_qc_cols].to_dict(orient="records")
         ]
-        n_workers = min(32, max(1, os.cpu_count() or 8))
+        n_workers = min(32, max(1, int(workers) if workers is not None else (os.cpu_count() or 8)))
         if n_rows >= 64 and n_workers > 1:
             with ProcessPoolExecutor(max_workers=n_workers) as pool:
                 qc_results = list(pool.map(_eval_single_leaf_qc_worker, qc_tasks, chunksize=64))
@@ -498,6 +512,60 @@ def rescore_tier_a_leaves(
                         el_df.at[idx_b, "efa_qc_pass"] = 0
                         el_df.at[idx_b, "qc_flag_reason"] = ";".join(toks)
 
+        upd_cie_l_norm: List[Optional[float]] = [None] * n_rows
+        upd_cie_l_sd: List[Optional[float]] = [None] * n_rows
+        n_photo_upd = 0
+        if recompute_photometry:
+            s02_mod = importlib.import_module("scripts.pipeline.02_segment_and_extract")
+            est_paper_fn = s02_mod.estimate_sheet_paper_cie_l_ref
+            cie_l_fn = s02_mod.compute_eroded_blade_cie_l_metrics
+            by_cat_photo: Dict[str, List[Tuple[int, Any, Any, Any]]] = {}
+            for pos_p, (idx_p, row_p) in enumerate(el_df.iterrows()):
+                cat_p = str(row_p["catalogNumber"]).strip()
+                by_cat_photo.setdefault(cat_p, []).append((pos_p, row_p.get("image_path"), row_p.get("mask_path"), row_p.get("crop_path")))
+
+            def _photo_sheet_worker(item: Tuple[str, List[Tuple[int, Any, Any, Any]]]) -> List[Tuple[int, Optional[float], Optional[float]]]:
+                cat_w, recs_w = item
+                img_f = _resolve_voucher_image_file(recs_w[0][1], cat_w, eff_data_dir)
+                img_bgr = cv2.imread(str(img_f), cv2.IMREAD_COLOR) if img_f is not None else None
+                sh_hw = img_bgr.shape[:2] if (img_bgr is not None and img_bgr.ndim == 3 and img_bgr.size > 0) else None
+                paper_ref = est_paper_fn(img_bgr) if sh_hw is not None else 90.0
+                out_w: List[Tuple[int, Optional[float], Optional[float]]] = []
+                for pos_i, _, m_raw, c_raw in recs_w:
+                    m_f = _resolve_mask_file(m_raw, eff_data_dir)
+                    m_u8 = cv2.imread(str(m_f), cv2.IMREAD_GRAYSCALE) if m_f is not None else None
+                    if m_u8 is None or int(np.count_nonzero(m_u8)) == 0:
+                        out_w.append((pos_i, None, None)); continue
+                    mh_mw = m_u8.shape[:2]
+                    c_f = _resolve_crop_file(c_raw, eff_data_dir)
+                    c_bgr = cv2.imread(str(c_f), cv2.IMREAD_COLOR) if c_f is not None else None
+                    if c_bgr is not None and c_bgr.ndim == 3 and c_bgr.shape[:2] == mh_mw:
+                        res_p = cie_l_fn(c_bgr, m_u8, mask_origin=(0, 0), paper_l_ref=paper_ref)
+                    elif sh_hw is not None and mh_mw == sh_hw:
+                        res_p = cie_l_fn(img_bgr, m_u8, mask_origin=(0, 0), paper_l_ref=paper_ref)
+                    else:
+                        out_w.append((pos_i, None, None)); continue
+                    ln = float(res_p["blade_cie_l_norm"]); ls = float(res_p["blade_cie_l_sd"])
+                    out_w.append((pos_i, ln if math.isfinite(ln) else None, ls if math.isfinite(ls) else None))
+                return out_w
+
+            photo_items = list(by_cat_photo.items())
+            if len(photo_items) >= 4 and n_workers > 1:
+                with ThreadPoolExecutor(max_workers=n_workers) as tpool:
+                    photo_batches = list(tpool.map(_photo_sheet_worker, photo_items))
+            else:
+                photo_batches = [_photo_sheet_worker(it) for it in photo_items]
+            for batch in photo_batches:
+                for pos_i, ln_v, ls_v in batch:
+                    if ln_v is not None:
+                        upd_cie_l_norm[pos_i] = ln_v
+                        el_df.iat[pos_i, el_df.columns.get_loc("blade_cie_l_norm")] = ln_v
+                        n_photo_upd += 1
+                    if ls_v is not None:
+                        upd_cie_l_sd[pos_i] = ls_v
+                        el_df.iat[pos_i, el_df.columns.get_loc("blade_cie_l_sd")] = ls_v
+            logger.info(f"CPU photometry recompute updated {n_photo_upd} / {n_rows} leaves where crop or sheet-matched mask existed.")
+
         # Persist updated QC, ruler scale, and leaf_zone columns atomically to SQLite
         def _opt_float(val: Any) -> Optional[float]:
             if val is None or pd.isna(val):
@@ -530,6 +598,8 @@ def rescore_tier_a_leaves(
                 _opt_float(r_u.get("petiole_length_mm")),
                 _opt_float(r_u.get("petiole_width_mm")),
                 cjson_new,
+                _opt_float(upd_cie_l_norm[pos_i]),
+                _opt_float(upd_cie_l_sd[pos_i]),
                 str(r_u["catalogNumber"]),
                 int(r_u["plant_individual_id"]),
                 int(r_u["leaf_id"]),
@@ -559,7 +629,9 @@ def rescore_tier_a_leaves(
                     blade_width_mm = COALESCE(?, blade_width_mm),
                     petiole_length_mm = COALESCE(?, petiole_length_mm),
                     petiole_width_mm = COALESCE(?, petiole_width_mm),
-                    contour_xy_json = COALESCE(?, contour_xy_json)
+                    contour_xy_json = COALESCE(?, contour_xy_json),
+                    blade_cie_l_norm = COALESCE(?, blade_cie_l_norm),
+                    blade_cie_l_sd = COALESCE(?, blade_cie_l_sd)
                 WHERE catalogNumber = ? AND plant_individual_id = ? AND leaf_id = ?;
                 """,
                 [
@@ -677,6 +749,8 @@ def rescore_tier_a_leaves(
                     "blade_width_mm",
                     "petiole_length_mm",
                     "petiole_width_mm",
+                    "blade_cie_l_norm",
+                    "blade_cie_l_sd",
                 )
                 for col_s in sync_cols:
                     if col_s not in m_df.columns:
@@ -720,6 +794,7 @@ def rescore_tier_a_leaves(
             "basal": n_bas,
             "cauline": n_caul,
             "ruler_calibrated_vouchers": len(calibrated_scales),
+            "photometry_recomputed": n_photo_upd,
         }
     finally:
         conn.close()
@@ -733,6 +808,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--data-dir", type=Path, default=PROJECT_ROOT / "data", help="Tier A data directory containing masks/, contours/, and tables/.")
     parser.add_argument("--manifest", type=Path, default=None, help="Optional extracted_leaf_manifest.csv path override.")
     parser.add_argument("--allow-partial-leaves", action="store_true", default=False, help="Allow detector_class_id == 1 (Leaf_PARTIAL) to pass QC.")
+    parser.add_argument("--recompute-photometry", action="store_true", default=False, help="Recompute blade_cie_l_norm/sd where crops or sheet-matched masks exist.")
+    parser.add_argument("--workers", type=int, default=None, help="Worker thread/process count cap (default: auto up to 32).")
     return parser.parse_args(argv)
 
 
@@ -743,6 +820,8 @@ def main(argv: Optional[List[str]] = None) -> None:
         data_dir=args.data_dir,
         manifest_csv=args.manifest,
         segment_partial_leaves=True if args.allow_partial_leaves else None,
+        recompute_photometry=bool(args.recompute_photometry),
+        workers=args.workers,
     )
 
 

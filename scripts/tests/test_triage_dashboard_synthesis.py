@@ -2695,6 +2695,123 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, f"Tier_0 soft-prior & zero-genomics invariance R suite failed:\n{proc.stderr}\n{proc.stdout}")
         self.assertIn("STEP07_T0_SOFT_AND_INVARIANCE_OK", proc.stdout)
 
+    def test_step07_remediation_invariants_cytology_simplex_anthesis_self_reassign_and_full_queue(self) -> None:
+        """Verify physical-only cytology, simplex modality weights, strict anthesis mask, zero self-reassignment, and full complex queue export."""
+        if not rscript_available():
+            self.skipTest("Rscript not installed.")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_p = Path(tmpdir)
+            cyto_dir = tmp_p / "cytology"
+            cyto_dir.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame([{"catalogNumber": "CY_REF1", "species_standardized": "Packera dubia", "ploidy_level": 2, "sporophytic_2n": 46, "base_x": 23, "cytology_linkage_tier": "C1_Direct_Cytovoucher"}]).to_csv(cyto_dir / "public_packera_cytology_records.csv", index=False)
+            pd.DataFrame([{"species_standardized": "Packera dubia", "taxon_reported_cytotypes": "2x", "modal_ploidy_level": 2, "is_multi_cytotype_taxon": 0}]).to_csv(cyto_dir / "public_packera_taxon_cytology_summary.csv", index=False)
+
+            r_code = f"""
+            source("{SYNTHESIS_R_SCRIPT.as_posix()}")
+
+            # 1. Cytology isolation ignores Step06 genomic inferred cytotypes (C1-C4 physical only)
+            df_c <- data.frame(
+              catalogNumber = c("C_U1", "C_U2", "C_U3", "C_U4"),
+              species_standardized = rep("Packera dubia", 4L),
+              gmm_cluster = c(1L, 1L, 2L, 2L),
+              inferred_cytotype = c("2x", "2x", "4x", "4x"),
+              stringsAsFactors = FALSE
+            )
+            c_out <- run_step07_cytology_integration(df_c, cytology_dir = "{cyto_dir.as_posix()}", opts = list(demo = TRUE))
+            stopifnot(!any(!is.na(c_out$cytology_linkage_tier) & c_out$cytology_linkage_tier == "Step06_Genomic_Cytotype"))
+            stopifnot(all(c_out$cytotype_reproductive_barrier_pass == 0L))
+
+            # 2. Normalized simplex weights sum to 1.0 while w_*_kappa keeps raw kappa scale
+            df_s <- data.frame(
+              catalogNumber = c("S1", "S2"), plant_individual_id = c(0L, 0L),
+              species_standardized = c("Packera dubia", "Packera anonyma"),
+              morph_tier_source = c("Basal_Rosette", "Basal_Rosette"), basal_leaf_count = c(3L, 3L),
+              cda_predicted_taxon = c("Packera dubia", "Packera anonyma"), cda_posterior_prob = c(0.90, 0.90),
+              edaphic_best_fit_taxon = c("Packera dubia", "Packera anonyma"), rf_predicted_prob = c(0.85, 0.85),
+              delta_doy_resid = c(2.0, 2.0), is_active_anthesis = c(TRUE, TRUE),
+              w_morph_kappa = c(0.80, 0.80), w_edaphic_kappa = c(0.40, 0.40),
+              w_pheno_kappa = c(0.20, 0.20), w_geno_kappa = c(0.00, 0.00),
+              stringsAsFactors = FALSE
+            )
+            sc <- compute_probabilistic_consensus_scores(df_s)
+            stopifnot(all(c("w_morph_simplex", "w_edaphic_simplex", "w_pheno_simplex", "w_geno_simplex") %in% names(sc)))
+            stopifnot(all(abs((sc$w_morph_simplex + sc$w_edaphic_simplex + sc$w_pheno_simplex + sc$w_geno_simplex) - 1.0) < 1e-6))
+            stopifnot(abs(sc$w_morph_kappa[1] - 0.80) < 1e-6)
+
+            # 3. Conservative active anthesis mask rejects unknown/blank/NA/fruiting/sterile
+            df_a <- data.frame(
+              voucher_phenological_state = c("anthesis", "unknown", "", NA_character_, "fruiting", "sterile"),
+              is_verified_anthesis = c(TRUE, NA, NA, NA, FALSE, FALSE),
+              doy = c(120, 125, 130, 135, 160, 140),
+              stringsAsFactors = FALSE
+            )
+            stopifnot(identical(resolve_active_anthesis_mask(df_a), c(TRUE, FALSE, FALSE, FALSE, FALSE, FALSE)))
+
+            # 4. Zero self-reassignment invariant even on Misidentification_Severe / Cauline_Only_Fallback
+            df_m <- data.frame(
+              catalogNumber = sprintf("SR_%d", 1:6),
+              plant_individual_id = rep(0L, 6L),
+              species_standardized = c(rep("Packera dubia", 3L), rep("Packera anonyma", 3L)),
+              determiner_tier = rep("Tier_1_Gold", 6L),
+              morph_tier_source = c("Cauline_Only_Fallback", rep("Basal_Rosette", 5L)),
+              basal_leaf_count = c(0L, rep(3L, 5L)),
+              PC1 = c(-4.0, -3.0, -3.1, 3.0, 3.1, 2.9),
+              PC2 = c(0.0, 0.0, 0.1, 0.0, 0.1, -0.1),
+              cda_predicted_taxon = c("Packera dubia", "Packera dubia", "Packera dubia", "Packera anonyma", "Packera anonyma", "Packera anonyma"),
+              cda_posterior_prob = c(0.95, 0.90, 0.90, 0.92, 0.92, 0.92),
+              edaphic_best_fit_taxon = c("Packera anonyma", "Packera dubia", "Packera dubia", "Packera anonyma", "Packera anonyma", "Packera anonyma"),
+              rf_predicted_prob = c(0.90, 0.88, 0.88, 0.90, 0.90, 0.90),
+              delta_doy_resid = rep(1.0, 6L),
+              is_active_anthesis = rep(TRUE, 6L),
+              stringsAsFactors = FALSE
+            )
+            dec <- apply_taxonomic_decision_matrix(df_m)
+            bad_self <- dec$taxonomic_treatment_subtype %in% c("Misidentification_Reassign", "Misidentification_Severe") &
+                        dec$recommended_determination == dec$species_standardized
+            stopifnot(!any(bad_self))
+            cat("STEP07_REMEDIATION_INVARIANTS_OK\\n")
+            """
+            r_file = tmp_p / "test_step07_remed.R"
+            r_file.write_text(r_code, encoding="utf-8")
+            proc = run_warm_r_cmd(["Rscript", str(r_file)], stage_key="step07", cwd=REPO_ROOT, skip_figures=True)
+            self.assertEqual(proc.returncode, 0, f"Step 07 remediation invariants R test failed:\n{proc.stderr}\n{proc.stdout}")
+            self.assertIn("STEP07_REMEDIATION_INVARIANTS_OK", proc.stdout)
+
+            # 5. --focal-taxon exports both focal triage_queue.csv and unfiltered triage_queue_complex_full.csv
+            dt_dir = tmp_p / "data" / "tables"
+            rep_dir = tmp_p / "outputs" / "reports"
+            fig_dir = tmp_p / "outputs" / "figures"
+            dt_dir.mkdir(parents=True, exist_ok=True)
+            rep_dir.mkdir(parents=True, exist_ok=True)
+            fig_dir.mkdir(parents=True, exist_ok=True)
+            v_csv = dt_dir / "curated_vouchers.csv"
+            m_csv = dt_dir / "morphometric_flags.csv"
+            q_csv = dt_dir / "triage_queue.csv"
+            pd.DataFrame([
+                {"catalogNumber": f"FQ_{i}", "plant_individual_id": 0, "species_standardized": sp, "determiner_tier": "Tier_1_Gold",
+                 "decimalLatitude": 35.5 + 0.05 * i, "decimalLongitude": -80.0 - 0.05 * i, "doy": 115 + i,
+                 "basal_leaf_count": 3, "morph_tier_source": "Basal_Rosette", "gmm_cluster": 1 if sp == "Packera dubia" else 2,
+                 "PC1": -2.0 if sp == "Packera dubia" else 2.0, "PC2": 0.1 * i,
+                 "cda_predicted_taxon": sp, "cda_posterior_prob": 0.92, "cda_second_posterior_prob": 0.05}
+                for i, sp in enumerate(["Packera dubia"] * 4 + ["Packera anonyma"] * 4, start=1)
+            ]).to_csv(v_csv, index=False)
+            pd.read_csv(v_csv).to_csv(m_csv, index=False)
+            res_cli = run_warm_r_cmd([
+                "Rscript", str(SYNTHESIS_R_SCRIPT),
+                "--vouchers", str(v_csv), "--morphometrics", str(m_csv),
+                "--focal-taxon", "Packera dubia",
+                "--output-queue", str(q_csv), "--output-plot", str(fig_dir / "rev.png"),
+                "--output-report", str(rep_dir / "rev.md"), "--output-html", str(rep_dir / "dash.html"),
+                "--output-complexes", str(rep_dir / "comp.csv"), "--output-affinity", str(rep_dir / "aff.csv"),
+                "--output-neighbors", str(rep_dir / "neigh.txt"), "--output-complex-plot", str(fig_dir / "cfig.png"),
+                "--demo",
+            ], stage_key="step07", cwd=REPO_ROOT, skip_figures=True)
+            self.assertEqual(res_cli.returncode, 0, f"Step 07 focal full-queue CLI failed:\n{res_cli.stderr}\n{res_cli.stdout}")
+            q_foc = pd.read_csv(q_csv)
+            q_full = pd.read_csv(dt_dir / "triage_queue_complex_full.csv")
+            self.assertEqual(set(q_foc["species_standardized"]), {"Packera dubia"})
+            self.assertEqual(set(q_full["species_standardized"]), {"Packera dubia", "Packera anonyma"})
+
 
 if __name__ == "__main__":
     unittest.main()

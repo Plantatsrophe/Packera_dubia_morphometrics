@@ -18,8 +18,10 @@ from __future__ import annotations
 import argparse
 import importlib
 import math
+import os
 import re
 import shutil
+import sqlite3
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -463,6 +465,198 @@ def compute_coalescent_gdi_delimitation(
     return pd.DataFrame(taxon_rows), pd.DataFrame(sample_rows)
 
 
+def _load_sample_metadata(
+    genomics_dir: Path,
+    parsed_samples_csv: Optional[Path],
+) -> Tuple[Optional[set[str]], Dict[str, str], Dict[str, str], Dict[str, float], Dict[str, float]]:
+    sample_taxon_map: Dict[str, str] = {}
+    rep_pair_map: Dict[str, str] = {}
+    hq_reads_map: Dict[str, float] = {}
+    miss_rate_map: Dict[str, float] = {}
+    pass_set: Optional[set[str]] = None
+
+    if parsed_samples_csv and parsed_samples_csv.exists():
+        sdf = pd.read_csv(parsed_samples_csv, dtype=str, keep_default_na=False)
+        if not sdf.empty:
+            pass_set = {
+                str(r["genetic_sample_id"])
+                for _, r in sdf.iterrows()
+                if str(r.get("geno_quality_pass", "1")) in ("1", "True", "true")
+            }
+            for _, r in sdf.iterrows():
+                sid = str(r["genetic_sample_id"])
+                tx = str(r.get("species_standardized") or r.get("taxon_raw") or "")
+                if str(r.get("is_putative_novel_or_hybrid_query", "0")) == "1":
+                    pop = str(r.get("population_id") or "")
+                    tx = f"{tx}_{pop}" if (tx and pop) else (tx or sid)
+                if tx:
+                    sample_taxon_map[sid] = tx
+                rp = str(r.get("replicate_pair_id") or "").strip()
+                if rp and rp.upper() not in {"NA", "NONE", "NAN", "NULL"}:
+                    rep_pair_map[sid] = rp
+                for raw_h, dst in ((r.get("hq_reads"), hq_reads_map), (r.get("missing_genotype_rate"), miss_rate_map)):
+                    try:
+                        if raw_h not in (None, ""):
+                            fv = float(raw_h)
+                            if math.isfinite(fv):
+                                dst[sid] = fv
+                    except (TypeError, ValueError):
+                        pass
+
+    db_cands = [
+        Path(env_p)
+        for env_k in ("PLANTMATICS_DB_PATH", "PACKERA_DB_PATH")
+        if (env_p := os.environ.get(env_k, "").strip())
+    ] + [genomics_dir.parent / "plantmatics.sqlite", PROJECT_ROOT / "data" / "plantmatics.sqlite"]
+    for db_p in db_cands:
+        if not db_p.is_file():
+            continue
+        try:
+            conn = sqlite3.connect(f"file:{db_p}?mode=ro", uri=True)
+            try:
+                cur = conn.execute(
+                    "SELECT genetic_sample_id, species_standardized, replicate_pair_id, hq_reads, missing_genotype_rate, geno_quality_pass "
+                    "FROM genomic_samples;"
+                )
+                for sid_r, sp_r, rp_r, hq_r, mr_r, qp_r in cur.fetchall():
+                    sid_s = str(sid_r or "").strip()
+                    if not sid_s:
+                        continue
+                    if sid_s not in sample_taxon_map and sp_r:
+                        sample_taxon_map[sid_s] = str(sp_r)
+                    rp_s = str(rp_r or "").strip()
+                    if sid_s not in rep_pair_map and rp_s and rp_s.upper() not in {"NA", "NONE", "NAN", "NULL"}:
+                        rep_pair_map[sid_s] = rp_s
+                    if sid_s not in hq_reads_map and hq_r is not None:
+                        hq_reads_map[sid_s] = float(hq_r)
+                    if sid_s not in miss_rate_map and mr_r is not None:
+                        miss_rate_map[sid_s] = float(mr_r)
+                    if pass_set is None and qp_r is not None and int(qp_r) == 1:
+                        pass_set = pass_set or set()
+                        pass_set.add(sid_s)
+            finally:
+                conn.close()
+            break
+        except sqlite3.Error:
+            continue
+    return pass_set, sample_taxon_map, rep_pair_map, hq_reads_map, miss_rate_map
+
+
+def _group_technical_replicates(
+    sids: Sequence[str],
+    taxa_labels: Sequence[str],
+    rep_pair_map: Mapping[str, str],
+) -> Dict[Any, List[int]]:
+    groups: Dict[Any, List[int]] = defaultdict(list)
+    for idx, (sid, tx) in enumerate(zip(sids, taxa_labels)):
+        rp = str(rep_pair_map.get(sid) or "").strip()
+        key = ("pair", rp, tx) if rp else ("uniq", idx)
+        groups[key].append(idx)
+    return groups
+
+
+def _collapse_alignment_replicates(
+    sids: Sequence[str],
+    seqs: Sequence[str],
+    taxa_labels: Sequence[str],
+    rep_pair_map: Mapping[str, str],
+    hq_reads_map: Mapping[str, float],
+    miss_rate_map: Mapping[str, float],
+) -> Tuple[List[str], List[str], List[str], Dict[str, List[str]]]:
+    groups = _group_technical_replicates(sids, taxa_labels, rep_pair_map)
+    out_sids: List[str] = []
+    out_seqs: List[str] = []
+    out_taxa: List[str] = []
+    group_members: Dict[str, List[str]] = {}
+    for idxs in groups.values():
+        ranked = sorted(
+            idxs,
+            key=lambda i: (
+                -sum(1 for ch in seqs[i] if ch not in "N?-"),
+                -float(hq_reads_map.get(sids[i], 0.0)),
+                float(miss_rate_map.get(sids[i], 1.0)),
+                sids[i],
+            ),
+        )
+        p_i = ranked[0]
+        p_sid = sids[p_i]
+        merged = seqs[p_i]
+        if len(ranked) > 1:
+            buf = list(merged)
+            for s_i in ranked[1:]:
+                sib = seqs[s_i]
+                lim = min(len(buf), len(sib))
+                for pos in range(lim):
+                    if buf[pos] in "N?-" and sib[pos] not in "N?-":
+                        buf[pos] = sib[pos]
+            merged = "".join(buf)
+        out_sids.append(p_sid)
+        out_seqs.append(merged)
+        out_taxa.append(taxa_labels[p_i])
+        group_members[p_sid] = [sids[i] for i in idxs]
+    return out_sids, out_seqs, out_taxa, group_members
+
+
+def _collapse_dosage_replicates(
+    sids: Sequence[str],
+    mat: np.ndarray,
+    taxa_labels: Sequence[str],
+    rep_pair_map: Mapping[str, str],
+    hq_reads_map: Mapping[str, float],
+    miss_rate_map: Mapping[str, float],
+) -> Tuple[List[str], np.ndarray, List[str], Dict[str, List[str]]]:
+    groups = _group_technical_replicates(sids, taxa_labels, rep_pair_map)
+    out_sids: List[str] = []
+    out_rows: List[np.ndarray] = []
+    out_taxa: List[str] = []
+    group_members: Dict[str, List[str]] = {}
+    for idxs in groups.values():
+        ranked = sorted(
+            idxs,
+            key=lambda i: (
+                -int(np.sum(np.isfinite(mat[i]))),
+                -float(hq_reads_map.get(sids[i], 0.0)),
+                float(miss_rate_map.get(sids[i], 1.0)),
+                sids[i],
+            ),
+        )
+        p_i = ranked[0]
+        p_sid = sids[p_i]
+        if len(ranked) == 1:
+            merged_row = mat[p_i]
+        else:
+            sub = mat[ranked]
+            ok = np.isfinite(sub)
+            cnt = np.sum(ok, axis=0)
+            sums = np.sum(np.where(ok, sub, 0.0), axis=0)
+            merged_row = np.where(cnt > 0, sums / np.maximum(cnt, 1), np.nan)
+        out_sids.append(p_sid)
+        out_rows.append(merged_row)
+        out_taxa.append(taxa_labels[p_i])
+        group_members[p_sid] = [sids[i] for i in idxs]
+    collapsed_mat = np.vstack(out_rows) if out_rows else mat[:0]
+    return out_sids, collapsed_mat, out_taxa, group_members
+
+
+def _expand_gdi_samples(
+    gdi_s_df: pd.DataFrame,
+    group_members: Mapping[str, List[str]],
+    orig_sids: Sequence[str],
+) -> pd.DataFrame:
+    if gdi_s_df.empty or not group_members:
+        return gdi_s_df
+    by_rep = {str(r["genetic_sample_id"]): r.to_dict() for _, r in gdi_s_df.iterrows()}
+    orig_to_rep = {m: rep for rep, members in group_members.items() for m in members}
+    rows = []
+    for sid in orig_sids:
+        rep = orig_to_rep.get(sid, sid)
+        if rep in by_rep:
+            rec = dict(by_rep[rep])
+            rec["genetic_sample_id"] = sid
+            rows.append(rec)
+    return pd.DataFrame(rows, columns=gdi_s_df.columns) if rows else gdi_s_df
+
+
 def run_coalescent_delimitation(
     genomics_dir: Path,
     out_dir: Path,
@@ -475,25 +669,9 @@ def run_coalescent_delimitation(
     discover_fn = importlib.import_module("scripts.data_prep.06_ingest_genetic_data").discover_genomic_inputs
     assets = discover_fn(genomics_dir)
 
-    sample_taxon_map: Dict[str, str] = {}
-    pass_set: Optional[set[str]] = None
-    if parsed_samples_csv and parsed_samples_csv.exists():
-        sdf = pd.read_csv(parsed_samples_csv, dtype=str, keep_default_na=False)
-        if not sdf.empty:
-            pass_set = {
-                str(r["genetic_sample_id"])
-                for _, r in sdf.iterrows()
-                if str(r.get("geno_quality_pass", "1")) in ("1", "True", "true")
-            }
-            for _, r in sdf.iterrows():
-                sid = str(r["genetic_sample_id"])
-                tx = str(r.get("species_standardized") or r.get("taxon_raw") or "")
-                # Keep putative novel/hybrid queries under their distinct sample/query group if unassigned
-                if str(r.get("is_putative_novel_or_hybrid_query", "0")) == "1":
-                    pop = str(r.get("population_id") or "")
-                    tx = f"{tx}_{pop}" if (tx and pop) else (tx or sid)
-                if tx:
-                    sample_taxon_map[sid] = tx
+    pass_set, sample_taxon_map, rep_pair_map, hq_reads_map, miss_rate_map = _load_sample_metadata(
+        genomics_dir, parsed_samples_csv
+    )
 
     out_dir.mkdir(parents=True, exist_ok=True)
     gdi_csv = out_dir / "coalescent_gdi_delimitation.csv"
@@ -513,7 +691,11 @@ def run_coalescent_delimitation(
                 sids = [x[0] for x in kept]
                 seqs = [x[1] for x in kept]
 
+        orig_sids = list(sids)
         taxa_labels = [_infer_taxon(sid, sample_taxon_map) for sid in sids]
+        sids, seqs, taxa_labels, group_members = _collapse_alignment_replicates(
+            sids, seqs, taxa_labels, rep_pair_map, hq_reads_map, miss_rate_map
+        )
         n_sites = min(len(s) for s in seqs) if seqs else 0
         eff_blk = block_len if n_sites >= block_len * 2 else max(20, n_sites // 4 or n_sites)
         block_slices = [(st, min(n_sites, st + eff_blk)) for st in range(0, n_sites, eff_blk) if (min(n_sites, st + eff_blk) - st) >= 15]
@@ -530,6 +712,7 @@ def run_coalescent_delimitation(
         svdq_df = compute_svdquartets_support(a1, a2, taxa_labels, sids)
         export_bpp_msci_files(sids, taxa_labels, seqs, block_slices, out_dir)
         gdi_df, gdi_s_df = compute_coalescent_gdi_delimitation(sids, taxa_labels, diff_blk, call_blk, within_het, within_call, n_boot=n_boot)
+        gdi_s_df = _expand_gdi_samples(gdi_s_df, group_members, orig_sids)
 
         svdq_df.to_csv(svdq_csv, index=False)
         gdi_df.to_csv(gdi_csv, index=False)
@@ -547,7 +730,11 @@ def run_coalescent_delimitation(
         ddf = pd.read_csv(dosage_tsv, sep="\t")
         sids = [str(x) for x in ddf["genetic_sample_id"].tolist()]
         mat = ddf.drop(columns=["genetic_sample_id"]).to_numpy(dtype=np.float64)
+        orig_sids = list(sids)
         taxa_labels = [_infer_taxon(sid, sample_taxon_map) for sid in sids]
+        sids, mat, taxa_labels, group_members = _collapse_dosage_replicates(
+            sids, mat, taxa_labels, rep_pair_map, hq_reads_map, miss_rate_map
+        )
         n_s, n_l = mat.shape
         diff_blk = np.zeros((1, n_s, n_s), dtype=np.float64)
         call_blk = np.ones((1, n_s, n_s), dtype=np.float64) * max(1, n_l)
@@ -560,6 +747,7 @@ def run_coalescent_delimitation(
         w_het = (np.nansum(mat * (1.0 - mat), axis=1, keepdims=True) * 0.02).T
         w_call = np.sum(np.isfinite(mat), axis=1, keepdims=True).astype(np.float64).T
         gdi_df, gdi_s_df = compute_coalescent_gdi_delimitation(sids, taxa_labels, diff_blk, call_blk, w_het, w_call, n_boot=50)
+        gdi_s_df = _expand_gdi_samples(gdi_s_df, group_members, orig_sids)
         gdi_df.to_csv(gdi_csv, index=False)
         gdi_s_df.to_csv(gdi_samp_csv, index=False)
         pd.DataFrame(columns=["quartet_id", "best_split", "svd_score_best", "svd_score_second", "quartet_support"]).to_csv(svdq_csv, index=False)

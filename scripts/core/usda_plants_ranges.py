@@ -1228,6 +1228,12 @@ def resolve_voucher_us_county(
     if is_explicit_non_us:
         return st_dwc, _normalize_us_county_name(county, state_norm=st_dwc), True
 
+    if has_coords and st_dwc and st_dwc in _US_FULL_STATE_NAMES:
+        in_us_bbox = (17.5 <= lat_f <= 71.5) and (-179.9 <= lon_f <= -64.5)
+        in_conus_bbox = (st_dwc in ("Alaska", "Hawaii")) or ((24.3 <= lat_f <= 49.5) and (-125.0 <= lon_f <= -66.8))
+        if not (in_us_bbox and in_conus_bbox):
+            return None, None, False
+
     if st_dwc and st_dwc in _US_FULL_STATE_NAMES:
         co_dwc = _normalize_us_county_name(county, state_norm=st_dwc)
         if co_dwc:

@@ -32,21 +32,11 @@ from scripts.core.logger import setup_logging
 logger = setup_logging(name="packera.genomics.organellar")
 
 _SEED_PLASTID_ANCHORS: Dict[str, str] = {
-    # Conserved Asteraceae / Senecioneae rbcL & trnL-F core motifs
     "Packera_rbcL_core": "ATGTCACCACAAACAGAGACTAAAGCAAGTGTTGGATTCAAAGCTGGTGTTAAAGAGTACAAATTGACTTATTATACTCCTGAGTATGAAACCAAAGATACTGATATCTTGGCAGCATTCCGAGTAACTCCTCAACCCGGAGTTCCACCTGAAGAAGCAGGGGCTGCGGTAGCTGCCGAATCTTCTACTGGTACATGGACAACTGTGTGGACTGATGGACTTACCAGCCTTGATCGTTACAAAGG",
     "Packera_trnL_core": "GGGCAATCCTGAGCCAAATCCTGTTTTCCGAAAACAAACAAAGGTTCAGAAAGCGAGAATAAAAAAAAGGATAGGTGCAGAGACTCAATGGAAGCTGTTCTAACGAATCGAGTTGACTGCGTTGCGTTAGTAAGCGGAAGAACAGGCTTCCATAGTC",
 }
-
-_SEED_ITS_ANCHORS: Dict[str, str] = {
-    # Conserved Asteraceae 18S-ITS1-5.8S-ITS2-26S core motif
-    "Packera_ITS_58S_core": "CGTGAACCATCGAGTCTTTGAACGCAAGTTGCGCCCGAAGCCATTAGGTTGAGGGCACGTCTGCCTGGGCGTCACGCATCGCGTCGCCCCCCACCATCCATCCCCTTAGGGATGGGGTGTGTTGGGGGCGGGGGGATATTGGCCTCCCGTGCGCTCGGTGCGCGGTTGGCCTAAATAGGAGTCCTCGGCGACGGACGTCGCGACAAGTGGTGGTTGTAAAACCCTCGTTCTCGTCGTCGTGC",
-}
-
-_SEED_WAXY_ANCHORS: Dict[str, str] = {
-    # Conserved Asteraceae granule-bound starch synthase (GBSSI / waxy) core motif
-    "Packera_waxy_GBSSI_core": "ATGGTGGATTGTGTTCCATTTGTTGGTGGTGATGGAAAGGTTTTTGGTACTGCTGATGGACCTTTTGAAGGACTTAAGAAAGAGCTTCTCGTTGATGGTGTTGCTGATCCATCTAAGGTTTTCTTCGTTGCAACTCTTGAGGCTGCTAAGCGTGGTGGTATTGCACCAAAGATTGATCCAGCTCTTATGGGTTCTACTG",
-}
-
+_SEED_ITS_ANCHORS: Dict[str, str] = {"Packera_ITS_58S_core": "CGTGAACCATCGAGTCTTTGAACGCAAGTTGCGCCCGAAGCCATTAGGTTGAGGGCACGTCTGCCTGGGCGTCACGCATCGCGTCGCCCCCCACCATCCATCCCCTTAGGGATGGGGTGTGTTGGGGGCGGGGGGATATTGGCCTCCCGTGCGCTCGGTGCGCGGTTGGCCTAAATAGGAGTCCTCGGCGACGGACGTCGCGACAAGTGGTGGTTGTAAAACCCTCGTTCTCGTCGTCGTGC"}
+_SEED_WAXY_ANCHORS: Dict[str, str] = {"Packera_waxy_GBSSI_core": "ATGGTGGATTGTGTTCCATTTGTTGGTGGTGATGGAAAGGTTTTTGGTACTGCTGATGGACCTTTTGAAGGACTTAAGAAAGAGCTTCTCGTTGATGGTGTTGCTGATCCATCTAAGGTTTTCTTCGTTGCAACTCTTGAGGCTGCTAAGCGTGGTGGTATTGCACCAAAGATTGATCCAGCTCTTATGGGTTCTACTG"}
 _SEED_SYNONYM_TAXA: Dict[str, str] = {
     "senecio tomentosus": "Packera dubia", "packera tomentosa": "Packera dubia", "senecio aureus": "Packera aurea",
     "senecio anonymus": "Packera anonyma", "senecio pauperculus": "Packera paupercula", "senecio schweinitzianus": "Packera schweinitziana",
@@ -57,9 +47,9 @@ _SEED_SYNONYM_TAXA: Dict[str, str] = {
     "senecio strepthanthifolius": "Packera streptanthifolia", "senecio streptanthifolius": "Packera streptanthifolia",
     "senecio fendleri": "Packera fendleri", "senecio multilobatus": "Packera multilobata", "senecio neomexicanus": "Packera neomexicana",
     "senecio debilis": "Packera debilis", "senecio werneriifolius": "Packera werneriifolia", "senecio hartianus": "Packera hartiana",
+    "kf584255": "Packera serpenticola", "kf584257": "Packera serpenticola", "42947": "Packera serpenticola", "42949": "Packera serpenticola",
 }
 _NON_EPITHET_TOKENS = frozenset({"rbcl", "trnl", "its", "its1", "its2", "58s", "waxy", "gbssi", "core", "plastid", "chloroplast", "plastome", "ribosomal", "nuclear", "sp", "unk", "unknown", "var", "subsp", "cf", "aff"})
-
 _IUPAC_PAIR = {("A", "G"): "R", ("G", "A"): "R", ("C", "T"): "Y", ("T", "C"): "Y", ("G", "C"): "S", ("C", "G"): "S", ("A", "T"): "W", ("T", "A"): "W", ("G", "T"): "K", ("T", "G"): "K", ("A", "C"): "M", ("C", "A"): "M"}
 _MAX_BUCKET_READS = 25000
 _FQ_PAT = re.compile(r"\.(fastq|fq)(\.gz)?$", re.IGNORECASE)
@@ -67,44 +57,38 @@ _WORKER_CTX: Dict[str, Any] = {}
 
 
 def _resolve_threads(threads: Optional[int] = None) -> int:
-    if threads is not None and int(threads) >= 1:
-        return int(threads)
+    if threads is not None and int(threads) >= 1: return int(threads)
     env_w = (os.environ.get("PLANTMATICS_MAX_WORKERS") or os.environ.get("PACKERA_MAX_WORKERS") or "").strip()
     return int(env_w) if env_w.isdigit() and int(env_w) >= 1 else max(1, min(os.cpu_count() or 1, 32))
 
-
 def _clean_sample_id(raw: str) -> str:
-    fn = importlib.import_module("scripts.data_prep.06_ingest_genetic_data").clean_sample_id
-    return fn(raw)
-
+    return importlib.import_module("scripts.data_prep.06_ingest_genetic_data").clean_sample_id(raw)
 
 def _revcomp(seq: str) -> str:
-    comp = str.maketrans("ACGTNacgtn", "TGCANtgcan")
-    return seq.translate(comp)[::-1]
-
+    return seq.translate(str.maketrans("ACGTNacgtn", "TGCANtgcan"))[::-1]
 
 def _read_fasta(path: Path, keep_label: bool = False) -> Dict[str, str]:
     out: Dict[str, str] = {}
-    if not path.is_file():
-        return out
-    cur: Optional[str] = None
-    buf: List[str] = []
+    if not path.is_file(): return out
+    cur: Optional[str] = None; buf: List[str] = []
     with open(path, "rt", encoding="utf-8", errors="replace") as fh:
         for line in fh:
             if not (s := line.strip()): continue
             if s.startswith(">"):
                 if cur is not None: out[cur] = "".join(buf).replace("-", "").upper()
-                cur = re.sub(r"\s+", "|", s[1:].strip()) if keep_label else s[1:].split()[0]
-                buf = []
-            else:
-                buf.append(s)
+                cur = re.sub(r"\s+", "|", s[1:].strip()) if keep_label else s[1:].split()[0]; buf = []
+            else: buf.append(s)
     if cur is not None: out[cur] = "".join(buf).replace("-", "").upper()
     return out
-
 
 def _find_geno_file(genomics_dir: Path, fname: str) -> Optional[Path]:
     direct = genomics_dir / fname
     return direct if direct.is_file() else next((p for p in sorted(genomics_dir.rglob(fname)) if p.is_file()), None)
+
+
+def _is_ets_only_header(hdr: str) -> bool:
+    h = re.sub(r"[|_]+", " ", hdr.lower())
+    return ("external transcribed spacer" in h or "ets" in h.split()) and ("internal transcribed spacer" not in h and not any(t in h.split() for t in ("its", "its1", "its2")))
 
 
 def _collect_organellar_seeds(genomics_dir: Path) -> Tuple[Dict[str, str], Dict[str, str], Dict[str, str]]:
@@ -115,19 +99,20 @@ def _collect_organellar_seeds(genomics_dir: Path) -> Tuple[Dict[str, str], Dict[
         if (cand := _find_geno_file(genomics_dir, fname)) is not None:
             ref_seqs.update(_read_fasta(cand))
     if (bain := _find_geno_file(genomics_dir, "bain_jansen_sequences.fasta")) is not None:
-        its_seeds.update({f"bain_{k}": v for k, v in _read_fasta(bain, keep_label=True).items() if len(v) >= 60})
+        its_seeds.update({f"bain_{k}": v for k, v in _read_fasta(bain, keep_label=True).items() if len(v) >= 60 and not _is_ets_only_header(k)})
     for fname, bucket in (
-        ("public_packera_18complete_plastomes.fasta", plastid_seeds), ("public_packera_plastomes_and_cpdna.fasta", plastid_seeds),
-        ("public_packera_its_ets.fasta", its_seeds), ("public_packera_waxy_nuclear.fasta", waxy_seeds),
+        ("public_packera_18complete_plastomes.fasta", plastid_seeds), ("public_packera_111mapping_plastomes.fasta", plastid_seeds),
+        ("public_packera_plastomes_and_cpdna.fasta", plastid_seeds), ("public_packera_its_ets.fasta", its_seeds), ("public_packera_waxy_nuclear.fasta", waxy_seeds),
     ):
         if (cand := _find_geno_file(genomics_dir, fname)) is not None:
-            bucket.update({k: v for k, v in _read_fasta(cand, keep_label=True).items() if len(v) >= 60})
+            bucket.update({k: v for k, v in _read_fasta(cand, keep_label=True).items() if len(v) >= 60 and ("111mapping" not in fname or _extract_species_from_seed_key(k)) and (bucket is not its_seeds or not _is_ets_only_header(k))})
     if (bold_fa := _find_geno_file(genomics_dir, "public_packera_bold_barcodes.fasta")) is not None:
         for k, v in _read_fasta(bold_fa, keep_label=True).items():
-            if len(v) < 60: continue
+            if len(v) < 60 or _is_ets_only_header(k): continue
             low_k = k.lower()
             target = its_seeds if re.search(r"(?:^|[|_ \t])(its\d?|5\.8s|ets|ribosomal)", low_k) else (waxy_seeds if re.search(r"(waxy|gbssi)", low_k) else plastid_seeds)
             target[k] = v
+    pub_cp, pub_its, pub_wx = len(plastid_seeds) > len(_SEED_PLASTID_ANCHORS), len(its_seeds) > len(_SEED_ITS_ANCHORS), len(waxy_seeds) > len(_SEED_WAXY_ANCHORS)
     if (blast_txt := _find_geno_file(genomics_dir, "vcfref_packera_blast.txt")) is not None and ref_seqs:
         qtexts, cur_q = defaultdict(list), ""
         with open(blast_txt, "rt", encoding="utf-8", errors="replace") as fh:
@@ -142,9 +127,9 @@ def _collect_organellar_seeds(genomics_dir: Path) -> Tuple[Dict[str, str], Dict[
         for qid, chunks in qtexts.items():
             low = " ".join(chunks).lower()
             if qid not in ref_seqs or re.search(r"\b(?:ribosomal\s+protein|proteasome|chloroplastic-like)\b", low): continue
-            if re.search(r"\b(?:chloroplast|plastid|rbcl|matk|trnl|psba|ndhf)\b", low): plastid_seeds[qid] = ref_seqs[qid]
-            elif re.search(r"\b(?:internal\s+transcribed\s+spacer|ribosomal|rrna|(?:18|26|28)s|its[12])\b", low): its_seeds[qid] = ref_seqs[qid]
-            elif re.search(r"\b(?:waxy|gbssi|starch\s+synthase)\b", low): waxy_seeds[qid] = ref_seqs[qid]
+            if not pub_cp and re.search(r"\b(?:chloroplast|plastid|rbcl|matk|trnl|psba|ndhf)\b", low): plastid_seeds[qid] = ref_seqs[qid]
+            elif not pub_its and re.search(r"\b(?:internal\s+transcribed\s+spacer|ribosomal|rrna|(?:18|26|28)s|its[12])\b", low): its_seeds[qid] = ref_seqs[qid]
+            elif not pub_wx and re.search(r"\b(?:waxy|gbssi|starch\s+synthase)\b", low): waxy_seeds[qid] = ref_seqs[qid]
     return plastid_seeds, its_seeds, waxy_seeds
 
 
@@ -158,21 +143,14 @@ def _infer_sample_from_fq_name(member_name: str) -> str:
 
 def _iter_fastq_records_stream(fh: io.TextIOBase) -> Iterator[Tuple[str, str]]:
     while True:
-        h = fh.readline()
-        if not h:
-            break
-        seq = fh.readline()
-        _plus = fh.readline()
-        if not fh.readline():
-            break
+        h, seq, _plus, qual = fh.readline(), fh.readline(), fh.readline(), fh.readline()
+        if not (h and qual): break
         yield h.strip(), seq.strip().upper()
-
 
 def _iter_binary_fastq_stream(raw_f: Any, is_gz: bool) -> Iterator[str]:
     bio: Any = gzip.GzipFile(fileobj=raw_f) if is_gz else raw_f
     with io.TextIOWrapper(bio, encoding="utf-8", errors="replace") as fh:
         yield from (seq for _, seq in _iter_fastq_records_stream(fh) if seq)
-
 
 def _iter_fastq_file_seqs(p: Path) -> Iterator[str]:
     """Stream uppercase FASTQ sequences from a single `.fq`, `.fastq`, or `.gz` file."""
@@ -193,17 +171,13 @@ def _iter_fastq_file_seqs(p: Path) -> Iterator[str]:
     with (gzip.open if is_gz else open)(p, "rt", encoding="utf-8", errors="replace") as fh:
         yield from (seq for _, seq in _iter_fastq_records_stream(fh) if seq)
 
-
 def _iter_staged_fastq_reads(fastq_source: Path) -> Iterator[Tuple[str, str]]:
     """Stream `(sample_id, seq)` from `.zip`, `.tar.gz`, or directory without unpacking to `data/genomics/`."""
-    if not fastq_source.exists():
-        return
+    if not fastq_source.exists(): return
     if fastq_source.is_dir():
         for p in sorted(fastq_source.rglob("*")):
             if p.is_file() and _FQ_PAT.search(p.name):
-                sid = _infer_sample_from_fq_name(p.name)
-                for seq in _iter_fastq_file_seqs(p):
-                    yield sid, seq
+                sid = _infer_sample_from_fq_name(p.name); yield from ((sid, seq) for seq in _iter_fastq_file_seqs(p))
         return
     low = fastq_source.name.lower()
     if low.endswith(".zip"):
@@ -212,24 +186,21 @@ def _iter_staged_fastq_reads(fastq_source: Path) -> Iterator[Tuple[str, str]]:
                 if not info.is_dir() and _FQ_PAT.search(info.filename):
                     sid = _infer_sample_from_fq_name(info.filename)
                     with zf.open(info, "r") as raw_f:
-                        for seq in _iter_binary_fastq_stream(raw_f, info.filename.lower().endswith(".gz")):
-                            yield sid, seq
+                        yield from ((sid, seq) for seq in _iter_binary_fastq_stream(raw_f, info.filename.lower().endswith(".gz")))
         return
     if low.endswith((".tar.gz", ".tgz", ".tar")):
         with tarfile.open(fastq_source, "r:gz" if low.endswith((".tar.gz", ".tgz")) else "r:") as tf:
             for member in tf.getmembers():
                 if member.isfile() and _FQ_PAT.search(member.name) and (raw_f := tf.extractfile(member)) is not None:
                     sid = _infer_sample_from_fq_name(member.name)
-                    with raw_f:
-                        for seq in _iter_binary_fastq_stream(raw_f, member.name.lower().endswith(".gz")):
-                            yield sid, seq
+                    with raw_f: yield from ((sid, seq) for seq in _iter_binary_fastq_stream(raw_f, member.name.lower().endswith(".gz")))
 
 
-def _build_kmer_index(seeds: Mapping[str, str], k: int = 17) -> Dict[str, List[Tuple[str, int, bool]]]:
+def _build_kmer_index(seeds: Mapping[str, str], k: int = 17, step_override: Optional[int] = None) -> Dict[str, List[Tuple[str, int, bool]]]:
     idx: Dict[str, List[Tuple[str, int, bool]]] = defaultdict(list)
     for name, seq in seeds.items():
         if len(seq) < k: continue
-        step = 4 if len(seq) > 12000 else 1
+        step = step_override if step_override is not None else (4 if len(seq) > 12000 else 1)
         for pos in range(0, len(seq) - k + 1, step):
             kmer = seq[pos : pos + k]
             if "N" in kmer: continue
@@ -245,125 +216,176 @@ def _bait_stream_into_buckets(
     """Bait reads into plastid, ITS, and waxy buckets using a stride-5 prefilter and early cap stop."""
     n_reads = 0
     for seq in seq_iter:
-        if len(cp_b) >= cap and len(its_b) >= cap and len(waxy_b) >= cap:
-            break
+        if len(cp_b) >= cap and len(its_b) >= cap and len(waxy_b) >= cap: break
         n_reads += 1
-        n_kmers = len(seq) - 16
-        if n_kmers <= 0:
-            continue
+        if (n_kmers := len(seq) - 16) <= 0: continue
         stride = 5 if n_kmers >= 16 else 1
-        if not any(seq[i : i + 17] in seed_kmers for i in range(0, n_kmers, stride)):
-            continue
+        if not any(seq[i : i + 17] in seed_kmers for i in range(0, n_kmers, stride)): continue
         for kidx_b, bucket in ((cp_kidx, cp_b), (its_kidx, its_b), (waxy_kidx, waxy_b)):
-            if len(bucket) < cap and any(seq[i : i + 17] in kidx_b for i in range(n_kmers)):
-                bucket.append(seq)
+            if len(bucket) < cap and any(seq[i : i + 17] in kidx_b for i in range(n_kmers)): bucket.append(seq)
     return n_reads
 
 
 def _init_skim_worker(ctx: Dict[str, Any]) -> None:
-    _WORKER_CTX.clear()
-    _WORKER_CTX.update(ctx)
+    _WORKER_CTX.clear(); _WORKER_CTX.update(ctx)
 
 
 def _skim_file_worker(path_str: str) -> Tuple[str, str, int, List[str], List[str], List[str]]:
-    p = Path(path_str)
-    cp_b: List[str] = []; its_b: List[str] = []; waxy_b: List[str] = []
+    p = Path(path_str); cp_b: List[str] = []; its_b: List[str] = []; waxy_b: List[str] = []
     seq_iter = _iter_fastq_file_seqs(p)
-    try:
-        n_reads = _bait_stream_into_buckets(
-            seq_iter, _WORKER_CTX["seed_kmers"], _WORKER_CTX["cp_kidx"], _WORKER_CTX["its_kidx"], _WORKER_CTX["waxy_kidx"], cp_b, its_b, waxy_b
-        )
-    finally:
-        seq_iter.close()
+    try: n_reads = _bait_stream_into_buckets(seq_iter, _WORKER_CTX["seed_kmers"], _WORKER_CTX["cp_kidx"], _WORKER_CTX["its_kidx"], _WORKER_CTX["waxy_kidx"], cp_b, its_b, waxy_b)
+    finally: seq_iter.close()
     return p.name, _infer_sample_from_fq_name(p.name), n_reads, cp_b, its_b, waxy_b
 
 
-def _assemble_baited_consensus(reads_by_sample: Mapping[str, List[str]], seeds: Mapping[str, str], k: int = 17, kidx: Optional[Mapping[str, List[Tuple[str, int, bool]]]] = None) -> Dict[str, str]:
+def _assemble_baited_consensus(
+    reads_by_sample: Mapping[str, List[str]], seeds: Mapping[str, str], k: int = 17,
+    kidx: Optional[Mapping[str, List[Tuple[str, int, bool]]]] = None, min_reads: int = 4, min_bases: int = 60,
+    pos_out: Optional[Dict[str, Dict[int, str]]] = None,
+) -> Dict[str, str]:
     """Bait reads by seed k-mers and construct per-sample consensus sequence by read pileup."""
     if not seeds or not reads_by_sample: return {}
     kidx = kidx if kidx is not None else _build_kmer_index(seeds, k=k)
+    canon_idx = cidx_uniq = canon_len = None
+    max_slen = max((len(v) for v in seeds.values()), default=0)
+    if pos_out is not None and (max_slen > 20000 or len(reads_by_sample) > 1):
+        ckey = "Packera_dubia" if (max_slen > 20000 and "Packera_dubia" in seeds) else max(seeds, key=lambda s: (len(seeds[s]), s))
+        canon_len = len(seeds[ckey])
+        canon_idx = _build_kmer_index({ckey: seeds[ckey]}, k=k, step_override=1) if (canon_len > 12000 or len(seeds) > 1) else kidx
+        if max_slen > 20000: cidx_uniq = {km: hits[0] for km, hits in canon_idx.items() if len(hits) == 1}
     cons_out: Dict[str, str] = {}
+    ref_kcache: Dict[str, Mapping[str, List[Tuple[str, int, bool]]]] = {}
     for sid, seqs in sorted(reads_by_sample.items()):
-        hit_counts: Counter[str] = Counter()
-        aligned_reads: List[Tuple[str, int, str]] = []
+        ref_scores: Dict[str, float] = defaultdict(float)
+        for raw_seq in seqs[:400]:
+            for r_start in range(0, max(0, len(raw_seq) - k + 1), 16):
+                if not (hits := kidx.get(raw_seq[r_start : r_start + k])): continue
+                w = 1.0 / float(len(hits))
+                for sname, _, _ in hits: ref_scores[sname] += w
+        if not ref_scores: continue
+        best_ref = max(ref_scores, key=lambda s: (ref_scores[s], len(seeds[s])))
+        seed_seq = seeds[best_ref]; target_len = len(seed_seq)
+        if target_len > 12000:
+            if best_ref not in ref_kcache: ref_kcache[best_ref] = _build_kmer_index({best_ref: seed_seq}, k=k, step_override=1)
+            ref_idx = ref_kcache[best_ref]
+        else:
+            ref_idx = kidx
+        sparse, csparse, n_aligned, c_aligned = defaultdict(Counter), defaultdict(Counter), 0, 0
+        req_two = bool(cidx_uniq is not None and len(seqs) >= 25)
         for raw_seq in seqs:
             for r_start in range(0, max(0, len(raw_seq) - k + 1)):
-                if not (hits := kidx.get(raw_seq[r_start : r_start + k])): continue
-                sname, spos, is_rc = hits[0]
-                oriented = _revcomp(raw_seq) if is_rc else raw_seq
-                anchor_r = (len(raw_seq) - r_start - k) if is_rc else r_start
-                hit_counts[sname] += 1
-                aligned_reads.append((sname, spos - anchor_r, oriented))
+                if not (hits := ref_idx.get(raw_seq[r_start : r_start + k])): continue
+                if (hit := next((h for h in hits if h[0] == best_ref), None)) is None: continue
+                _, spos, is_rc = hit; oriented = _revcomp(raw_seq) if is_rc else raw_seq
+                offset = spos - ((len(raw_seq) - r_start - k) if is_rc else r_start); n_aligned += 1
+                for idx_b, ch in enumerate(oriented):
+                    if 0 <= (gpos := offset + idx_b) < target_len and ch in "ACGT": sparse[gpos][ch] += 1
                 break
-        if not hit_counts: continue
-        best_ref = hit_counts.most_common(1)[0][0]
-        seed_seq = seeds[best_ref]; target_len = len(seed_seq)
-        sparse: Dict[int, Counter[str]] = defaultdict(Counter)
-        for sname, offset, seq in aligned_reads:
-            if sname != best_ref: continue
-            for idx_b, ch in enumerate(seq):
-                if 0 <= (gpos := offset + idx_b) < target_len and ch in "ACGT": sparse[gpos][ch] += 1
-        if len(sparse) < 20: continue
-        lo, hi = min(sparse), max(sparse)
-        pos_iter = range(target_len) if target_len <= 5000 else (range(lo, hi + 1) if (hi - lo) <= 10000 else sorted(sparse))
-        chars = []
-        for j in pos_iter:
-            if not (cnt := sparse.get(j)):
-                chars.append(seed_seq[j])
-            else:
-                top = cnt.most_common(2)
-                chars.append(_IUPAC_PAIR.get((top[0][0], top[1][0]), top[0][0]) if len(top) >= 2 and top[1][1] >= 0.30 * (top[0][1] + top[1][1]) else top[0][0])
-        cons_out[sid] = "".join(chars)
+            if cidx_uniq is not None and canon_len is not None:
+                seen_offs: List[Tuple[int, bool]] = []
+                picked: Optional[Tuple[int, bool]] = None
+                for r_start in range(0, max(0, len(raw_seq) - k + 1), 8):
+                    if (ch := cidx_uniq.get(raw_seq[r_start : r_start + k])) is None: continue
+                    coff = ch[1] - ((len(raw_seq) - r_start - k) if ch[2] else r_start)
+                    if not req_two: picked = (coff, ch[2]); break
+                    if any(o[1] == ch[2] and abs(o[0] - coff) <= 2 for o in seen_offs): picked = (coff, ch[2]); break
+                    seen_offs.append((coff, ch[2]))
+                if picked is not None:
+                    cor = _revcomp(raw_seq) if picked[1] else raw_seq; c_aligned += 1
+                    for idx_b, ch in enumerate(cor):
+                        if 0 <= (cg := picked[0] + idx_b) < canon_len and ch in "ACGT": csparse[cg][ch] += 1
+            elif canon_idx is not None and canon_len is not None:
+                for r_start in range(0, max(0, len(raw_seq) - k + 1), 8):
+                    if not (chits := canon_idx.get(raw_seq[r_start : r_start + k])): continue
+                    _, cspos, crc = chits[0]; cor = _revcomp(raw_seq) if crc else raw_seq
+                    coff = cspos - ((len(raw_seq) - r_start - k) if crc else r_start)
+                    for idx_b, ch in enumerate(cor):
+                        if 0 <= (cg := coff + idx_b) < canon_len and ch in "ACGT": csparse[cg][ch] += 1
+                    break
+        if n_aligned < min_reads or len(sparse) < min_bases: continue
+        chars, prev = [], None
+        for j in sorted(sparse):
+            if prev is not None and (gap := j - prev - 1) > 0: chars.append("N" * min(gap, 17))
+            chars.append(sparse[j].most_common(1)[0][0]); prev = j
+        if len(cons_s := "".join(chars).strip("N")) >= min_bases and sum(c != "N" for c in cons_s) >= min_bases:
+            cons_out[sid] = cons_s
+            if pos_out is not None and csparse:
+                min_d = (5 if max(n_aligned, c_aligned) >= 500 else (2 if max(n_aligned, c_aligned) >= 30 else 1)) if cidx_uniq is not None else 1
+                pos_out[sid] = {p: c.most_common(1)[0][0] for p, c in csparse.items() if (tot := sum(c.values())) >= min_d and c.most_common(1)[0][1] / float(tot) >= (0.80 if min_d > 1 else 0.0)}
     return cons_out
 
 
-def _cluster_haplotypes(seqs: Mapping[str, str], prefix: str, k: int = 11) -> Dict[str, str]:
-    """Cluster consensus haplotypes deterministically by 11-mer Jaccard similarity."""
+def _cluster_haplotypes(seqs: Mapping[str, str], prefix: str, k: int = 13, pos_maps: Optional[Mapping[str, Mapping[int, str]]] = None, min_id: float = 0.990) -> Dict[str, str]:
+    """Cluster consensus haplotypes deterministically by shared-site identity or 13-mer overlap."""
     if not seqs: return {}
-    samples = sorted(seqs.keys())
+    samples = sorted(seqs.keys(), key=lambda s: (-sum(c != "N" for c in seqs[s]), s))
     ksets = {sid: {seqs[sid][i : i + k] for i in range(max(0, len(seqs[sid]) - k + 1)) if "N" not in seqs[sid][i : i + k]} for sid in samples}
-    reps: List[Tuple[str, set[str]]] = []
+    reps: List[Tuple[str, set[str], Mapping[int, str]]] = []
     out: Dict[str, str] = {}
     for sid in samples:
-        ks = ksets[sid]
-        best_label, best_sim = max(((lbl, float(len(ks & rks)) / float(u)) for lbl, rks in reps if (u := len(ks | rks)) > 0), key=lambda x: x[1], default=(None, -1.0))
-        if best_label is not None and best_sim >= 0.85:
-            out[sid] = best_label
-        else:
-            lbl = f"{prefix}_{len(reps) + 1}"; reps.append((lbl, ks)); out[sid] = lbl
+        ks, spos = ksets[sid], (pos_maps.get(sid, {}) if pos_maps is not None else {})
+        best_label, best_sim = None, -1.0
+        for lbl, rks, rpos in reps:
+            shared_p = (spos.keys() & rpos.keys()) if pos_maps is not None else set()
+            if len(shared_p) >= 150:
+                ident = sum(1 for p in shared_p if spos[p] == rpos[p]) / float(len(shared_p))
+                if ident >= min_id and ident > best_sim: best_label, best_sim = lbl, ident
+            elif min(len(ks), len(rks)) >= 30 and (ov := len(ks & rks) / float(min(len(ks), len(rks)))) >= 0.88 and ov > best_sim: best_label, best_sim = lbl, ov
+            if best_label is None and prefix != "cp_Clade" and min(len(ks), len(rks)) >= 30 and (ov := len(ks & rks) / float(min(len(ks), len(rks)))) >= 0.94 and ov > best_sim: best_label, best_sim = lbl, ov
+        if best_label is not None: out[sid] = best_label
+        else: lbl = f"{prefix}_{len(reps) + 1}"; reps.append((lbl, ks, spos)); out[sid] = lbl
     return out
 
 
 def _extract_species_from_seed_key(seed_key: str) -> str:
     norm = re.sub(r"[|_/\t]+", " ", seed_key).lower()
     for syn, canon in _SEED_SYNONYM_TAXA.items():
-        if syn in norm:
-            return canon
+        if syn in norm: return canon
     if m := re.search(r"\bpackera\s+[0-9]*([a-z]+(?:-[a-z]+)?)(?=\s|$|[0-9])", norm):
         ep = m.group(1).strip("-")
-        if ep and ep not in _NON_EPITHET_TOKENS:
-            return "Packera dubia" if ep == "tomentosa" else f"Packera {ep}"
+        if ep and ep not in _NON_EPITHET_TOKENS: return "Packera dubia" if ep == "tomentosa" else f"Packera {ep}"
     return ""
 
 
-def _match_best_public_lineage(seq: str, ref_seeds: Mapping[str, str], k: int = 13, _kcache: Optional[Dict[str, Tuple[str, set[str]]]] = None) -> str:
-    """Identify the closest public Packera taxon reference using 13-mer Jaccard similarity."""
-    if not seq or len(seq) < k or not ref_seeds: return ""
-    q_kmers = {seq[i : i + k] for i in range(len(seq) - k + 1) if "N" not in seq[i : i + k]}
+def _match_best_public_lineage(seq: str, ref_seeds: Mapping[str, str], k: int = 13, _kcache: Optional[Dict[str, Any]] = None, q_pos: Optional[Mapping[int, str]] = None) -> str:
+    """Identify the closest public Packera taxon reference using strand-aware k-mer recall and IDF specificity."""
+    _ = q_pos
+    if not ref_seeds or not seq: return ""
+    cache = _kcache if _kcache is not None else {}
+    max_ref_len = max((len(s) for s in ref_seeds.values()), default=0)
+    use_k = 17 if (len(seq) > 5000 and max_ref_len >= 20000) else k
+    if len(seq) < use_k: return ""
+    q_kmers = {seq[i : i + use_k] for i in range(len(seq) - use_k + 1) if "N" not in seq[i : i + use_k]}
+    min_i = 15 if len(q_kmers) >= 30 else max(3, len(q_kmers) // 3)
     if not q_kmers: return ""
-    best_sp, best_sim = "", 0.0
-    for rkey, rseq in ref_seeds.items():
-        if _kcache is not None and rkey in _kcache:
-            sp, r_kmers = _kcache[rkey]
-        else:
-            sp = _extract_species_from_seed_key(rkey)
-            step = 4 if len(rseq) > 20000 else 1
-            r_kmers = {rseq[i : i + k] for i in range(0, len(rseq) - k + 1, step) if "N" not in rseq[i : i + k]} if (sp and len(rseq) >= k) else set()
-            if _kcache is not None: _kcache[rkey] = (sp, r_kmers)
-        if not sp or not r_kmers or not (inter := len(q_kmers & r_kmers)): continue
-        if (union := len(q_kmers | r_kmers)) > 0 and (sim := float(inter) / float(union)) > best_sim:
-            best_sim, best_sp = sim, sp
-    return best_sp
+    if "__refs__" not in cache:
+        ref_list, sp_kmers = [], defaultdict(set)
+        for rkey, rseq in ref_seeds.items():
+            if not (sp := _extract_species_from_seed_key(rkey)) or len(rseq) < use_k: continue
+            rc = _revcomp(rseq)
+            rk = {rseq[i : i + use_k] for i in range(len(rseq) - use_k + 1) if "N" not in rseq[i : i + use_k]}
+            rk |= {rc[i : i + use_k] for i in range(len(rc) - use_k + 1) if "N" not in rc[i : i + use_k]}
+            if rk:
+                low_rk = rkey.lower()
+                is_pure_its = (180 <= len(rseq) <= 670) and ("large|subunit" not in low_rk) and ("external" not in low_rk)
+                ref_list.append((sp, rk, len(rseq), is_pure_its)); sp_kmers[sp].update(rk)
+        cache["__refs__"] = (ref_list, Counter(km for rset in sp_kmers.values() for km in rset))
+    ref_list, df_cnt = cache["__refs__"]
+    is_plastome_q = len(seq) > 5000 and max_ref_len >= 20000
+    complete_refs = [(sp, rk, rl, p_its) for sp, rk, rl, p_its in ref_list if rl >= 125000] if is_plastome_q else []
+    pure_its_refs = [(sp, rk, rl, p_its) for sp, rk, rl, p_its in ref_list if p_its] if (not is_plastome_q and len(seq) <= 5000) else []
+    pools = ((complete_refs, 0.20), (ref_list, 0.35)) if complete_refs else (((pure_its_refs, 0.35), (ref_list, 0.35)) if pure_its_refs else ((ref_list, 0.35),))
+    for pool, min_cov in pools:
+        best_sp, best_sc = "", (0.0, 0.0, 0.0)
+        for sp, r_kmers, rl, _ in pool:
+            if len(shared := (q_kmers & r_kmers)) < min_i: continue
+            denom = float(len(q_kmers) if is_plastome_q else min(len(q_kmers), len(r_kmers)))
+            if (cov_base := len(shared) / denom) < min_cov: continue
+            cov_key = round(cov_base, 4) if is_plastome_q else cov_base
+            idf_sc = sum(1.0 / float(df_cnt[km]) for km in shared if (not is_plastome_q or df_cnt[km] < 15)) / denom
+            if (sc := (cov_key, idf_sc, float(rl >= 500))) > best_sc: best_sc, best_sp = sc, sp
+        if best_sp: return best_sp
+    return ""
 
 
 def _detect_cytonuclear_discordance(
@@ -399,28 +421,21 @@ def run_offtarget_organellar_skim(
 ) -> Dict[str, Any]:
     """Skim off-target plastid, ITS, and nuclear waxy reads into `public_organellar_and_loci/` (or `--out-dir`)."""
     if fastq_source is None or not fastq_source.exists():
-        msg = f"[skim-organellar] FASTQ source absent ({fastq_source}); skipping cleanly."
-        logger.info(msg); print(msg)
+        msg = f"[skim-organellar] FASTQ source absent ({fastq_source}); skipping cleanly."; logger.info(msg); print(msg)
         return {"status": "skipped_missing_fastq", "n_samples": 0}
-    getorg_bin = shutil.which("get_organelle_from_reads.py")
-    if getorg_bin and fastq_source.is_dir():
+    if (getorg_bin := shutil.which("get_organelle_from_reads.py")) and fastq_source.is_dir():
         logger.info("Detected GetOrganelle binary at %s; running alongside pure-Python pileup audit.", getorg_bin)
-        with tempfile.TemporaryDirectory(prefix="packera_getorg_") as tmpd:
-            _ = (tmpd, subprocess)
-
+        with tempfile.TemporaryDirectory(prefix="packera_getorg_") as tmpd: _ = (tmpd, subprocess)
     plastid_seeds, its_seeds, waxy_seeds = _collect_organellar_seeds(genomics_dir)
     cp_kidx, its_kidx, waxy_kidx = _build_kmer_index(plastid_seeds), _build_kmer_index(its_seeds), _build_kmer_index(waxy_seeds)
-    seed_kmers = set(cp_kidx) | set(its_kidx) | set(waxy_kidx)
-    seen_samples: set[str] = set()
+    seed_kmers = set(cp_kidx) | set(its_kidx) | set(waxy_kidx); seen_samples: set[str] = set()
     cp_reads, its_reads, waxy_reads = defaultdict(list), defaultdict(list), defaultdict(list)
-
     eff_threads = _resolve_threads(threads)
     fq_files = sorted((p for p in fastq_source.rglob("*") if p.is_file() and _FQ_PAT.search(p.name)), key=lambda p: (-p.stat().st_size, p.name)) if fastq_source.is_dir() else []
     if len(fq_files) > 1 and eff_threads > 1:
         n_workers = min(eff_threads, len(fq_files))
         logger.info("[skim-organellar] Scanning %d FASTQ file(s) across %d worker(s)...", len(fq_files), n_workers)
-        _WORKER_CTX.clear()
-        _WORKER_CTX.update({"seed_kmers": seed_kmers, "cp_kidx": cp_kidx, "its_kidx": its_kidx, "waxy_kidx": waxy_kidx})
+        _WORKER_CTX.clear(); _WORKER_CTX.update({"seed_kmers": seed_kmers, "cp_kidx": cp_kidx, "its_kidx": its_kidx, "waxy_kidx": waxy_kidx})
         use_fork = "fork" in mp.get_all_start_methods()
         ctx_mp = mp.get_context("fork") if use_fork else mp.get_context()
         pool_kw: Dict[str, Any] = {"processes": n_workers} if use_fork else {"processes": n_workers, "initializer": _init_skim_worker, "initargs": (dict(_WORKER_CTX),)}
@@ -429,50 +444,41 @@ def run_offtarget_organellar_skim(
                 for done_i, (fname, sid, n_reads, cp_b, its_b, waxy_b) in enumerate(pool.imap_unordered(_skim_file_worker, [str(p) for p in fq_files]), start=1):
                     seen_samples.add(sid)
                     for src_b, dst_b in ((cp_b, cp_reads[sid]), (its_b, its_reads[sid]), (waxy_b, waxy_reads[sid])):
-                        if src_b and len(dst_b) < _MAX_BUCKET_READS:
-                            dst_b.extend(src_b[: _MAX_BUCKET_READS - len(dst_b)])
+                        if src_b and len(dst_b) < _MAX_BUCKET_READS: dst_b.extend(src_b[: _MAX_BUCKET_READS - len(dst_b)])
                     logger.info("[skim-organellar] [%d/%d] %s (%s): scanned %d reads (cp=%d, its=%d, waxy=%d)", done_i, len(fq_files), fname, sid, n_reads, len(cp_b), len(its_b), len(waxy_b))
-        finally:
-            _WORKER_CTX.clear()
+        finally: _WORKER_CTX.clear()
     else:
         for sid, seq in _iter_staged_fastq_reads(fastq_source):
-            seen_samples.add(sid)
-            cp_b, its_b, waxy_b = cp_reads[sid], its_reads[sid], waxy_reads[sid]
+            seen_samples.add(sid); cp_b, its_b, waxy_b = cp_reads[sid], its_reads[sid], waxy_reads[sid]
             if len(cp_b) < _MAX_BUCKET_READS or len(its_b) < _MAX_BUCKET_READS or len(waxy_b) < _MAX_BUCKET_READS:
                 _bait_stream_into_buckets((seq,), seed_kmers, cp_kidx, its_kidx, waxy_kidx, cp_b, its_b, waxy_b)
-
     if not seen_samples:
         logger.info("[skim-organellar] No FASTQ reads discovered inside %s; skipping.", fastq_source)
         return {"status": "skipped_no_reads", "n_samples": 0}
 
-    cp_cons = _assemble_baited_consensus(cp_reads, plastid_seeds, kidx=cp_kidx)
-    its_cons = _assemble_baited_consensus(its_reads, its_seeds, kidx=its_kidx)
-    waxy_cons = _assemble_baited_consensus(waxy_reads, waxy_seeds, kidx=waxy_kidx)
-    cp_clades, its_ribo, waxy_clades = _cluster_haplotypes(cp_cons, prefix="cp_Clade"), _cluster_haplotypes(its_cons, prefix="ITS_Ribotype"), _cluster_haplotypes(waxy_cons, prefix="Waxy_Lineage")
+    cp_pos, its_pos, wx_pos = {}, {}, {}
+    cp_cons = _assemble_baited_consensus(cp_reads, plastid_seeds, kidx=cp_kidx, min_reads=4, min_bases=80, pos_out=cp_pos)
+    its_cons = _assemble_baited_consensus(its_reads, its_seeds, kidx=its_kidx, min_reads=4, min_bases=60, pos_out=its_pos)
+    waxy_cons = _assemble_baited_consensus(waxy_reads, waxy_seeds, kidx=waxy_kidx, min_reads=4, min_bases=60, pos_out=wx_pos)
+    cp_clades = _cluster_haplotypes(cp_cons, "cp_Clade", pos_maps=cp_pos, min_id=0.990)
+    its_ribo = _cluster_haplotypes(its_cons, "ITS_Ribotype", pos_maps=its_pos, min_id=0.990)
+    waxy_clades = _cluster_haplotypes(waxy_cons, "Waxy_Lineage", pos_maps=wx_pos, min_id=0.990)
     cp_cache, its_cache, waxy_cache = {}, {}, {}
-    pub_cp_match = {sid: _match_best_public_lineage(seq, plastid_seeds, _kcache=cp_cache) for sid, seq in cp_cons.items()}
+    pub_cp_match = {sid: _match_best_public_lineage(seq, plastid_seeds, _kcache=cp_cache, q_pos=cp_pos.get(sid)) for sid, seq in cp_cons.items()}
     pub_its_match = {sid: _match_best_public_lineage(seq, its_seeds, _kcache=its_cache) for sid, seq in its_cons.items()}
     waxy_match = {sid: _match_best_public_lineage(seq, waxy_seeds, _kcache=waxy_cache) or waxy_clades.get(sid, "") for sid, seq in waxy_cons.items()}
     cyto_rows = _detect_cytonuclear_discordance(cp_clades, its_ribo, nuclear_tree_path=nuclear_tree, public_plastome_matches=pub_cp_match, public_its_matches=pub_its_match, waxy_lineage_matches=waxy_match)
 
     target_dir = out_dir if out_dir is not None else (genomics_dir if genomics_dir.name == "public_organellar_and_loci" else (genomics_dir / "public_organellar_and_loci"))
     target_dir.mkdir(parents=True, exist_ok=True)
-    cp_fasta, its_fasta, waxy_fasta = target_dir / "skimmed_plastid_consensus.fasta", target_dir / "skimmed_its_consensus.fasta", target_dir / "skimmed_waxy_consensus.fasta"
     cyto_csv = target_dir / "cytonuclear_discordance.csv"
-    for out_fa, cons_map, tag, lbl_map, fallback in (
-        (cp_fasta, cp_cons, "clade", cp_clades, "cp_Unassigned"),
-        (its_fasta, its_cons, "ribotype", its_ribo, "ITS_Unassigned"),
-        (waxy_fasta, waxy_cons, "waxy", waxy_clades, "Waxy_Unassigned"),
-    ):
-        with open(out_fa, "wt", encoding="utf-8") as fh:
-            for sid, seq in sorted(cons_map.items()):
-                fh.write(f">{sid}|{tag}={lbl_map.get(sid, fallback)}\n{seq}\n")
+    for fname_out, cons_map, tag, lbl_map, fallback in (("skimmed_plastid_consensus.fasta", cp_cons, "clade", cp_clades, "cp_Unassigned"), ("skimmed_its_consensus.fasta", its_cons, "ribotype", its_ribo, "ITS_Unassigned"), ("skimmed_waxy_consensus.fasta", waxy_cons, "waxy", waxy_clades, "Waxy_Unassigned")):
+        with open(target_dir / fname_out, "wt", encoding="utf-8") as fh:
+            for sid, seq in sorted(cons_map.items()): fh.write(f">{sid}|{tag}={lbl_map.get(sid, fallback)}\n{seq}\n")
     cols = ["genetic_sample_id", "nuclear_taxon", "plastid_clade", "its_ribotype", "cytonuclear_discordant", "public_plastome_match", "public_its_match", "waxy_lineage_match"]
     (pd.DataFrame(cyto_rows) if cyto_rows else pd.DataFrame(columns=cols)).to_csv(cyto_csv, index=False)
-
     logger.info("Skimmed %d plastid, %d ITS, and %d waxy consensuses (%d cytonuclear records) into %s.", len(cp_cons), len(its_cons), len(waxy_cons), len(cyto_rows), target_dir)
     return {"status": "skimmed", "n_samples": len(seen_samples), "n_plastid": len(cp_cons), "n_its": len(its_cons), "n_waxy": len(waxy_cons), "out_dir": str(target_dir), "cytonuclear_csv": str(cyto_csv)}
-
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Offline off-target organellar/ITS read skimmer for Packera.")
@@ -485,7 +491,5 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     run_offtarget_organellar_skim(args.fastq_source, args.genomics_dir, nuclear_tree=args.nuclear_tree, out_dir=args.out_dir, threads=args.threads)
     return 0
 
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+if __name__ == "__main__": raise SystemExit(main())
 

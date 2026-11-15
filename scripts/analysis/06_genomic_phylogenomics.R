@@ -578,7 +578,7 @@ run_step06_genomic_phylogenomics <- function(opts) {
     !is.na(pass_df$species_standardized) & nzchar(pass_df$species_standardized)
   ref_idx <- which(is_ref_anchor)
   ref_tbl <- table(pass_df$species_standardized[ref_idx])
-  keep_taxa <- names(ref_tbl[ref_tbl >= 2L])
+  keep_taxa <- names(ref_tbl[ref_tbl >= 1L])
   if (length(keep_taxa) >= 2L) {
     ref_idx <- ref_idx[pass_df$species_standardized[ref_idx] %in% keep_taxa]
   } else {

@@ -660,7 +660,7 @@ export PYTHONUNBUFFERED=1
 LOG_FILE="${RUN_DIR}/logs/pipeline.log"
 exec > >(tee -a "${LOG_FILE}") 2>&1
 
-START_TIME="$(date -Iseconds)"
+START_TIME="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 GIT_SHA="$(git rev-parse HEAD 2>/dev/null || echo 'unknown')"
 
 echo "=============================================================================="
@@ -1829,7 +1829,7 @@ if [[ "${START_STEP}" -le 7 ]]; then
 fi
 
 # Finalize run_metadata.json and SQLite pipeline_runs with end timestamp and table row counts
-END_TIME="$(date -Iseconds)"
+END_TIME="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 "${PYTHON_MAIN}" -c "
 import os
 import sys

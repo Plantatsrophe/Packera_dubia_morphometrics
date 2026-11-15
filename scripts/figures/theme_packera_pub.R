@@ -175,7 +175,7 @@ abbreviate_icn_taxon <- function(label_vec, abbreviate_genus = FALSE) {
     if (is.na(s) || !nzchar(trimws(s))) return("Unknown")
     s_clean <- trimws(s)
     if (!isTRUE(abbreviate_genus)) return(s_clean)
-    if (grepl("^(Morphotype|Ecotype|Complex|Cluster)_", s_clean)) return(gsub("_", " ", s_clean))
+    if (grepl("^(Morphotype|Ecotype|Complex|Cluster|Deme)_", s_clean)) return(gsub("_", " ", s_clean))
     toks <- strsplit(s_clean, "\\s+")[[1L]]
     if (length(toks) >= 2L && grepl("^[A-Z][a-z]+$", toks[1L])) {
       toks[1L] <- paste0(substr(toks[1L], 1L, 1L), ".")
@@ -188,7 +188,7 @@ abbreviate_icn_taxon <- function(label_vec, abbreviate_genus = FALSE) {
 format_icn_label_expr <- function(tx, abbreviate_genus = FALSE, count_n = NULL) {
   s <- abbreviate_icn_taxon(tx, abbreviate_genus = abbreviate_genus)
   suffix_n <- if (!is.null(count_n) && is.finite(count_n)) sprintf(" (n=%d)", as.integer(count_n)) else ""
-  if (grepl("^(Morphotype|Ecotype|Complex|Cluster|Unknown|Unassigned)", s, ignore.case = TRUE) ||
+  if (grepl("^(Morphotype|Ecotype|Complex|Cluster|Deme|Unknown|Unassigned)", s, ignore.case = TRUE) ||
       !grepl("^[A-Z][a-z.]*\\s+", s)) {
     lbl_plain <- paste0(gsub("_", " ", s), suffix_n)
     return(bquote(.(lbl_plain)))

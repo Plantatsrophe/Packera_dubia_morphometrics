@@ -369,6 +369,43 @@ class TestEasternNAMonographCLI(unittest.TestCase):
             self.assertEqual(set(pd.read_csv(tables_dir / "curated_vouchers.csv")["catalogNumber"]), {"PAUP_NC1", "PAUP_NC2", "PAUP_TYPE", "ANON_NC1"})
             self.assertNotIn("Packera obovata", res.stdout)
 
+    def test_compile_complex_resolution_summary_full_queue_merged_k_and_stage2_pulls(self) -> None:
+        """Verify compile_complex_resolution_summary prefers triage_queue_complex_full.csv, optimal_K_merged, dual CSVs, and Stage 2 purged misidentifications."""
+        from scripts.pipeline.resolve_focal_species_complex import compile_complex_resolution_summary
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Path(tmp).resolve()
+            stages = ("dubia_01_eastern_discovery", "dubia_02_complex_triage", "dubia_03_intraspecific_clean", "dubia_04_gold_thin_audit")
+            for st in stages:
+                st_dir = ws / "runs" / st
+                if st == "dubia_02_complex_triage":
+                    _write_csv(st_dir / "data" / "tables" / "triage_queue.csv", ["catalogNumber", "plant_individual_id", "species_standardized", "taxonomic_treatment_subtype", "gmm_cluster"],
+                               [{"catalogNumber": "DUB_1", "plant_individual_id": 0, "species_standardized": "Packera dubia", "taxonomic_treatment_subtype": "Confirmed_Species", "gmm_cluster": "1"}])
+                    _write_csv(st_dir / "data" / "tables" / "triage_queue_complex_full.csv", ["catalogNumber", "plant_individual_id", "species_standardized", "taxonomic_treatment_subtype", "recommended_determination", "gmm_cluster"], [
+                        {"catalogNumber": "DUB_1", "plant_individual_id": 0, "species_standardized": "Packera dubia", "taxonomic_treatment_subtype": "Confirmed_Species", "recommended_determination": "Packera dubia", "gmm_cluster": "1"},
+                        {"catalogNumber": "DUB_MIS2", "plant_individual_id": 0, "species_standardized": "Packera dubia", "taxonomic_treatment_subtype": "Misidentification_Reassign", "recommended_determination": "Packera anonyma", "gmm_cluster": "2"},
+                        {"catalogNumber": "ANO_1", "plant_individual_id": 0, "species_standardized": "Packera anonyma", "taxonomic_treatment_subtype": "Confirmed_Species", "recommended_determination": "Packera anonyma", "gmm_cluster": "2"},
+                    ])
+                else:
+                    _write_csv(st_dir / "data" / "tables" / "triage_queue.csv", ["catalogNumber", "plant_individual_id", "species_standardized", "taxonomic_treatment_subtype", "gmm_cluster"],
+                               [{"catalogNumber": "DUB_1", "plant_individual_id": 0, "species_standardized": "Packera dubia", "taxonomic_treatment_subtype": "Confirmed_Type_Control", "gmm_cluster": "1"}])
+                _write_csv(st_dir / "outputs" / "reports" / "gmm_bayes_factors_summary.csv", ["K", "BIC", "is_optimal", "optimal_K", "optimal_K_merged"],
+                           [{"K": 4, "BIC": -100.0, "is_optimal": "TRUE", "optimal_K": 4, "optimal_K_merged": 1}])
+
+            csv_four, md_path = compile_complex_resolution_summary(focal_taxon="Packera dubia", prefix="dubia", workspace_root=ws)
+            csv_cmp = ws / "outputs" / "reports" / "Packera_dubia_complex_stage_comparison.csv"
+            self.assertTrue(csv_four.is_file() and csv_cmp.is_file())
+            self.assertEqual(csv_four.read_text(encoding="utf-8"), csv_cmp.read_text(encoding="utf-8"))
+            rows = {r["stage"]: r for r in csv.DictReader(csv_cmp.open("r", encoding="utf-8", newline=""))}
+            self.assertEqual(rows["Stage_2_Complex_Triage"]["n_total_otus"], "3")
+            self.assertEqual(rows["Stage_3_Intraspecific_Clean"]["gmm_optimal_k"], "1")
+            md_txt = md_path.read_text(encoding="utf-8")
+            self.assertIn("DUB_MIS2", md_txt)
+            self.assertIn("NY00232445", md_txt)
+            self.assertIn("P-MICH", md_txt)
+            self.assertNotIn("\u2013", md_txt)
+            self.assertNotIn("\u2014", md_txt)
+
 
 if __name__ == "__main__":
     unittest.main()

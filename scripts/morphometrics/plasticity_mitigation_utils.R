@@ -343,3 +343,91 @@ merge_plastic_gmm_components_ridgeline <- function(
     merged_any = merged_any
   )
 }
+
+# Empirical Bayes institutional location-offset shrinkage accounting for biological taxon structure
+apply_eb_institution_batch_centering <- function(df, target_cols, min_inst_n = 10L) {
+  if (!is.data.frame(df) || nrow(df) < 10L || !("institutionCode" %in% names(df))) return(df)
+  cand_cols <- intersect(unique(as.character(target_cols)), names(df))
+  if (length(cand_cols) == 0L) return(df)
+  inst_all <- trimws(as.character(df$institutionCode))
+  inst_all[is.na(df$institutionCode) | !nzchar(inst_all)] <- NA_character_
+  ref_mask <- !is.na(inst_all)
+  if ("authority_weight" %in% names(df)) ref_mask <- ref_mask & !is.na(df$authority_weight) & (suppressWarnings(as.numeric(df$authority_weight)) > 0)
+  if ("is_passive" %in% names(df)) ref_mask <- ref_mask & (is.na(df$is_passive) | !as.logical(df$is_passive))
+  if ("morph_tier_source" %in% names(df)) ref_mask <- ref_mask & (is.na(df$morph_tier_source) | !(df$morph_tier_source %in% c("Cauline_Only_Fallback", "Transitional_Passive")))
+  if (sum(ref_mask, na.rm = TRUE) < 10L || length(unique(inst_all[ref_mask])) < 2L) ref_mask <- !is.na(inst_all)
+  if (sum(ref_mask, na.rm = TRUE) < 10L || length(unique(inst_all[ref_mask])) < 2L) return(df)
+
+  sp_all <- if ("species_standardized" %in% names(df)) as.character(df$species_standardized) else if ("scientificName" %in% names(df)) as.character(df$scientificName) else rep("Unassigned", nrow(df))
+  sp_all[is.na(sp_all) | !nzchar(trimws(sp_all))] <- "Unassigned"
+  w_all <- (if ("authority_weight" %in% names(df)) suppressWarnings(as.numeric(df$authority_weight)) else rep(1.0, nrow(df))) *
+    (if ("spatial_balance_weight" %in% names(df)) suppressWarnings(as.numeric(df$spatial_balance_weight)) else rep(1.0, nrow(df)))
+  w_all[!is.finite(w_all) | w_all <= 0] <- 1.0
+
+  pre_eta <- attr(df, "pre_eb_batch_partial_eta_sq")
+  if (is.null(pre_eta) || !is.numeric(pre_eta)) pre_eta <- stats::setNames(numeric(0), character(0))
+
+  for (col in cand_cols) {
+    yv <- suppressWarnings(as.numeric(df[[col]]))
+    ok_all <- is.finite(yv) & !is.na(inst_all)
+    r_idx <- which(ref_mask & is.finite(yv))
+    if (length(r_idx) < 10L || stats::var(yv[r_idx]) <= 1e-12) next
+    r_inst <- inst_all[r_idx]; r_sp <- sp_all[r_idx]; r_y <- yv[r_idx]; r_w <- w_all[r_idx]
+    u_inst <- unique(r_inst); if (length(u_inst) < 2L) next
+
+    # Compute exact pre-EB marginal ANCOVA partial eta-squared matching audit_institutional_batch_effects
+    fit_pre <- tryCatch({
+      sub_p <- data.frame(y = r_y, sp = droplevels(factor(r_sp)), inst = droplevels(factor(r_inst)))
+      fml_p <- if (nlevels(sub_p$sp) >= 2L) stats::as.formula("y ~ sp + inst") else stats::as.formula("y ~ inst")
+      stats::anova(stats::lm(fml_p, data = sub_p, weights = r_w))
+    }, error = function(e) NULL)
+    if (!is.null(fit_pre) && "inst" %in% rownames(fit_pre) && "Residuals" %in% rownames(fit_pre)) {
+      ii <- which(rownames(fit_pre) == "inst")[1L]; ri <- which(rownames(fit_pre) == "Residuals")[1L]
+      pre_eta[[col]] <- as.numeric(fit_pre$`Sum Sq`[ii] / max(fit_pre$`Sum Sq`[ii] + fit_pre$`Sum Sq`[ri], 1e-12))
+    }
+
+    # Estimate marginal species means and zero-mean institutional location shifts iteratively
+    d_raw <- stats::setNames(rep(0.0, length(u_inst)), u_inst)
+    mu_sp <- stats::setNames(rep(mean(r_y), length(unique(r_sp))), unique(r_sp))
+    for (it in seq_len(6L)) {
+      for (sp_u in names(mu_sp)) {
+        si <- which(r_sp == sp_u)
+        mu_sp[sp_u] <- stats::weighted.mean(r_y[si] - d_raw[r_inst[si]], w = r_w[si])
+      }
+      e_it <- r_y - mu_sp[r_sp]
+      for (ih in u_inst) {
+        hi <- which(r_inst == ih)
+        d_raw[ih] <- if (length(hi) >= 2L) stats::weighted.mean(e_it[hi], w = r_w[hi]) else 0.0
+      }
+      w_mean_d <- sum(vapply(u_inst, function(ih) sum(r_w[r_inst == ih]) * d_raw[ih], numeric(1))) / max(sum(r_w), 1e-12)
+      d_raw <- d_raw - w_mean_d
+    }
+
+    res_w <- r_y - mu_sp[r_sp] - d_raw[r_inst]
+    s2_in <- sum(r_w * res_w^2) / max(1.0, sum(r_w) - length(unique(r_sp)) - length(u_inst))
+    n_by_i <- vapply(u_inst, function(ih) sum(r_inst == ih), integer(1))
+    elig_v <- which(n_by_i >= min_inst_n)
+    if (length(elig_v) < 2L) elig_v <- which(n_by_i >= 2L)
+    if (length(elig_v) < 2L || !is.finite(s2_in) || s2_in <= 0) next
+    se2_v <- s2_in / pmax(as.numeric(n_by_i[elig_v]), 1.0)
+    tau2 <- max(0.0, stats::var(d_raw[elig_v]) - mean(se2_v, na.rm = TRUE))
+    if (!is.finite(tau2) || tau2 <= 1e-9) next
+
+    delta_eb <- stats::setNames(numeric(length(u_inst)), u_inst)
+    for (ih in u_inst) {
+      nh <- n_by_i[ih]
+      if (nh >= 2L) {
+        eb_w <- tau2 / (tau2 + (s2_in / nh))
+        if (nh < min_inst_n) eb_w <- eb_w * (nh / min_inst_n)
+        delta_eb[ih] <- d_raw[ih] * eb_w
+      }
+    }
+    w_eb_mean <- sum(vapply(u_inst, function(ih) sum(r_w[r_inst == ih]) * delta_eb[ih], numeric(1))) / max(sum(r_w), 1e-12)
+    delta_eb <- delta_eb - w_eb_mean
+    adj_mask <- ok_all & (inst_all %in% names(delta_eb))
+    yv[adj_mask] <- round(yv[adj_mask] - delta_eb[inst_all[adj_mask]], 5)
+    df[[col]] <- yv
+  }
+  attr(df, "pre_eb_batch_partial_eta_sq") <- pre_eta
+  df
+}

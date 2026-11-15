@@ -44,9 +44,9 @@ PACKERA_TREATMENT_HOLLOW_SHAPES <- c(
   } else 0L
   u_2n <- sort(unique(vp_2n[has_2n]))
   u_x <- sort(unique(vp_x[has_x]))
-  lbl_2n <- if (length(u_2n) > 0L) paste(utils::head(u_2n, 3L), collapse = "/") else "NA"
   lbl_x <- if (length(u_x) > 0L) paste0(paste(utils::head(u_x, 3L), collapse = "/"), "x") else paste(utils::head(unique(tx_cy[has_tx]), 2L), collapse = "; ")
-  sprintf("[2n=%s | %s; %d cytovoucher(s), %d barrier(s)]", lbl_2n, lbl_x, n_cyto_v, n_bar)
+  lbl_ploidy <- if (length(u_2n) > 0L) sprintf("2n=%s | %s", paste(utils::head(u_2n, 3L), collapse = "/"), lbl_x) else lbl_x
+  sprintf("[%s; %d cytovoucher(s), %d barrier(s)]", lbl_ploidy, n_cyto_v, n_bar)
 }
 
 render_step07a_integrative_synthesis_png <- function(
@@ -302,6 +302,8 @@ render_step07a_integrative_synthesis_png <- function(
     sprintf("Step 07: Integrative Species Delimitation Across Packera Complexes (%s Focus, N = %d Taxa)", trimws(as.character(focal_taxon)), length(active_taxa))
   } else if (nzchar(trimws(as.character(focal_taxon)))) {
     sprintf("Step 07: Integrative Species Delimitation & Curatorial Synthesis (%s)", trimws(as.character(focal_taxon)))
+  } else if (length(active_taxa) == 1L) {
+    sprintf("Step 07: Integrative Species Delimitation & Curatorial Synthesis (%s)", active_taxa[1L])
   } else {
     sprintf("Step 07: Integrative Species Delimitation Across Packera Complexes (N = %d Taxa)", length(active_taxa))
   }
@@ -466,10 +468,10 @@ render_step07b_complex_network_png <- function(
   p_heat <- ggplot2::ggplot(hm_grid, ggplot2::aes(x = .data$Col, y = .data$Row, fill = .data$Affinity)) +
     ggplot2::geom_tile(color = "white", linewidth = 0.35) +
     ggplot2::scale_fill_viridis_c(option = "magma", limits = c(0, 1), name = "Affinity\nW_ij") +
-    ggplot2::scale_x_discrete(labels = function(x) abbreviate_icn_taxon(x, abbreviate_genus = TRUE)) +
+    ggplot2::scale_x_discrete(labels = icn_discrete_labeller(abbreviate_genus = TRUE)) +
     ggplot2::scale_y_discrete(labels = icn_discrete_labeller(abbreviate_genus = TRUE)) +
     theme_packera_pub(base_size = 9.4) +
-    ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 40, hjust = 1, face = "italic")) +
+    ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 40, hjust = 1, face = "plain")) +
     ggplot2::labs(
       title = sprintf("A. Ward.D2 Multimodal Affinity Matrix (%d %s)", n_comp, if (n_comp == 1L) "Complex" else "Complexes"),
       subtitle = if (is_deme_net) {

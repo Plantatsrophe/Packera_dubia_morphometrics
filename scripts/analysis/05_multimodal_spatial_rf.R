@@ -2967,9 +2967,11 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
   })
   tot_pos <- sum(grp_sums, na.rm = TRUE)
 
+  adj_r2_vals <- rep(NA_real_, length(grp_names))
   if (!is.null(varpart_obj) && !is.null(varpart_obj$part$indfract)) {
     adj_col <- intersect(c("Adj.R.square", "Adj.R.sq"), colnames(varpart_obj$part$indfract))[1]
     if (!is.na(adj_col)) {
+      adj_r2_vals <- round(as.numeric(varpart_obj$part$indfract[1:3, adj_col]), 4)
       vp_pos <- pmax(0, as.numeric(varpart_obj$part$indfract[1:3, adj_col]))
       if (sum(vp_pos, na.rm = TRUE) > 0) {
         grp_sums <- vp_pos
@@ -2989,6 +2991,8 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
   var_part <- data.frame(
     Component = grp_names,
     Variance_Pct = var_pct,
+    Adj_R2 = adj_r2_vals,
+    MEM_Dominance_Flag = (grp_names == "[C] Spatial MEMs") & (var_pct > 50.0),
     stringsAsFactors = FALSE
   )
 
@@ -3614,10 +3618,13 @@ run_warren_niche_identity_tests <- function(
 
     min_p_bg <- suppressWarnings(min(c(joint_res$p_bg_D, edaph_res$p_bg_D, clim_res$p_bg_D), na.rm = TRUE))
     if (!is.finite(min_p_bg)) min_p_bg <- min(c(p_val_D, edaph_res$p_equiv_D, clim_res$p_equiv_D), na.rm = TRUE)
+    min_p_eq <- suppressWarnings(min(c(p_val_D, edaph_res$p_equiv_D, clim_res$p_equiv_D), na.rm = TRUE))
     min_d_emp <- suppressWarnings(min(c(D_emp, D_edaph, D_clim), na.rm = TRUE))
     outcome <- ifelse(is.finite(min_p_bg) && min_p_bg < 0.01 && is.finite(min_d_emp) && min_d_emp < 0.30,
                       "Distinct Ecological Niche (Background Similarity Divergence Confirmed)",
-               ifelse(is.finite(min_p_bg) && min_p_bg < 0.05 && is.finite(min_d_emp) && min_d_emp < 0.50,
+               ifelse((is.finite(min_p_bg) && min_p_bg < 0.05 && is.finite(min_d_emp) && min_d_emp < 0.50) ||
+                      (is.finite(p_val_D) && p_val_D < 0.05 && is.finite(D_emp) && D_emp < 0.55) ||
+                      (is.finite(min_p_eq) && min_p_eq < 0.05 && is.finite(min_d_emp) && min_d_emp < 0.45),
                       "Significant Divergence (Subspecific Ecological Race)",
                       "Conserved / Overlapping Niche (Shared Regional Background)"))
 
@@ -4058,6 +4065,12 @@ main <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
     ibe_out_csv <- file.path(dirname(opts$output_summary), "isolation_by_environment_summary.csv")
     if (write_csv_atomic(srf_res$ibe_summary, ibe_out_csv, demo = demo_mode)) {
       message(sprintf("Saved Isolation-by-Environment (IBE) partial RDA summary to %s.", ibe_out_csv))
+    }
+  }
+  if (!is.null(srf_res$variance_partition) && is.data.frame(srf_res$variance_partition) && nrow(srf_res$variance_partition) > 0L) {
+    vp_out_csv <- file.path(dirname(opts$output_summary), "variance_partitioning_summary.csv")
+    if (write_csv_atomic(srf_res$variance_partition, vp_out_csv, demo = demo_mode)) {
+      message(sprintf("Saved vegan::varpart variance partitioning summary to %s.", vp_out_csv))
     }
   }
 

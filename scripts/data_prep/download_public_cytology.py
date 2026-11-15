@@ -151,6 +151,10 @@ def resolve_packera_cytology_taxon(
     for src in (_DYNAMIC_SYNONYM_TO_CANONICAL, synonym_map or {}):
         smap.update({str(k).strip().lower(): v for k, v in src.items() if isinstance(v, str) and v.startswith("Packera ")})
     binom, is_sen = f"{words[0].lower()} {words[1].lower()}", words[0].lower() in ("senecio", "cineraria")
+    if re.search(r"\bledeb\.?\b", orig, re.I) or ((is_sen or "tomentos" in orig.lower()) and sporophytic_2n is not None and int(sporophytic_2n) in _OLD_WORLD_2N):
+        return None
+    if clean.lower().startswith("senecio aureus var. pauperculus"):
+        return {"original_taxon_name": orig, "basionym_name": clean, "species_standardized": "Packera paupercula"}
     for cand in (orig.lower(), clean.lower(), binom):
         if cand in smap:
             return {"original_taxon_name": orig, "basionym_name": clean if is_sen else None, "species_standardized": smap[cand]}

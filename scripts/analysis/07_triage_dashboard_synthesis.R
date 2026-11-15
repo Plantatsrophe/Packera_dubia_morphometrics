@@ -168,14 +168,14 @@ resolve_active_anthesis_mask <- function(df) {
   if (length(state_cols) > 0L) {
     st_raw <- tolower(trimws(as.character(df[[state_cols[1L]]])))
     unk_mask <- is.na(st_raw) | !nzchar(st_raw) | st_raw == "unknown"
-    is_anthesis <- unk_mask | st_raw %in% c("anthesis", "flowering", "active_anthesis", "open_flower") | grepl("anthesis|flower", st_raw)
+    is_anthesis <- (!unk_mask) & (st_raw %in% c("anthesis", "flowering", "active_anthesis", "open_flower") | grepl("anthesis|flower", st_raw))
     is_anthesis[!is.na(st_raw) & (st_raw %in% c("bud", "fruit", "sterile", "vegetative", "fruiting", "senescent") | grepl("pre[_-]?anthesis|post[_-]?anthesis|non[_-]?anthesis", st_raw))] <- FALSE
     if (any(unk_mask)) {
       has_ver <- unk_mask & !is.na(ver_vec)
       if (any(has_ver)) is_anthesis[has_ver] <- ver_vec[has_ver]
       rem_unk <- unk_mask & is.na(ver_vec) & is.finite(na_cnt)
       if (any(rem_unk)) {
-        is_anthesis[rem_unk] <- ifelse(na_cnt[rem_unk] >= 1.0, TRUE, if (has_non_anth_col) !(non_anth_cnt[rem_unk] > 0.0) else FALSE)
+        is_anthesis[rem_unk] <- na_cnt[rem_unk] >= 1.0
       }
     }
     return(is_anthesis)
@@ -183,12 +183,22 @@ resolve_active_anthesis_mask <- function(df) {
   if ("is_verified_anthesis" %in% names(df)) {
     ia <- ver_vec
     if (any(is.na(ia)) && any(is.finite(na_cnt))) ia[is.na(ia) & is.finite(na_cnt)] <- na_cnt[is.na(ia) & is.finite(na_cnt)] >= 1.0
-    ia[is.na(ia)] <- TRUE
+    if (all(is.na(ia)) && ("is_active_anthesis" %in% names(df))) {
+      ia_fb <- suppressWarnings(as.logical(df$is_active_anthesis))
+      ia_fb[is.na(ia_fb)] <- FALSE
+      return(ia_fb)
+    }
+    ia[is.na(ia)] <- FALSE
     return(ia)
   }
-  if ("is_anthesis" %in% names(df)) { ia <- as.logical(df$is_anthesis); ia[is.na(ia)] <- TRUE; return(ia) }
-  if ("n_anthesis" %in% names(df)) { return(is.na(na_cnt) | na_cnt >= 1.0) }
-  if ("n_anthesis_heads" %in% names(df)) { nh <- suppressWarnings(as.numeric(df$n_anthesis_heads)); return(is.na(nh) | nh >= 1.0) }
+  if ("is_active_anthesis" %in% names(df)) {
+    ia <- suppressWarnings(as.logical(df$is_active_anthesis))
+    ia[is.na(ia)] <- FALSE
+    return(ia)
+  }
+  if ("is_anthesis" %in% names(df)) { ia <- as.logical(df$is_anthesis); ia[is.na(ia)] <- FALSE; return(ia) }
+  if ("n_anthesis" %in% names(df)) { return(!is.na(na_cnt) & is.finite(na_cnt) & na_cnt >= 1.0) }
+  if ("n_anthesis_heads" %in% names(df)) { nh <- suppressWarnings(as.numeric(df$n_anthesis_heads)); return(!is.na(nh) & is.finite(nh) & nh >= 1.0) }
   rep(TRUE, n)
 }
 
@@ -671,6 +681,7 @@ compute_probabilistic_consensus_scores <- function(df) {
   }
 
   p_conf_out <- numeric(n); p_score_out <- numeric(n); n_mod_out <- integer(n)
+  w_morph_sx <- numeric(n); w_edaph_sx <- numeric(n); w_pheno_sx <- numeric(n); w_geno_sx <- numeric(n)
   df_nms_c <- names(df)
   given_sp_cv <- as.character(df$species_standardized)
   morph_sp_cv <- if ("cda_predicted_taxon" %in% df_nms_c) as.character(df$cda_predicted_taxon) else rep(NA_character_, n)
@@ -818,8 +829,23 @@ compute_probabilistic_consensus_scores <- function(df) {
     p_vec <- c(morph = p_m, edaphic = p_e, pheno = p_p, geno = p_g, t0_soft = p_t0_i)
     avail <- !is.na(p_vec) & is.finite(p_vec) & !is.na(w_i_vec) & is.finite(w_i_vec); n_mod_out[i] <- sum(avail)
     p_conf_i <- if (any(avail)) sum(w_i_vec[avail] * p_vec[avail]) / sum(w_i_vec[avail]) else 0.0
+    w4_vec <- pmax(0.0, w_i_vec[c("morph", "edaphic", "pheno", "geno")])
+    av4 <- avail[c("morph", "edaphic", "pheno", "geno")]
+    w4_sx <- rep(0.0, 4L)
+    if (any(av4) && sum(w4_vec[av4]) > 0.0) {
+      w4_raw <- w4_vec[av4] / sum(w4_vec[av4])
+      w4_rnd <- round(w4_raw, 6L)
+      idx_max <- which.max(w4_rnd)
+      w4_rnd[idx_max] <- round(w4_rnd[idx_max] + (1.0 - sum(w4_rnd)), 6L)
+      w4_sx[av4] <- w4_rnd
+    }
+    w_morph_sx[i] <- w4_sx[1L]; w_edaph_sx[i] <- w4_sx[2L]; w_pheno_sx[i] <- w4_sx[3L]; w_geno_sx[i] <- w4_sx[4L]
     p_conf_out[i] <- round(min(1.0, max(0.0, p_conf_i)), 4); p_score_out[i] <- round(1.0 - p_conf_out[i], 4)
   }
+  df$w_morph_simplex <- w_morph_sx
+  df$w_edaphic_simplex <- w_edaph_sx
+  df$w_pheno_simplex <- w_pheno_sx
+  df$w_geno_simplex <- w_geno_sx
   df$n_available_modalities <- n_mod_out
   df$probabilistic_consensus_conflict <- p_conf_out
   df$probabilistic_consensus_score <- p_score_out
@@ -2611,10 +2637,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
                                !sec_organ_supports_alt && !exs_supports_alt
 
     tier_authority_gate_ok <- if (det_t == "Tier_1_Gold") {
-      outside_self_morph_95 && !exs_supports_given && !vestiture_supports_given && (
-        any_non_outline_supports_alt ||
-        (!has_obs_edaph_i && n_diag_sec == 0L && !pheno_supports_given && is.finite(eff_cda_prob) && eff_cda_prob >= 0.95)
-      )
+      outside_self_morph_95 && !exs_supports_given && !vestiture_supports_given && any_non_outline_supports_alt
     } else if (det_t == "Tier_2_Silver") {
       outside_self_morph_95 && !exs_supports_given && !vestiture_supports_given && (
         if (!is_single_ramet_sheet) {
@@ -2848,10 +2871,10 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
           treat_broad[i] <- "Confirmed Species"; treat_sub[i] <- "Confirmed_Species"; next
         }
       } else if (!is_tier1_pure_morph && is_mo_flag && !morph_concordant_self && (d_edaph < 0.30 || (is.finite(edaph_z) && edaph_z > 2.5))) {
-        status_calls[i] <- "Misidentification_Severe"; rec_taxa[i] <- if (!is.na(min_cong_tx_i) && min_cong_tx_i != given_sp) min_cong_tx_i else if (edaph_is_taxon && edaph_sp != given_sp) edaph_sp else given_sp
-        triage_prios[i] <- "HIGH"; triage_acts[i] <- "Reassign_Determination"
-        rationales[i] <- "Cauline_Only_Fallback morphology with severe multimodal discordance routed to Misidentification_Reassign"
-        treat_broad[i] <- "Misidentification / Cryptic Species"; treat_sub[i] <- "Misidentification_Reassign"; next
+        status_calls[i] <- "Ecophenotypic_Plasticity"; rec_taxa[i] <- given_sp
+        triage_prios[i] <- "MEDIUM"; triage_acts[i] <- "Annotate_Taphonomic_Ecophenotype"
+        rationales[i] <- "Cauline_Only_Fallback morphology with multimodal discordance retained within Ecophenotypic_Plasticity envelope"
+        treat_broad[i] <- "Variety / Ecotype"; treat_sub[i] <- "Ecophenotypic_Plasticity"; next
       } else if (has_cytotype_barrier_i && !is_sensu_stricto_locked_i) {
         base_rat_c <- if (g_cl > 1L && has_edaph_pheno_div) {
           bas_note_eco <- if (is_heterotypic_bas_match_i) sprintf(" [Available Heterotypic Basionym: %s]", bas_i) else ""
@@ -3039,9 +3062,10 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
       rationales[i] <- paste0(sprintf("Stage 4 Ecotype: Cohesive intraspecific lineage (GMM K%d, D_edaph=%.2f, delta_DOY=%.1fd, tau=%.1fd)", g_cl, d_edaph, ddoy, tau_ecotype_i), cline_note_ms)
       treat_broad[i] <- "Variety / Ecotype"; treat_sub[i] <- "Subspecies_Ecotype"
     } else if (is_plastic_variant || hyb_cand_pass[i]) {
+      doy_plast_note <- if (is.finite(doy) && is.finite(sp_q75_doy) && doy >= sp_q75_doy) sprintf("DOY %.0f >= Q75 %.0f", doy, sp_q75_doy) else sprintf("DOY %s, Q75 %s", ifelse(is.finite(doy), sprintf("%.0f", doy), "NA"), ifelse(is.finite(sp_q75_doy), sprintf("%.0f", sp_q75_doy), "NA"))
       status_calls[i] <- "Ecophenotypic_Plasticity"; rec_taxa[i] <- given_sp
       triage_prios[i] <- "MEDIUM"; triage_acts[i] <- "Annotate_Taphonomic_Ecophenotype"
-      rationales[i] <- sprintf("Stage 4 Plasticity: Within-envelope taphonomic/ontogenetic variation (DOY %.0f >= Q75 %.0f, edaphic_z=%s, pH=%s, Sand=%s)", doy, sp_q75_doy, ifelse(is.finite(edaph_z_i), sprintf("%.2f", edaph_z_i), "NA"), ph_str, sand_str)
+      rationales[i] <- sprintf("Stage 4 Plasticity: Within-envelope taphonomic/ontogenetic variation (%s, edaphic_z=%s, pH=%s, Sand=%s)", doy_plast_note, ifelse(is.finite(edaph_z_i), sprintf("%.2f", edaph_z_i), "NA"), ph_str, sand_str)
       treat_broad[i] <- "Variety / Ecotype"; treat_sub[i] <- "Ecophenotypic_Plasticity"
     } else {
       status_calls[i] <- "Species_Confirmed"; rec_taxa[i] <- given_sp
@@ -3233,6 +3257,28 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
         }
       }
     }
+  }
+
+  # Enforce self-reassignment invariant: no voucher with recommended_determination == given_sp may stay flagged as Misidentification_*
+  self_mis_idx <- which(
+    (status_calls %in% c("Misidentification_Reassign", "Misidentification_Severe") | treat_sub == "Misidentification_Reassign") &
+    !is.na(rec_taxa) & !is.na(sp_all_vec) & nzchar(sp_all_vec) & (rec_taxa == sp_all_vec)
+  )
+  for (si in self_mis_idx) {
+    if (isTRUE(mo_flag_dv[si])) {
+      status_calls[si] <- "Ecophenotypic_Plasticity"
+      treat_broad[si] <- "Variety / Ecotype"
+      treat_sub[si] <- "Ecophenotypic_Plasticity"
+      triage_prios[si] <- "MEDIUM"
+      triage_acts[si] <- "Annotate_Taphonomic_Ecophenotype"
+    } else {
+      status_calls[si] <- "Species_Confirmed"
+      treat_broad[si] <- "Confirmed Species"
+      treat_sub[si] <- "Confirmed_Species"
+      triage_prios[si] <- "LOW"
+      triage_acts[si] <- "Accept_Current_Determination"
+    }
+    rationales[si] <- paste0(rationales[si], " [Self-reassignment guard retained given determination]")
   }
 
   geno_idx_note <- which(has_geno_dv & !is.na(geno_pred_dv) & nzchar(geno_pred_dv))
@@ -3890,12 +3936,7 @@ build_triage_queue <- function(opts) {
   if (!is.null(attr(vouchers, "cytotype_barrier_labels"))) cyto_bar_lbl_q <- attr(vouchers, "cytotype_barrier_labels")
   if (!is.null(attr(vouchers, "gigas_concordance_df"))) gigas_df_q <- attr(vouchers, "gigas_concordance_df")
 
-  # Persist full evaluated cohort (including outgroup anchors and incoming reassignments) to SQLite BEFORE --focal-taxon filtering
-  if (!isTRUE(opts$demo) && exists("persist_step07_to_sqlite", mode = "function")) {
-    tryCatch(persist_step07_to_sqlite(vouchers, vouchers_path = opts$vouchers, demo = isTRUE(opts$demo)), error = function(e) warning("SQLite Step 07 persistence note: ", e$message))
-  }
-
-  # Run Unsupervised Quantitative Taxon-Complex Discovery across full multi-taxon cohort BEFORE --focal-taxon filtering
+  # Run Unsupervised Quantitative Taxon-Complex Discovery across full multi-taxon cohort BEFORE SQLite persistence and --focal-taxon filtering
   comp_res <- if (exists("run_step07_complex_discovery", mode = "function")) {
     tryCatch(run_step07_complex_discovery(vouchers, opts), error = function(e) { warning("Step 07 complex discovery warning: ", e$message); NULL })
   } else NULL
@@ -3906,9 +3947,15 @@ build_triage_queue <- function(opts) {
     vouchers$complex_label <- as.character(cdf_m$complex_label[idx_cm])
   }
 
+  # Persist full evaluated cohort (including outgroup anchors and incoming reassignments) to SQLite BEFORE --focal-taxon filtering
+  if (!isTRUE(opts$demo) && exists("persist_step07_to_sqlite", mode = "function")) {
+    tryCatch(persist_step07_to_sqlite(vouchers, vouchers_path = opts$vouchers, demo = isTRUE(opts$demo)), error = function(e) warning("SQLite Step 07 persistence note: ", e$message))
+  }
+
   can_eval_hyb_attr <- attr(vouchers, "can_evaluate_hybrids")
   full_complex_df <- vouchers
-  if (!is.null(opts$focal_taxon) && nzchar(trimws(opts$focal_taxon))) {
+  focal_active_flag <- !is.null(opts$focal_taxon) && nzchar(trimws(opts$focal_taxon))
+  if (focal_active_flag) {
     f_std <- standardize_packera_taxon(opts$focal_taxon)
     rec_det_v <- if ("recommended_determination" %in% names(vouchers)) as.character(vouchers$recommended_determination) else rep(NA_character_, nrow(vouchers))
     hp1_v <- if ("hybrid_parent_1" %in% names(vouchers)) as.character(vouchers$hybrid_parent_1) else rep(NA_character_, nrow(vouchers))
@@ -3919,9 +3966,15 @@ build_triage_queue <- function(opts) {
   }
 
   prio_order <- c("CRITICAL" = 1, "HIGH" = 2, "MEDIUM" = 3, "LOW" = 4, "RESOLVED" = 5)
-  vouchers$prio_rank <- prio_order[vouchers$synthesis_triage_priority]
-  vouchers <- if ("coordinateUncertainty" %in% names(vouchers)) vouchers[order(vouchers$prio_rank, -vouchers$coordinateUncertainty), ] else vouchers[order(vouchers$prio_rank), ]
-  vouchers$prio_rank <- NULL
+  sort_triage_by_prio <- function(d_in) {
+    if (!is.data.frame(d_in) || nrow(d_in) == 0L) return(d_in)
+    d_in$prio_rank <- prio_order[d_in$synthesis_triage_priority]
+    d_in <- if ("coordinateUncertainty" %in% names(d_in)) d_in[order(d_in$prio_rank, -d_in$coordinateUncertainty), ] else d_in[order(d_in$prio_rank), ]
+    d_in$prio_rank <- NULL
+    d_in
+  }
+  vouchers <- sort_triage_by_prio(vouchers)
+  full_complex_df <- sort_triage_by_prio(full_complex_df)
   if (!is.null(comp_res)) attr(vouchers, "complex_discovery") <- comp_res
   if (!is.null(can_eval_hyb_attr)) attr(vouchers, "can_evaluate_hybrids") <- can_eval_hyb_attr
   if (!is.null(prop_sum)) attr(vouchers, "genomic_propagation_summary") <- prop_sum
@@ -3937,6 +3990,10 @@ build_triage_queue <- function(opts) {
   }
   dir.create(dirname(opts$output_queue), recursive = TRUE, showWarnings = FALSE)
   tmp_queue <- paste0(opts$output_queue, ".tmp"); .write_triage_fast(vouchers, tmp_queue, na_str = "NA"); file.rename(tmp_queue, opts$output_queue)
+  if (focal_active_flag && !is.null(full_complex_df) && nrow(full_complex_df) > 0L) {
+    full_q_path <- file.path(dirname(opts$output_queue), "triage_queue_complex_full.csv")
+    tmp_full_q <- paste0(full_q_path, ".tmp"); .write_triage_fast(full_complex_df, tmp_full_q, na_str = "NA"); file.rename(tmp_full_q, full_q_path)
+  }
   if (exists("export_genomic_field_triage_csv", mode = "function")) {
     tryCatch(export_genomic_field_triage_csv(opts, vouchers), error = function(e) warning("Genomic field triage export note: ", e$message))
   }
@@ -4247,12 +4304,13 @@ generate_taxonomic_revision_report <- function(df, opts) {
     sprintf("| **LOW / RESOLVED** | **%d** | **%0.1f%%** | Verified taxon anchor retained |", res_n, (res_n / max(tot_n, 1)) * 100),
     sprintf("| **Total** | **%d** | **100.0%%** | Reliability-weighted multi-modal consensus |", tot_n)
   )
+  geno_md <- character(0)
   if (exists("build_genomic_markdown_summary", mode = "function")) {
     geno_md <- tryCatch(build_genomic_markdown_summary(opts, df), error = function(e) character(0))
     if (length(geno_md) > 0L) md_lines <- c(md_lines, geno_md)
   }
   cyto_md_rep <- attr(df, "cytology_markdown_lines")
-  if (!is.null(cyto_md_rep) && length(cyto_md_rep) > 0L) {
+  if (!is.null(cyto_md_rep) && length(cyto_md_rep) > 0L && length(geno_md) == 0L) {
     cyto_md_rep <- as.character(cyto_md_rep)
     cyto_md_rep <- cyto_md_rep[!is.na(cyto_md_rep)]
     if (length(cyto_md_rep) > 0L) {

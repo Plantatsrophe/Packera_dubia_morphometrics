@@ -292,8 +292,8 @@ render_focal_revision_synthesis_plate_png <- function(df, out_png, full_df = NUL
     ggplot2::scale_shape_manual(values = PACKERA_TREATMENT_HOLLOW_SHAPES, labels = function(x) gsub("_", " ", x), name = "Treatment") +
     theme_packera_pub(base_size = 9.4) +
     ggplot2::labs(
-      title = sprintf("A. %s vs. Complex Neighbors Morphospace", foc_name),
-      subtitle = "Grey circles = congeneric complex; colored hollow symbols = focal treatments (* = Type)",
+      title = bquote("A." ~ italic(.(foc_name)) ~ "vs. Complex Neighbors Morphospace"),
+      subtitle = if (nrow(nb_df) > 0L) "Grey circles = congeneric complex; colored hollow symbols = focal treatments (* = Type)" else "Colored hollow symbols = focal treatments (* = Type)",
       x = if (mx_col == "can1") "Canonical Variate 1 (Can1)" else format_morph_trait_labels(mx_col),
       y = if (my_col == "can2") "Canonical Variate 2 (Can2)" else format_morph_trait_labels(my_col)
     )
@@ -370,7 +370,7 @@ render_focal_revision_synthesis_plate_png <- function(df, out_png, full_df = NUL
     ggplot2::scale_x_continuous(expand = ggplot2::expansion(mult = c(0, 0.25))) +
     theme_packera_pub(base_size = 9.4) +
     ggplot2::labs(
-      title = sprintf("D. %s Treatment Breakdown (N = %d)", foc_name, nrow(foc_df)),
+      title = bquote("D." ~ italic(.(foc_name)) ~ .(sprintf("Treatment Breakdown (N = %d)", nrow(foc_df)))),
       subtitle = paste(c(sprintf("Basal_Rosette = %d / %d", n_basal_src, nrow(foc_df)), if (nzchar(pcs_med)) pcs_med else NULL), collapse = " | "),
       x = "Voucher Count", y = NULL
     )
@@ -378,7 +378,7 @@ render_focal_revision_synthesis_plate_png <- function(df, out_png, full_df = NUL
   plate_f <- ((p_a | p_b) / (p_c | p_d)) +
     patchwork::plot_layout(heights = c(1.12, 1.0)) +
     patchwork::plot_annotation(
-      title = sprintf("Integrative Taxonomic Revision Plate: %s", foc_name),
+      title = bquote(bold("Integrative Taxonomic Revision Plate:" ~ italic(.(foc_name)))),
       theme = ggplot2::theme(plot.title = ggplot2::element_text(face = "bold", size = 12.5))
     )
   save_packera_png_300(plate_f, normalize_png_path(out_png), width = 14.4, height = 10.6)

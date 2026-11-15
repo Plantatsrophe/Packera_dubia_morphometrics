@@ -126,10 +126,6 @@ test_and_correct_allometry <- function(morpho_df, correct_mode = "auto", permuta
   anova_df$Term <- gsub("^Residuals$", "Residual", anova_df$Term)
   if ("Total" %in% anova_df$Term) anova_df$R2[anova_df$Term == "Total"] <- 1.0
   anova_df <- anova_df[, intersect(c("Term", "Df", "SumOfSqs", "R2", "F", "p_value"), names(anova_df)), drop = FALSE]
-  if (!is.null(output_report) && nzchar(output_report)) {
-    dir.create(dirname(output_report), recursive = TRUE, showWarnings = FALSE); tmp_rep <- paste0(output_report, ".", Sys.getpid(), ".tmp"); write.csv(anova_df, file = tmp_rep, row.names = FALSE); file.rename(tmp_rep, output_report)
-    message("Allometry significance audit report exported -> ", output_report)
-  }
   size_row <- anova_df[grepl("^log_centsize$", anova_df$Term, ignore.case = TRUE), ]
   r2_size <- if (nrow(size_row) > 0 && is.finite(size_row$R2[1])) size_row$R2[1] else 0.0; p_size <- if (nrow(size_row) > 0 && !is.na(size_row$p_value[1]) && is.finite(size_row$p_value[1])) size_row$p_value[1] else 1.0
   int_row <- anova_df[grepl("log_centsize:scientificName|scientificName:log_centsize", anova_df$Term, ignore.case = TRUE), ]
@@ -143,8 +139,13 @@ test_and_correct_allometry <- function(morpho_df, correct_mode = "auto", permuta
   }
   if (is.na(p_int) || !is.finite(p_int)) p_int <- 1.0
   correct_flag <- tolower(trimws(as.character(correct_mode))); slopes_homogeneous <- p_int > 0.05
+  anova_df$Slopes_Homogeneous <- ifelse(grepl("log_centsize:scientificName|scientificName:log_centsize", anova_df$Term, ignore.case = TRUE), slopes_homogeneous, NA)
+  if (!is.null(output_report) && nzchar(output_report)) {
+    dir.create(dirname(output_report), recursive = TRUE, showWarnings = FALSE); tmp_rep <- paste0(output_report, ".", Sys.getpid(), ".tmp"); write.csv(anova_df, file = tmp_rep, row.names = FALSE); file.rename(tmp_rep, output_report)
+    message("Allometry significance audit report exported -> ", output_report)
+  }
   message(sprintf("Klingenberg (2016) Homogeneity of Allometric Slopes (%s): R2_int = %.4f, p_int = %.4f (homogeneous = %s)", ifelse(used_pc1_fb, "PC1 ~ log_centsize * taxon fallback", "Y ~ log_centsize * taxon"), r2_int, p_int, slopes_homogeneous))
-  should_correct <- (correct_flag %in% c("true", "1", "yes")) || (correct_flag == "auto" && !is.na(r2_size) && r2_size >= r2_threshold && !is.na(p_size) && p_size < 0.05 && slopes_homogeneous)
+  should_correct <- (correct_flag %in% c("true", "1", "yes")) || (correct_flag == "auto" && !is.na(r2_size) && r2_size >= r2_threshold && !is.na(p_size) && p_size < 0.05)
   fit_within <- if (nlevels(gold_df$scientificName) >= 2) stats::lm(Y ~ log_centsize + scientificName, data = gold_df, weights = eff_weight) else stats::lm(Y ~ log_centsize, data = gold_df, weights = eff_weight)
   beta_within <- stats::coef(fit_within)["log_centsize", ]; beta_within[is.na(beta_within)] <- 0.0
   ref_mean_cs <- stats::weighted.mean(gold_df$log_centsize, w = eff_weight, na.rm = TRUE)
@@ -611,6 +612,7 @@ run_gmm_morphotools_pipeline <- function(opts) {
   is_intra_mode <- isTRUE(opts$intraspecific_mode) || (length(target_taxa) < 2L)
   if (exists("merge_voucher_phenophase_covariates", mode = "function")) closed_df <- merge_voucher_phenophase_covariates(closed_df, opts$harmonics, opts$vouchers)
   std_plast_cols <- setdiff(grep("_std$", names(closed_df), value = TRUE), c("log_centsize_std", "petiole_length_mm_std", "plant_height_cm_std"))
+  if (exists("apply_eb_institution_batch_centering", mode = "function")) closed_df <- apply_eb_institution_batch_centering(closed_df, target_cols = unique(c(pca_cols, std_plast_cols)), min_inst_n = 10L)
   if (exists("residualize_ontogenetic_phenophase_plasticity", mode = "function")) closed_df <- residualize_ontogenetic_phenophase_plasticity(closed_df, target_cols = unique(c(if (is_intra_mode) pca_cols else character(0), std_plast_cols)), ref_mask = (closed_df$authority_weight > 0) & (is.na(closed_df$morph_tier_source) | !(closed_df$morph_tier_source %in% c("Cauline_Only_Fallback", "Transitional_Passive"))), intraspecific_mode = is_intra_mode)
   gmm_res <- run_gmm_cluster_analysis(closed_df, feature_cols, max_k = opts$max_k, use_clustvarsel = isTRUE(opts$use_clustvarsel), intraspecific_mode = is_intra_mode, seed = opts$seed)
   dir.create(dirname(opts$output_report), recursive = TRUE, showWarnings = FALSE); tmp_bic <- paste0(opts$output_report, ".", Sys.getpid(), ".tmp"); write.csv(gmm_res$bic_table, file = tmp_bic, row.names = FALSE); file.rename(tmp_bic, opts$output_report)
