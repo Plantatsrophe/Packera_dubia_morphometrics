@@ -685,11 +685,21 @@ def compile_complex_resolution_summary(
         "",
     ])
     if type_controls:
+        def _nz(val: Any) -> str:
+            s = str(val or "").strip()
+            return "" if s.upper() in {"", "NA", "NAN", "NULL", "NONE"} else s
+
         for tr in type_controls[:10]:
             cat = tr.get("catalogNumber", "Unknown")
             inst = tr.get("institutionCode", "")
-            cl = tr.get("gmm_cluster", "N/A")
-            bas = str(tr.get("nearest_type_basionym") or tr.get("species_raw") or focal_std).strip()
+            cl = _nz(tr.get("gmm_cluster")) or "unclustered/passive"
+            bas = (
+                _nz(tr.get("nearest_type_basionym"))
+                or _nz(tr.get("backbone_basionym_name"))
+                or _nz(tr.get("basionym_name"))
+                or _nz(tr.get("species_raw"))
+                or focal_std
+            )
             md_lines.append(f"* `{cat}` ({inst}): basionym *{bas}* anchored in cluster `{cl}` (`Confirmed_Type_Control`).")
         if focal_std == "Packera dubia":
             md_lines.append(

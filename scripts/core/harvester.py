@@ -112,6 +112,7 @@ from scripts.core.config import (
     DEFAULT_WORKSPACE,
     WESTERN_LONGITUDE_THRESHOLD,
     _DEFAULT_CONFIG,
+    resolve_target_genus,
 )
 from scripts.core.db import (
     get_db_connection,
@@ -973,6 +974,7 @@ from scripts.core.taxonomy_authority import (
     parse_determiner_tier,
     resolve_geographic_scope_settings,
     resolve_voucher_image_path,
+    reconcile_cross_taxon_exsiccatae_with_db,
     sanitize_filename,
     spatially_balance_and_thin_vouchers,
     stratify_duplicates,
@@ -1738,6 +1740,165 @@ def print_and_log_summary(
     logger.info("=" * 80)
 
 
+_CONFLICT_STOP_TOKENS: Set[str] = {
+    "det", "conf", "rev", "annot", "by", "the", "and", "jr", "sr",
+    "van", "von", "der", "den", "ter", "bar", "prof", "dr", "mr",
+    "ms", "mrs", "herb", "univ", "bot", "ny", "ph", "ncu",
+}
+_NEGATED_TAXON_RE = re.compile(r"\b(?:not|non|nec|formerly|misapplied|excl\.?)\s+$", flags=re.IGNORECASE)
+
+
+def _detect_verbatim_identification_conflict(
+    rec: Optional[Dict[str, Any]],
+    resolved_canonical: str,
+    determiner_tier: str,
+) -> Tuple[bool, str]:
+    """
+    Detect portal-lag identification conflicts where a voucher's structured `identifications`,
+    `identificationRemarks` / `verbatimIdentificationHistory` (linked to `identifiedBy`), or
+    `verbatimIdentification` points to a different canonical species than GBIF `scientificName`,
+    while ignoring superseded `previousIdentifications` and `_DYNAMIC_SYNONYM_TO_CANONICAL` synonyms.
+    """
+    if not isinstance(rec, dict) or not resolved_canonical:
+        return False, ""
+
+    target_genus = (resolve_target_genus() or "Packera").strip().capitalize()
+    allowed_genera = {target_genus, "Packera"} | set(_SYNONYM_GENERA)
+    genus_alt = "|".join(sorted((re.escape(g) for g in allowed_genera), key=len, reverse=True))
+    mention_re = re.compile(
+        rf"\b({genus_alt})(?:\s*×\s*|\s+[x×]\s+|\s+)([a-z][a-z-]{{1,}})"
+        r"(?:\s+(var|subsp|ssp|f)\.?\s+([a-z][a-z-]{1,}))?\b",
+        flags=re.IGNORECASE,
+    )
+
+    def _norm_tx(raw_val: Any) -> Optional[str]:
+        if raw_val is None or (isinstance(raw_val, float) and math.isnan(raw_val)):
+            return None
+        txt = re.sub(r"\s+", " ", str(raw_val).strip())
+        if not txt:
+            return None
+        low = txt.lower()
+        if low in _DYNAMIC_SYNONYM_TO_CANONICAL:
+            return _DYNAMIC_SYNONYM_TO_CANONICAL[low]
+        var_m = re.match(r"^([a-z]+\s+[a-z-]+\s+(?:var\.?|subsp\.?|ssp\.?|f\.?)\s+[a-z-]+)", low)
+        if var_m:
+            v_raw = var_m.group(1)
+            v_dot = re.sub(r"\b(var|subsp|ssp|f)\b\.?", r"\1.", v_raw)
+            if v_raw in _DYNAMIC_SYNONYM_TO_CANONICAL:
+                return _DYNAMIC_SYNONYM_TO_CANONICAL[v_raw]
+            if v_dot in _DYNAMIC_SYNONYM_TO_CANONICAL:
+                return _DYNAMIC_SYNONYM_TO_CANONICAL[v_dot]
+        cand_bin = _extract_canonical_binomial(txt, allowed_genera)
+        if not cand_bin:
+            return None
+        if cand_bin.lower() in _DYNAMIC_SYNONYM_TO_CANONICAL:
+            return _DYNAMIC_SYNONYM_TO_CANONICAL[cand_bin.lower()]
+        if cand_bin.startswith(f"{target_genus} ") or cand_bin.startswith("Packera "):
+            return cand_bin
+        if _is_gbif_species_mocked():
+            std_m = standardize_packera_taxon(cand_bin)
+            if std_m:
+                return std_m
+        return None
+
+    def _extract_mentions(raw_text: Any) -> List[str]:
+        if raw_text is None:
+            return []
+        txt = str(raw_text).strip()
+        if not txt:
+            return []
+        found: List[str] = []
+        for m in mention_re.finditer(txt):
+            prefix = txt[max(0, m.start() - 28):m.start()]
+            if _NEGATED_TAXON_RE.search(prefix):
+                continue
+            cand = m.group(0)
+            tx = _norm_tx(cand) or _norm_tx(f"{m.group(1)} {m.group(2)}")
+            if tx and tx not in found:
+                found.append(tx)
+        return found
+
+    resolved_norm = _norm_tx(resolved_canonical) or standardize_packera_taxon(resolved_canonical) or ""
+    if not resolved_norm:
+        return False, ""
+
+    is_gold = str(determiner_tier or "").strip() == "Tier_1_Gold"
+    superseded_taxa: Set[str] = set()
+    prev_raw = rec.get("previousIdentifications")
+    if isinstance(prev_raw, list):
+        for pv in prev_raw:
+            superseded_taxa.update(_extract_mentions(pv))
+    elif prev_raw:
+        superseded_taxa.update(_extract_mentions(prev_raw))
+
+    # 1. Structured identifications array: evaluate highest-priority current or latest dated determination
+    idents = rec.get("identifications")
+    if isinstance(idents, list) and idents:
+        ranked_idents: List[Tuple[int, str, int, Dict[str, Any], Optional[str]]] = []
+        for i_pos, entry in enumerate(idents):
+            if not isinstance(entry, dict):
+                continue
+            curr_flag = 1 if entry.get("isCurrent") is True else (-1 if entry.get("isCurrent") is False else 0)
+            date_s = str(entry.get("dateIdentified") or "").strip()
+            raw_id_nm = entry.get("scientificName") or entry.get("taxonName") or entry.get("verbatimIdentification") or ""
+            tx_id = _norm_tx(raw_id_nm) or (next(iter(_extract_mentions(raw_id_nm)), None))
+            ranked_idents.append((curr_flag, date_s, i_pos, entry, tx_id))
+        if ranked_idents:
+            ranked_idents.sort(key=lambda t: (t[0], t[1], t[2]), reverse=True)
+            top_curr_flag, top_date, _, top_entry, top_tx = ranked_idents[0]
+            for cf, _, _, _, tx_other in ranked_idents[1:]:
+                if tx_other and tx_other != resolved_norm and (cf < 0 or top_tx == resolved_norm):
+                    superseded_taxa.add(tx_other)
+            if top_tx and top_tx != resolved_norm and (top_curr_flag >= 0 or not any(r[4] == resolved_norm for r in ranked_idents)):
+                top_det_tier, _, _ = parse_determiner_tier(
+                    None,
+                    top_entry.get("identifiedBy"),
+                    rec.get("recordedBy"),
+                    top_entry.get("identificationRemarks"),
+                    rec.get("institutionCode"),
+                    rec.get("locality"),
+                    rec.get("habitat"),
+                )
+                gold_tx = top_tx if (is_gold or top_det_tier == "Tier_1_Gold") else ""
+                return True, gold_tx
+
+    # Extract surname tokens from identifiedBy for linking remarks/history to active determiner
+    det_raw = str(rec.get("identifiedBy") or "").strip()
+    det_surnames: List[str] = []
+    if det_raw:
+        for tok in re.findall(r"[A-Za-z][A-Za-z-]{1,}", det_raw):
+            tl = tok.lower()
+            if tl not in _CONFLICT_STOP_TOKENS and len(tl) >= 2:
+                det_surnames.append(tl)
+
+    # 2. identifiedBy-linked identificationRemarks / verbatimIdentificationHistory clauses
+    if det_surnames:
+        remark_clauses: List[str] = []
+        for fld in ("verbatimIdentificationHistory", "identificationRemarks"):
+            val = rec.get(fld)
+            if val:
+                remark_clauses.extend([c.strip() for c in re.split(r"[;|\n]+", str(val)) if c.strip()])
+        linked_matches: List[str] = []
+        for cl in remark_clauses:
+            if any(re.search(rf"\b{re.escape(sn)}\b", cl, flags=re.IGNORECASE) for sn in det_surnames):
+                cl_taxa = _extract_mentions(cl)
+                if cl_taxa:
+                    linked_matches.extend(cl_taxa)
+        if linked_matches:
+            latest_linked = linked_matches[-1]
+            if latest_linked != resolved_norm:
+                return True, (latest_linked if is_gold else "")
+
+    # 3. Direct verbatimIdentification differing from resolved canonical (when not merely superseded history)
+    v_raw = str(rec.get("verbatimIdentification") or "").strip()
+    if v_raw:
+        v_tx = _norm_tx(v_raw) or next(iter(_extract_mentions(v_raw)), None)
+        if v_tx and v_tx != resolved_norm and v_tx not in superseded_taxa:
+            return True, (v_tx if is_gold else "")
+
+    return False, ""
+
+
 class VoucherHarvester:
     """
     Consolidated botanical voucher harvester and curator for the genus `Packera`.
@@ -2368,6 +2529,11 @@ class VoucherHarvester:
                     county=rec.get("county"),
                 )
 
+                verbatim_conflict, verbatim_gold_taxon = _detect_verbatim_identification_conflict(
+                    rec=rec,
+                    resolved_canonical=(resolved_packera or sci_name_val),
+                    determiner_tier=determiner_tier,
+                )
                 curated_record = {
                     "catalogNumber": catalog_number,
                     "institutionCode": inst_code,
@@ -2391,6 +2557,8 @@ class VoucherHarvester:
                     "eventDate": event_date,
                     "regional_group": regional_group,
                     "image_path": relative_image_path,
+                    "exsiccatae_taxonomic_conflict": bool(verbatim_conflict),
+                    "exsiccatae_gold_taxon": verbatim_gold_taxon,
                     "_image_url": image_url,
                     "_is_western_rec": bool(is_west_rec),
                     "_is_type_rec": bool(is_rec_type),
@@ -2583,22 +2751,6 @@ class VoucherHarvester:
             if raw_audit_cols:
                 df = df.drop(columns=raw_audit_cols)
 
-            df = stratify_duplicates(
-                df,
-                workspace_dir=self.workspace_dir,
-                logger=self.logger,
-                home_herbarium=self.home_herbarium,
-            )
-            # Cache secondary duplicate sheets so download_and_validate_media() can promote a fallback
-            # duplicate whenever a primary sheet's image URL 404s or fails optical resolution QC
-            if "is_primary_duplicate" in df.columns:
-                sec_mask = ~df["is_primary_duplicate"].map(
-                    lambda v: v is True or str(v).strip().lower() in {"true", "1", "t", "yes"}
-                )
-                self._secondary_duplicate_pool = df.loc[sec_mask].copy()
-            else:
-                self._secondary_duplicate_pool = None
-
             is_gbif_mocked = (
                 _is_gbif_species_mocked()
                 or occ is None
@@ -2613,6 +2765,7 @@ class VoucherHarvester:
                 or (default_usda_cache / "plantlst.txt").is_file()
                 or (default_usda_cache / "distributions").is_dir()
             )
+            usda_stats: Optional[Dict[str, Any]] = None
             if (not is_gbif_mocked) or has_local_usda_cache:
                 df, usda_stats = filter_vouchers_by_usda_county_range(
                     df=df,
@@ -2626,12 +2779,69 @@ class VoucherHarvester:
                     workspace_dir=self.workspace_dir,
                     allow_network=(not is_gbif_mocked),
                     force_refresh=self.force,
-                    drop_out_of_range=bool(self.usda_county_filter),
+                    drop_out_of_range=False,
                     logger=self.logger,
                 )
                 self.last_usda_filter_stats = usda_stats
                 if df.empty:
                     return df
+
+            df = stratify_duplicates(
+                df,
+                workspace_dir=self.workspace_dir,
+                logger=self.logger,
+                home_herbarium=self.home_herbarium,
+            )
+
+            resolved_db = resolve_db_path(self.db_path, workspace_root=self.workspace_dir)
+            if resolved_db != ":memory:" and Path(resolved_db).is_file() and (not is_gbif_mocked or self.db_path is not None):
+                try:
+                    conn_rec = get_db_connection(db_path=resolved_db, init_schema=False, read_only=True)
+                    try:
+                        df = reconcile_cross_taxon_exsiccatae_with_db(
+                            df,
+                            conn_rec,
+                            standardize_fn=standardize_packera_taxon,
+                        )
+                    finally:
+                        conn_rec.close()
+                except Exception:
+                    pass
+
+            if usda_stats is not None and bool(self.usda_county_filter) and "usda_county_status" in df.columns:
+                keep_post: List[bool] = []
+                for _, urow in df.iterrows():
+                    st_u = str(urow.get("usda_county_status") or "").strip()
+                    if st_u not in {"out_of_range", "natureserve_exotic_or_waif"}:
+                        keep_post.append(True)
+                        continue
+                    raw_ts_u = urow.get("type_status")
+                    if raw_ts_u is None or pd.isna(raw_ts_u) or not str(raw_ts_u).strip():
+                        raw_ts_u = urow.get("typeStatus")
+                    t_rank_u, _ = classify_nomenclatural_type_rank(raw_ts_u)
+                    d_tier_u = str(urow.get("determiner_tier") or "").strip()
+                    is_ex_u = (t_rank_u >= 1) or (bool(self.usda_exempt_gold) and d_tier_u == "Tier_1_Gold")
+                    if is_ex_u:
+                        if st_u == "natureserve_exotic_or_waif":
+                            usda_stats["exempt_retained"] = int(usda_stats.get("exempt_retained", 0)) + 1
+                        keep_post.append(True)
+                    else:
+                        usda_stats["dropped_out_of_range"] = int(usda_stats.get("dropped_out_of_range", 0)) + 1
+                        keep_post.append(False)
+                df = df.loc[keep_post].reset_index(drop=True)
+                self.last_usda_filter_stats = usda_stats
+                if df.empty:
+                    return df
+
+            # Cache secondary duplicate sheets so download_and_validate_media() can promote a fallback
+            # duplicate whenever a primary sheet's image URL 404s or fails optical resolution QC
+            if "is_primary_duplicate" in df.columns:
+                sec_mask = ~df["is_primary_duplicate"].map(
+                    lambda v: v is True or str(v).strip().lower() in {"true", "1", "t", "yes"}
+                )
+                self._secondary_duplicate_pool = df.loc[sec_mask].copy()
+            else:
+                self._secondary_duplicate_pool = None
             self._pre_thin_curated_pool = df.copy()
             df = spatially_balance_and_thin_vouchers(
                 df,

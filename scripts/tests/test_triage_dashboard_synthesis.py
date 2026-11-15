@@ -2812,6 +2812,217 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
             self.assertEqual(set(q_foc["species_standardized"]), {"Packera dubia"})
             self.assertEqual(set(q_full["species_standardized"]), {"Packera dubia", "Packera anonyma"})
 
+    def test_portal_metadata_lag_gates_1_2_3_and_5(self) -> None:
+        """Verify Gate 1/2/3-Core/5 portal metadata lag detection, Barkley immunity, marginal preservation, and audit CSV export."""
+        if not rscript_available():
+            self.skipTest("Rscript not installed.")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_p = Path(tmpdir)
+            db_p = tmp_p / "plantmatics.sqlite"
+            conn = get_db_connection(db_p, init_schema=True)
+            with conn:
+                usda_rows = [
+                    ("Packera dubia", "PATO", "delaware", "sussex", 0),
+                    ("Packera dubia", "PATO", "florida", "duval", 0),
+                    ("Packera schweinitziana", "PASC19", "new york", "hamilton", 0),
+                    ("Packera schweinitziana", "PASC19", "new york", "franklin", 0),
+                    ("Packera paupercula", "PASC19", "new york", "hamilton", 0),
+                    ("Packera aurea", "PAAU3", "new york", "essex", 0),
+                    ("Packera aurea", "PAAU3", "new york", "albany", 0),
+                    ("Packera aurea", "PAAU3", "new york", "ulster", 0),
+                    ("Packera aurea", "PAAU3", "new york", "saratoga", 0),
+                    ("Packera aurea", "PAAU3", "new york", "rensselaer", 0),
+                    ("Packera aurea", "PAAU3", "new york", "greene", 0),
+                    ("Packera paupercula", "PAPA20", "michigan", "charlevoix", 0),
+                    ("Packera anonyma", "PAAU3", "michigan", "wayne", 0),
+                ]
+                for sp, sym, st, cnty, st_only in usda_rows:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO usda_county_ranges (canonical_packera, usda_symbol, state_norm, county_norm, is_state_only) VALUES (?, ?, ?, ?, ?);",
+                        (sp, sym, st, cnty, st_only),
+                    )
+                for sp, sc in [
+                    ("Packera schweinitziana", "NY"),
+                    ("Packera paupercula", "MI"),
+                    ("Packera aurea", "NY"),
+                    ("Packera glabella", "LA"),
+                    ("Packera glabella", "MS"),
+                    ("Packera anonyma", "VA"),
+                    ("Packera anonyma", "NC"),
+                ]:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO natureserve_subnational_ranges (species_standardized, country_code, subnation_code, is_native, is_exotic) VALUES (?, 'US', ?, 1, 0);",
+                        (sp, sc),
+                    )
+            conn.close()
+
+            dt_dir = tmp_p / "data" / "tables"
+            rep_dir = tmp_p / "outputs" / "reports"
+            fig_dir = tmp_p / "outputs" / "figures"
+            dt_dir.mkdir(parents=True, exist_ok=True)
+            rep_dir.mkdir(parents=True, exist_ok=True)
+            fig_dir.mkdir(parents=True, exist_ok=True)
+
+            # Gate 2: Authority weighting exclusion keeps Barkley unpenalized and marks extralimital non-type as Passive_Extralimital_Audit
+            aw_r = PROJECT_ROOT / "scripts" / "morphometrics" / "authority_weighting_utils.R"
+            r_script = tmp_p / "test_portal_lag.R"
+            r_script.write_text(f"""
+            .old_env <- Sys.getenv(c("PLANTMATICS_DB_PATH", "PACKERA_DB_PATH", "RUN_ID"), unset = NA_character_)
+            on.exit({{
+              for (.nm in names(.old_env)) {{
+                if (is.na(.old_env[[.nm]])) Sys.unsetenv(.nm) else do.call(Sys.setenv, stats::setNames(list(.old_env[[.nm]]), .nm))
+              }}
+            }}, add = TRUE)
+            Sys.setenv(PLANTMATICS_DB_PATH = "{db_p.as_posix()}")
+            Sys.setenv(PACKERA_DB_PATH = "{db_p.as_posix()}")
+            Sys.setenv(RUN_ID = "test_portal_lag")
+            source("{aw_r.as_posix()}")
+            source("{SYNTHESIS_R_SCRIPT.as_posix()}")
+
+            df_g2 <- data.frame(
+              catalogNumber = c("DE_B1", "DE_B2", "DE_B3", "NY_B_OOR", "SC_1", "SC_2", "MI_1", "MI_2"),
+              plant_individual_id = rep(0L, 8L),
+              species_standardized = c("Packera dubia", "Packera dubia", "Packera dubia", "Packera dubia",
+                                       "Packera schweinitziana", "Packera schweinitziana", "Packera paupercula", "Packera paupercula"),
+              scientificName = c("Packera dubia", "Packera dubia", "Packera dubia", "Packera dubia",
+                                 "Packera schweinitziana", "Packera schweinitziana", "Packera paupercula", "Packera paupercula"),
+              identifiedBy = c("T.M. Barkley", "T.M. Barkley", "E. Larsen", "T.M. Barkley", "T.M. Barkley", "T.M. Barkley", "M. Voss", "M. Voss"),
+              determiner_tier = c("Tier_1_Gold", "Tier_1_Gold", "Tier_3_Bronze", "Tier_1_Gold", "Tier_1_Gold", "Tier_1_Gold", "Tier_1_Gold", "Tier_1_Gold"),
+              usda_county_status = c("in_range", "in_range", "in_range", "out_of_range", "in_range", "in_range", "in_range", "in_range"),
+              exsiccatae_taxonomic_conflict = c(0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L),
+              PC1 = c(-2.0, -2.1, -1.9, 2.0, 2.1, 1.9, 4.0, 4.1),
+              PC2 = c(0.1, -0.1, 0.0, 1.2, 1.1, 1.3, -1.5, -1.4),
+              rf_predicted_taxon = c("Packera dubia", "Packera dubia", "Packera dubia", "Packera schweinitziana",
+                                     "Packera schweinitziana", "Packera schweinitziana", "Packera paupercula", "Packera paupercula"),
+              stringsAsFactors = FALSE
+            )
+            sel_g2 <- select_adaptive_reference_anchors(df_g2)
+            stopifnot(identical(sel_g2$anchor_tier_source[df_g2$catalogNumber == "NY_B_OOR"], "Passive_Extralimital_Audit"))
+            eb_g2 <- compute_empirical_bayes_authority_weights(df_g2)
+            stopifnot(eb_g2[df_g2$catalogNumber == "NY_B_OOR"] == 0.0)
+            stopifnot(eb_g2[df_g2$catalogNumber == "DE_B1"] >= 0.80)
+
+            df_s7 <- data.frame(
+              catalogNumber = c(
+                "DE_DUB1", "DE_DUB2", "DE_BARKLEY_OK", "NCU00385159_FL", "EXS_LAG_NY",
+                "NY_ESSEX_BARK", "NY_LAMB_35", "NY_LAMB_34_BARK", "MI_CMC17204",
+                "SC_REF1", "SC_REF2", "AU_REF1", "AU_REF2", "PA_REF1", "PA_REF2"
+              ),
+              plant_individual_id = rep(0L, 15L),
+              institutionCode = c(rep("NCU", 4L), rep("PH", 4L), "CMC", rep("NHA", 6L)),
+              species_standardized = c(
+                rep("Packera dubia", 9L),
+                "Packera schweinitziana", "Packera schweinitziana",
+                "Packera aurea", "Packera aurea",
+                "Packera paupercula", "Packera paupercula"
+              ),
+              determiner_tier = c(
+                "Tier_1_Gold", "Tier_2_Silver", "Tier_1_Gold", "Tier_2_Silver", "Tier_3_Bronze",
+                "Tier_1_Gold", "Tier_3_Bronze", "Tier_1_Gold", "Tier_3_Bronze",
+                "Tier_1_Gold", "Tier_1_Gold", "Tier_1_Gold", "Tier_1_Gold", "Tier_1_Gold", "Tier_1_Gold"
+              ),
+              identifiedBy = c(
+                "E. Larsen", "J. Fogg", "T.M. Barkley", "J.B. Fuller", "E. Larsen",
+                "T.M. Barkley", "B. Lambert", "T.M. Barkley", "E. Roush",
+                "T.M. Barkley", "T.M. Barkley", "M. Fernald", "M. Fernald", "E. Voss", "E. Voss"
+              ),
+              recordedBy = c(
+                "E. Larsen", "J. Fogg", "J. Fogg", "H. Ahles", "E. Larsen",
+                "H. House", "Bertha Brown Lambert", "Bertha Brown Lambert", "E. Roush",
+                "H. House", "H. House", "M. Fernald", "M. Fernald", "E. Voss", "E. Voss"
+              ),
+              recordNumber = c("1", "2", "1718", "10592", "50", "26514", "35", "34", "s.n.", "100", "101", "200", "201", "300", "301"),
+              stateProvince = c(
+                "Delaware", "Delaware", "Delaware", "Florida", "New York",
+                "New York", "New York", "New York", "Michigan",
+                "New York", "New York", "New York", "New York", "Michigan", "Michigan"
+              ),
+              county = c(
+                "Sussex", "Sussex", "Sussex", "Leon", "Franklin",
+                "Essex", "Hamilton", "Hamilton", "Charlevoix",
+                "Hamilton", "Franklin", "Ulster", "Albany", "Charlevoix", "Charlevoix"
+              ),
+              usda_county_status = c(
+                "in_range", "in_range", "in_range", "out_of_range", "buffered_adjacent",
+                "out_of_range", "out_of_range", "out_of_range", "out_of_range",
+                "in_range", "in_range", "in_range", "in_range", "in_range", "in_range"
+              ),
+              exsiccatae_taxonomic_conflict = c(0L, 0L, 0L, 0L, 1L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L),
+              exsiccatae_gold_taxon = c(NA, NA, "Packera dubia", NA, "Packera schweinitziana", NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
+              decimalLatitude = c(38.7, 38.72, 38.60, 28.86, 44.33, 43.97, 43.78, 43.78, NA_real_, 43.78, 44.33, 41.83, 42.65, 45.3, 45.32),
+              decimalLongitude = c(-75.2, -75.3, -75.17, -81.93, -74.15, -74.12, -74.27, -74.27, NA_real_, -74.27, -74.15, -74.01, -73.75, -85.2, -85.22),
+              doy = c(140, 142, 145, 92, 188, 171, 194, 192, 203, 185, 190, 155, 158, 170, 172),
+              is_active_anthesis = rep(TRUE, 15L),
+              morph_tier_source = rep("Basal_Rosette", 15L),
+              basal_leaf_count = rep(3L, 15L),
+              PC1 = c(-2.0, -2.1, -2.05, -1.9, 1.4, 4.0, -1.5, 4.1, 3.0, 1.5, 1.6, 2.5, 2.6, 4.5, 4.4),
+              PC2 = c(0.0, 0.1, -0.05, 0.05, 0.4, 2.0, 0.1, 2.1, -2.0, 0.4, 0.5, 1.8, 1.9, -1.5, -1.6),
+              self_morph_mahal_d2 = c(1.0, 1.2, 1.1, 2.1, 3.0, 60.0, 3.1, 55.0, 19.2, 1.0, 1.1, 1.2, 1.3, 1.1, 1.2),
+              self_morph_df = rep(14L, 15L),
+              is_typical_morphotype = c(TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE),
+              type_edaphic_z_score = c(0.6, 0.7, 1.5, 2.5, 0.8, 8.5, 7.1, 7.1, 0.0, 0.5, 0.6, 0.7, 0.8, 0.5, 0.6),
+              cda_predicted_taxon = c(
+                "Packera dubia", "Packera dubia", "Packera dubia", "Packera dubia", "Packera dubia",
+                "Packera glabella", "Packera dubia", "Packera glabella", "Packera anonyma",
+                "Packera schweinitziana", "Packera schweinitziana", "Packera aurea", "Packera aurea", "Packera paupercula", "Packera paupercula"
+              ),
+              cda_posterior_prob = c(0.90, 0.88, 0.78, 0.47, 0.82, 0.99, 0.57, 0.78, 0.97, 0.92, 0.91, 0.90, 0.91, 0.93, 0.92),
+              cda_second_taxon = c(
+                "Packera aurea", "Packera aurea", "Packera aurea", "Packera aurea", "Packera schweinitziana",
+                "Packera aurea", "Packera schweinitziana", "Packera aurea", "Packera paupercula",
+                "Packera dubia", "Packera dubia", "Packera dubia", "Packera dubia", "Packera dubia", "Packera dubia"
+              ),
+              cda_second_posterior_prob = c(0.05, 0.05, 0.12, 0.40, 0.12, 0.006, 0.28, 0.22, 0.02, 0.05, 0.05, 0.05, 0.05, 0.04, 0.05),
+              rf_predicted_taxon = c(
+                "Packera dubia", "Packera dubia", "Packera dubia", "Packera dubia", "Packera dubia",
+                "Packera schweinitziana", "Packera schweinitziana", "Packera aurea", NA_character_,
+                "Packera schweinitziana", "Packera schweinitziana", "Packera aurea", "Packera aurea", "Packera paupercula", "Packera paupercula"
+              ),
+              rf_predicted_prob = c(0.85, 0.82, 0.60, 0.73, 0.50, 0.42, 0.43, 0.37, NA_real_, 0.88, 0.89, 0.86, 0.87, 0.90, 0.91),
+              rf_given_taxon_prob = c(0.85, 0.82, 0.60, 0.73, 0.45, 0.013, 0.189, 0.013, NA_real_, 0.88, 0.89, 0.86, 0.87, 0.90, 0.91),
+              edaphic_best_fit_taxon = c(
+                "Packera dubia", "Packera dubia", "Packera dubia", "Packera dubia", "Packera dubia",
+                "Packera schweinitziana", "Packera schweinitziana", "Packera schweinitziana", NA_character_,
+                "Packera schweinitziana", "Packera schweinitziana", "Packera aurea", "Packera aurea", "Packera paupercula", "Packera paupercula"
+              ),
+              climatic_z_score = c(1.5, 1.6, 1.5, 2.15, 2.0, 4.48, 4.45, 4.45, NA_real_, 0.5, 0.6, 0.5, 0.6, 0.4, 0.5),
+              edaphic_z_score = c(0.6, 0.7, 0.5, 2.70, 0.6, 2.43, 1.87, 1.87, NA_real_, 0.5, 0.5, 0.4, 0.5, 0.4, 0.5),
+              stringsAsFactors = FALSE
+            )
+            readr::write_csv(df_s7, "{(dt_dir / 'curated_vouchers.csv').as_posix()}")
+            q_out <- build_triage_queue(list(
+              vouchers = "{(dt_dir / 'curated_vouchers.csv').as_posix()}",
+              morphometrics = "", harmonics = "", multimodal_flags = "",
+              output_queue = "{(dt_dir / 'triage_queue.csv').as_posix()}",
+              output_report = "{(rep_dir / 'rev.md').as_posix()}",
+              output_html = "{(rep_dir / 'dash.html').as_posix()}",
+              output_complexes = "{(rep_dir / 'comp.csv').as_posix()}",
+              output_affinity = "{(rep_dir / 'aff.csv').as_posix()}",
+              output_neighbors = "{(rep_dir / 'neigh.txt').as_posix()}",
+              output_plot = "{(fig_dir / 'fig07a.png').as_posix()}",
+              output_complex_plot = "{(fig_dir / 'fig07b.png').as_posix()}",
+              intraspecific_mode = FALSE, demo = FALSE
+            ))
+            stopifnot(q_out$taxonomic_treatment_subtype[q_out$catalogNumber == "DE_BARKLEY_OK"] == "Confirmed_Species")
+            stopifnot(q_out$taxonomic_treatment_subtype[q_out$catalogNumber == "NCU00385159_FL"] == "Confirmed_Species")
+            stopifnot(isTRUE(q_out$is_marginal_range_extension[q_out$catalogNumber == "NCU00385159_FL"]))
+            stopifnot(q_out$taxonomic_treatment_subtype[q_out$catalogNumber == "EXS_LAG_NY"] == "Misidentification_Reassign")
+            stopifnot(q_out$recommended_determination[q_out$catalogNumber == "EXS_LAG_NY"] == "Packera schweinitziana")
+            for (ny_id in c("NY_ESSEX_BARK", "NY_LAMB_35", "NY_LAMB_34_BARK")) {{
+              stopifnot(q_out$taxonomic_treatment_subtype[q_out$catalogNumber == ny_id] == "Misidentification_Reassign")
+              stopifnot(q_out$recommended_determination[q_out$catalogNumber == ny_id] == "Packera schweinitziana")
+            }}
+            stopifnot(q_out$taxonomic_treatment_subtype[q_out$catalogNumber == "MI_CMC17204"] == "Misidentification_Reassign")
+            stopifnot(q_out$recommended_determination[q_out$catalogNumber == "MI_CMC17204"] == "Packera paupercula")
+            stopifnot(file.exists("{(rep_dir / 'portal_metadata_lag_audit.csv').as_posix()}"))
+            aud <- readr::read_csv("{(rep_dir / 'portal_metadata_lag_audit.csv').as_posix()}", show_col_types = FALSE)
+            stopifnot(all(c("NY_ESSEX_BARK", "NY_LAMB_35", "NY_LAMB_34_BARK", "MI_CMC17204", "NCU00385159_FL", "EXS_LAG_NY") %in% aud$catalogNumber))
+            cat("PORTAL_LAG_GATES_1_2_3_5_OK\\n")
+            """)
+            proc = run_warm_r_cmd(["Rscript", str(r_script)], stage_key="step07", cwd=REPO_ROOT, skip_figures=True)
+            self.assertEqual(proc.returncode, 0, f"Portal lag integration test failed:\n{proc.stderr}\n{proc.stdout}")
+            self.assertIn("PORTAL_LAG_GATES_1_2_3_5_OK", proc.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

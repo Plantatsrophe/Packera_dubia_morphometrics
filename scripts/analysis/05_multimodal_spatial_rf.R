@@ -1672,6 +1672,12 @@ execute_crossmodal_consensus <- function(
   miss_gmm_c <- if (is_intra && "is_missing_gmm_cluster" %in% names(df)) as.logical(df$is_missing_gmm_cluster) else rep(FALSE, n)
   miss_gmm_c[is.na(miss_gmm_c)] <- FALSE
   tier_ok_con <- (grepl("Tier_1|Gold|Tier_2|Silver", det_t_vec, ignore.case = TRUE) | is_prom_anc | is_t_con) & (!cl_con | is_t_con)
+  ext_con_mask <- if (exists(".is_step05_extralimital_non_type", mode = "function")) {
+    .is_step05_extralimital_non_type(df, group_vec = grp_vec, clean_base_mask = (tier_ok_con & elig_coord), is_type_vec = is_t_con)
+  } else {
+    rep(FALSE, n)
+  }
+  tier_ok_con <- tier_ok_con & !ext_con_mask
   is_anchor <- tier_ok_con & elig_coord & grp_vec %in% active_taxa & !miss_gmm_c
   if (sum(is_anchor) < min(4L, n)) {
     is_anchor <- tier_ok_con & elig_coord & grp_vec %in% active_taxa
@@ -1989,7 +1995,7 @@ execute_crossmodal_consensus <- function(
   s05_lon_v <- if ("decimalLongitude" %in% names(df)) suppressWarnings(as.numeric(df$decimalLongitude)) else rep(NA_real_, n)
   s05_cat_v <- if ("catalogNumber" %in% names(df)) as.character(df$catalogNumber) else as.character(seq_len(n))
   s05_tier_v <- if ("determiner_tier" %in% names(df)) as.character(df$determiner_tier) else rep("Tier_3_Bronze", n)
-  s05_anc_mask <- s05_tier_v %in% c("Tier_0_Type_Anchor", "Tier_1_Gold", "Tier_2_Silver")
+  s05_anc_mask <- (s05_tier_v %in% c("Tier_0_Type_Anchor", "Tier_1_Gold", "Tier_2_Silver")) & !ext_con_mask
   s05_coords_by_tx <- list()
   if (can_eval_hybrids_s05) {
     for (tx_s05 in active_taxa) {
@@ -2075,7 +2081,17 @@ execute_crossmodal_consensus <- function(
     ang_diff <- if (has_p_i && !is.null(prof_g) && is.finite(prof_g$mean_theta)) {
       abs(atan2(sin(df$pheno_theta[i] - prof_g$mean_theta), cos(df$pheno_theta[i] - prof_g$mean_theta)))
     } else NA_real_
+    rf_given_p_i <- if (!is.null(rf_prob_mat) && !is.na(given_sp) && (given_sp %in% colnames(rf_prob_mat))) {
+      suppressWarnings(as.numeric(rf_prob_mat[i, given_sp]))
+    } else if ("rf_given_taxon_prob" %in% names(df)) {
+      suppressWarnings(as.numeric(df$rf_given_taxon_prob[i]))
+    } else {
+      NA_real_
+    }
     pheno_agree <- if (is.finite(ang_diff)) isTRUE(ang_diff < (pi / 3.0)) else NA
+    if (is.finite(clim_z_given) && clim_z_given > 3.5 && (!is.finite(rf_given_p_i) || rf_given_p_i < 0.25)) {
+      pheno_agree <- NA
+    }
 
     obs_matches <- c(
       if (has_m_i) (morph_sp == given_sp) else NA,
@@ -2471,6 +2487,12 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
 
   is_gold_silver <- ((det_tier %in% c("Tier_1_Gold", "Tier_2_Silver")) | is_promoted | type_info_rf$is_type_specimen) &
                     (!cl_noise_rf | type_info_rf$is_type_specimen)
+  ext_rf_mask <- if (exists(".is_step05_extralimital_non_type", mode = "function")) {
+    .is_step05_extralimital_non_type(df, group_vec = y, clean_base_mask = (is_gold_silver & elig_clim & !is.na(y)), is_type_vec = type_info_rf$is_type_specimen)
+  } else {
+    rep(FALSE, n)
+  }
+  is_gold_silver <- is_gold_silver & !ext_rf_mask
   elig_coord <- if (has_30m_edaph && sum(is_gold_silver & elig_clim & elig_edaph & !is.na(y)) >= 6L) (elig_clim & elig_edaph) else elig_clim
 
   miss_gmm_rf <- if (isTRUE(intraspecific_mode) && "is_missing_gmm_cluster" %in% names(df)) {

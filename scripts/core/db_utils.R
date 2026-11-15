@@ -1779,6 +1779,18 @@ fetch_step04_morphometrics_from_db <- function(
     return(NULL)
   }
 
+  v_cols <- tryCatch(DBI::dbListFields(conn, "vouchers"), error = function(e) character(0))
+  extra_v_cols <- intersect(
+    c("usda_symbol", "usda_county_status", "exsiccatae_key", "exsiccatae_taxonomic_conflict", "exsiccatae_gold_taxon"),
+    v_cols
+  )
+  extra_v_sql <- if (length(extra_v_cols) > 0L) {
+    paste0(", ", paste0("v.", extra_v_cols, " AS ", extra_v_cols, "_v_joined", collapse = ", "))
+  } else ""
+  extra_v_join <- if (length(extra_v_cols) > 0L) {
+    "LEFT JOIN vouchers v ON v.catalogNumber = om.catalogNumber "
+  } else ""
+
   sql <- paste0(
     "SELECT ",
     "  om.*, ",
@@ -1790,11 +1802,13 @@ fetch_step04_morphometrics_from_db <- function(
     "  CASE WHEN vrp.catalogNumber IS NOT NULL THEN vrp.involucre_height_px ELSE vrp0.involucre_height_px END AS involucre_height_px_joined, ",
     "  CASE WHEN vrp.catalogNumber IS NOT NULL THEN vrp.involucre_width_px ELSE vrp0.involucre_width_px END AS involucre_width_px_joined, ",
     "  CASE WHEN vrp.catalogNumber IS NOT NULL THEN vrp.involucre_height_mm ELSE vrp0.involucre_height_mm END AS involucre_height_mm_joined, ",
-    "  CASE WHEN vrp.catalogNumber IS NOT NULL THEN vrp.involucre_width_mm ELSE vrp0.involucre_width_mm END AS involucre_width_mm_joined ",
+    "  CASE WHEN vrp.catalogNumber IS NOT NULL THEN vrp.involucre_width_mm ELSE vrp0.involucre_width_mm END AS involucre_width_mm_joined",
+    extra_v_sql, " ",
     "FROM otu_morphometrics om ",
     "LEFT JOIN plant_individuals pi ON pi.catalogNumber = om.catalogNumber AND pi.plant_individual_id = om.plant_individual_id ",
     "LEFT JOIN voucher_reproductive_phenology vrp ON vrp.catalogNumber = om.catalogNumber AND vrp.plant_individual_id = om.plant_individual_id ",
     "LEFT JOIN voucher_reproductive_phenology vrp0 ON vrp0.catalogNumber = om.catalogNumber AND vrp0.plant_individual_id = 0 ",
+    extra_v_join,
     "WHERE om.run_id = $1 ",
     "ORDER BY om.catalogNumber, om.plant_individual_id;"
   )
@@ -1824,6 +1838,13 @@ fetch_step04_morphometrics_from_db <- function(
   )) {
     df[[pair[1]]] <- df[[pair[2]]]
     df[[pair[2]]] <- NULL
+  }
+  for (vcol in extra_v_cols) {
+    vj <- paste0(vcol, "_v_joined")
+    if (vj %in% names(df)) {
+      df[[vcol]] <- df[[vj]]
+      df[[vj]] <- NULL
+    }
   }
   df$run_id <- NULL
   df <- coerce_sqlite_logical_cols(df)

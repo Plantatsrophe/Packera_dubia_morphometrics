@@ -550,7 +550,7 @@ run_fourier_extraction <- function(opts) {
   if (!is.null(vouchers_df)) {
     meta_cols <- intersect(colnames(vouchers_df), c("catalogNumber", "taxon", "species_standardized", "scientificName", "species_raw", "institutionCode",
       "identifiedBy", "determiner_tier", "authority_tier", "type_status", "dawid_skene_error_rate", "label_error_rate",
-      "stateProvince", "county", "locality", "decimalLatitude", "decimalLongitude",
+      "stateProvince", "county", "locality", "decimalLatitude", "decimalLongitude", "usda_symbol", "usda_county_status", "exsiccatae_key", "exsiccatae_taxonomic_conflict", "exsiccatae_gold_taxon",
       "coordinateUncertainty", "year", "month", "day", "eventDate", "regional_group", "spatial_balance_weight"))
     v_sub <- vouchers_df[!duplicated(vouchers_df$catalogNumber), meta_cols, drop = FALSE]
     fac_df$.row_ord <- seq_len(nrow(fac_df))

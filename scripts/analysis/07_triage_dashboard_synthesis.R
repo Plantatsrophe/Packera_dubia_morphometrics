@@ -264,6 +264,37 @@ resolve_step07_ecological_authority_weights <- function(df, allow_bronze_prior =
   (365.25 / (2.0 * pi)) * sqrt(-2.0 * log(r_clamped))
 }
 
+.is_step07_extralimital_non_type <- function(df) {
+  n <- nrow(df)
+  if (n == 0L) return(logical(0))
+  nms <- names(df)
+  is_type_m <- if (exists(".identify_type_specimen_vec", mode = "function")) .identify_type_specimen_vec(df)$is_type_specimen else rep(FALSE, n)
+  if ("is_type_specimen" %in% nms) {
+    tv <- suppressWarnings(as.logical(df$is_type_specimen)); tv[is.na(tv)] <- FALSE
+    is_type_m <- is_type_m | tv
+  }
+  if ("determiner_tier" %in% nms) {
+    is_type_m <- is_type_m | (trimws(as.character(df$determiner_tier)) == "Tier_0_Type_Anchor")
+  }
+  u_stat <- if ("usda_county_status" %in% nms) tolower(trimws(ifelse(is.na(df$usda_county_status), "", as.character(df$usda_county_status)))) else rep("", n)
+  ext_u <- u_stat %in% c("out_of_range", "natureserve_exotic_or_waif")
+  exs_c <- if ("exsiccatae_taxonomic_conflict" %in% nms) {
+    raw_ec <- df$exsiccatae_taxonomic_conflict
+    if (is.logical(raw_ec)) (!is.na(raw_ec) & raw_ec) else (!is.na(suppressWarnings(as.integer(raw_ec))) & suppressWarnings(as.integer(raw_ec)) != 0L)
+  } else rep(FALSE, n)
+  pas_aud <- if ("anchor_tier_source" %in% nms) (trimws(ifelse(is.na(df$anchor_tier_source), "", as.character(df$anchor_tier_source))) == "Passive_Extralimital_Audit") else rep(FALSE, n)
+  flag <- !is_type_m & (ext_u | exs_c | pas_aud)
+  if (any(flag) && ("species_standardized" %in% nms)) {
+    sp_v <- trimws(ifelse(is.na(df$species_standardized), "", as.character(df$species_standardized)))
+    noise_m <- if ("is_confident_label_noise" %in% nms) (!is.na(df$is_confident_label_noise) & as.logical(df$is_confident_label_noise)) else rep(FALSE, n)
+    for (tx in unique(sp_v[flag & nzchar(sp_v)])) {
+      tx_idx <- which(sp_v == tx & !noise_m)
+      if (sum(!flag[tx_idx]) < 2L) flag[sp_v == tx] <- FALSE
+    }
+  }
+  flag
+}
+
 .resolve_step07_anchor_mask <- function(df) {
   n <- nrow(df)
   if (n == 0L) return(logical(0))
@@ -295,7 +326,8 @@ resolve_step07_ecological_authority_weights <- function(df, allow_bronze_prior =
     tv <- suppressWarnings(as.logical(df$is_type_specimen)); tv[is.na(tv)] <- FALSE
     is_type_m <- is_type_m | tv
   }
-  anchor_mask <- (((tier_col %in% c("Tier_0_Type_Anchor", "Tier_1_Gold", "Tier_2_Silver", "Tier_3_Bronze_Promoted")) | promo_mask) & !noise_mask & !passive_mask) | (is_type_m & !noise_mask)
+  ext_non_type_mask <- .is_step07_extralimital_non_type(df)
+  anchor_mask <- (((tier_col %in% c("Tier_0_Type_Anchor", "Tier_1_Gold", "Tier_2_Silver", "Tier_3_Bronze_Promoted")) | promo_mask) & !noise_mask & !passive_mask & !ext_non_type_mask) | (is_type_m & !noise_mask)
   if (any(.has_step07_geno_row_mask(df))) {
     nms <- names(df)
     tier_g <- if ("geno_linkage_tier" %in% nms) trimws(as.character(df$geno_linkage_tier)) else if ("linkage_tier" %in% nms) trimws(as.character(df$linkage_tier)) else rep("", n)
@@ -1283,20 +1315,21 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
     else NULL
   } else NULL
 
+  ext_non_type_all <- .is_step07_extralimital_non_type(df)
   ref_idx_by_taxon <- list()
   for (tx in active_taxa) {
     idx_t <- which(sp_all_vec == tx)
     if (!is.null(t0_info)) {
       pure_ev <- t0_info$evict_from_given_anchor & (!t0_info$is_tier0_dna_anchor | t0_info$rectified_taxon != tx)
-      t0_rect_tx <- which(t0_info$is_tier0_dna_anchor & !is.na(t0_info$rectified_taxon) & (t0_info$rectified_taxon == tx) & !noise_all)
-      idx_gs <- unique(c(idx_t[anchor_all[idx_t] & !mo_all[idx_t] & !noise_all[idx_t] & !pure_ev[idx_t]], t0_rect_tx))
-      idx_clean <- unique(c(idx_t[!mo_all[idx_t] & !noise_all[idx_t] & !pure_ev[idx_t]], t0_rect_tx))
+      t0_rect_tx <- which(t0_info$is_tier0_dna_anchor & !is.na(t0_info$rectified_taxon) & (t0_info$rectified_taxon == tx) & !noise_all & !ext_non_type_all)
+      idx_gs <- unique(c(idx_t[anchor_all[idx_t] & !mo_all[idx_t] & !noise_all[idx_t] & !ext_non_type_all[idx_t] & !pure_ev[idx_t]], t0_rect_tx))
+      idx_clean <- unique(c(idx_t[!mo_all[idx_t] & !noise_all[idx_t] & !ext_non_type_all[idx_t] & !pure_ev[idx_t]], t0_rect_tx))
       idx_nonoise <- unique(c(idx_t[!noise_all[idx_t] & !pure_ev[idx_t]], t0_rect_tx))
       ref_idx <- if (length(idx_gs) >= 2L) idx_gs else if (length(idx_clean) >= 2L) idx_clean else if (length(idx_nonoise) >= 1L) idx_nonoise else idx_t
       ref_idx_by_taxon[[tx]] <- ref_idx
 
       ref_anth_idx <- ref_idx[valid_doy_all[ref_idx] & anth_all[ref_idx]]
-      if (length(ref_anth_idx) == 0L) ref_anth_idx <- idx_t[valid_doy_all[idx_t] & anth_all[idx_t] & !noise_all[idx_t] & !pure_ev[idx_t]]
+      if (length(ref_anth_idx) == 0L) ref_anth_idx <- idx_t[valid_doy_all[idx_t] & anth_all[idx_t] & !noise_all[idx_t] & !ext_non_type_all[idx_t] & !pure_ev[idx_t]]
       if (length(ref_anth_idx) == 0L) ref_anth_idx <- idx_t[valid_doy_all[idx_t] & !pure_ev[idx_t]]
       if (length(ref_anth_idx) == 0L) ref_anth_idx <- idx_t[valid_doy_all[idx_t]]
       if (length(ref_anth_idx) > 0L) {
@@ -1309,14 +1342,14 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
         med_doy[[tx]] <- tx_circ$med_doy
       }
     } else {
-      idx_gs <- idx_t[anchor_all[idx_t] & !mo_all[idx_t] & !noise_all[idx_t]]
-      idx_clean <- idx_t[!mo_all[idx_t] & !noise_all[idx_t]]
+      idx_gs <- idx_t[anchor_all[idx_t] & !mo_all[idx_t] & !noise_all[idx_t] & !ext_non_type_all[idx_t]]
+      idx_clean <- idx_t[!mo_all[idx_t] & !noise_all[idx_t] & !ext_non_type_all[idx_t]]
       idx_nonoise <- idx_t[!noise_all[idx_t]]
       ref_idx <- if (length(idx_gs) >= 2L) idx_gs else if (length(idx_clean) >= 2L) idx_clean else if (length(idx_nonoise) >= 1L) idx_nonoise else idx_t
       ref_idx_by_taxon[[tx]] <- ref_idx
 
       d_ref <- hop_doy_all[ref_idx[valid_doy_all[ref_idx] & anth_all[ref_idx]]]
-      if (length(d_ref) == 0L) d_ref <- hop_doy_all[idx_t[valid_doy_all[idx_t] & anth_all[idx_t] & !noise_all[idx_t]]]
+      if (length(d_ref) == 0L) d_ref <- hop_doy_all[idx_t[valid_doy_all[idx_t] & anth_all[idx_t] & !noise_all[idx_t] & !ext_non_type_all[idx_t]]]
       if (length(d_ref) == 0L) d_ref <- hop_doy_all[idx_t[valid_doy_all[idx_t]]]
       if (length(d_ref) > 0L) {
         tx_circ <- .circ_hop_stats(d_ref)
@@ -1346,7 +1379,10 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
     OH = "ohio", OK = "oklahoma", OR = "oregon", PA = "pennsylvania", RI = "rhode island",
     SC = "south carolina", SD = "south dakota", TN = "tennessee", TX = "texas", UT = "utah",
     VT = "vermont", VA = "virginia", WA = "washington", WV = "west virginia", WI = "wisconsin",
-    WY = "wyoming", ON = "ontario", QC = "quebec", NB = "new brunswick", NS = "nova scotia"
+    WY = "wyoming", AB = "alberta", BC = "british columbia", MB = "manitoba",
+    NB = "new brunswick", NL = "newfoundland and labrador", NS = "nova scotia",
+    NT = "northwest territories", NU = "nunavut", ON = "ontario",
+    PE = "prince edward island", QC = "quebec", SK = "saskatchewan", YT = "yukon"
   )
   .norm_state_str <- function(sv) {
     s <- tolower(trimws(as.character(sv)))
@@ -1379,6 +1415,8 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
   has_any_geo_in_df <- any(nzchar(state_vec_geo)) || any(is.finite(lat_vec_geo) & is.finite(lon_vec_geo))
   use_ext_geo_db <- nzchar(Sys.getenv("RUN_ID", unset = "")) || nzchar(env_plantmatics_or_packera("PLANTMATICS_DB_PATH", "PACKERA_DB_PATH")) || has_any_geo_in_df
   usda_states_by_tx <- list()
+  usda_counties_by_tx <- list()
+  usda_state_county_counts_by_tx <- list()
   db_syntopy_rows <- NULL
   if (use_ext_geo_db && trimws(env_plantmatics_or_packera("PLANTMATICS_DEMO_MODE", "PACKERA_DEMO_MODE")) != "1" && exists("connect_packera_db", mode = "function") && requireNamespace("DBI", quietly = TRUE)) {
     tryCatch({
@@ -1386,10 +1424,12 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
       on.exit(tryCatch(if (!is.null(c_geo) && DBI::dbIsValid(c_geo)) DBI::dbDisconnect(c_geo), error = function(e) NULL), add = TRUE)
       if (!is.null(c_geo) && DBI::dbExistsTable(c_geo, "usda_county_ranges")) {
         u_flds <- tryCatch(DBI::dbListFields(c_geo, "usda_county_ranges"), error = function(e) character(0))
+        u_cnty_sel <- if ("county_norm" %in% u_flds) ", county_norm" else ""
+        u_stonly_sel <- if ("is_state_only" %in% u_flds) ", is_state_only" else ""
         u_sym_sel <- if ("usda_symbol" %in% u_flds) ", usda_symbol" else ""
         u_df <- DBI::dbGetQuery(
           c_geo,
-          paste0("SELECT DISTINCT canonical_packera, state_norm", u_sym_sel,
+          paste0("SELECT DISTINCT canonical_packera, state_norm", u_cnty_sel, u_stonly_sel, u_sym_sel,
                  " FROM usda_county_ranges WHERE state_norm IS NOT NULL AND TRIM(state_norm) != '';")
         )
         if (!is.null(u_df) && nrow(u_df) > 0L) {
@@ -1404,24 +1444,64 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
               shared_syms <- names(sym_owners)[sym_owners > 1L]
               if (length(shared_syms) > 0L) {
                 is_shared_u <- has_sym_u & (u_sym %in% shared_syms)
-                ep_pre <- toupper(substr(sub("^Packera\\s+", "", u_tx), 1L, 2L))
+                ep_pre <- toupper(substr(sub("^[A-Za-z-]+\\s+", "", u_tx), 1L, 2L))
                 sym_ok_u <- !is_shared_u | (nchar(u_sym) >= 4L & ep_pre == substr(u_sym, 3L, 4L))
                 ok_u <- ok_u & sym_ok_u
               }
             }
           }
-          if (any(ok_u)) usda_states_by_tx <- lapply(split(u_st[ok_u], u_tx[ok_u]), unique)
+          if (any(ok_u)) {
+            usda_states_by_tx <- lapply(split(u_st[ok_u], u_tx[ok_u]), unique)
+            if ("county_norm" %in% names(u_df)) {
+              u_cty <- .norm_county_str(u_df$county_norm)
+              u_stonly <- if ("is_state_only" %in% names(u_df)) (!is.na(u_df$is_state_only) & suppressWarnings(as.integer(u_df$is_state_only)) != 0L) else rep(FALSE, nrow(u_df))
+              ok_uc <- ok_u & nzchar(u_cty) & !u_stonly
+              if (any(ok_uc)) {
+                u_sc <- paste(u_st[ok_uc], u_cty[ok_uc], sep = "||")
+                usda_counties_by_tx <- lapply(split(u_sc, u_tx[ok_uc]), unique)
+                for (tx_c in names(usda_counties_by_tx)) {
+                  m_c <- ok_uc & (u_tx == tx_c)
+                  st_cnt_tbl <- tapply(u_cty[m_c], u_st[m_c], function(v) length(unique(v)))
+                  usda_state_county_counts_by_tx[[tx_c]] <- st_cnt_tbl
+                }
+              }
+            }
+          }
+        }
+      }
+      if (!is.null(c_geo) && DBI::dbExistsTable(c_geo, "natureserve_subnational_ranges")) {
+        ns_df <- tryCatch(
+          DBI::dbGetQuery(
+            c_geo,
+            "SELECT DISTINCT species_standardized, subnation_code FROM natureserve_subnational_ranges WHERE subnation_code IS NOT NULL AND TRIM(subnation_code) != '' AND COALESCE(is_native, 0) = 1 AND COALESCE(is_exotic, 0) = 0;"
+          ),
+          error = function(e) NULL
+        )
+        if (!is.null(ns_df) && nrow(ns_df) > 0L) {
+          ns_tx <- trimws(as.character(ns_df$species_standardized))
+          ns_st <- .norm_state_str(ns_df$subnation_code)
+          ok_ns <- !is.na(ns_tx) & nzchar(ns_tx) & nzchar(ns_st)
+          if (any(ok_ns)) {
+            for (tx_ns in unique(ns_tx[ok_ns])) {
+              usda_states_by_tx[[tx_ns]] <- unique(c(usda_states_by_tx[[tx_ns]], ns_st[ok_ns & ns_tx == tx_ns]))
+            }
+          }
         }
       }
       if ((can_evaluate_hybrids || is_intra) && (nzchar(Sys.getenv("RUN_ID", unset = "")) || nzchar(env_plantmatics_or_packera("PLANTMATICS_DB_PATH", "PACKERA_DB_PATH"))) &&
           !is.null(c_geo) && DBI::dbExistsTable(c_geo, "vouchers")) {
         v_flds <- tryCatch(DBI::dbListFields(c_geo, "vouchers"), error = function(e) character(0))
         sp_std_sel <- if ("species_standardized" %in% v_flds) "v.species_standardized, " else ""
+        rec_by_sel <- if ("recordedBy" %in% v_flds) "v.recordedBy, " else ""
+        syn_ext_cond <- if ("usda_county_status" %in% v_flds) "AND (v.determiner_tier = 'Tier_0_Type_Anchor' OR COALESCE(LOWER(TRIM(v.usda_county_status)), '') NOT IN ('out_of_range', 'natureserve_exotic_or_waif'))" else ""
+        syn_exs_cond <- if ("exsiccatae_taxonomic_conflict" %in% v_flds) "AND (v.determiner_tier = 'Tier_0_Type_Anchor' OR COALESCE(v.exsiccatae_taxonomic_conflict, 0) = 0)" else ""
         q_syn <- paste(
-          paste0("SELECT v.catalogNumber, ", sp_std_sel, "v.scientificName, v.species_raw, v.determiner_tier,"),
+          paste0("SELECT v.catalogNumber, ", sp_std_sel, rec_by_sel, "v.scientificName, v.species_raw, v.determiner_tier,"),
           "v.stateProvince, v.county, v.decimalLatitude, v.decimalLongitude",
           "FROM vouchers v",
           "WHERE v.determiner_tier IN ('Tier_0_Type_Anchor', 'Tier_1_Gold', 'Tier_2_Silver')",
+          syn_ext_cond,
+          syn_exs_cond,
           "AND NOT EXISTS (SELECT 1 FROM curation_triage ct WHERE ct.catalogNumber = v.catalogNumber AND ct.taxonomic_treatment_subtype = 'Misidentification_Reassign');"
         )
         db_syntopy_rows <- tryCatch(DBI::dbGetQuery(c_geo, q_syn), error = function(e) NULL)
@@ -1925,6 +2005,15 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
     ok_eg <- which(!is.na(exs_gold_tx_dv) & nzchar(trimws(exs_gold_tx_dv)))
     exs_gold_tx_dv[ok_eg] <- standardize_packera_taxon(exs_gold_tx_dv[ok_eg])
   }
+  usda_stat_dv <- tolower(trimws(ifelse(is.na(.chr_col(df, "usda_county_status", n, default = "")), "", .chr_col(df, "usda_county_status", n, default = ""))))
+  exs_conf_raw <- if ("exsiccatae_taxonomic_conflict" %in% df_nms_d) df$exsiccatae_taxonomic_conflict else rep(0L, n)
+  exs_conf_dv <- if (is.logical(exs_conf_raw)) (!is.na(exs_conf_raw) & exs_conf_raw) else (!is.na(suppressWarnings(as.integer(exs_conf_raw))) & suppressWarnings(as.integer(exs_conf_raw)) != 0L)
+  clim_z_dv <- .num_col(df, "climatic_z_score", n, default = NA_real_)
+  rf_given_p_dv <- .num_col(df, "rf_given_taxon_prob", n, default = NA_real_)
+  id_by_dv <- .chr_col(df, "identifiedBy", n, default = NA_character_)
+  portal_lag_flag <- logical(n)
+  portal_lag_gate <- rep(NA_character_, n)
+  is_marginal_ext_v <- logical(n)
   p_type_morph <- max(2L, if (length(sel_mc) > 0L) length(sel_mc) else if (length(morph_coord_cols) > 0L) length(morph_coord_cols) else 3L)
   type_morph_chisq95 <- stats::qchisq(0.95, df = p_type_morph)
   osr_df_vec <- ifelse(is.finite(osr_df_raw) & osr_df_raw >= 1.0, as.integer(round(osr_df_raw)), p_type_morph)
@@ -2029,6 +2118,195 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
   }
 
   coll_surname_all <- .norm_collector_surname(rec_by_v)
+
+  clean_peer_df <- {
+    idx_cp <- which(anchor_all & !mo_all & !noise_all & !ext_non_type_all & nzchar(sp_clean_vec) & (sp_clean_vec != "Unknown"))
+    df_cp <- if (length(idx_cp) > 0L) {
+      data.frame(
+        sp = sp_clean_vec[idx_cp],
+        surname = coll_surname_all[idx_cp],
+        deme_id = spatial_deme_vec[idx_cp],
+        state_cnty = state_cnty_geo[idx_cp],
+        lat = lat_vec_geo[idx_cp],
+        lon = lon_vec_geo[idx_cp],
+        cat = cat_sheet_vec[idx_cp],
+        stringsAsFactors = FALSE
+      )
+    } else NULL
+    db_cp <- NULL
+    if (!is.null(db_syntopy_rows) && nrow(db_syntopy_rows) > 0L) {
+      raw_cp_nm <- if ("species_standardized" %in% names(db_syntopy_rows)) {
+        ifelse(!is.na(db_syntopy_rows$species_standardized) & nzchar(trimws(as.character(db_syntopy_rows$species_standardized))),
+               as.character(db_syntopy_rows$species_standardized),
+               ifelse(!is.na(db_syntopy_rows$scientificName) & nzchar(trimws(as.character(db_syntopy_rows$scientificName))),
+                      as.character(db_syntopy_rows$scientificName), as.character(db_syntopy_rows$species_raw)))
+      } else {
+        ifelse(!is.na(db_syntopy_rows$scientificName) & nzchar(trimws(as.character(db_syntopy_rows$scientificName))),
+               as.character(db_syntopy_rows$scientificName), as.character(db_syntopy_rows$species_raw))
+      }
+      tx_cp <- standardize_packera_taxon(raw_cp_nm)
+      keep_cp <- !is.na(tx_cp) & nzchar(tx_cp) & (tx_cp != "Unknown")
+      if (any(keep_cp)) {
+        st_cp <- .norm_state_str(db_syntopy_rows$stateProvince[keep_cp])
+        cty_cp <- .norm_county_str(db_syntopy_rows$county[keep_cp])
+        sc_cp <- ifelse(nzchar(st_cp) & nzchar(cty_cp), paste(st_cp, cty_cp, sep = "||"), "")
+        sur_cp <- if ("recordedBy" %in% names(db_syntopy_rows)) .norm_collector_surname(db_syntopy_rows$recordedBy[keep_cp]) else rep("", sum(keep_cp))
+        db_cp <- data.frame(
+          sp = tx_cp[keep_cp],
+          surname = sur_cp,
+          deme_id = rep("", sum(keep_cp)),
+          state_cnty = sc_cp,
+          lat = suppressWarnings(as.numeric(db_syntopy_rows$decimalLatitude[keep_cp])),
+          lon = suppressWarnings(as.numeric(db_syntopy_rows$decimalLongitude[keep_cp])),
+          cat = as.character(db_syntopy_rows$catalogNumber[keep_cp]),
+          stringsAsFactors = FALSE
+        )
+      }
+    }
+    res_cp <- if (!is.null(df_cp) && !is.null(db_cp)) rbind(df_cp, db_cp) else if (!is.null(df_cp)) df_cp else db_cp
+    if (!is.null(res_cp) && nrow(res_cp) > 0L) res_cp else NULL
+  }
+
+  .county_eval_for_taxon <- function(row_i, ctx) {
+    sc_i <- state_cnty_geo[row_i]
+    st_i <- state_vec_geo[row_i]
+    cty_i <- cnty_raw_geo[row_i]
+    exact_cnty <- nzchar(sc_i) && (ctx %in% names(usda_counties_by_tx)) && (sc_i %in% usda_counties_by_tx[[ctx]])
+    n_st_cnty <- if (nzchar(st_i) && (ctx %in% names(usda_state_county_counts_by_tx)) && (st_i %in% names(usda_state_county_counts_by_tx[[ctx]]))) {
+      as.integer(usda_state_county_counts_by_tx[[ctx]][[st_i]])
+    } else 0L
+    absent_comp <- nzchar(st_i) && nzchar(cty_i) && !exact_cnty && (n_st_cnty >= 5L)
+    list(exact_county = exact_cnty, absent_comprehensive_county = absent_comp)
+  }
+
+  .eval_deme_peer_votes <- function(row_i, given_sp) {
+    sur_i <- coll_surname_all[row_i]
+    dm_i <- spatial_deme_vec[row_i]
+    sc_i <- state_cnty_geo[row_i]
+    lat_i <- lat_vec_geo[row_i]; lon_i <- lon_vec_geo[row_i]; cat_i <- cat_sheet_vec[row_i]
+    has_ll_i <- is.finite(lat_i) && is.finite(lon_i)
+    same_coll_sp <- character(0); same_deme_sp <- character(0)
+    if (!is.null(clean_peer_df) && nrow(clean_peer_df) > 0L) {
+      ok_c <- (clean_peer_df$cat != cat_i) & (clean_peer_df$sp != given_sp)
+      near_c <- rep(FALSE, nrow(clean_peer_df))
+      if (has_ll_i) {
+        ok_ll_p <- ok_c & is.finite(clean_peer_df$lat) & is.finite(clean_peer_df$lon)
+        if (any(ok_ll_p)) {
+          dl_p <- (clean_peer_df$lat[ok_ll_p] - lat_i) * (pi / 180.0); dn_p <- (clean_peer_df$lon[ok_ll_p] - lon_i) * (pi / 180.0)
+          hv_p <- sin(dl_p * 0.5)^2 + cos(lat_i * (pi / 180.0)) * cos(clean_peer_df$lat[ok_ll_p] * (pi / 180.0)) * (sin(dn_p * 0.5)^2)
+          dkm_p <- 2.0 * 6371.0088 * asin(pmin(1.0, sqrt(pmax(0.0, hv_p))))
+          near_c[which(ok_ll_p)[is.finite(dkm_p) & dkm_p <= 10.0]] <- TRUE
+        }
+      }
+      if (!grepl("^SHEET_", dm_i) && nzchar(dm_i)) {
+        near_c[ok_c & nzchar(clean_peer_df$deme_id) & (clean_peer_df$deme_id == dm_i)] <- TRUE
+      }
+      if (!has_ll_i && nzchar(sc_i)) {
+        near_c[ok_c & (clean_peer_df$state_cnty == sc_i)] <- TRUE
+      }
+      if (any(near_c)) {
+        same_deme_sp <- c(same_deme_sp, unique(clean_peer_df$sp[near_c]))
+        if (nzchar(sur_i)) {
+          sc_hit <- near_c & (clean_peer_df$surname == sur_i)
+          if (any(sc_hit)) same_coll_sp <- c(same_coll_sp, unique(clean_peer_df$sp[sc_hit]))
+        }
+      }
+    }
+    peer_j <- integer(0)
+    if (has_ll_i) {
+      ok_ll_df <- which((seq_len(n) != row_i) & (cat_sheet_vec != cat_i) & is.finite(lat_vec_geo) & is.finite(lon_vec_geo))
+      if (length(ok_ll_df) > 0L) {
+        dl_j <- (lat_vec_geo[ok_ll_df] - lat_i) * (pi / 180.0); dn_j <- (lon_vec_geo[ok_ll_df] - lon_i) * (pi / 180.0)
+        hv_j <- sin(dl_j * 0.5)^2 + cos(lat_i * (pi / 180.0)) * cos(lat_vec_geo[ok_ll_df] * (pi / 180.0)) * (sin(dn_j * 0.5)^2)
+        dkm_j <- 2.0 * 6371.0088 * asin(pmin(1.0, sqrt(pmax(0.0, hv_j))))
+        peer_j <- ok_ll_df[is.finite(dkm_j) & dkm_j <= 10.0]
+      }
+    } else if (nzchar(sc_i)) {
+      peer_j <- which((seq_len(n) != row_i) & (cat_sheet_vec != cat_i) & (state_cnty_geo == sc_i))
+    }
+    if (length(peer_j) > 0L) {
+      for (pj in peer_j) {
+        cand_pj <- unique(stats::na.omit(c(
+          if (is_valid_taxon_str(rf_pred_dv[pj]) && rf_pred_dv[pj] != given_sp) rf_pred_dv[pj] else NA_character_,
+          if (is_valid_taxon_str(cda_pred_dv[pj]) && cda_pred_dv[pj] != given_sp && isTRUE(.eval_taxon_geo_plausibility(pj, cda_pred_dv[pj])$plausible)) cda_pred_dv[pj] else NA_character_
+        )))
+        for (cpj in cand_pj) {
+          same_deme_sp <- c(same_deme_sp, cpj)
+          if (nzchar(sur_i) && coll_surname_all[pj] == sur_i) same_coll_sp <- c(same_coll_sp, cpj)
+        }
+      }
+    }
+    list(same_coll = unique(same_coll_sp), same_deme = unique(same_deme_sp))
+  }
+
+  .score_sympatric_cand <- function(row_i, ctx, given_sp, morph_sp, cda_prob, cda_sec_taxon, cda_sec,
+                                    edaph_sp, edaph_is_taxon, rf_sp, rf_is_taxon, rf_prob,
+                                    min_cong_tx_i, nt_m_i, nt_e_i, te_z_i,
+                                    geno_is_taxon, geno_sp_i, geno_prob_i,
+                                    morph_allopatric_or_weak_self = FALSE, peer_votes = NULL) {
+    gw <- .eval_taxon_geo_plausibility(row_i, ctx)$weight
+    cty_eval <- .county_eval_for_taxon(row_i, ctx)
+    cnty_mult <- if (cty_eval$absent_comprehensive_county) 0.25 else 1.0
+    cnty_bonus <- if (cty_eval$exact_county) 0.14 else 0.0
+    ms <- if (!is.null(morph_sp) && morph_sp == ctx && is.finite(cda_prob)) {
+      cda_prob
+    } else if (!is.null(cda_sec_taxon) && cda_sec_taxon == ctx && is.finite(cda_sec)) {
+      cda_sec
+    } else if (!is.null(morph_X) && !is.null(morph_centroids) && !is.null(morph_S_inv) && (ctx %in% rownames(morph_centroids))) {
+      xi <- morph_X[row_i, ]; bm <- if (given_sp %in% rownames(morph_centroids)) morph_centroids[given_sp, ] else colMeans(morph_centroids)
+      xi[!is.finite(xi)] <- bm[!is.finite(xi)]
+      dv <- xi - morph_centroids[ctx, ]
+      exp(-0.25 * max(0.0, as.numeric(t(dv) %*% morph_S_inv %*% dv)))
+    } else 0.15
+    rf_match <- (rf_is_taxon && rf_sp == ctx) || (edaph_is_taxon && edaph_sp == ctx)
+    es <- if (rf_match) {
+      w_rf <- if (morph_allopatric_or_weak_self) 0.55 else 0.35
+      if (is.finite(rf_prob)) w_rf * rf_prob else 0.20
+    } else 0.0
+    ts <- if ((!is.na(min_cong_tx_i) && min_cong_tx_i == ctx) || (!is.na(nt_m_i) && nt_m_i == ctx)) 0.20 else 0.0
+    if (!is.na(nt_e_i) && nt_e_i == ctx && is.finite(te_z_i) && te_z_i > 2.0) ts <- ts + 0.15
+    gs <- if (geno_is_taxon && !is.na(geno_sp_i) && geno_sp_i == ctx && is.finite(geno_prob_i)) 0.85 * geno_prob_i else 0.0
+    ps <- if (!is.null(peer_votes) && (ctx %in% peer_votes$same_coll)) 0.20 else if (!is.null(peer_votes) && (ctx %in% peer_votes$same_deme)) 0.10 else 0.0
+    gw * cnty_mult * (0.65 * ms + es + ts + gs + cnty_bonus + ps)
+  }
+
+  .rank_sympatric_congeners <- function(row_i, given_sp, morph_sp, cda_prob, cda_sec_taxon, cda_sec,
+                                       edaph_sp, edaph_is_taxon, rf_sp, rf_is_taxon, rf_prob,
+                                       min_cong_tx_i, nt_m_i, nt_e_i, te_z_i,
+                                       geno_is_taxon, geno_sp_i, geno_prob_i,
+                                       morph_allopatric_or_weak_self = FALSE) {
+    cand_pool <- unique(stats::na.omit(c(
+      if (geno_is_taxon && !is.na(geno_sp_i) && geno_sp_i != given_sp) geno_sp_i else NA_character_,
+      if (rf_is_taxon && rf_sp != given_sp) rf_sp else NA_character_,
+      if (edaph_is_taxon && edaph_sp != given_sp) edaph_sp else NA_character_,
+      if (!is.na(nt_e_i) && nt_e_i != given_sp) nt_e_i else NA_character_,
+      if (!is.null(morph_sp) && morph_sp != given_sp) morph_sp else NA_character_,
+      if (!is.null(cda_sec_taxon) && cda_sec_taxon != given_sp) cda_sec_taxon else NA_character_,
+      if (!is.na(min_cong_tx_i) && min_cong_tx_i != given_sp) min_cong_tx_i else NA_character_,
+      if (!is.na(nt_m_i) && nt_m_i != given_sp) nt_m_i else NA_character_,
+      setdiff(active_taxa, given_sp)
+    )))
+    cand_pool <- cand_pool[vapply(cand_pool, is_valid_taxon_str, logical(1)) & (cand_pool != given_sp)]
+    plaus_cands <- cand_pool[vapply(cand_pool, function(ctx) isTRUE(.eval_taxon_geo_plausibility(row_i, ctx)$plausible), logical(1))]
+    if (length(plaus_cands) == 0L && nzchar(state_cnty_geo[row_i])) {
+      cnty_hits <- names(usda_counties_by_tx)[vapply(names(usda_counties_by_tx), function(ctx) {
+        ctx != given_sp && is_valid_taxon_str(ctx) && (state_cnty_geo[row_i] %in% usda_counties_by_tx[[ctx]])
+      }, logical(1))]
+      plaus_cands <- cnty_hits[vapply(cnty_hits, function(ctx) isTRUE(.eval_taxon_geo_plausibility(row_i, ctx)$plausible), logical(1))]
+    }
+    if (length(plaus_cands) == 0L) return(list(best = NULL, max_score = -Inf, peer_votes = NULL))
+    pv <- .eval_deme_peer_votes(row_i, given_sp)
+    scores <- vapply(plaus_cands, function(ctx) {
+      .score_sympatric_cand(
+        row_i, ctx, given_sp, morph_sp, cda_prob, cda_sec_taxon, cda_sec,
+        edaph_sp, edaph_is_taxon, rf_sp, rf_is_taxon, rf_prob,
+        min_cong_tx_i, nt_m_i, nt_e_i, te_z_i,
+        geno_is_taxon, geno_sp_i, geno_prob_i,
+        morph_allopatric_or_weak_self = morph_allopatric_or_weak_self, peer_votes = pv
+      )
+    }, numeric(1))
+    list(best = plaus_cands[which.max(scores)], max_score = max(scores), peer_votes = pv)
+  }
   rec_num_clean_all <- tolower(gsub("[^a-z0-9]+", "", ifelse(is.na(rec_num_v), "", rec_num_v)))
   rec_num_clean_all[rec_num_clean_all %in% c("sn", "na", "none", "unknown", "0")] <- ""
   exs_clean_all <- tolower(trimws(ifelse(is.na(exs_key_v), "", exs_key_v)))
@@ -2281,12 +2559,29 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
     type_morph_d2_i <- tm_d2_i
     nt_m_i <- if (is_valid_taxon_str(nt_morph_dv[i])) nt_morph_dv[i] else NA_character_
     nt_e_i <- if (is_valid_taxon_str(nt_niche_dv[i])) nt_niche_dv[i] else NA_character_
-    in_type_edaphic_env_i <- if (is.finite(te_z_i)) (te_z_i <= 2.0) else (!is.finite(edaph_z_i) || edaph_z_i <= 2.0)
+    clim_z_i <- clim_z_dv[i]
+    rf_given_p_i <- rf_given_p_dv[i]
+    u_stat_i <- usda_stat_dv[i]
+    has_geo_ll_i <- is.finite(lat_vec_geo[i]) && is.finite(lon_vec_geo[i])
+    is_extralimital_st <- u_stat_i %in% c("out_of_range", "natureserve_exotic_or_waif")
+    is_exs_conflict_i <- isTRUE(exs_conf_dv[i]) && !is.na(exs_gold_tx_dv[i]) && nzchar(exs_gold_tx_dv[i]) && (exs_gold_tx_dv[i] != given_sp)
+    is_marginal_range_extension_i <- is_extralimital_st && is.finite(rf_given_p_i) && (rf_given_p_i >= 0.35) && (!is.finite(clim_z_i) || clim_z_i <= 3.0)
+    if (is_marginal_range_extension_i) is_marginal_ext_v[i] <- TRUE
+    has_obs_edaph_check_i <- (!is.na(edaph_sp_dv[i]) && nzchar(trimws(edaph_sp_dv[i]))) ||
+                             (!is.na(rf_pred_dv[i]) && nzchar(trimws(rf_pred_dv[i]))) ||
+                             is.finite(edaph_z_i) || !is.na(d_ed1_dv[i]) || !is.na(d_ed2_dv[i]) || !is.na(d_ed3_dv[i])
+    in_type_edaphic_env_i <- if (!has_geo_ll_i && is_extralimital_st && !has_obs_edaph_check_i) {
+      FALSE
+    } else if (is.finite(te_z_i)) {
+      (te_z_i <= 2.0)
+    } else {
+      (!is.finite(edaph_z_i) || edaph_z_i <= 2.0)
+    }
     # Rule C: Stage 3 & Stage 4 Autonymic (sensu stricto) Locking (restricted to homotypic basionyms when basionym tracking is present)
     bas_i <- if (!is.na(nt_bas_dv[i]) && nzchar(trimws(nt_bas_dv[i]))) trimws(nt_bas_dv[i]) else NA_character_
     is_heterotypic_bas_match_i <- !is.na(bas_i) && exists(".is_homotypic_sensu_stricto_basionym", mode = "function") &&
                                   !isTRUE(.is_homotypic_sensu_stricto_basionym(bas_i, given_sp)[1L])
-    is_sensu_stricto_locked_i <- is_typical_morph_i && in_type_edaphic_env_i && !is_heterotypic_bas_match_i
+    is_sensu_stricto_locked_i <- is_typical_morph_i && in_type_edaphic_env_i && !is_heterotypic_bas_match_i && !is_extralimital_st && !is_exs_conflict_i
 
     cl_key_i <- paste(given_sp, g_cl, sep = "||")
     cryptic_non_clinal_pass[i] <- if (g_cl > 1L && (cl_key_i %in% names(cryptic_non_clinal_map))) {
@@ -2423,6 +2718,8 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
     osr_geo_ok <- isTRUE(geo_osr_res$plausible) && (!is_intra || (if (has_ext_geo_ref) (is.finite(geo_osr_res$dist_km) && geo_osr_res$dist_km <= 250.0) else (!is.finite(geo_osr_res$dist_km) || geo_osr_res$dist_km <= 250.0)))
     osr_d2_ceil <- if (is_intra) stats::qchisq(0.50, df = max(1.0, osr_df_i)) else osr_chisq90
     osr_gold_eco_lock <- (det_t == "Tier_1_Gold") && has_obs_edaph_i && in_type_edaphic_env_i &&
+                         !is_extralimital_st && !is_exs_conflict_i &&
+                         !(is.finite(clim_z_i) && clim_z_i > 3.5 && (!is.finite(rf_given_p_i) || rf_given_p_i < 0.25)) &&
                          (is.na(exs_gold_tx_dv[i]) || exs_gold_tx_dv[i] != min_cong_tx_i) &&
                          (!edaph_is_taxon || edaph_sp == given_sp)
     congener_osr_reassign <- !is_type_specimen_i &&
@@ -2567,11 +2864,26 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
         pheno_supports_alt <- (da_obs <= 10.0) && (dg_obs >= 16.0)
       }
     }
+    if (is.finite(clim_z_i) && clim_z_i > 3.5 && (!is.finite(rf_given_p_i) || rf_given_p_i < 0.25)) {
+      pheno_supports_given <- FALSE
+    }
     exs_supports_given <- !is.na(exs_gold_tx_dv[i]) && nzchar(exs_gold_tx_dv[i]) && (exs_gold_tx_dv[i] == given_sp)
     exs_supports_alt <- !is.na(exs_gold_tx_dv[i]) && nzchar(exs_gold_tx_dv[i]) && !is.na(cand_alt_sp) && (exs_gold_tx_dv[i] == cand_alt_sp)
     any_non_outline_supports_alt <- eco_supports_alt || sec_organ_supports_alt || pheno_supports_alt || exs_supports_alt || geno_supports_alt ||
       (!is.na(nt_m_i) && !is.na(cand_alt_sp) && nt_m_i == cand_alt_sp && is.finite(tm_d2_i) && tm_d2_i > type_morph_chisq95)
     any_non_outline_supports_given <- eco_supports_given || sec_organ_supports_given || pheno_supports_given || exs_supports_given || geno_supports_given
+
+    exs_conflict_reassign <- !is_type_specimen_i && is_exs_conflict_i && !exs_supports_given
+    extralimital_biogeo_reassign <- !is_type_specimen_i && !is_sensu_stricto_locked_i && !exs_supports_given &&
+      !is_marginal_range_extension_i && is_extralimital_st &&
+      is.finite(clim_z_i) && (clim_z_i > 3.5) && (!is.finite(rf_given_p_i) || rf_given_p_i < 0.25) &&
+      !(morph_is_taxon && !is.null(morph_sp) && morph_sp == given_sp && is.finite(eff_cda_prob) && eff_cda_prob >= 0.75)
+    ungeoref_extralimital_reassign <- !is_type_specimen_i && !is_sensu_stricto_locked_i && !exs_supports_given &&
+      !is_marginal_range_extension_i && is_extralimital_st && !has_geo_ll_i &&
+      ((!is.null(morph_sp) && morph_is_taxon && morph_sp != given_sp && is.finite(eff_cda_prob) && eff_cda_prob >= 0.80) ||
+       (!is.na(min_cong_tx_i) && min_cong_tx_i != given_sp && is.finite(min_cong_d2_i) && min_cong_d2_i <= osr_chisq90 &&
+        (!morph_is_taxon || is.null(morph_sp) || morph_sp != given_sp)))
+    portal_lag_reassign <- exs_conflict_reassign || extralimital_biogeo_reassign || ungeoref_extralimital_reassign
 
     # 2. General Ontogenetic / Taphonomic Plasticity Rule (circular Hopkins-adjusted DOY quantile & edaphic envelope)
     in_edaphic_envelope <- (is.finite(edaph_z_i) && edaph_z_i <= 2.0) || (edaph_is_taxon && edaph_sp == given_sp)
@@ -2585,6 +2897,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
     is_taphonomic_plasticity <- (triage_cat != "Severe_Triple_Stream_Conflict") &&
                                 !both_alt_agree && !morph_edaph_alt_agree &&
                                 !type_control_reassign && !congener_osr_reassign &&
+                                !portal_lag_reassign &&
                                 in_edaphic_envelope && is_late_foliar_wear
 
     is_intermodal_mosaic <- FALSE
@@ -2671,15 +2984,40 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
         eff_triple_conflict || single_morph_reassign ||
         morph_corrupt_cand
       )) || (type_control_reassign && !exs_supports_given) || (congener_osr_reassign && !exs_supports_given)
-    )) || (geno_uncontradicted_reassign && !exs_supports_given)
+    )) || portal_lag_reassign || (geno_uncontradicted_reassign && !exs_supports_given)
     is_severe_misid <- is_misid
 
     geno_priority_override <- geno_uncontradicted_reassign && !is.na(geno_sp_i) &&
       (geno_g1_direct || !morph_edaph_alt_agree || (!is.null(morph_sp) && morph_sp == geno_sp_i))
 
     if (is_severe_misid) {
+      morph_allo_or_weak <- (!morph_is_taxon || is.null(morph_sp) || !isTRUE(.eval_taxon_geo_plausibility(i, morph_sp)$plausible) || (morph_sp == given_sp && is_extralimital_st))
+      rank_pl <- NULL
+      if (portal_lag_reassign) {
+        portal_lag_flag[i] <- TRUE
+        portal_lag_gate[i] <- if (exs_conflict_reassign) "Gate1_Exsiccatae_Conflict" else if (extralimital_biogeo_reassign) "Gate3_Extralimital_Bioclimatic" else "Gate3_Ungeoref_Extralimital"
+      }
       raw_target_sp <- if (geno_priority_override) {
         geno_sp_i
+      } else if (exs_conflict_reassign) {
+        exs_gold_tx_dv[i]
+      } else if (extralimital_biogeo_reassign || ungeoref_extralimital_reassign) {
+        rank_pl <- .rank_sympatric_congeners(
+          i, given_sp, morph_sp, cda_prob, cda_sec_taxon, cda_sec,
+          edaph_sp, edaph_is_taxon, rf_sp, rf_is_taxon, rf_prob,
+          min_cong_tx_i, nt_m_i, nt_e_i, te_z_i,
+          geno_is_taxon, geno_sp_i, geno_prob_i,
+          morph_allopatric_or_weak_self = TRUE
+        )
+        if (!is.null(rank_pl$best) && is.finite(rank_pl$max_score) && rank_pl$max_score >= 0.12) {
+          rank_pl$best
+        } else if (rf_is_taxon && rf_sp != given_sp && isTRUE(.eval_taxon_geo_plausibility(i, rf_sp)$plausible)) {
+          rf_sp
+        } else if (morph_is_taxon && !is.null(morph_sp) && morph_sp != given_sp && isTRUE(.eval_taxon_geo_plausibility(i, morph_sp)$plausible)) {
+          morph_sp
+        } else {
+          given_sp
+        }
       } else if (type_control_reassign && !is.null(type_control_target_sp)) {
         type_control_target_sp
       } else if (both_alt_agree && morph_is_taxon) {
@@ -2702,55 +3040,48 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
         sprintf(" [Disjunct Population Verified by Genomics (%.0f km from reference hull)]", ifelse(is.finite(raw_geo$dist_km), raw_geo$dist_km, 500.0))
       } else ""
       if (raw_target_sp != given_sp && !isTRUE(raw_geo$plausible) && !geno_exempt_geo_gate) {
-        cand_pool <- unique(stats::na.omit(c(
-          if (geno_is_taxon && geno_sp_i != given_sp) geno_sp_i else NA_character_,
-          if (morph_is_taxon && morph_sp != given_sp) morph_sp else NA_character_,
-          if (sec_is_taxon && cda_sec_taxon != given_sp) cda_sec_taxon else NA_character_,
-          if (!is.na(min_cong_tx_i) && min_cong_tx_i != given_sp) min_cong_tx_i else NA_character_,
-          if (!is.na(nt_m_i) && nt_m_i != given_sp) nt_m_i else NA_character_,
-          if (edaph_is_taxon && edaph_sp != given_sp) edaph_sp else NA_character_,
-          if (rf_is_taxon && rf_sp != given_sp) rf_sp else NA_character_,
-          setdiff(active_taxa, given_sp)
-        )))
-        cand_pool <- cand_pool[vapply(cand_pool, is_valid_taxon_str, logical(1)) & cand_pool != given_sp]
-        plaus_cands <- cand_pool[vapply(cand_pool, function(ctx) isTRUE(.eval_taxon_geo_plausibility(i, ctx)$plausible), logical(1))]
-        if (length(plaus_cands) >= 1L) {
-          score_cand <- function(ctx) {
-            gw <- .eval_taxon_geo_plausibility(i, ctx)$weight
-            ms <- if (!is.null(morph_sp) && morph_sp == ctx && is.finite(cda_prob)) cda_prob
-                  else if (!is.null(cda_sec_taxon) && cda_sec_taxon == ctx && is.finite(cda_sec)) cda_sec
-                  else if (!is.null(morph_X) && !is.null(morph_centroids) && !is.null(morph_S_inv) && (ctx %in% rownames(morph_centroids))) {
-                    xi <- morph_X[i, ]; bm <- if (given_sp %in% rownames(morph_centroids)) morph_centroids[given_sp, ] else colMeans(morph_centroids)
-                    xi[!is.finite(xi)] <- bm[!is.finite(xi)]
-                    dv <- xi - morph_centroids[ctx, ]
-                    exp(-0.25 * max(0.0, as.numeric(t(dv) %*% morph_S_inv %*% dv)))
-                  } else 0.15
-            es <- if (edaph_is_taxon && edaph_sp == ctx) (if (is.finite(rf_prob)) 0.35 * rf_prob else 0.20) else 0.0
-            ts <- if ((!is.na(min_cong_tx_i) && min_cong_tx_i == ctx) || (!is.na(nt_m_i) && nt_m_i == ctx)) 0.20 else 0.0
-            gs <- if (geno_is_taxon && !is.na(geno_sp_i) && geno_sp_i == ctx && is.finite(geno_prob_i)) 0.85 * geno_prob_i else 0.0
-            gw * (0.65 * ms + es + ts + gs)
-          }
-          cand_scores <- vapply(plaus_cands, score_cand, numeric(1))
-          best_plaus <- plaus_cands[which.max(cand_scores)]
-          if (max(cand_scores) >= 0.12) {
-            range_gated_note <- sprintf(" [Range-Gated from allopatric %s (%.0f km outside range)]", raw_target_sp, ifelse(is.finite(raw_geo$dist_km), raw_geo$dist_km, 500.0))
-            raw_target_sp <- best_plaus
-          } else {
-            # Allopatric prediction with no supported sympatric congener -> abstain from false reassignment
-            raw_target_sp <- given_sp
-          }
+        if (is.null(rank_pl)) {
+          rank_pl <- .rank_sympatric_congeners(
+            i, given_sp, morph_sp, cda_prob, cda_sec_taxon, cda_sec,
+            edaph_sp, edaph_is_taxon, rf_sp, rf_is_taxon, rf_prob,
+            min_cong_tx_i, nt_m_i, nt_e_i, te_z_i,
+            geno_is_taxon, geno_sp_i, geno_prob_i,
+            morph_allopatric_or_weak_self = morph_allo_or_weak
+          )
+        }
+        if (!is.null(rank_pl$best) && is.finite(rank_pl$max_score) && rank_pl$max_score >= 0.12) {
+          range_gated_note <- sprintf(" [Range-Gated from allopatric %s (%.0f km outside range)]", raw_target_sp, ifelse(is.finite(raw_geo$dist_km), raw_geo$dist_km, 500.0))
+          raw_target_sp <- rank_pl$best
         } else {
           raw_target_sp <- given_sp
         }
       }
       target_sp <- raw_target_sp
       if (target_sp == given_sp) {
+        portal_lag_flag[i] <- FALSE
+        portal_lag_gate[i] <- NA_character_
         status_calls[i] <- "Ecophenotypic_Plasticity"; rec_taxa[i] <- given_sp
         triage_prios[i] <- "MEDIUM"; triage_acts[i] <- "Annotate_Taphonomic_Ecophenotype"
         rationales[i] <- sprintf("Stage 4 Plasticity (Allopatric Reassignment Blocked): Morphological outlier retained as %s because candidate congener lies outside documented geographic range", given_sp)
         treat_broad[i] <- "Variety / Ecotype"; treat_sub[i] <- "Ecophenotypic_Plasticity"
         next
       }
+      portal_note_str <- if (portal_lag_flag[i]) {
+        peer_hit_s <- if (!is.null(rank_pl) && !is.null(rank_pl$peer_votes) && (target_sp %in% rank_pl$peer_votes$same_coll)) {
+          sprintf("; same-collector/deme peer=%s", target_sp)
+        } else ""
+        sprintf(
+          " [Portal Metadata Lag / Extralimital Audit: %s; identifiedBy=%s; loc=%s/%s; clim_z=%s; rf_given_p=%s%s%s]",
+          portal_lag_gate[i],
+          ifelse(!is.na(id_by_dv[i]) && nzchar(trimws(id_by_dv[i])), trimws(id_by_dv[i]), "Unknown"),
+          ifelse(nzchar(state_vec_geo[i]), state_vec_geo[i], "NA"),
+          ifelse(nzchar(cnty_raw_geo[i]), cnty_raw_geo[i], "NA"),
+          ifelse(is.finite(clim_z_i), sprintf("%.2f", clim_z_i), "NA"),
+          ifelse(is.finite(rf_given_p_i), sprintf("%.3f", rf_given_p_i), "NA"),
+          ifelse(exs_conflict_reassign, sprintf("; exsiccatae_gold=%s", exs_gold_tx_dv[i]), ""),
+          peer_hit_s
+        )
+      } else ""
       status_calls[i] <- "Misidentification_Severe"; rec_taxa[i] <- target_sp
       triage_prios[i] <- if (tier == "Tier_1_Gold") "CRITICAL" else "HIGH"; triage_acts[i] <- "Reassign_Determination"
       rationales[i] <- paste0(
@@ -2758,6 +3089,16 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
           sprintf(
             "Stage 1 Reassign (Independent Genomic Assignment): %s contradicted by %s genome (%s, posterior=%.2f, margin=%.2f); reassign to %s",
             given_sp, target_sp, ifelse(is.na(geno_tier_i), "Genomic", geno_tier_i), geno_prob_i, geno_marg_i, target_sp
+          )
+        } else if (exs_conflict_reassign) {
+          sprintf(
+            "Stage 1 Reassign (Exsiccatae Portal Metadata Lag): %s conflicts with verified in-range Tier_1_Gold isoduplicate %s; reassign to %s",
+            given_sp, target_sp, target_sp
+          )
+        } else if (extralimital_biogeo_reassign || ungeoref_extralimital_reassign) {
+          sprintf(
+            "Stage 1 Reassign (Extralimital / Portal Metadata Lag Audit): %s fails USDA/NatureServe county range (status=%s) and bioclimatic/morphometric support; reassign to %s",
+            given_sp, u_stat_i, target_sp
           )
         } else if (congener_osr_reassign && target_sp == min_cong_tx_i) {
           sprintf(
@@ -2775,7 +3116,8 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
         } else {
           sprintf("Stage 1 Reassign: %s contradicted across modalities (consensus_conflict=%.2f); reassign to %s", given_sp, p_conf_dv[i], target_sp)
         },
-        range_gated_note
+        range_gated_note,
+        portal_note_str
       )
       treat_broad[i] <- "Misidentification / Cryptic Species"; treat_sub[i] <- "Misidentification_Reassign"
       next
@@ -3207,6 +3549,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
       ref_conf_r <- s_idx[which(conf_leaf_s)[which.max(w_r[which(conf_leaf_s)])]]
       for (k_pos in seq_along(s_idx)) {
         r <- s_idx[k_pos]
+        if (portal_lag_flag[r]) next
         if (is_conf_s[k_pos] && rec_taxa[r] == sp_clean_vec[r]) next
         if (isTRUE(cyto_barrier_pass_v[r])) next
         if (!(treat_sub[r] %in% c("Hybrid_Introgressant", "Misidentification_Reassign", "Ecophenotypic_Plasticity") ||
@@ -3234,7 +3577,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
       best_r <- s_idx[cand_positions[which.max(w_r[cand_positions])]]
       for (k_pos in seq_along(s_idx)) {
         r <- s_idx[k_pos]
-        if (r == best_r) next
+        if (r == best_r || portal_lag_flag[r]) next
         if ((geno_gdi_oversplit_v[r] && treat_sub[best_r] == "Putative_Cryptic_Species") ||
             (tier0_abstain_dv[r] && (treat_sub[best_r] %in% c("Putative_Cryptic_Species", "Subspecies_Ecotype"))) ||
             (isTRUE(cyto_barrier_pass_v[r]) && (treat_sub[best_r] %in% c("Ecophenotypic_Plasticity", "Confirmed_Species")))) {
@@ -3312,6 +3655,15 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
       rationales[ai] <- paste0(rationales[ai], " [Tier_0 Abstention: Phenotypic overlap across genetically distinct lineages; DNA required]")
     }
   }
+  for (mi in which(is_marginal_ext_v & !portal_lag_flag & (treat_sub == "Confirmed_Species"))) {
+    if (!grepl("Marginal Range Extension Preserved", rationales[mi], fixed = TRUE)) {
+      rationales[mi] <- paste0(
+        rationales[mi],
+        sprintf(" [Marginal Range Extension Preserved: rf_given_p=%.3f, clim_z=%s]",
+                rf_given_p_dv[mi], ifelse(is.finite(clim_z_dv[mi]), sprintf("%.2f", clim_z_dv[mi]), "NA"))
+      )
+    }
+  }
 
   df$authority_weight <- aw_sheet_vec
   df$is_type_specimen <- as.logical(is_type_dv)
@@ -3323,6 +3675,9 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
   df$hybrid_zone_cohesion_pass <- as.logical(hybrid_zone_cohesion_pass)
   df$hybrid_parent_1 <- hybrid_parent_1
   df$hybrid_parent_2 <- hybrid_parent_2
+  df$portal_metadata_lag_flag <- as.logical(portal_lag_flag)
+  df$portal_lag_trigger_gate <- portal_lag_gate
+  df$is_marginal_range_extension <- as.logical(is_marginal_ext_v)
   df$taxonomic_status_call <- status_calls; df$recommended_determination <- rec_taxa
   df$synthesis_triage_priority <- triage_prios; df$synthesis_triage_action <- triage_acts
   df$synthesis_rationale <- rationales
@@ -3665,7 +4020,7 @@ build_triage_queue <- function(opts) {
     "doy", "decimalLatitude", "decimalLongitude",
     "soil_ph", "soil_sand", "soil_cec", "soil_bulk_density", "delta_doy",
     "fine_soil_ph", "fine_soil_sand", "fine_bedrock_depth_cm", "ssurgo_rock_outcrop_pct",
-    "edaphic_z_score", "type_edaphic_z_score", "climatic_z_score", "spatial_block_cv_acc", "rf_predicted_prob",
+    "edaphic_z_score", "type_edaphic_z_score", "climatic_z_score", "spatial_block_cv_acc", "rf_predicted_prob", "rf_given_taxon_prob",
     "petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio",
     "plant_height_cm", "scape_to_basal_leaf_ratio",
     "capitula_count", "log1p_capitulum_count", "involucre_height_mm", "involucre_width_mm", "AR_inv", "blade_cie_l_norm", "blade_cie_l_sd"
@@ -3997,20 +4352,50 @@ build_triage_queue <- function(opts) {
   if (exists("export_genomic_field_triage_csv", mode = "function")) {
     tryCatch(export_genomic_field_triage_csv(opts, vouchers), error = function(e) warning("Genomic field triage export note: ", e$message))
   }
-  if (!is.null(prop_sum) && isTRUE(prop_sum$active) && is.data.frame(prop_sum$table) && nrow(prop_sum$table) > 0L) {
-    reports_dir <- if (!is.null(opts$output_report) && nzchar(opts$output_report)) {
-      dirname(opts$output_report)
-    } else if (!is.null(opts$output_complexes) && nzchar(opts$output_complexes)) {
-      dirname(opts$output_complexes)
-    } else if (!is.null(opts$output_html) && nzchar(opts$output_html)) {
-      dirname(opts$output_html)
-    } else if (!is.null(opts$output_queue) && nzchar(opts$output_queue)) {
-      q_dir <- dirname(opts$output_queue)
-      if (basename(q_dir) == "tables") file.path(dirname(q_dir), "reports") else q_dir
-    } else {
-      "outputs/reports"
+  reports_dir <- if (!is.null(opts$output_report) && nzchar(opts$output_report)) {
+    dirname(opts$output_report)
+  } else if (!is.null(opts$output_complexes) && nzchar(opts$output_complexes)) {
+    dirname(opts$output_complexes)
+  } else if (!is.null(opts$output_html) && nzchar(opts$output_html)) {
+    dirname(opts$output_html)
+  } else if (!is.null(opts$output_queue) && nzchar(opts$output_queue)) {
+    q_dir <- dirname(opts$output_queue)
+    if (basename(q_dir) == "tables") file.path(dirname(q_dir), "reports") else q_dir
+  } else {
+    "outputs/reports"
+  }
+  dir.create(reports_dir, recursive = TRUE, showWarnings = FALSE)
+  tryCatch({
+    audit_cols <- c(
+      "catalogNumber", "institutionCode", "species_standardized", "identifiedBy", "determiner_tier",
+      "recordedBy", "recordNumber", "stateProvince", "county", "usda_county_status",
+      "exsiccatae_key", "exsiccatae_taxonomic_conflict", "exsiccatae_gold_taxon",
+      "climatic_z_score", "rf_given_taxon_prob", "cda_predicted_taxon", "cda_posterior_prob",
+      "rf_predicted_taxon", "rf_predicted_prob", "portal_lag_trigger_gate",
+      "portal_metadata_lag_flag", "is_marginal_range_extension",
+      "recommended_determination", "synthesis_triage_action", "taxonomic_treatment_subtype",
+      "synthesis_rationale"
+    )
+    n_v <- nrow(vouchers)
+    u_aud <- if ("usda_county_status" %in% names(vouchers)) tolower(trimws(ifelse(is.na(vouchers$usda_county_status), "", as.character(vouchers$usda_county_status)))) else rep("", n_v)
+    ex_aud <- if ("exsiccatae_taxonomic_conflict" %in% names(vouchers)) (!is.na(suppressWarnings(as.integer(vouchers$exsiccatae_taxonomic_conflict))) & suppressWarnings(as.integer(vouchers$exsiccatae_taxonomic_conflict)) != 0L) else rep(FALSE, n_v)
+    pl_aud <- if ("portal_metadata_lag_flag" %in% names(vouchers)) (!is.na(vouchers$portal_metadata_lag_flag) & as.logical(vouchers$portal_metadata_lag_flag)) else rep(FALSE, n_v)
+    aud_mask <- (u_aud %in% c("out_of_range", "natureserve_exotic_or_waif")) | ex_aud | pl_aud
+    aud_df <- vouchers[aud_mask, , drop = FALSE]
+    for (ac in audit_cols) {
+      if (!(ac %in% names(aud_df))) aud_df[[ac]] <- if (nrow(aud_df) > 0L) NA else character(0)
     }
-    dir.create(reports_dir, recursive = TRUE, showWarnings = FALSE)
+    aud_df <- aud_df[, audit_cols, drop = FALSE]
+    if (nrow(aud_df) > 0L && ("institutionCode" %in% names(aud_df))) {
+      aud_df <- aud_df[order(ifelse(is.na(aud_df$institutionCode), "", as.character(aud_df$institutionCode)),
+                             ifelse(is.na(aud_df$catalogNumber), "", as.character(aud_df$catalogNumber))), , drop = FALSE]
+    }
+    aud_out <- file.path(reports_dir, "portal_metadata_lag_audit.csv")
+    tmp_aud <- paste0(aud_out, ".tmp")
+    .write_triage_fast(aud_df, tmp_aud, na_str = "NA")
+    file.rename(tmp_aud, aud_out)
+  }, error = function(e) warning("Portal metadata lag audit CSV export note: ", e$message))
+  if (!is.null(prop_sum) && isTRUE(prop_sum$active) && is.data.frame(prop_sum$table) && nrow(prop_sum$table) > 0L) {
     prop_out <- file.path(reports_dir, "unsequenced_genomic_propagation_summary.csv")
     tmp_prop <- paste0(prop_out, ".tmp")
     utils::write.csv(prop_sum$table, tmp_prop, row.names = FALSE)

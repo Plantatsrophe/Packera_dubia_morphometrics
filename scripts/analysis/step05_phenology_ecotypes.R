@@ -3,6 +3,46 @@
 # Extracted from 05_multimodal_spatial_rf.R
 # ==============================================================================
 
+.is_step05_extralimital_non_type <- function(df, group_vec = NULL, clean_base_mask = NULL, is_type_vec = NULL) {
+  if (is.null(df) || !is.data.frame(df) || nrow(df) == 0L) {
+    return(logical(0))
+  }
+  n <- nrow(df)
+  is_t <- if (!is.null(is_type_vec) && length(is_type_vec) == n) {
+    as.logical(is_type_vec)
+  } else if (exists(".identify_type_specimen_vec", mode = "function")) {
+    as.logical(.identify_type_specimen_vec(df)$is_type_specimen)
+  } else if ("is_type_specimen" %in% names(df)) {
+    as.logical(df$is_type_specimen)
+  } else {
+    rep(FALSE, n)
+  }
+  is_t[is.na(is_t)] <- FALSE
+  usda_st <- if ("usda_county_status" %in% names(df)) tolower(trimws(as.character(df$usda_county_status))) else rep("", n)
+  usda_st[is.na(usda_st)] <- ""
+  is_out <- usda_st %in% c("out_of_range", "natureserve_exotic_or_waif")
+  ex_conf <- if ("exsiccatae_taxonomic_conflict" %in% names(df)) {
+    raw_ec <- df$exsiccatae_taxonomic_conflict
+    if (is.logical(raw_ec)) !is.na(raw_ec) & raw_ec
+    else if (is.numeric(raw_ec)) !is.na(raw_ec) & (raw_ec != 0)
+    else tolower(trimws(as.character(raw_ec))) %in% c("true", "1", "t", "yes")
+  } else {
+    rep(FALSE, n)
+  }
+  raw_mask <- (!is_t) & (is_out | ex_conf)
+  if (!any(raw_mask)) return(raw_mask)
+  g_v <- if (!is.null(group_vec) && length(group_vec) == n) as.character(group_vec) else if ("species_standardized" %in% names(df)) as.character(df$species_standardized) else rep("ALL", n)
+  base_m <- if (!is.null(clean_base_mask) && length(clean_base_mask) == n) as.logical(clean_base_mask) else rep(TRUE, n)
+  base_m[is.na(base_m)] <- FALSE
+  out_mask <- rep(FALSE, n)
+  for (tx_chk in unique(g_v[!is.na(g_v) & nzchar(g_v)])) {
+    if (sum(base_m & !is.na(g_v) & (g_v == tx_chk) & !raw_mask) >= 2L) {
+      out_mask[!is.na(g_v) & (g_v == tx_chk) & raw_mask] <- TRUE
+    }
+  }
+  out_mask
+}
+
 # ------------------------------------------------------------------------------
 # 2d. Latitudinal Spring Baseline & Phenological Anomalies (Delta DOY) Engine
 # ------------------------------------------------------------------------------
@@ -420,6 +460,9 @@ compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = 
     cl_ph <- as.logical(df$is_confident_label_noise); cl_ph[is.na(cl_ph)] <- FALSE
     is_active_ref <- is_active_ref & (!cl_ph | is_t_ph)
   }
+  ph_grp_v <- if ("species_standardized" %in% names(df)) as.character(df$species_standardized) else rep("ALL", nrow(df))
+  ext_ph_mask <- .is_step05_extralimital_non_type(df, group_vec = ph_grp_v, clean_base_mask = is_active_ref, is_type_vec = is_t_ph)
+  is_active_ref <- is_active_ref & !ext_ph_mask
 
   anthesis_cohort <- df[df$is_verified_anthesis & is_active_ref, , drop = FALSE]
   if (nrow(anthesis_cohort) < 5L) anthesis_cohort <- df[df$is_verified_anthesis, , drop = FALSE]
@@ -1304,7 +1347,8 @@ resolve_active_anchor_groups <- function(df, intraspecific_mode = FALSE) {
 
   tier_ok <- grepl("Tier_1|Gold|Tier_2|Silver", det_t, ignore.case = TRUE) | is_prom | is_t_anc
   valid_g <- !is.na(g_raw) & nzchar(g_raw) & (g_raw != "Unknown") & not_noise
-  base_anc <- tier_ok & elig & valid_g
+  ext_anc_m <- .is_step05_extralimital_non_type(df, group_vec = g_raw, clean_base_mask = (tier_ok & elig & valid_g), is_type_vec = is_t_anc)
+  base_anc <- tier_ok & elig & valid_g & !ext_anc_m
   is_anc <- base_anc & !miss_gmm
   if (sum(is_anc) < 4L) is_anc <- base_anc
   if (!any(tier_ok) && sum(is_anc) == 0L) {

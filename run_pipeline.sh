@@ -929,6 +929,7 @@ fi
 run_preflight_subset_filter() {
   echo "[Preflight] Balancing/filtering ${RUN_DIR}/data/tables/ for taxa='${CUSTOM_TAXA_CSV:-}' focal='${FOCAL_TAXON:-}' exclude='${EXCLUDE_TAXON_CSV:-}' determiner_tier='${DETERMINER_TIER:-}' exclude_misidentified='${EXCLUDE_MISIDENTIFIED:-false}' spatial_thin_km='${SPATIAL_THIN_KM:-0}' max_per_state='${MAX_PER_STATE:-}' max_per_region='${MAX_PER_REGION:-}' no_spatial_weights='${NO_SPATIAL_WEIGHTS:-false}'..."
   "${PYTHON_MAIN}" -c "
+import math
 import os
 import re
 import shutil
@@ -1044,6 +1045,43 @@ if requested_taxa and os.environ.get('PLANTMATICS_DEMO_MODE') != '1' and os.envi
 df = pd.read_csv(csv_path)
 initial_voucher_count = len(df)
 
+non_demo_pf = (
+    os.environ.get('PLANTMATICS_DEMO_MODE') != '1'
+    and os.environ.get('PACKERA_DEMO_MODE') != '1'
+)
+target_db_path = os.environ.get('PLANTMATICS_DB_PATH') or os.environ.get('PACKERA_DB_PATH') or str(root_data / 'plantmatics.sqlite')
+if non_demo_pf and Path(target_db_path).is_file() and not df.empty and 'catalogNumber' in df.columns:
+    try:
+        from scripts.core.db import get_db_connection as _get_db_hyd
+        _conn_hyd = _get_db_hyd(db_path=target_db_path, init_schema=False, read_only=True, workspace_root=root_data.parent)
+        try:
+            _vcols = {r[1] for r in _conn_hyd.execute('PRAGMA table_info(vouchers)').fetchall()}
+            _hyd_cols = [c for c in ('usda_symbol', 'usda_county_status', 'exsiccatae_key', 'exsiccatae_taxonomic_conflict', 'exsiccatae_gold_taxon') if c in _vcols]
+            if _hyd_cols:
+                _rows_h = _conn_hyd.execute(
+                    'SELECT catalogNumber, ' + ', '.join(_hyd_cols) + ' FROM vouchers'
+                ).fetchall()
+                _hmap = {str(r[0]).strip(): dict(zip(_hyd_cols, r[1:])) for r in _rows_h if r[0] is not None}
+                _cats_df = df['catalogNumber'].astype(str).str.strip().tolist()
+                for _hc in _hyd_cols:
+                    if _hc not in df.columns:
+                        df[_hc] = [
+                            _hmap.get(_c, {}).get(_hc)
+                            for _c in _cats_df
+                        ]
+                    else:
+                        _cur_vals = df[_hc].tolist()
+                        _new_vals = []
+                        for _c, _cv in zip(_cats_df, _cur_vals):
+                            _is_empty = _cv is None or (isinstance(_cv, float) and math.isnan(_cv)) or str(_cv).strip() in ('', 'None', 'nan')
+                            _hv = _hmap.get(_c, {}).get(_hc)
+                            _new_vals.append(_hv if (_is_empty and _hv is not None and str(_hv).strip() not in ('', 'None', 'nan')) else _cv)
+                        df[_hc] = _new_vals
+        finally:
+            _conn_hyd.close()
+    except Exception:
+        pass
+
 sn_vals = df['scientificName'] if 'scientificName' in df.columns else [None] * len(df)
 sr_vals = df['species_raw'] if 'species_raw' in df.columns else [None] * len(df)
 ss_vals = df['species_standardized'] if 'species_standardized' in df.columns else (df['species'] if 'species' in df.columns else [None] * len(df))
@@ -1099,7 +1137,6 @@ from scripts.core.db import (
     populate_run_active_cohort,
     query_misidentified_vouchers_from_db,
 )
-target_db_path = os.environ.get('PLANTMATICS_DB_PATH') or os.environ.get('PACKERA_DB_PATH') or str(root_data / 'plantmatics.sqlite')
 
 misidentified_cats = set()
 if exclude_misidentified:
@@ -1226,35 +1263,87 @@ if exclude_taxa:
     retained_taxa = sorted([str(t).strip() for t in df['species_standardized'].dropna().unique().tolist() if str(t).strip()])
     print(f'[Preflight: Exclude Taxa] Excluded {sorted([str(t) for t in exclude_taxa if t])}: retained {len(df)} / {before_n} vouchers across {retained_taxa}.')
 
-if usda_filter_arg == 'true' and (reuse_canonical or start_step_val >= 2):
-    from scripts.core.db import load_taxon_synonyms
-    from scripts.core.usda_plants_ranges import filter_vouchers_by_usda_county_range
-    syn_map_pf = {}
-    if os.environ.get('PLANTMATICS_DEMO_MODE') != '1' and os.environ.get('PACKERA_DEMO_MODE') != '1' and Path(target_db_path).is_file():
+default_usda_cache_pf = root_data / 'environmental' / 'usda_plants'
+has_local_usda_pf = (
+    (default_usda_cache_pf / 'plantlst.txt').is_file()
+    or (default_usda_cache_pf / 'distributions').is_dir()
+)
+syn_map_pf = {}
+has_sqlite_usda_pf = False
+if non_demo_pf and Path(target_db_path).is_file():
+    try:
+        conn_syn = get_db_connection(db_path=target_db_path, init_schema=False, read_only=True, workspace_root=root_data.parent)
         try:
-            conn_syn = get_db_connection(db_path=target_db_path, read_only=True, workspace_root=root_data.parent)
-            try:
-                syn_map_pf = load_taxon_synonyms(conn_syn)
-            finally:
-                conn_syn.close()
-        except Exception:
-            syn_map_pf = {}
+            from scripts.core.db import load_taxon_synonyms
+            syn_map_pf = load_taxon_synonyms(conn_syn)
+            _u_cnt = conn_syn.execute('SELECT COUNT(*) FROM sqlite_master WHERE type=? AND name=?', ('table', 'usda_county_ranges')).fetchone()[0]
+            if _u_cnt:
+                has_sqlite_usda_pf = bool(conn_syn.execute('SELECT 1 FROM usda_county_ranges LIMIT 1').fetchone())
+        finally:
+            conn_syn.close()
+    except Exception:
+        syn_map_pf = {}
+
+if (reuse_canonical or start_step_val >= 2) and (usda_filter_arg == 'true' or has_local_usda_pf or has_sqlite_usda_pf):
+    from scripts.core.usda_plants_ranges import filter_vouchers_by_usda_county_range
     before_usda_n = len(df)
+    _drop_flag = (usda_filter_arg == 'true')
     df_usda, usda_pf_stats = filter_vouchers_by_usda_county_range(
         df=df,
         standardize_taxon_fn=standardize_packera_taxon,
         synonym_to_canonical=syn_map_pf,
         county_buffer_km=usda_buffer_arg,
         exempt_gold=usda_exempt_gold_arg,
-        db_path=target_db_path if os.environ.get('PLANTMATICS_DEMO_MODE') != '1' and os.environ.get('PACKERA_DEMO_MODE') != '1' else None,
+        db_path=target_db_path if non_demo_pf else None,
         workspace_dir=root_data.parent,
-        allow_network=(os.environ.get('PLANTMATICS_DEMO_MODE') != '1' and os.environ.get('PACKERA_DEMO_MODE') != '1'),
+        allow_network=(_drop_flag and non_demo_pf),
+        drop_out_of_range=_drop_flag,
     )
-    df = df_usda.drop(columns=[c for c in ('usda_symbol', 'usda_county_status') if c in df_usda.columns])
+    df = df_usda
     print(
-        f'[Preflight: USDA County Range Filter] Retained {len(df)} / {before_usda_n} vouchers '
+        f'[Preflight: USDA County Range Audit/Filter (drop_out_of_range={_drop_flag})] '
+        f'Retained {len(df)} / {before_usda_n} vouchers '
         f'(buffer={usda_buffer_arg:.1f} km, exempt_gold={usda_exempt_gold_arg}; stats={usda_pf_stats}).'
     )
+
+if non_demo_pf and Path(target_db_path).is_file() and not df.empty:
+    try:
+        from scripts.core.taxonomy_authority import reconcile_cross_taxon_exsiccatae_with_db
+        conn_rec_pf = get_db_connection(db_path=target_db_path, init_schema=False, workspace_root=root_data.parent)
+        try:
+            if 'exsiccatae_key' in df.columns:
+                df = reconcile_cross_taxon_exsiccatae_with_db(df, conn_rec_pf, standardize_fn=standardize_packera_taxon)
+            # Persist refreshed USDA range and exsiccatae conflict fields back onto SQLite vouchers
+            _v_cols_upd = {r[1] for r in conn_rec_pf.execute('PRAGMA table_info(vouchers)').fetchall()}
+            _sync_cols = [c for c in ('usda_symbol', 'usda_county_status', 'exsiccatae_taxonomic_conflict', 'exsiccatae_gold_taxon') if c in _v_cols_upd and c in df.columns]
+            if _sync_cols and 'catalogNumber' in df.columns:
+                _q2 = chr(39) * 2
+                _set_expr = ', '.join(f'{c} = COALESCE(NULLIF(?, {_q2}), {c})' if c != 'exsiccatae_taxonomic_conflict' else f'{c} = MAX(COALESCE({c}, 0), ?)' for c in _sync_cols)
+                _upd_rows = []
+                for _, _ur in df.iterrows():
+                    _cat_u = str(_ur.get('catalogNumber') or '').strip()
+                    if not _cat_u:
+                        continue
+                    _vals_u = []
+                    for _sc in _sync_cols:
+                        _v = _ur.get(_sc)
+                        if _sc == 'exsiccatae_taxonomic_conflict':
+                            _vals_u.append(1 if (_v is True or str(_v).strip().lower() in ('true', '1', 't', 'yes')) else 0)
+                        else:
+                            _sv = '' if (_v is None or (isinstance(_v, float) and math.isnan(_v))) else str(_v).strip()
+                            _vals_u.append('' if _sv in ('None', 'nan') else _sv)
+                    _vals_u.append(_cat_u)
+                    _upd_rows.append(tuple(_vals_u))
+                if _upd_rows:
+                    conn_rec_pf.executemany(
+                        f'UPDATE vouchers SET {_set_expr} WHERE catalogNumber = ?',
+                        _upd_rows,
+                    )
+                    conn_rec_pf.commit()
+        finally:
+            conn_rec_pf.close()
+    except Exception:
+        pass
 
 if focal_raw:
     focal_taxon = standardize_packera_taxon(focal_raw)
@@ -1371,6 +1460,7 @@ if focal_raw:
             outgroup_taxa,
             max_anchors=gold_anchors,
             workspace_dir=root_data.parent,
+            focal_df=focal_df,
         )
         subset_df = pd.concat([focal_df] + outgroup_dfs, ignore_index=True) if outgroup_dfs else focal_df
         print(
@@ -1657,6 +1747,7 @@ if [[ "${START_STEP}" -le 2 && "${REUSE_CANONICAL_DATA}" == "false" ]]; then
   cp -alf "${RUN_DIR}/data/cropped_patches/." "${PROJECT_ROOT}/data/cropped_patches/" 2>/dev/null || cp -rf "${RUN_DIR}/data/cropped_patches/." "${PROJECT_ROOT}/data/cropped_patches/"
   if [[ "${CUSTOM_GEO_SCOPE}" != "true" && -z "${FOCAL_TAXON}" && -z "${EXCLUDE_TAXON_CSV}" && -z "${DETERMINER_TIER}" && "${GOLD_ONLY}" != "true" && "${EXCLUDE_MISIDENTIFIED}" != "true" && ${#LIMIT_ARG[@]} -eq 0 ]]; then
     "${PYTHON_MAIN}" -c "
+import math
 import os
 from pathlib import Path
 run_tables = Path('${RUN_DIR}/data/tables')

@@ -297,6 +297,25 @@ def _resolve_row_standardized_packera(row: Mapping[str, Any]) -> str:
     return ""
 
 
+def _is_extralimital_status(row_or_status: Any) -> bool:
+    """Return True if a voucher row carries an out-of-range or exotic/waif USDA/NatureServe flag."""
+    if isinstance(row_or_status, dict) or (pd is not None and isinstance(row_or_status, pd.Series)):
+        raw_st = row_or_status.get("usda_county_status")
+    else:
+        raw_st = row_or_status
+    if raw_st is None or (pd is not None and pd.isna(raw_st)):
+        return False
+    return str(raw_st).strip().lower() in {"out_of_range", "natureserve_exotic_or_waif"}
+
+
+def _as_bool_flag(val: Any) -> bool:
+    if val is None or (pd is not None and pd.isna(val)):
+        return False
+    if isinstance(val, bool):
+        return val
+    return str(val).strip().lower() in {"true", "1", "t", "yes"}
+
+
 def stratify_duplicates(
     df: pd.DataFrame,
     max_distance_meters: float = 50.0,
@@ -503,8 +522,13 @@ def stratify_duplicates(
 
     idx_to_pos: Dict[Any, int] = {idx_lbl: pos for pos, idx_lbl in enumerate(df.index)}
     is_primary_list = [False] * n_rows
-    conflict_list = [False] * n_rows
-    gold_taxon_list = [""] * n_rows
+    pre_conf_col = df["exsiccatae_taxonomic_conflict"] if "exsiccatae_taxonomic_conflict" in df.columns else [False] * n_rows
+    pre_gold_col = df["exsiccatae_gold_taxon"] if "exsiccatae_gold_taxon" in df.columns else [""] * n_rows
+    conflict_list = [_as_bool_flag(v) for v in pre_conf_col]
+    gold_taxon_list = [
+        "" if (v is None or (pd is not None and pd.isna(v))) else str(v).strip()
+        for v in pre_gold_col
+    ]
     elevations_to_apply: List[Tuple[Any, str, Any]] = []
 
     for key, group_df in grouped:
@@ -517,6 +541,7 @@ def stratify_duplicates(
         idx_to_std_tx: Dict[Any, str] = {}
         idx_to_tier: Dict[Any, str] = {}
         idx_to_score: Dict[Any, Tuple[Any, ...]] = {}
+        idx_to_extra: Dict[Any, bool] = {}
 
         for idx in indices:
             row = group_df.loc[idx]
@@ -530,6 +555,10 @@ def stratify_duplicates(
             type_rank, _ = classify_nomenclatural_type_rank(raw_ts)
             type_subrank = classify_nomenclatural_type_subrank(raw_ts)
             has_type = int(type_rank)
+
+            # Priority 1.5: Documented in-range status ahead of extralimital sheets
+            is_extra_i = _is_extralimital_status(row)
+            in_range_rank = 0 if is_extra_i else 1
 
             # Priority 2: Home Herbarium (default: NCU, configurable via home_herbarium)
             target_home = str(home_herbarium).strip().upper() if home_herbarium else ""
@@ -547,48 +576,65 @@ def stratify_duplicates(
 
             cat_tiebreak = str(row.get("catalogNumber", idx))
 
-            score_tuple = (has_type, type_subrank, is_home_herb, tier_score, res_score, cat_tiebreak)
+            score_tuple = (has_type, type_subrank, in_range_rank, is_home_herb, tier_score, res_score, cat_tiebreak)
             scored_candidates.append((score_tuple, idx))
             idx_to_std_tx[idx] = _resolve_row_standardized_packera(row)
             idx_to_tier[idx] = tier
             idx_to_score[idx] = score_tuple
+            idx_to_extra[idx] = is_extra_i
 
         distinct_taxa = {tx for tx in idx_to_std_tx.values() if tx}
+        inrange_taxa = {idx_to_std_tx[idx] for idx in indices if idx_to_std_tx.get(idx) and not idx_to_extra.get(idx, False)}
         has_conflict = len(distinct_taxa) >= 2
 
-        gold_counts: Dict[str, int] = {}
-        gold_best_idx: Dict[str, Any] = {}
+        inrange_gold_counts: Dict[str, int] = {}
+        inrange_gold_best_idx: Dict[str, Any] = {}
+        all_gold_counts: Dict[str, int] = {}
+        all_gold_best_idx: Dict[str, Any] = {}
         for idx in indices:
             tx_i = idx_to_std_tx.get(idx, "")
             if idx_to_tier.get(idx) == "Tier_1_Gold" and tx_i:
-                gold_counts[tx_i] = gold_counts.get(tx_i, 0) + 1
-                if tx_i not in gold_best_idx or idx_to_score[idx] > idx_to_score[gold_best_idx[tx_i]]:
-                    gold_best_idx[tx_i] = idx
+                all_gold_counts[tx_i] = all_gold_counts.get(tx_i, 0) + 1
+                if tx_i not in all_gold_best_idx or idx_to_score[idx] > idx_to_score[all_gold_best_idx[tx_i]]:
+                    all_gold_best_idx[tx_i] = idx
+                if not idx_to_extra.get(idx, False) and not conflict_list[idx_to_pos[idx]]:
+                    inrange_gold_counts[tx_i] = inrange_gold_counts.get(tx_i, 0) + 1
+                    if tx_i not in inrange_gold_best_idx or idx_to_score[idx] > idx_to_score[inrange_gold_best_idx[tx_i]]:
+                        inrange_gold_best_idx[tx_i] = idx
 
         best_gold_taxon = ""
         best_gold_source_idx: Any = None
-        if gold_counts:
+        best_gold_from_inrange = False
+        active_gold_counts = inrange_gold_counts if inrange_gold_counts else all_gold_counts
+        active_gold_best = inrange_gold_best_idx if inrange_gold_counts else all_gold_best_idx
+        if active_gold_counts:
+            best_gold_from_inrange = bool(inrange_gold_counts)
             ranked_gold = sorted(
-                gold_counts.keys(),
-                key=lambda tx: (gold_counts[tx], idx_to_score[gold_best_idx[tx]]),
+                active_gold_counts.keys(),
+                key=lambda tx: (active_gold_counts[tx], idx_to_score[active_gold_best[tx]]),
                 reverse=True,
             )
             best_gold_taxon = ranked_gold[0]
-            best_gold_source_idx = gold_best_idx[best_gold_taxon]
+            best_gold_source_idx = active_gold_best[best_gold_taxon]
 
-        multi_gold_disagreement = len(gold_counts) >= 2
+        multi_gold_disagreement = len(active_gold_counts) >= 2
+        unanimous_inrange_tx = next(iter(inrange_taxa)) if len(inrange_taxa) == 1 else ""
         for idx in indices:
             pos_i = idx_to_pos[idx]
             row_tx_i = idx_to_std_tx.get(idx, "")
             if not has_conflict:
                 row_conflict = False
-            elif multi_gold_disagreement or not best_gold_taxon:
-                row_conflict = True
-            else:
+            elif best_gold_taxon and not multi_gold_disagreement:
                 # Unanimous Tier_1_Gold consensus exists: flag only sheets whose label disagreed with Gold consensus
                 row_conflict = bool(row_tx_i and row_tx_i != best_gold_taxon)
-            conflict_list[pos_i] = row_conflict
-            gold_taxon_list[pos_i] = best_gold_taxon
+            elif unanimous_inrange_tx:
+                # Unanimous in-range determination across duplicates: flag only disagreeing extralimital duplicates
+                row_conflict = bool(idx_to_extra.get(idx, False) and row_tx_i and row_tx_i != unanimous_inrange_tx)
+            else:
+                row_conflict = True
+            conflict_list[pos_i] = bool(conflict_list[pos_i] or row_conflict)
+            if best_gold_taxon and not (not best_gold_from_inrange and not idx_to_extra.get(idx, False)):
+                gold_taxon_list[pos_i] = best_gold_taxon
 
         scored_candidates.sort(key=lambda x: x[0], reverse=True)
         primary_idx = scored_candidates[0][1]
@@ -602,6 +648,7 @@ def stratify_duplicates(
             and best_gold_source_idx is not None
             and primary_tier in {"Tier_3_Bronze", ""}
             and primary_tx != best_gold_taxon
+            and not (not best_gold_from_inrange and not idx_to_extra.get(primary_idx, False))
         ):
             elevations_to_apply.append((primary_idx, best_gold_taxon, best_gold_source_idx))
 
@@ -644,6 +691,191 @@ def stratify_duplicates(
         )
 
     return df
+
+
+def reconcile_cross_taxon_exsiccatae_with_db(
+    df: pd.DataFrame,
+    conn: Any,
+    standardize_fn: Optional[Any] = None,
+) -> pd.DataFrame:
+    """
+    Cross-reference `exsiccatae_key` across the full SQLite `vouchers` table so duplicate
+    sheets filed under separate online species still detect taxonomic disagreement and
+    in-range specialist annotations.
+    """
+    if pd is None or df is None or df.empty or conn is None or "exsiccatae_key" not in df.columns:
+        return df
+
+    try:
+        has_tbl = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='vouchers' LIMIT 1"
+        ).fetchone()
+    except Exception:
+        return df
+    if not has_tbl:
+        return df
+
+    raw_keys = [
+        str(v).strip()
+        for v in df["exsiccatae_key"].dropna().unique().tolist()
+        if str(v).strip() and str(v).strip().lower() not in {"none", "nan"}
+    ]
+    if not raw_keys:
+        return df
+
+    try:
+        v_cols = {r[1] for r in conn.execute("PRAGMA table_info(vouchers)").fetchall()}
+    except Exception:
+        return df
+
+    want_cols = [
+        c
+        for c in (
+            "catalogNumber",
+            "exsiccatae_key",
+            "species_standardized",
+            "scientificName",
+            "species_raw",
+            "determiner_tier",
+            "usda_county_status",
+        )
+        if c in v_cols
+    ]
+    if "exsiccatae_key" not in want_cols:
+        return df
+
+    db_rows: List[Dict[str, Any]] = []
+    sel_sql = ", ".join(want_cols)
+    for start in range(0, len(raw_keys), 500):
+        chunk = raw_keys[start : start + 500]
+        ph = ", ".join(["?"] * len(chunk))
+        try:
+            cur = conn.execute(
+                f"SELECT {sel_sql} FROM vouchers WHERE exsiccatae_key IN ({ph})",
+                chunk,
+            )
+            for row_t in cur.fetchall():
+                db_rows.append(dict(zip(want_cols, row_t)))
+        except Exception:
+            continue
+
+    if not db_rows:
+        return df
+
+    def _std_tx(rec: Any) -> str:
+        raw_val = ""
+        for fld in ("species_standardized", "scientificName", "species_raw"):
+            v = rec.get(fld) if isinstance(rec, dict) else rec.get(fld, None)
+            if v is not None and not (pd is not None and pd.isna(v)) and str(v).strip():
+                raw_val = str(v).strip()
+                break
+        if not raw_val:
+            return ""
+        if standardize_fn is not None:
+            try:
+                res = standardize_fn(raw_val)
+                if res:
+                    return str(res).strip()
+            except Exception:
+                pass
+        return _resolve_row_standardized_packera(rec if isinstance(rec, dict) else rec)
+
+    # Index DB records grouped by exsiccatae_key
+    db_by_key: Dict[str, List[Dict[str, Any]]] = {}
+    for drec in db_rows:
+        ek = str(drec.get("exsiccatae_key") or "").strip()
+        if ek:
+            db_by_key.setdefault(ek, []).append(drec)
+
+    out_df = df.copy()
+    if "exsiccatae_taxonomic_conflict" not in out_df.columns:
+        out_df["exsiccatae_taxonomic_conflict"] = False
+    if "exsiccatae_gold_taxon" not in out_df.columns:
+        out_df["exsiccatae_gold_taxon"] = ""
+
+    conf_vals = [_as_bool_flag(v) for v in out_df["exsiccatae_taxonomic_conflict"].tolist()]
+    gold_vals = [
+        "" if (v is None or pd.isna(v)) else str(v).strip()
+        for v in out_df["exsiccatae_gold_taxon"].tolist()
+    ]
+
+    for key, idx_lbls in out_df.groupby("exsiccatae_key", sort=False).groups.items():
+        ek = str(key or "").strip()
+        if not ek or ek not in db_by_key:
+            continue
+        batch_indices = list(idx_lbls)
+        batch_cats = {
+            str(out_df.at[i_l, "catalogNumber"]).strip()
+            for i_l in batch_indices
+            if "catalogNumber" in out_df.columns and not pd.isna(out_df.at[i_l, "catalogNumber"])
+        }
+        siblings: List[Dict[str, Any]] = []
+        for i_l in batch_indices:
+            r_s = out_df.loc[i_l]
+            siblings.append({
+                "catalogNumber": str(r_s.get("catalogNumber") or ""),
+                "tx": _std_tx(r_s),
+                "tier": str(r_s.get("determiner_tier") or "").strip(),
+                "extra": _is_extralimital_status(r_s),
+                "pre_conf": _as_bool_flag(r_s.get("exsiccatae_taxonomic_conflict")),
+            })
+        for drec in db_by_key[ek]:
+            d_cat = str(drec.get("catalogNumber") or "").strip()
+            d_tx = _std_tx(drec)
+            # Include DB siblings under other catalogNumbers (or differing taxon snapshots)
+            if d_cat and d_cat in batch_cats:
+                same_cat_tx = [s["tx"] for s in siblings if s["catalogNumber"].strip() == d_cat]
+                if any(t == d_tx for t in same_cat_tx):
+                    continue
+            siblings.append({
+                "catalogNumber": d_cat,
+                "tx": d_tx,
+                "tier": str(drec.get("determiner_tier") or "").strip(),
+                "extra": _is_extralimital_status(drec),
+                "pre_conf": False,
+            })
+
+        distinct_taxa = {s["tx"] for s in siblings if s["tx"]}
+        if len(distinct_taxa) < 2:
+            continue
+
+        inrange_taxa = {s["tx"] for s in siblings if s["tx"] and not s["extra"]}
+        inrange_gold_counts: Dict[str, int] = {}
+        all_gold_counts: Dict[str, int] = {}
+        for s in siblings:
+            if s["tier"] == "Tier_1_Gold" and s["tx"]:
+                all_gold_counts[s["tx"]] = all_gold_counts.get(s["tx"], 0) + 1
+                if not s["extra"] and not s["pre_conf"]:
+                    inrange_gold_counts[s["tx"]] = inrange_gold_counts.get(s["tx"], 0) + 1
+
+        active_gold = inrange_gold_counts if inrange_gold_counts else all_gold_counts
+        best_gold_tx = ""
+        best_gold_from_inrange = False
+        multi_gold = len(active_gold) >= 2
+        if active_gold:
+            best_gold_from_inrange = bool(inrange_gold_counts)
+            best_gold_tx = sorted(active_gold.items(), key=lambda kv: (kv[1], kv[0]), reverse=True)[0][0]
+        unanimous_inrange_tx = next(iter(inrange_taxa)) if len(inrange_taxa) == 1 else ""
+
+        pos_map = {idx_lbl: pos for pos, idx_lbl in enumerate(out_df.index)}
+        for i_l in batch_indices:
+            pos_i = pos_map[i_l]
+            r_s = out_df.loc[i_l]
+            r_tx = _std_tx(r_s)
+            r_extra = _is_extralimital_status(r_s)
+            if best_gold_tx and not multi_gold:
+                row_conf = bool(r_tx and r_tx != best_gold_tx)
+            elif unanimous_inrange_tx:
+                row_conf = bool(r_extra and r_tx and r_tx != unanimous_inrange_tx)
+            else:
+                row_conf = True
+            conf_vals[pos_i] = bool(conf_vals[pos_i] or row_conf)
+            if best_gold_tx and not gold_vals[pos_i] and not (not best_gold_from_inrange and not r_extra):
+                gold_vals[pos_i] = best_gold_tx
+
+    out_df["exsiccatae_taxonomic_conflict"] = conf_vals
+    out_df["exsiccatae_gold_taxon"] = gold_vals
+    return out_df
 
 
 def spatially_balance_and_thin_vouchers(
@@ -2459,12 +2691,14 @@ def select_cascading_outgroup_anchors(
     outgroup_taxa: List[str],
     max_anchors: int = 30,
     workspace_dir: Optional[Path] = None,
+    focal_df: Optional[pd.DataFrame] = None,
 ) -> Tuple[List[pd.DataFrame], Dict[str, int], Dict[str, Dict[str, int]]]:
     """
     Selects up to `max_anchors` reference sheets per outgroup taxon by cascading across
-    determiner authority tiers (`Tier_1_Gold` -> `Tier_2_Silver` -> `Tier_3_Bronze`),
-    primary duplicate status, local image availability, and image resolution score.
-    Ensures outgroup species lacking `Tier_1_Gold` vouchers still supply reference anchors.
+    nomenclatural types, range-clean standing, and determiner authority tiers
+    (`Tier_1_Gold` -> `Tier_2_Silver` -> `Tier_3_Bronze`), with geographic round-robin
+    stratification across `(stateProvince, regional_group)` within each stratum
+    prioritizing regions overlapping `focal_df`.
     """
     outgroup_dfs: List[pd.DataFrame] = []
     outgroup_counts: Dict[str, int] = {}
@@ -2478,6 +2712,19 @@ def select_cascading_outgroup_anchors(
 
     tier_rank = {"Tier_1_Gold": 3, "Tier_2_Silver": 2, "Tier_3_Bronze": 1}
     ws_root = Path(workspace_dir).resolve() if workspace_dir is not None else PROJECT_ROOT
+
+    def _norm_tok(v: Any) -> str:
+        if v is None or (pd is not None and pd.isna(v)):
+            return ""
+        return str(v).strip().lower()
+
+    focal_states: Set[str] = set()
+    focal_regions: Set[str] = set()
+    if focal_df is not None and not focal_df.empty:
+        if "stateProvince" in focal_df.columns:
+            focal_states = {_norm_tok(v) for v in focal_df["stateProvince"].tolist()} - {""}
+        if "regional_group" in focal_df.columns:
+            focal_regions = {_norm_tok(v) for v in focal_df["regional_group"].tolist()} - {""}
 
     for tx in outgroup_taxa:
         tx_df = df[df["species_standardized"] == tx].copy()
@@ -2534,21 +2781,73 @@ def select_cascading_outgroup_anchors(
             else 0
         )
         tx_df["_is_prim"] = tx_df.apply(_is_prim, axis=1)
+        tx_df["_range_clean_rank"] = [
+            0 if (_is_extralimital_status(r) or _as_bool_flag(r.get("exsiccatae_taxonomic_conflict"))) else 1
+            for _, r in tx_df.iterrows()
+        ]
         tx_df["_img_res"] = tx_df["image_path"].map(
             lambda p: get_image_resolution_score(str(p) if not pd.isna(p) else "", workspace_dir=ws_root)
         ) if "image_path" in tx_df.columns else 0.0
 
         tx_df = tx_df.sort_values(
-            by=["_type_rank", "_type_subrank", "_tier_rank", "_is_prim", "_has_local", "_img_res"],
-            ascending=[False, False, False, False, False, False],
+            by=["_type_rank", "_type_subrank", "_range_clean_rank", "_tier_rank", "_is_prim", "_has_local", "_img_res"],
+            ascending=[False, False, False, False, False, False, False],
             kind="mergesort",
         )
-        tx_head = tx_df.head(int(max_anchors))
+
+        # Within each (type_rank, range_clean_rank, tier_rank) cascade stratum, round-robin
+        # across (stateProvince, regional_group) buckets with focal-overlapping buckets first
+        selected_positions: List[int] = []
+        cap_n = int(max_anchors)
+        strata_groups: Dict[Tuple[int, int, int], List[int]] = {}
+        strata_order: List[Tuple[int, int, int]] = []
+        for pos_i, (_, row_i) in enumerate(tx_df.iterrows()):
+            s_key = (int(row_i["_type_rank"]), int(row_i["_range_clean_rank"]), int(row_i["_tier_rank"]))
+            if s_key not in strata_groups:
+                strata_groups[s_key] = []
+                strata_order.append(s_key)
+            strata_groups[s_key].append(pos_i)
+
+        for s_key in strata_order:
+            if len(selected_positions) >= cap_n:
+                break
+            stratum_positions = strata_groups[s_key]
+            buckets: Dict[Tuple[str, str], List[int]] = {}
+            bucket_order: List[Tuple[str, str]] = []
+            for p_i in stratum_positions:
+                r_p = tx_df.iloc[p_i]
+                b_key = (_norm_tok(r_p.get("stateProvince")), _norm_tok(r_p.get("regional_group")))
+                if b_key not in buckets:
+                    buckets[b_key] = []
+                    bucket_order.append(b_key)
+                buckets[b_key].append(p_i)
+            if focal_states or focal_regions:
+                focal_buckets = [
+                    bk for bk in bucket_order
+                    if (bk[0] and bk[0] in focal_states) or (bk[1] and bk[1] in focal_regions)
+                ]
+                other_buckets = [bk for bk in bucket_order if bk not in focal_buckets]
+                bucket_order = focal_buckets + other_buckets
+            wave_idx = 0
+            while len(selected_positions) < cap_n:
+                added_wave = False
+                for bk in bucket_order:
+                    b_list = buckets[bk]
+                    if wave_idx < len(b_list):
+                        selected_positions.append(b_list[wave_idx])
+                        added_wave = True
+                        if len(selected_positions) >= cap_n:
+                            break
+                if not added_wave:
+                    break
+                wave_idx += 1
+
+        tx_head = tx_df.iloc[selected_positions]
         n_type_sel = int((tx_head["_type_rank"] >= 1).sum())
         n_prim_type_sel = int((tx_head["_type_rank"] == 2).sum())
         n_sec_type_sel = int((tx_head["_type_rank"] == 1).sum())
         tx_sel = tx_head.drop(
-            columns=["_has_local", "_has_valid", "_type_rank", "_type_subrank", "_tier_rank", "_is_prim", "_img_res"]
+            columns=["_has_local", "_has_valid", "_type_rank", "_type_subrank", "_range_clean_rank", "_tier_rank", "_is_prim", "_img_res"]
         )
         outgroup_dfs.append(tx_sel)
         outgroup_counts[tx] = len(tx_sel)

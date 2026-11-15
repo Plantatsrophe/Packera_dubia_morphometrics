@@ -27,6 +27,36 @@
 #        case weighting normalized to [0.5, 3.0].
 # ==============================================================================
 
+is_extralimital_or_conflicted_non_type <- function(df) {
+  if (is.null(df) || !is.data.frame(df) || nrow(df) == 0L) {
+    return(logical(0))
+  }
+  n <- nrow(df)
+  t_info <- .identify_type_specimen_vec(df)
+  is_t <- as.logical(t_info$is_type_specimen)
+  is_t[is.na(is_t)] <- FALSE
+  usda_st <- if ("usda_county_status" %in% names(df)) {
+    tolower(trimws(as.character(df$usda_county_status)))
+  } else {
+    rep("", n)
+  }
+  usda_st[is.na(usda_st)] <- ""
+  is_out <- usda_st %in% c("out_of_range", "natureserve_exotic_or_waif")
+  ex_conf <- if ("exsiccatae_taxonomic_conflict" %in% names(df)) {
+    raw_ec <- df$exsiccatae_taxonomic_conflict
+    if (is.logical(raw_ec)) {
+      !is.na(raw_ec) & raw_ec
+    } else if (is.numeric(raw_ec)) {
+      !is.na(raw_ec) & (raw_ec != 0)
+    } else {
+      tolower(trimws(as.character(raw_ec))) %in% c("true", "1", "t", "yes")
+    }
+  } else {
+    rep(FALSE, n)
+  }
+  (!is_t) & (is_out | ex_conf)
+}
+
 .identify_type_specimen_vec <- function(df) {
   if (is.null(df)) {
     return(list(type_rank = integer(0), is_type_specimen = logical(0), type_status_clean = character(0)))
@@ -542,11 +572,22 @@ select_adaptive_reference_anchors <- function(
   has_feat <- if (!is.null(feat_prep)) feat_prep$has_feat else rep(TRUE, n)
   valid_pool <- is_t1_pure & has_feat
 
+  extralimital_raw <- is_extralimital_or_conflicted_non_type(df)
+  extralimital_mask <- rep(FALSE, n)
+  if (any(extralimital_raw)) {
+    for (tx_chk in unique(taxa_vec[!is.na(taxa_vec) & nzchar(taxa_vec)])) {
+      if (sum(valid_pool & (taxa_vec == tx_chk) & !extralimital_raw) >= 2L) {
+        extralimital_mask[(taxa_vec == tx_chk) & extralimital_raw] <- TRUE
+      }
+    }
+  }
+  anchor_pool <- valid_pool & !extralimital_mask
+
   is_type_valid <- (type_rank >= 1L) & valid_pool
   is_nb_type_valid <- as.logical(type_info$is_name_bearing_type) & valid_pool
   is_nb_type_valid[is.na(is_nb_type_valid)] <- FALSE
-  is_gold <- ((det_tier == "Tier_1_Gold") | (type_rank >= 1L)) & valid_pool
-  is_silver <- (det_tier == "Tier_2_Silver") & !is_gold & valid_pool
+  is_gold <- (((det_tier == "Tier_1_Gold") & anchor_pool) | (type_rank >= 1L & valid_pool))
+  is_silver <- (det_tier == "Tier_2_Silver") & !is_gold & anchor_pool
   is_gs <- is_gold | is_silver
   is_promoted_bronze <- rep(FALSE, n)
 
@@ -755,7 +796,7 @@ select_adaptive_reference_anchors <- function(
     # Step 2: Adaptive Anchor Promotion for Gold/Silver-poor taxa (raw GS < min_anchors_per_taxon or clean n_gs < 3)
     n_gs <- length(idx_gs_clean)
     if (tx != "Unassigned_Packera" && (length(idx_gs) < min_anc || n_gs < min(3L, min_anc))) {
-      idx_br <- which((det_tier == "Tier_3_Bronze") & valid_pool & (taxa_vec == tx))
+      idx_br <- which((det_tier == "Tier_3_Bronze") & anchor_pool & (taxa_vec == tx))
       n_needed <- min_anc - n_gs
       if (length(idx_br) > 0L && n_needed > 0L) {
         if (is.null(X_use) || ncol(X_use) == 0L) {
@@ -926,15 +967,25 @@ select_adaptive_reference_anchors <- function(
     }
   }
 
+  if (any(extralimital_mask)) {
+    active_mask[extralimital_mask] <- FALSE
+    is_gold[extralimital_mask] <- FALSE
+    is_silver[extralimital_mask] <- FALSE
+    is_promoted_bronze[extralimital_mask] <- FALSE
+  }
+
   anchor_tier_source <- ifelse(
     is_confident_label_noise, "Passive_Confident_Noise_Demoted",
     ifelse(
-      is_type_valid & active_mask, "Tier_0_Type_Anchor",
+      extralimital_mask, "Passive_Extralimital_Audit",
       ifelse(
-        is_gold, "Tier_1_Gold_Anchor",
+        is_type_valid & active_mask, "Tier_0_Type_Anchor",
         ifelse(
-          is_silver, "Tier_2_Silver_Anchor",
-          ifelse(is_promoted_bronze, "Tier_3_Bronze_Promoted", "Passive_Projected")
+          is_gold, "Tier_1_Gold_Anchor",
+          ifelse(
+            is_silver, "Tier_2_Silver_Anchor",
+            ifelse(is_promoted_bronze, "Tier_3_Bronze_Promoted", "Passive_Projected")
+          )
         )
       )
     )
@@ -1572,6 +1623,17 @@ compute_empirical_bayes_authority_weights <- function(
     act_mask[!is.na(mts_eb) & (mts_eb %in% c("Cauline_Only_Fallback", "Transitional_Passive", "No_Leaves")) & !is_type_mask] <- FALSE
   }
 
+  extralimital_raw_ds <- is_extralimital_or_conflicted_non_type(df)
+  extralimital_ds <- rep(FALSE, n)
+  if (any(extralimital_raw_ds)) {
+    for (tx_chk in unique(taxa_vec[!is.na(taxa_vec) & nzchar(taxa_vec)])) {
+      if (sum(act_mask & (taxa_vec == tx_chk) & !extralimital_raw_ds) >= 2L) {
+        extralimital_ds[(taxa_vec == tx_chk) & extralimital_raw_ds] <- TRUE
+      }
+    }
+  }
+  act_mask[extralimital_ds] <- FALSE
+
   if (mode == "active_passive" && !any(act_mask)) {
     return(rep(0.0, n))
   }
@@ -1721,7 +1783,8 @@ compute_empirical_bayes_authority_weights <- function(
 
   if (G >= 2L) {
     L_mat <- matrix(1.0 / G, nrow = n, ncol = G, dimnames = list(NULL, valid_taxa))
-    ds_rows <- which(eval_mask & !is.na(y_idx))
+    ds_rows <- which(eval_mask & !is.na(y_idx) & !extralimital_ds)
+    if (length(ds_rows) == 0L) ds_rows <- which(eval_mask & !is.na(y_idx))
     for (i in ds_rows) {
       yi <- y_idx[i]
       log_odds_vec <- numeric(0)
@@ -1908,9 +1971,9 @@ compute_empirical_bayes_authority_weights <- function(
     w_eb[ds_obs_idx] <- pmax(0.05, pmin(0.995, 0.35 * p_prior + 0.65 * post_bayes))
 
     # Handle any evaluated rows with unknown taxon string that still carry explicit error rates
-    rem_err <- which(eval_mask & !has_ds_Row & is.finite(eps_err))
+    rem_err <- which(eval_mask & !has_ds_Row & is.finite(eps_err) & !extralimital_ds)
     if (length(rem_err) > 0L) {
-      fb_obs <- eval_mask & is.finite(eps_err)
+      fb_obs <- eval_mask & is.finite(eps_err) & !extralimital_ds
       fb_conc <- pmin(pmax(0.0, 1.0 - eps_err), tier_ceil)
       fb_theta <- blend_tier_and_determiner(fb_conc, fb_obs)
       p_pr_r <- pmax(0.05, pmin(0.995, fb_theta[rem_err]))
@@ -1923,7 +1986,7 @@ compute_empirical_bayes_authority_weights <- function(
     # Graceful single-taxon or feature-absent degradation: Beta-Binomial tier + determiner shrinkage
     eps_fb <- eps_err
     if (length(pred_sources) > 0L) {
-      for (i in which(eval_mask & !is.finite(eps_fb))) {
+      for (i in which(eval_mask & !is.finite(eps_fb) & !extralimital_ds)) {
         tx_i <- taxa_vec[i]
         if (is.na(tx_i) || (tx_i %in% bad_tx)) next
         mism <- numeric(0)
@@ -1937,7 +2000,8 @@ compute_empirical_bayes_authority_weights <- function(
         if (length(mism) > 0L) eps_fb[i] <- mean(mism)
       }
     }
-    obs_fb <- eval_mask & is.finite(eps_fb)
+    obs_fb <- eval_mask & is.finite(eps_fb) & !extralimital_ds
+    if (!any(obs_fb)) obs_fb <- eval_mask & is.finite(eps_fb)
     if (any(obs_fb)) {
       conc_fb <- pmin(pmax(0.0, 1.0 - eps_fb), tier_ceil)
       theta_fb <- blend_tier_and_determiner(conc_fb, obs_fb)
@@ -2018,6 +2082,7 @@ compute_empirical_bayes_authority_weights <- function(
     w_final[cap_cont$capped_mask] <- pmax(0.01, w_final[cap_cont$capped_mask])
     w_final[!cap_cont$capped_mask] <- pmax(0.5, pmin(3.0, w_final[!cap_cont$capped_mask]))
   }
+  w_final[extralimital_ds] <- 0.0
   round(w_final, 6)
 }
 
