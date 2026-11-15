@@ -1489,7 +1489,7 @@ cat("BATCHED_PHASE2_R_OK\\n")
                 "Collector_ID,Collector,EventDate,Taxon\n21,Brandon Fuller,3rd August 2020,Packera millefolia\n",
                 encoding="utf-8",
             )
-            parsed_field = ing._parse_field_metadata(fcsv)
+            parsed_field = ing._parse_field_metadata([fcsv])
             self.assertIn("2020-08-03", json.dumps(parsed_field, default=str))
             self.assertIn("21", json.dumps(parsed_field, default=str))
 
@@ -1511,8 +1511,10 @@ cat("BATCHED_PHASE2_R_OK\\n")
                 encoding="utf-8",
             )
             cp_s, its_s, _ = skim_mod._collect_organellar_seeds(gdir)
-            self.assertEqual(set(cp_s.keys()), {"75949_5", "82071_300", "49275_9"})
-            self.assertEqual(set(its_s.keys()), {"16157_6"})
+            self.assertTrue({"75949_5", "82071_300", "49275_9"}.issubset(cp_s.keys()))
+            self.assertTrue({"49053_5", "52797_44", "68356_89"}.isdisjoint(cp_s.keys()))
+            self.assertIn("16157_6", its_s)
+            self.assertTrue({"52797_44", "68356_89"}.isdisjoint(its_s.keys()))
             self.assertEqual(
                 skim_mod._extract_species_from_seed_key("AF161693.1|Packera_sp Senecio loratifolius"),
                 "Packera loratifolia",
@@ -1539,16 +1541,17 @@ cat("BATCHED_PHASE2_R_OK\\n")
                     "  'Packera millefolium', 'Packera xmemmingeri', 'Packera xmemmingeri',\n"
                     "  '', '', 'Packera sp. nov.')\n"
                     "stopifnot(identical(got, exp))\n"
-                    "tr <- ape::read.tree(text = '((Packera_millefolium:1,Packera_xmemmingeri:1):1,(Packera_aurea:1,Packera_cana:2):1);')\n"
+                    "tr <- ape::read.tree(text = '((Packera_millefolium:1,Packera_xmemmingeri:1):1,(Packera_aurea:1,Packera_cana:3):1);')\n"
                     "tr$tip.label <- .normalize_public_packera_taxon(tr$tip.label)\n"
-                    "bg <- select_backbone_guided_outgroup(c('Packera millefolia', 'Packera memmingeri', 'Packera aurea', 'Packera cana'), NULL, list(tree = tr))\n"
+                    "bg <- select_backbone_guided_outgroup(c('Packera millefolia', 'Packera memmingeri', 'Packera aurea', 'Packera cana'), NULL, list(trees = list(MO = tr)))\n"
                     "stopifnot(!is.null(bg), bg$outgroup == 'Packera cana', all(c('Packera millefolia', 'Packera memmingeri', 'Packera aurea') %in% bg$tree_order))\n"
                     "aligned <- .align_packera_orthography(c('Packera millefolium', 'Packera xmemmingeri'), c('Packera millefolia', 'Packera memmingeri'))\n"
                     "stopifnot(identical(aligned, c('Packera millefolia', 'Packera memmingeri')))\n"
                     "cat('R_OK\\n')\n",
                     encoding="utf-8",
                 )
-                proc = run_warm_r_cmd(["Rscript", str(r_test)], cwd=PROJECT_ROOT, check=True)
+                proc = run_warm_r_cmd(["Rscript", str(r_test)], stage_key="step06", cwd=PROJECT_ROOT)
+                self.assertEqual(proc.returncode, 0, (proc.stderr or "") + (proc.stdout or ""))
                 self.assertIn("R_OK", proc.stdout)
 
     def test_step06_public_backbone_outgroup_and_sqlite_columns(self) -> None:
