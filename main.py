@@ -1301,6 +1301,8 @@ def run_skim_organellar_cli(args: argparse.Namespace, cfg: PipelineConfig) -> No
         cmd.extend(["--genomics-dir", str(args.genomics_dir)])
     if getattr(args, "nuclear_tree", None):
         cmd.extend(["--nuclear-tree", str(args.nuclear_tree)])
+    if getattr(args, "out_dir", None):
+        cmd.extend(["--out-dir", str(args.out_dir)])
     subprocess.run(cmd, check=True)
 
 
@@ -2039,6 +2041,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_skim.add_argument("--fastq-source", type=Path, default=None, help="Optional .zip, .tar.gz, or directory containing raw FASTQ reads")
     p_skim.add_argument("--genomics-dir", type=Path, default=None, help="Destination data/genomics/ directory")
     p_skim.add_argument("--nuclear-tree", type=Path, default=None, help="Optional nuclear Newick tree for cytonuclear comparison")
+    p_skim.add_argument("--out-dir", type=Path, default=None, help="Optional output directory for skimmed FASTAs and cytonuclear CSV (default: <genomics-dir>/public_organellar_and_loci)")
 
     # Subcommand: download-public-genomics (public NCBI/SRA/Dryad/BOLD staging into relational data/genomics/ subdirectories)
     p_dl_pub = subparsers.add_parser("download-public-genomics", help="Download public Packera sequences, trees, and SRA manifests into relational data/genomics/ subdirectories")

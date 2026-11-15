@@ -54,19 +54,9 @@ _SEED_SYNONYM_TAXA: Dict[str, str] = {
     "senecio obovatus": "Packera obovata", "senecio plattensis": "Packera plattensis",
     "senecio antennariifolius": "Packera antennariifolia", "senecio glabellus": "Packera glabella",
 }
-_NON_EPITHET_TOKENS = frozenset({
-    "rbcl", "trnl", "its", "its1", "its2", "58s", "waxy", "gbssi", "core",
-    "plastid", "chloroplast", "plastome", "ribosomal", "nuclear", "sp", "unk", "unknown", "var", "subsp", "cf", "aff",
-})
+_NON_EPITHET_TOKENS = frozenset({"rbcl", "trnl", "its", "its1", "its2", "58s", "waxy", "gbssi", "core", "plastid", "chloroplast", "plastome", "ribosomal", "nuclear", "sp", "unk", "unknown", "var", "subsp", "cf", "aff"})
 
-_IUPAC_PAIR = {
-    ("A", "G"): "R", ("G", "A"): "R",
-    ("C", "T"): "Y", ("T", "C"): "Y",
-    ("G", "C"): "S", ("C", "G"): "S",
-    ("A", "T"): "W", ("T", "A"): "W",
-    ("G", "T"): "K", ("T", "G"): "K",
-    ("A", "C"): "M", ("C", "A"): "M",
-}
+_IUPAC_PAIR = {("A", "G"): "R", ("G", "A"): "R", ("C", "T"): "Y", ("T", "C"): "Y", ("G", "C"): "S", ("C", "G"): "S", ("A", "T"): "W", ("T", "A"): "W", ("G", "T"): "K", ("T", "G"): "K", ("A", "C"): "M", ("C", "A"): "M"}
 
 
 def _clean_sample_id(raw: str) -> str:
@@ -167,7 +157,8 @@ def _collect_organellar_seeds(genomics_dir: Path) -> Tuple[Dict[str, str], Dict[
 def _infer_sample_from_fq_name(member_name: str) -> str:
     base = Path(member_name).name
     stem = re.sub(r"\.(fastq|fq)(\.gz)?$", "", base, flags=re.IGNORECASE)
-    stem = re.sub(r"([_.-](R?[12]|merged|trimmed|paired|unpaired|clean))+$", "", stem, flags=re.IGNORECASE)
+    stem = re.sub(r"([_.-](?:S\d+|L\d{3}|R?[12]|F|R|merged|trimmed|paired|unpaired|clean))+$", "", stem, flags=re.IGNORECASE)
+    stem = re.sub(r"^[A-Z][a-z]+(?=[A-Z]{3}[A-Z0-9]{4,}$)", "", stem)
     return _clean_sample_id(stem)
 
 
@@ -177,9 +168,8 @@ def _iter_fastq_records_stream(fh: io.TextIOBase) -> Iterator[Tuple[str, str]]:
         if not h:
             break
         seq = fh.readline()
-        plus = fh.readline()
-        qual = fh.readline()
-        if not qual:
+        _plus = fh.readline()
+        if not fh.readline():
             break
         yield h.strip(), seq.strip().upper()
 
@@ -191,15 +181,30 @@ def _iter_staged_fastq_reads(fastq_source: Path) -> Iterator[Tuple[str, str]]:
 
     fq_pat = re.compile(r"\.(fastq|fq)(\.gz)?$", re.IGNORECASE)
     if fastq_source.is_dir():
+        gzip_bin = shutil.which("pigz") or shutil.which("gzip")
         for p in sorted(fastq_source.rglob("*")):
             if not p.is_file() or not fq_pat.search(p.name):
                 continue
             sid = _infer_sample_from_fq_name(p.name)
-            opener = gzip.open if p.name.lower().endswith(".gz") else open
-            with opener(p, "rt", encoding="utf-8", errors="replace") as fh:
-                for _, seq in _iter_fastq_records_stream(fh):
-                    if seq:
-                        yield sid, seq
+            if p.name.lower().endswith(".gz") and gzip_bin:
+                proc = subprocess.Popen([gzip_bin, "-dc", str(p)], stdout=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", bufsize=1 << 20)
+                try:
+                    assert proc.stdout is not None
+                    for _, seq in _iter_fastq_records_stream(proc.stdout):
+                        if seq:
+                            yield sid, seq
+                finally:
+                    if proc.stdout is not None:
+                        proc.stdout.close()
+                    if proc.poll() is None:
+                        proc.terminate()
+                    proc.wait()
+            else:
+                opener = gzip.open if p.name.lower().endswith(".gz") else open
+                with opener(p, "rt", encoding="utf-8", errors="replace") as fh:
+                    for _, seq in _iter_fastq_records_stream(fh):
+                        if seq:
+                            yield sid, seq
         return
 
     low = fastq_source.name.lower()
@@ -250,15 +255,11 @@ def _build_kmer_index(seeds: Mapping[str, str], k: int = 17) -> Dict[str, List[T
     return idx
 
 
-def _assemble_baited_consensus(
-    reads_by_sample: Mapping[str, List[str]],
-    seeds: Mapping[str, str],
-    k: int = 17,
-) -> Dict[str, str]:
+def _assemble_baited_consensus(reads_by_sample: Mapping[str, List[str]], seeds: Mapping[str, str], k: int = 17, kidx: Optional[Mapping[str, List[Tuple[str, int, bool]]]] = None) -> Dict[str, str]:
     """Bait reads by seed k-mers and construct per-sample consensus sequence by read pileup."""
     if not seeds or not reads_by_sample:
         return {}
-    kidx = _build_kmer_index(seeds, k=k)
+    kidx = kidx if kidx is not None else _build_kmer_index(seeds, k=k)
     cons_out: Dict[str, str] = {}
 
     for sid, seqs in sorted(reads_by_sample.items()):
@@ -383,17 +384,12 @@ def _match_best_public_lineage(
 
 
 def _detect_cytonuclear_discordance(
-    plastid_clades: Mapping[str, str],
-    its_ribotypes: Mapping[str, str],
-    nuclear_tree_path: Optional[Path] = None,
-    public_plastome_matches: Optional[Mapping[str, str]] = None,
-    public_its_matches: Optional[Mapping[str, str]] = None,
-    waxy_lineage_matches: Optional[Mapping[str, str]] = None,
+    plastid_clades: Mapping[str, str], its_ribotypes: Mapping[str, str], nuclear_tree_path: Optional[Path] = None,
+    public_plastome_matches: Optional[Mapping[str, str]] = None, public_its_matches: Optional[Mapping[str, str]] = None, waxy_lineage_matches: Optional[Mapping[str, str]] = None,
 ) -> List[Dict[str, Any]]:
     """Compare organellar clade vs. nuclear taxon/sister group to flag cytonuclear capture."""
     parse_code = importlib.import_module("scripts.data_prep.06_ingest_genetic_data").parse_sample_code
     _ = nuclear_tree_path
-
     samples = sorted(set(plastid_clades.keys()) | set(its_ribotypes.keys()) | set((waxy_lineage_matches or {}).keys()))
     taxon_of = {sid: (parse_code(sid).get("species_standardized") or "Unknown") for sid in samples}
     by_clade: Dict[str, Counter[str]] = defaultdict(Counter)
@@ -405,12 +401,8 @@ def _detect_cytonuclear_discordance(
     rows: List[Dict[str, Any]] = []
     for sid in samples:
         pc, its_r, sp = plastid_clades.get(sid), its_ribotypes.get(sid), taxon_of[sid]
-        discordant = 0
-        if pc and sp != "Unknown":
-            maj_tx = clade_maj_taxon.get(pc, sp)
-            # Flag cytonuclear capture when a sample carries a chloroplast clade dominated by another species
-            if maj_tx != sp and by_clade[pc][sp] < by_clade[pc][maj_tx]:
-                discordant = 1
+        # Flag cytonuclear capture when a sample carries a chloroplast clade dominated by another species
+        discordant = 1 if (pc and sp != "Unknown" and clade_maj_taxon.get(pc, sp) != sp and by_clade[pc][sp] < by_clade[pc][clade_maj_taxon[pc]]) else 0
         rows.append({
             "genetic_sample_id": sid, "nuclear_taxon": sp, "plastid_clade": pc or "", "its_ribotype": its_r or "",
             "cytonuclear_discordant": discordant,
@@ -422,17 +414,13 @@ def _detect_cytonuclear_discordance(
 
 
 def run_offtarget_organellar_skim(
-    fastq_source: Optional[Path],
-    genomics_dir: Path,
-    nuclear_tree: Optional[Path] = None,
+    fastq_source: Optional[Path], genomics_dir: Path, nuclear_tree: Optional[Path] = None, out_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
-    """Skim off-target plastid, ITS, and nuclear waxy reads into `public_organellar_and_loci/`."""
+    """Skim off-target plastid, ITS, and nuclear waxy reads into `public_organellar_and_loci/` (or `--out-dir`)."""
     if fastq_source is None or not fastq_source.exists():
         msg = f"[skim-organellar] FASTQ source absent ({fastq_source}); skipping cleanly."
-        logger.info(msg)
-        print(msg)
+        logger.info(msg); print(msg)
         return {"status": "skipped_missing_fastq", "n_samples": 0}
-
     getorg_bin = shutil.which("get_organelle_from_reads.py")
     if getorg_bin and fastq_source.is_dir():
         logger.info("Detected GetOrganelle binary at %s; running alongside pure-Python pileup audit.", getorg_bin)
@@ -440,32 +428,35 @@ def run_offtarget_organellar_skim(
             _ = (tmpd, subprocess)
 
     plastid_seeds, its_seeds, waxy_seeds = _collect_organellar_seeds(genomics_dir)
-    reads_by_sample: Dict[str, List[str]] = defaultdict(list)
+    cp_kidx, its_kidx, waxy_kidx = _build_kmer_index(plastid_seeds), _build_kmer_index(its_seeds), _build_kmer_index(waxy_seeds)
+    seed_kmers = set(cp_kidx) | set(its_kidx) | set(waxy_kidx)
+    seen_samples: set[str] = set()
+    cp_reads, its_reads, waxy_reads = defaultdict(list), defaultdict(list), defaultdict(list)
     for sid, seq in _iter_staged_fastq_reads(fastq_source):
-        reads_by_sample[sid].append(seq)
-    if not reads_by_sample:
+        seen_samples.add(sid)
+        if len(seq) < 17 or not any(seq[i : i + 17] in seed_kmers for i in range(len(seq) - 16)):
+            continue
+        for kidx_b, bucket in ((cp_kidx, cp_reads), (its_kidx, its_reads), (waxy_kidx, waxy_reads)):
+            if len(bucket[sid]) < 25000 and any(seq[i : i + 17] in kidx_b for i in range(len(seq) - 16)):
+                bucket[sid].append(seq)
+    if not seen_samples:
         logger.info("[skim-organellar] No FASTQ reads discovered inside %s; skipping.", fastq_source)
         return {"status": "skipped_no_reads", "n_samples": 0}
 
-    cp_cons = _assemble_baited_consensus(reads_by_sample, plastid_seeds)
-    its_cons = _assemble_baited_consensus(reads_by_sample, its_seeds)
-    waxy_cons = _assemble_baited_consensus(reads_by_sample, waxy_seeds)
-    cp_clades = _cluster_haplotypes(cp_cons, prefix="cp_Clade")
-    its_ribo = _cluster_haplotypes(its_cons, prefix="ITS_Ribotype")
-    waxy_clades = _cluster_haplotypes(waxy_cons, prefix="Waxy_Lineage")
+    cp_cons = _assemble_baited_consensus(cp_reads, plastid_seeds, kidx=cp_kidx)
+    its_cons = _assemble_baited_consensus(its_reads, its_seeds, kidx=its_kidx)
+    waxy_cons = _assemble_baited_consensus(waxy_reads, waxy_seeds, kidx=waxy_kidx)
+    cp_clades, its_ribo, waxy_clades = _cluster_haplotypes(cp_cons, prefix="cp_Clade"), _cluster_haplotypes(its_cons, prefix="ITS_Ribotype"), _cluster_haplotypes(waxy_cons, prefix="Waxy_Lineage")
     cp_cache, its_cache, waxy_cache = {}, {}, {}
     pub_cp_match = {sid: _match_best_public_lineage(seq, plastid_seeds, _kcache=cp_cache) for sid, seq in cp_cons.items()}
     pub_its_match = {sid: _match_best_public_lineage(seq, its_seeds, _kcache=its_cache) for sid, seq in its_cons.items()}
     waxy_match = {sid: _match_best_public_lineage(seq, waxy_seeds, _kcache=waxy_cache) or waxy_clades.get(sid, "") for sid, seq in waxy_cons.items()}
-    cyto_rows = _detect_cytonuclear_discordance(
-        cp_clades, its_ribo, nuclear_tree_path=nuclear_tree,
-        public_plastome_matches=pub_cp_match, public_its_matches=pub_its_match, waxy_lineage_matches=waxy_match,
-    )
+    cyto_rows = _detect_cytonuclear_discordance(cp_clades, its_ribo, nuclear_tree_path=nuclear_tree, public_plastome_matches=pub_cp_match, public_its_matches=pub_its_match, waxy_lineage_matches=waxy_match)
 
-    out_dir = genomics_dir if genomics_dir.name == "public_organellar_and_loci" else (genomics_dir / "public_organellar_and_loci")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    cp_fasta, its_fasta, waxy_fasta = out_dir / "skimmed_plastid_consensus.fasta", out_dir / "skimmed_its_consensus.fasta", out_dir / "skimmed_waxy_consensus.fasta"
-    cyto_csv = out_dir / "cytonuclear_discordance.csv"
+    target_dir = out_dir if out_dir is not None else (genomics_dir if genomics_dir.name == "public_organellar_and_loci" else (genomics_dir / "public_organellar_and_loci"))
+    target_dir.mkdir(parents=True, exist_ok=True)
+    cp_fasta, its_fasta, waxy_fasta = target_dir / "skimmed_plastid_consensus.fasta", target_dir / "skimmed_its_consensus.fasta", target_dir / "skimmed_waxy_consensus.fasta"
+    cyto_csv = target_dir / "cytonuclear_discordance.csv"
     for out_fa, cons_map, tag, lbl_map, fallback in (
         (cp_fasta, cp_cons, "clade", cp_clades, "cp_Unassigned"),
         (its_fasta, its_cons, "ribotype", its_ribo, "ITS_Unassigned"),
@@ -477,8 +468,8 @@ def run_offtarget_organellar_skim(
     cols = ["genetic_sample_id", "nuclear_taxon", "plastid_clade", "its_ribotype", "cytonuclear_discordant", "public_plastome_match", "public_its_match", "waxy_lineage_match"]
     (pd.DataFrame(cyto_rows) if cyto_rows else pd.DataFrame(columns=cols)).to_csv(cyto_csv, index=False)
 
-    logger.info("Skimmed %d plastid, %d ITS, and %d waxy consensuses (%d cytonuclear records) into %s.", len(cp_cons), len(its_cons), len(waxy_cons), len(cyto_rows), out_dir)
-    return {"status": "skimmed", "n_samples": len(reads_by_sample), "n_plastid": len(cp_cons), "n_its": len(its_cons), "n_waxy": len(waxy_cons), "cytonuclear_csv": str(cyto_csv)}
+    logger.info("Skimmed %d plastid, %d ITS, and %d waxy consensuses (%d cytonuclear records) into %s.", len(cp_cons), len(its_cons), len(waxy_cons), len(cyto_rows), target_dir)
+    return {"status": "skimmed", "n_samples": len(seen_samples), "n_plastid": len(cp_cons), "n_its": len(its_cons), "n_waxy": len(waxy_cons), "out_dir": str(target_dir), "cytonuclear_csv": str(cyto_csv)}
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -486,8 +477,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--fastq-source", type=Path, default=None, help="Directory, .zip, or .tar.gz with FASTQ reads")
     parser.add_argument("--genomics-dir", type=Path, default=PROJECT_ROOT / "data" / "genomics")
     parser.add_argument("--nuclear-tree", type=Path, default=None)
+    parser.add_argument("--out-dir", type=Path, default=None, help="Output subdirectory (default: <genomics-dir>/public_organellar_and_loci)")
     args = parser.parse_args(list(argv) if argv is not None else None)
-    run_offtarget_organellar_skim(args.fastq_source, args.genomics_dir, nuclear_tree=args.nuclear_tree)
+    run_offtarget_organellar_skim(args.fastq_source, args.genomics_dir, nuclear_tree=args.nuclear_tree, out_dir=args.out_dir)
     return 0
 
 

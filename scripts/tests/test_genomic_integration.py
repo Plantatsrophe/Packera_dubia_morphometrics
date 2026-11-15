@@ -1414,18 +1414,20 @@ cat("BATCHED_PHASE2_R_OK\\n")
                 encoding="utf-8",
             )
 
+            self.assertEqual(skim_mod._infer_sample_from_fq_name("EhieraciifoliusEREHIENCS1M_S76.F.fq.gz"), "EREHIENCS1M")
             zip_path = raw_dir / "run_5563_public_skim.zip"
             with zipfile.ZipFile(zip_path, "w") as zf:
-                for sid, p_s, i_s, w_s in (
-                    ("PACSERNCS1M", cp_ser, its_ser, waxy_ser),
-                    ("PACAURFK1M", cp_aur, its_aur, waxy_aur),
+                for fq_name, p_s, i_s, w_s in (
+                    ("fastqs/PACSERNCS1M_R1.fastq.gz", cp_ser, its_ser, waxy_ser),
+                    ("fastqs/PaureaPACAURFK1M_S2.F.fq.gz", cp_aur, its_aur, waxy_aur),
                 ):
+                    sid = fq_name.split("/")[-1].split("_")[0].replace("Paurea", "")
                     reads = (
                         [(f"{sid}_cp_{j}", p_s) for j in range(4)]
                         + [(f"{sid}_its_{j}", i_s) for j in range(4)]
                         + [(f"{sid}_waxy_{j}", w_s) for j in range(4)]
                     )
-                    zf.writestr(f"fastqs/{sid}_R1.fastq.gz", _build_r1_fastq_gz_bytes(reads))
+                    zf.writestr(fq_name, _build_r1_fastq_gz_bytes(reads))
 
             res = skim_mod.run_offtarget_organellar_skim(fastq_source=zip_path, genomics_dir=geno_dir)
             self.assertEqual(res["status"], "skimmed")
