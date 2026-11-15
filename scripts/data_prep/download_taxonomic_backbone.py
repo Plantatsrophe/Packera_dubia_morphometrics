@@ -315,13 +315,23 @@ def fetch_natureserve_ranges(species_list: Sequence[str], target_genus: str, htt
     ranks_by_taxon: Dict[str, Dict[str, str]] = {}
     range_map: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
     target_set = {sp for sp in species_list if sp}
-    ns_body = {"criteriaType": "species", "textCriteria": [{"paramType": "quickSearch", "searchToken": target_genus, "matchAgainst": "allNames", "operator": "contains"}], "pagingOptions": {"page": 0, "recordsPerPage": 250}}
-    search_payload = (
-        _http_request_json("https://explorer.natureserve.org/api/data/speciesSearch?" + _uparse.urlencode({"text": target_genus}), http_get_fn=http_get_fn)
-        if http_get_fn is not None else _http_request_json("https://explorer.natureserve.org/api/data/speciesSearch", post_body=ns_body)
-    )
+    if http_get_fn is not None:
+        search_payload = _http_request_json("https://explorer.natureserve.org/api/data/speciesSearch?" + _uparse.urlencode({"text": target_genus}), http_get_fn=http_get_fn)
+        search_results = list(search_payload.get("results") or []) if isinstance(search_payload, Mapping) else []
+    else:
+        search_results = []
+        for page in range(10):
+            ns_body = {"criteriaType": "species", "textCriteria": [{"paramType": "quickSearch", "searchToken": target_genus}], "pagingOptions": {"page": page, "recordsPerPage": 100}}
+            page_payload = _http_request_json("https://explorer.natureserve.org/api/data/speciesSearch", post_body=ns_body)
+            page_items = list(page_payload.get("results") or []) if isinstance(page_payload, Mapping) else []
+            if not page_items:
+                break
+            search_results.extend(page_items)
+            total_pages = int(((page_payload.get("resultsSummary") or {}).get("totalPages")) or 1)
+            if page + 1 >= total_pages or len(page_items) < 100:
+                break
     probe_taxon = True
-    for item in (list(search_payload.get("results") or []) if isinstance(search_payload, Mapping) else []):
+    for item in search_results:
         if not isinstance(item, Mapping):
             continue
         sp_std, _, _ = _parse_species_name(item.get("scientificName") or item.get("primaryCommonName") or "", target_genus)
@@ -386,9 +396,15 @@ def download_taxonomic_backbone(
     _validate_flat_taxonomy_dir(eff_dir)
     eff_db = resolve_db_path(db_path=db_path, workspace_root=PROJECT_ROOT)
     prof_csv, range_csv, manifest_json = eff_dir / PROFILE_CSV_NAME, eff_dir / RANGE_CSV_NAME, eff_dir / MANIFEST_JSON_NAME
-    if not sync_only and (force or not prof_csv.is_file()):
-        profiles = fetch_col_powo_backbone(eff_genus, http_get_fn=col_http_fn)
-        enrich_bhl_protologues(profiles, bhl_api_key=bhl_api_key, http_get_fn=bhl_http_fn)
+    prof_rows_existing = _read_csv_safe(prof_csv)
+    need_full = force or not prof_rows_existing
+    need_ns = need_full or not _read_csv_safe(range_csv)
+    if not sync_only and (need_full or need_ns):
+        if need_full:
+            profiles = fetch_col_powo_backbone(eff_genus, http_get_fn=col_http_fn)
+            enrich_bhl_protologues(profiles, bhl_api_key=bhl_api_key, http_get_fn=bhl_http_fn)
+        else:
+            profiles = {r["species_standardized"]: dict(r) for r in prof_rows_existing if r.get("species_standardized")}
         ranks, ns_rows = fetch_natureserve_ranges(sorted(profiles), eff_genus, http_get_fn=natureserve_http_fn)
         prof_list = [{**profiles[sp], **{k: v for k, v in ranks.get(sp, {}).items() if v}} for sp in sorted(profiles)]
         atomic_write_csv_rows(prof_csv, PROFILE_FIELDS, prof_list)
