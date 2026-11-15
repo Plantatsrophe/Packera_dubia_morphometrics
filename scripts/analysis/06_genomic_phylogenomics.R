@@ -52,6 +52,7 @@ if (!exists("save_packera_png_300", mode = "function")) .src_step06_rel("scripts
 if (!exists("compute_microhaplotype_coancestry", mode = "function")) .src_step06_rel("scripts/analysis/step06_reticulation_coancestry.R")
 if (!exists("run_step06_landscape_genomics", mode = "function")) .src_step06_rel("scripts/analysis/step06_spatial_landscape_genomics.R")
 if (!exists("load_public_packera_backbone", mode = "function")) .src_step06_rel("scripts/analysis/step06_public_backbone.R")
+if (!exists("select_admixture_k_cross_entropy", mode = "function")) .src_step06_rel("scripts/analysis/step06_model_selection.R")
 if (!exists("render_fig06a_genomic_pcoa_tree_png", mode = "function")) .src_step06_rel("scripts/figures/step06_figures.R")
 if (!exists("render_fig06c_cytonuclear_paralog_cytotype_png", mode = "function")) .src_step06_rel("scripts/figures/step06c_figures.R")
 
@@ -204,7 +205,7 @@ parse_step06_args <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
   q_mat
 }
 
-.fit_shrinkage_dapc <- function(X_train, y_train, X_test, lambda_shrink = 0.20) {
+.fit_shrinkage_dapc <- function(X_train, y_train, X_test, lambda_shrink = NULL) {
   classes <- sort(unique(y_train))
   g <- length(classes)
   m <- ncol(X_train)
@@ -215,13 +216,15 @@ parse_step06_args <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
       probs = p_mat,
       max_p = rep(1.0 / max(1L, g), nrow(X_test)),
       margin = rep(0.0, nrow(X_test)),
-      centroids = matrix(colMeans(X_train), nrow = 1L)
+      centroids = matrix(colMeans(X_train), nrow = 1L),
+      lambda_shrink = 0.95
     ))
   }
 
   centroids <- matrix(0.0, nrow = g, ncol = m, dimnames = list(classes, colnames(X_train)))
   S_w <- matrix(0.0, nrow = m, ncol = m)
   w_sum <- 0.0
+  wc_list <- vector("list", g)
   for (ci in seq_along(classes)) {
     idx <- which(y_train == classes[ci])
     sub <- X_train[idx, , drop = FALSE]
@@ -229,6 +232,7 @@ parse_step06_args <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
     centroids[ci, ] <- mu
     if (nrow(sub) >= 2L) {
       centered <- sweep(sub, 2L, mu, "-")
+      wc_list[[ci]] <- centered
       S_w <- S_w + (crossprod(centered) / nrow(sub))
       w_sum <- w_sum + 1.0
     }
@@ -236,9 +240,16 @@ parse_step06_args <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
   if (w_sum > 0) S_w <- S_w / w_sum else S_w <- stats::cov(X_train)
   if (!all(is.finite(S_w))) S_w <- diag(1.0, m)
 
+  wc_nonempty <- Filter(Negate(is.null), wc_list)
+  X_tr_c <- if (length(wc_nonempty) > 0L) do.call(rbind, wc_nonempty) else scale(X_train, center = TRUE, scale = FALSE)
+  if (is.null(nrow(X_tr_c)) || nrow(X_tr_c) < 2L) X_tr_c <- scale(X_train, center = TRUE, scale = FALSE)
+  lam_eff <- if (is.null(lambda_shrink) || !is.finite(lambda_shrink)) {
+    if (exists("estimate_ledoit_wolf_lambda", mode = "function")) estimate_ledoit_wolf_lambda(X_tr_c) else 0.20
+  } else as.numeric(lambda_shrink)
+
   diag_sw <- diag(diag(S_w), nrow = m, ncol = m)
   mean_var <- max(1e-5, mean(diag(S_w)))
-  Sigma_reg <- (1.0 - lambda_shrink) * S_w + lambda_shrink * diag_sw + diag(1e-3 * mean_var, m)
+  Sigma_reg <- (1.0 - lam_eff) * S_w + lam_eff * diag_sw + diag(1e-3 * mean_var, m)
   Sigma_inv <- tryCatch(solve(Sigma_reg), error = function(e) solve(Sigma_reg + diag(1e-2, m)))
 
   log_scores <- matrix(0.0, nrow = nrow(X_test), ncol = g, dimnames = list(rownames(X_test), classes))
@@ -261,7 +272,55 @@ parse_step06_args <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
   max_p <- apply(probs, 1L, max)
   sec_p <- apply(probs, 1L, function(v) sort(v, decreasing = TRUE)[min(2L, length(v))])
   margin <- if (g >= 2L) (max_p - sec_p) else max_p
-  list(pred = pred, probs = probs, max_p = max_p, margin = margin, centroids = centroids)
+  list(pred = pred, probs = probs, max_p = max_p, margin = margin, centroids = centroids, lambda_shrink = lam_eff)
+}
+
+.evaluate_tree_clade_cohesion <- function(tr, pass_df) {
+  summary_df <- data.frame(
+    species_standardized = character(0),
+    n_tips = integer(0),
+    mean_intra_patristic = numeric(0),
+    min_inter_patristic = numeric(0),
+    nearest_sister_taxon = character(0),
+    is_monophyletic = logical(0),
+    stringsAsFactors = FALSE
+  )
+  if (is.null(tr) || length(tr$tip.label) < 3L || !requireNamespace("ape", quietly = TRUE)) {
+    return(summary_df)
+  }
+  coph <- ape::cophenetic.phylo(tr)
+  sp_map <- stats::setNames(pass_df$species_standardized, pass_df$genetic_sample_id)
+  qry_map <- stats::setNames(as.integer(pass_df$is_putative_novel_or_hybrid_query) == 1L, pass_df$genetic_sample_id)
+  present_tips <- intersect(tr$tip.label, pass_df$genetic_sample_id)
+  ref_tips <- present_tips[!is.na(sp_map[present_tips]) & (!qry_map[present_tips] | grepl("^Packera sp\\. nov", sp_map[present_tips]))]
+  taxa_u <- sort(unique(sp_map[ref_tips]))
+  if (length(taxa_u) >= 2L) {
+    sum_rows <- lapply(taxa_u, function(tx) {
+      t_tx <- ref_tips[sp_map[ref_tips] == tx]
+      t_oth <- setdiff(ref_tips, t_tx)
+      intra <- if (length(t_tx) >= 2L) mean(coph[t_tx, t_tx][upper.tri(coph[t_tx, t_tx])], na.rm = TRUE) else 0.0
+      inter_mat <- coph[t_tx, t_oth, drop = FALSE]
+      min_inter <- min(inter_mat, na.rm = TRUE)
+      min_idx <- which(inter_mat == min_inter, arr.ind = TRUE)[1L, 2L]
+      sis_tx <- sp_map[[t_oth[min_idx]]]
+      mono_ok <- if (length(t_tx) >= 2L) {
+        tryCatch(ape::is.monophyletic(tr, tips = t_tx), error = function(e) NA)
+      } else {
+        NA
+      }
+      data.frame(
+        species_standardized = tx,
+        n_tips = length(t_tx),
+        mean_intra_patristic = round(intra, 6),
+        min_inter_patristic = round(min_inter, 6),
+        nearest_sister_taxon = sis_tx,
+        is_monophyletic = mono_ok,
+        stringsAsFactors = FALSE
+      )
+    })
+    summary_df <- dplyr::bind_rows(sum_rows)
+  }
+  summary_df
 }
 
 .extract_phylo_metrics <- function(tree_files, pass_df) {
@@ -337,36 +396,7 @@ parse_step06_args <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
     }
   }
 
-  # Clade cohesion summary per reference taxon
-  present_tips <- intersect(tr$tip.label, pass_df$genetic_sample_id)
-  ref_tips <- present_tips[!is.na(sp_map[present_tips]) & (!qry_map[present_tips] | grepl("^Packera sp\\. nov", sp_map[present_tips]))]
-  taxa_u <- sort(unique(sp_map[ref_tips]))
-  if (length(taxa_u) >= 2L) {
-    sum_rows <- lapply(taxa_u, function(tx) {
-      t_tx <- ref_tips[sp_map[ref_tips] == tx]
-      t_oth <- setdiff(ref_tips, t_tx)
-      intra <- if (length(t_tx) >= 2L) mean(coph[t_tx, t_tx][upper.tri(coph[t_tx, t_tx])], na.rm = TRUE) else 0.0
-      inter_mat <- coph[t_tx, t_oth, drop = FALSE]
-      min_inter <- min(inter_mat, na.rm = TRUE)
-      min_idx <- which(inter_mat == min_inter, arr.ind = TRUE)[1L, 2L]
-      sis_tx <- sp_map[[t_oth[min_idx]]]
-      mono_ok <- if (length(t_tx) >= 2L) {
-        tryCatch(ape::is.monophyletic(tr, tips = t_tx), error = function(e) NA)
-      } else {
-        NA
-      }
-      data.frame(
-        species_standardized = tx,
-        n_tips = length(t_tx),
-        mean_intra_patristic = round(intra, 6),
-        min_inter_patristic = round(min_inter, 6),
-        nearest_sister_taxon = sis_tx,
-        is_monophyletic = mono_ok,
-        stringsAsFactors = FALSE
-      )
-    })
-    summary_df <- dplyr::bind_rows(sum_rows)
-  }
+  summary_df <- .evaluate_tree_clade_cohesion(tr, pass_df)
 
   list(sample_metrics = out, clade_summary = summary_df, tree = tr)
 }
@@ -562,15 +592,20 @@ run_step06_genomic_phylogenomics <- function(opts) {
   pass_df$PCo1 <- pco_coords[, 1L]
   pass_df$PCo2 <- if (k_use >= 2L) pco_coords[, 2L] else 0.0
 
-  best_k <- 2L; best_sil <- -1.0; best_clus <- rep(1L, nrow(pass_df))
-  k_max <- min(8L, nrow(pass_df) - 1L)
-  if (k_max >= 2L && requireNamespace("cluster", quietly = TRUE)) {
-    for (kk in 2:k_max) {
-      pam_k <- tryCatch(cluster::pam(stats::as.dist(d_mat), k = kk, diss = TRUE), error = function(e) NULL)
-      if (!is.null(pam_k) && is.finite(pam_k$silinfo$avg.width) && pam_k$silinfo$avg.width > best_sil) {
-        best_sil <- pam_k$silinfo$avg.width; best_k <- kk; best_clus <- pam_k$clustering
-      }
-    }
+  ce_res <- select_admixture_k_cross_entropy(
+    dos_mat, d_mat = d_mat,
+    k_max = min(8L, max(1L, nrow(dos_mat) - 1L)),
+    n_folds = 5L, seed = 202611L
+  )
+  best_k <- as.integer(ce_res$best_k)
+  sel_ce_row <- ce_res$table_df[ce_res$table_df$K == best_k, , drop = FALSE]
+  best_sil <- if (nrow(sel_ce_row) > 0L && is.finite(sel_ce_row$pam_silhouette[1L])) as.numeric(sel_ce_row$pam_silhouette[1L]) else NA_real_
+  best_clus <- rep(1L, nrow(pass_df))
+  if (best_k >= 2L && nrow(pass_df) > best_k) {
+    pam_fit <- if (requireNamespace("cluster", quietly = TRUE)) {
+      tryCatch(cluster::pam(stats::as.dist(d_mat), k = best_k, diss = TRUE), error = function(e) NULL)
+    } else NULL
+    best_clus <- if (!is.null(pam_fit)) pam_fit$clustering else max.col(ce_res$Q_opt, ties.method = "first")
   }
   gen_cluster <- sprintf("Geno_Cluster_%d", as.integer(best_clus))
 
@@ -588,32 +623,37 @@ run_step06_genomic_phylogenomics <- function(opts) {
   m_dapc <- min(5L, ncol(pco_coords), max(2L, length(ref_idx) - length(keep_taxa)))
   X_dapc <- pco_coords[, seq_len(m_dapc), drop = FALSE]
   y_ref <- pass_df$species_standardized[ref_idx]
-  full_model <- .fit_shrinkage_dapc(X_dapc[ref_idx, , drop = FALSE], y_ref, X_dapc, lambda_shrink = 0.20)
+  full_model <- .fit_shrinkage_dapc(X_dapc[ref_idx, , drop = FALSE], y_ref, X_dapc)
   pred_taxon <- full_model$pred; post_prob <- full_model$max_p; margin_vec <- full_model$margin; probs_mat <- full_model$probs
   oof_pred <- rep(NA_character_, length(ref_idx))
+  oof_logloss <- rep(NA_real_, length(ref_idx))
   for (ri in seq_along(ref_idx)) {
     i_global <- ref_idx[ri]
     rep_i <- rep_ids[i_global]
     hold_mask <- if (!is.na(rep_i) && nzchar(rep_i)) (rep_ids[ref_idx] == rep_i) else (seq_along(ref_idx) == ri)
     tr_sub <- which(!hold_mask)
     if (sum(y_ref[tr_sub] == y_ref[i_global], na.rm = TRUE) >= 1L && length(unique(y_ref[tr_sub])) >= 2L) {
-      cv_fit <- .fit_shrinkage_dapc(X_dapc[ref_idx[tr_sub], , drop = FALSE], y_ref[tr_sub], X_dapc[i_global, , drop = FALSE], lambda_shrink = 0.20)
+      cv_fit <- .fit_shrinkage_dapc(X_dapc[ref_idx[tr_sub], , drop = FALSE], y_ref[tr_sub], X_dapc[i_global, , drop = FALSE])
       oof_pred[ri] <- cv_fit$pred[1L]; pred_taxon[i_global] <- cv_fit$pred[1L]
       post_prob[i_global] <- cv_fit$max_p[1L]; margin_vec[i_global] <- cv_fit$margin[1L]
       probs_mat[i_global, ] <- 0.0
       common_cols <- intersect(colnames(probs_mat), colnames(cv_fit$probs))
       if (length(common_cols) > 0L) probs_mat[i_global, common_cols] <- cv_fit$probs[1L, common_cols]
+      y_true <- as.character(y_ref[i_global])
+      p_true <- if (y_true %in% colnames(cv_fit$probs)) as.numeric(cv_fit$probs[1L, y_true]) else 1e-6
+      oof_logloss[ri] <- -log(min(1.0 - 1e-6, max(1e-6, p_true)))
     }
   }
   valid_oof <- !is.na(oof_pred)
   loro_acc <- if (any(valid_oof)) mean(oof_pred[valid_oof] == y_ref[valid_oof], na.rm = TRUE) else NA_real_
   loro_kappa <- if (sum(valid_oof) >= 2L) .compute_kappa_r(y_ref[valid_oof], oof_pred[valid_oof]) else NA_real_
+  loro_logloss <- if (any(is.finite(oof_logloss))) mean(oof_logloss, na.rm = TRUE) else NA_real_
 
   tree_files <- character(0); q_files <- character(0)
   if (file.exists(manifest_json)) {
     m_txt <- gsub("[\r\n]+", " ", paste(readLines(manifest_json, warn = FALSE), collapse = " "))
     ext_paths <- function(key) {
-      m <- regexec(sprintf('"%s"\\s*:\\s*\\[(.*?)\\]', key), m_txt)
+      m <- regexec(sprintf('"%s"[[:space:]]*:[[:space:]]*\\[(.*?)\\]', key), m_txt)
       hit <- regmatches(m_txt, m)[[1L]]
       if (length(hit) < 2L) return(character(0))
       vals <- regmatches(hit[2L], gregexpr('"([^"]+)"', hit[2L]))[[1L]]
@@ -632,7 +672,41 @@ run_step06_genomic_phylogenomics <- function(opts) {
   }
 
   q_ext <- .read_admixture_q_if_present(q_files, common_ids, keep_taxa, probs_mat)
-  q_mat <- if (!is.null(q_ext)) q_ext else .solve_admixture_simplex(X_dapc, full_model$centroids, rownames(full_model$centroids))
+  n_taxa_ref <- length(unique(y_ref[!is.na(y_ref) & nzchar(y_ref)]))
+  q_mat <- if (!is.null(q_ext)) {
+    q_ext
+  } else {
+    q_out <- ce_res$Q_opt
+    if (n_taxa_ref >= 2L && nrow(full_model$centroids) >= 2L) {
+      q_sup <- .solve_admixture_simplex(X_dapc, full_model$centroids, rownames(full_model$centroids))
+      rownames(q_sup) <- common_ids
+      ce_sup <- evaluate_q_reconstruction_ce(dos_mat, q_sup, n_folds = 5L, seed = 202611L)
+      ce_opt <- ce_res$selected_k_cross_entropy
+      if (ncol(q_out) == 1L || (is.finite(ce_sup) && length(ce_opt) == 1L && is.finite(ce_opt) && ce_sup <= 1.05 * ce_opt)) {
+        q_out <- q_sup
+      }
+    }
+    q_out
+  }
+  if (ncol(q_mat) >= 2L && length(ref_idx) >= 2L && length(keep_taxa) >= 2L &&
+      (is.null(colnames(q_mat)) || !all(colnames(q_mat) %in% keep_taxa))) {
+    if (is.null(colnames(q_mat))) colnames(q_mat) <- paste0("Ancestry_K", seq_len(ncol(q_mat)))
+    M_tx <- matrix(0.0, nrow = length(keep_taxa), ncol = ncol(q_mat), dimnames = list(keep_taxa, colnames(q_mat)))
+    for (ti in seq_along(keep_taxa)) {
+      t_rows <- ref_idx[y_ref == keep_taxa[ti]]
+      if (length(t_rows) > 0L) M_tx[ti, ] <- colMeans(q_mat[t_rows, , drop = FALSE], na.rm = TRUE)
+    }
+    M_work <- M_tx
+    M_work[!is.finite(M_work)] <- -1.0
+    for (step_m in seq_len(min(nrow(M_work), ncol(M_work)))) {
+      mx_v <- max(M_work)
+      if (!is.finite(mx_v) || mx_v < 0.50) break
+      rc <- which(M_work == mx_v, arr.ind = TRUE)[1L, ]
+      colnames(q_mat)[rc[2L]] <- keep_taxa[rc[1L]]
+      M_work[rc[1L], ] <- -1.0
+      M_work[, rc[2L]] <- -1.0
+    }
+  }
   q_cols <- colnames(q_mat); q_max <- apply(q_mat, 1L, max)
   is_admixed <- integer(nrow(pass_df)); p1 <- character(nrow(pass_df)); p2 <- character(nrow(pass_df)); q_json <- character(nrow(pass_df))
   for (i in seq_len(nrow(pass_df))) {
@@ -646,6 +720,7 @@ run_step06_genomic_phylogenomics <- function(opts) {
 
   # Phase 2 Independent Modules: Co-ancestry, (h, Q12) Hybrid Classifier, f-branch, SNPs2CF/SNaQ
   dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+  phylo_res$clade_summary <- evaluate_ml_tree_model_and_support(raw_geno_dir, phylo_res$tree, pass_df, out_dir)
   pub_bb <- load_public_packera_backbone(raw_geno_dir)
   coanc_res <- compute_microhaplotype_coancestry(common_ids, dos_mat, raw_geno_dir)
   tri_res <- compute_hybrid_index_q12(pass_df, dos_mat, q_mat, p1, p2, d_mat)
@@ -726,7 +801,11 @@ run_step06_genomic_phylogenomics <- function(opts) {
   eff_db_ro <- if (nzchar(eff_db_in)) eff_db_in else .resolve_step06_db_env("data/plantmatics.sqlite")
 
   # Post-stream read-only landscape genomics (MMRR + FEEMS) & Mantel congruence
-  land_res <- run_step06_landscape_genomics(pass_df, d_mat, db_path = eff_db_ro, run_id = opts[["run-id"]], demo = opts$demo)
+  land_res <- if ("out_dir" %in% names(formals(run_step06_landscape_genomics))) {
+    run_step06_landscape_genomics(pass_df, d_mat, db_path = eff_db_ro, run_id = opts[["run-id"]], demo = opts$demo, out_dir = out_dir)
+  } else {
+    run_step06_landscape_genomics(pass_df, d_mat, db_path = eff_db_ro, run_id = opts[["run-id"]], demo = opts$demo)
+  }
   if (nrow(land_res$summary_df) > 0L) {
     assign_df$mmrr_beta_ibd <- land_res$summary_df$mmrr_beta_ibd[1L]
     assign_df$mmrr_beta_ibe <- land_res$summary_df$mmrr_beta_ibe[1L]
@@ -748,8 +827,12 @@ run_step06_genomic_phylogenomics <- function(opts) {
     n_samples_total = nrow(samples_df), n_samples_pass = nrow(pass_df),
     n_reference_anchors = length(ref_idx),
     n_novel_queries = sum(as.integer(pass_df$is_putative_novel_or_hybrid_query) == 1L, na.rm = TRUE),
-    n_loci_retained = ncol(dos_mat), optimal_k_pam = best_k, pam_silhouette = round(best_sil, 4),
+    n_loci_retained = ncol(dos_mat), optimal_k_pam = best_k,
+    pam_silhouette = if (is.finite(best_sil)) round(best_sil, 4) else NA_real_,
+    selected_k_cross_entropy = if (length(ce_res$selected_k_cross_entropy) > 0L && is.finite(ce_res$selected_k_cross_entropy)) round(as.numeric(ce_res$selected_k_cross_entropy), 6) else NA_real_,
+    selected_shrinkage_lambda = round(as.numeric(full_model$lambda_shrink), 4),
     loro_cv_accuracy = round(loro_acc, 4), loro_cv_kappa = round(loro_kappa, 4),
+    loro_cv_logloss = round(loro_logloss, 4),
     mean_replicate_concordance = round(mean(rep_conc, na.rm = TRUE), 4),
     stringsAsFactors = FALSE
   )
@@ -757,12 +840,17 @@ run_step06_genomic_phylogenomics <- function(opts) {
   readr::write_csv(full_audit, file.path(out_dir, "genomic_assignments.csv"), na = "")
   readr::write_csv(phylo_res$clade_summary, file.path(out_dir, "genomic_clade_cohesion_summary.csv"), na = "")
   readr::write_csv(metrics_df, file.path(out_dir, "genomic_model_metrics.csv"), na = "")
+  readr::write_csv(ce_res$table_df, file.path(out_dir, "admixture_k_model_selection.csv"), na = "")
   readr::write_csv(congr_df, file.path(out_dir, "genomic_multimodal_congruence_summary.csv"), na = "")
   readr::write_csv(coanc_res$coanc_df, file.path(out_dir, "coancestry_matrix_finerad.csv"), na = "")
   readr::write_csv(tri_res$triangle_df, file.path(out_dir, "hybrid_index_q12_triangle.csv"), na = "")
   readr::write_csv(fb_res$fbranch_df, file.path(out_dir, "introgressive_fbranch_summary.csv"), na = "")
   readr::write_csv(cf_res$cf_df, file.path(out_dir, "quartet_concordance_factors_snps2cf.csv"), na = "")
   readr::write_csv(land_res$summary_df, file.path(out_dir, "landscape_mmrr_feems_summary.csv"), na = "")
+  mmrr_sel_p <- file.path(out_dir, "mmrr_model_selection.csv")
+  if (!is.null(land_res$mmrr_models_df) && is.data.frame(land_res$mmrr_models_df) && nrow(land_res$mmrr_models_df) > 0L && !file.exists(mmrr_sel_p)) {
+    readr::write_csv(land_res$mmrr_models_df, mmrr_sel_p, na = "")
+  }
   if (nrow(land_res$feems_edges_df) > 0L) readr::write_csv(land_res$feems_edges_df, file.path(out_dir, "feems_migration_edges.csv"), na = "")
 
   if (nzchar(tables_dir) && normalizePath(tables_dir, mustWork = FALSE) != normalizePath(out_dir, mustWork = FALSE)) {
@@ -770,6 +858,7 @@ run_step06_genomic_phylogenomics <- function(opts) {
     readr::write_csv(full_audit, file.path(tables_dir, "genomic_assignments.csv"), na = "")
     readr::write_csv(phylo_res$clade_summary, file.path(tables_dir, "genomic_clade_cohesion_summary.csv"), na = "")
     readr::write_csv(metrics_df, file.path(tables_dir, "genomic_model_metrics.csv"), na = "")
+    readr::write_csv(ce_res$table_df, file.path(tables_dir, "admixture_k_model_selection.csv"), na = "")
     readr::write_csv(congr_df, file.path(tables_dir, "genomic_multimodal_congruence_summary.csv"), na = "")
     readr::write_csv(pub_eval$concordance_df, file.path(tables_dir, "public_backbone_concordance.csv"), na = "")
     readr::write_csv(pub_eval$placement_df, file.path(tables_dir, "public_organellar_placement.csv"), na = "")

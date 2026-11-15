@@ -335,6 +335,10 @@ class TestCodeHygiene(unittest.TestCase):
             PROJECT_ROOT / "scripts" / "analysis" / "edaphic_geochem_wetland_utils.R",
             PROJECT_ROOT / "scripts" / "tests" / "test_external_data_sources.py",
             PROJECT_ROOT / "scripts" / "figures" / "step06c_figures.R",
+            PROJECT_ROOT / "scripts" / "analysis" / "step06_coalescent_models.py",
+            PROJECT_ROOT / "scripts" / "analysis" / "step06_model_selection.R",
+            PROJECT_ROOT / "scripts" / "analysis" / "step06_spatial_landscape_genomics.R",
+            PROJECT_ROOT / "scripts" / "tests" / "test_step06_model_selection.py",
         )
         strict_ceilings = {
             PROJECT_ROOT / "scripts" / "data_prep" / "download_public_packera_sequences.py": 500,
@@ -347,6 +351,10 @@ class TestCodeHygiene(unittest.TestCase):
             PROJECT_ROOT / "scripts" / "analysis" / "edaphic_geochem_wetland_utils.R": 320,
             PROJECT_ROOT / "scripts" / "tests" / "test_external_data_sources.py": 420,
             PROJECT_ROOT / "scripts" / "figures" / "step06c_figures.R": 350,
+            PROJECT_ROOT / "scripts" / "analysis" / "step06_coalescent_models.py": 380,
+            PROJECT_ROOT / "scripts" / "analysis" / "step06_model_selection.R": 380,
+            PROJECT_ROOT / "scripts" / "analysis" / "step06_spatial_landscape_genomics.R": 380,
+            PROJECT_ROOT / "scripts" / "tests" / "test_step06_model_selection.py": 420,
         }
         for mod_path in bounded_paths:
             self.assertTrue(mod_path.exists(), f"Missing expected bounded module: {mod_path}")

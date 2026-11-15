@@ -34,6 +34,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from scripts.analysis.step06_coalescent_models import (
+    _resolve_max_workers,
+    compute_coalescent_introgression_bf,
+    compute_model_corrected_divergence_blocks,
+    select_nucleotide_substitution_model,
+)
 from scripts.core.logger import setup_logging
 
 logger = setup_logging(name="packera.genomics.coalescent")
@@ -161,37 +167,7 @@ def _pairwise_site_divergence_blocks(
     block_slices: Sequence[Tuple[int, int]],
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Compute per-block `(n_samp, n_samp)` pairwise allele mismatch counts and callable site counts."""
-    n_samp = a1.shape[0]
-    n_blk = len(block_slices)
-    diff_blk = np.zeros((n_blk, n_samp, n_samp), dtype=np.float64)
-    call_blk = np.zeros((n_blk, n_samp, n_samp), dtype=np.float64)
-    within_het = np.zeros((n_blk, n_samp), dtype=np.float64)
-    within_call = np.zeros((n_blk, n_samp), dtype=np.float64)
-
-    for bi, (st, en) in enumerate(block_slices):
-        x1 = a1[:, st:en]
-        x2 = a2[:, st:en]
-        ok = x1 >= 0
-        within_call[bi, :] = np.sum(ok, axis=1)
-        within_het[bi, :] = np.sum(ok & (x1 != x2), axis=1)
-
-        # Two haplotypes per sample -> 4 pairwise combinations between sample i and sample j
-        for i in range(n_samp):
-            oki = ok[i]
-            if not np.any(oki):
-                continue
-            xi1, xi2 = x1[i][None, :], x2[i][None, :]
-            valid_ij = ok & oki[None, :]
-            d4 = (
-                (xi1 != x1).astype(np.float64)
-                + (xi1 != x2).astype(np.float64)
-                + (xi2 != x1).astype(np.float64)
-                + (xi2 != x2).astype(np.float64)
-            ) * 0.25
-            d4 = np.where(valid_ij, d4, 0.0)
-            diff_blk[bi, i, :] = np.sum(d4, axis=1)
-            call_blk[bi, i, :] = np.sum(valid_ij, axis=1)
-    return diff_blk, call_blk, within_het, within_call
+    return compute_model_corrected_divergence_blocks(a1, a2, block_slices, model_spec=None)
 
 
 def compute_svdquartets_support(
@@ -201,14 +177,25 @@ def compute_svdquartets_support(
     sample_ids: Sequence[str],
     max_quartets: int = 120,
     seed: int = 202611,
+    n_boot: int = 200,
 ) -> pd.DataFrame:
-    """Compute Chifman & Kubatko (2014) 16x16 site-pattern flattening SVDquartets scores."""
+    """Compute Chifman & Kubatko (2014) 16x16 SVDquartets scores and block-bootstrap p-values."""
+    empty_cols = [
+        "quartet_id",
+        "best_split",
+        "svd_score_best",
+        "svd_score_second",
+        "quartet_support",
+        "quartet_boot_support",
+        "quartet_p_value",
+        "n_sites_used",
+    ]
     taxon_groups: Dict[str, List[int]] = defaultdict(list)
     for idx, tx in enumerate(taxa_labels):
         taxon_groups[tx].append(idx)
     uniq_taxa = sorted(taxon_groups.keys())
     if len(uniq_taxa) < 4 or a1.shape[1] < 20:
-        return pd.DataFrame(columns=["quartet_id", "best_split", "svd_score_best", "svd_score_second", "quartet_support"])
+        return pd.DataFrame(columns=empty_cols)
 
     rng = np.random.default_rng(seed)
     from itertools import combinations
@@ -223,6 +210,10 @@ def compute_svdquartets_support(
     rep_idx = {tx: max(idxs, key=lambda i: int(np.sum(a1[i] >= 0))) for tx, idxs in taxon_groups.items()}
     n_sites = a1.shape[1]
 
+    def _svd_residual(mats: np.ndarray) -> np.ndarray:
+        sv = np.linalg.svd(mats, compute_uv=False)
+        return np.sqrt(np.sum(sv[..., 10:] ** 2, axis=-1))
+
     for t1, t2, t3, t4 in all_q:
         i1, i2, i3, i4 = rep_idx[t1], rep_idx[t2], rep_idx[t3], rep_idx[t4]
         valid = (a1[i1] >= 0) & (a1[i2] >= 0) & (a1[i3] >= 0) & (a1[i4] >= 0)
@@ -231,35 +222,63 @@ def compute_svdquartets_support(
             continue
         b1, b2, b3, b4 = a1[i1, valid], a1[i2, valid], a1[i3, valid], a1[i4, valid]
 
-        def _flat_svd_score(r1: np.ndarray, r2: np.ndarray, c1: np.ndarray, c2: np.ndarray) -> float:
-            flat = np.zeros((16, 16), dtype=np.float64)
-            r_code = r1.astype(np.int32) * 4 + r2.astype(np.int32)
-            c_code = c1.astype(np.int32) * 4 + c2.astype(np.int32)
-            np.add.at(flat, (r_code, c_code), 1.0 / float(nv))
-            sv = np.linalg.svd(flat, compute_uv=False)
-            # Coalescent rank-10 flattening residual energy (Chifman & Kubatko 2014)
-            return float(np.sqrt(np.sum(sv[10:] ** 2)))
+        n_b = max(4, min(40, nv // (2 if nv < 40 else 10)))
+        blk_splits = np.array_split(np.arange(nv), n_b)
+        blk_tensors = np.zeros((n_b, 256), dtype=np.float64)
+        idx_256 = (
+            b1.astype(np.int32) * 64
+            + b2.astype(np.int32) * 16
+            + b3.astype(np.int32) * 4
+            + b4.astype(np.int32)
+        )
+        for bi, b_idx in enumerate(blk_splits):
+            np.add.at(blk_tensors[bi], idx_256[b_idx], 1.0)
 
-        splits = [
-            (f"{t1},{t2}|{t3},{t4}", _flat_svd_score(b1, b2, b3, b4)),
-            (f"{t1},{t3}|{t2},{t4}", _flat_svd_score(b1, b3, b2, b4)),
-            (f"{t1},{t4}|{t2},{t3}", _flat_svd_score(b1, b4, b2, b3)),
+        obs_t4 = np.sum(blk_tensors, axis=0).reshape(4, 4, 4, 4) / float(nv)
+        obs_mats = np.stack([
+            obs_t4.reshape(16, 16),
+            obs_t4.transpose(0, 2, 1, 3).reshape(16, 16),
+            obs_t4.transpose(0, 3, 1, 2).reshape(16, 16),
+        ], axis=0)
+        obs_scores = _svd_residual(obs_mats)
+        split_labels = [
+            f"{t1},{t2}|{t3},{t4}",
+            f"{t1},{t3}|{t2},{t4}",
+            f"{t1},{t4}|{t2},{t3}",
         ]
-        splits.sort(key=lambda item: item[1])
-        s_best, s_sec, s_trd = splits[0][1], splits[1][1], splits[2][1]
-        # Softmax quartet weight inverted on residual error
+        order = np.argsort(obs_scores, kind="mergesort")
+        best_idx = int(order[0])
+        s_best, s_sec, s_trd = float(obs_scores[order[0]]), float(obs_scores[order[1]]), float(obs_scores[order[2]])
         scale = max(1e-6, float(np.std([s_best, s_sec, s_trd])))
         w = np.exp(-np.array([s_best, s_sec, s_trd]) / scale)
         support = float(w[0] / np.sum(w))
+
+        draws = rng.integers(0, n_b, size=(max(1, n_boot), n_b))
+        bw = np.zeros((max(1, n_boot), n_b), dtype=np.float64)
+        for bi in range(n_b):
+            bw[:, bi] = np.sum(draws == bi, axis=1)
+        boot_raw = (bw @ blk_tensors).reshape(-1, 4, 4, 4, 4)
+        boot_den = np.maximum(1.0, np.sum(boot_raw, axis=(1, 2, 3, 4), keepdims=True))
+        boot_t4 = boot_raw / boot_den
+        b_s0 = _svd_residual(boot_t4.reshape(-1, 16, 16))
+        b_s1 = _svd_residual(boot_t4.transpose(0, 1, 3, 2, 4).reshape(-1, 16, 16))
+        b_s2 = _svd_residual(boot_t4.transpose(0, 1, 4, 2, 3).reshape(-1, 16, 16))
+        boot_win = np.argmin(np.stack([b_s0, b_s1, b_s2], axis=1), axis=1)
+        n_match = int(np.sum(boot_win == best_idx))
+        boot_supp = float(n_match / float(len(boot_win)))
+        p_val = float((len(boot_win) - n_match + 1) / float(len(boot_win) + 1))
+
         rows.append({
             "quartet_id": f"{t1};{t2};{t3};{t4}",
-            "best_split": splits[0][0],
+            "best_split": split_labels[best_idx],
             "svd_score_best": round(s_best, 6),
             "svd_score_second": round(s_sec, 6),
             "quartet_support": round(support, 4),
+            "quartet_boot_support": round(boot_supp, 4),
+            "quartet_p_value": round(p_val, 4),
             "n_sites_used": min(nv, n_sites),
         })
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows, columns=empty_cols) if not rows else pd.DataFrame(rows)
 
 
 def export_bpp_msci_files(
@@ -269,6 +288,7 @@ def export_bpp_msci_files(
     block_slices: Sequence[Tuple[int, int]],
     out_dir: Path,
     max_loci: int = 200,
+    substitution_model: str = "JC69",
 ) -> Tuple[Path, Path]:
     """Write BPP-formatted multi-locus PHYLIP and `bpp_msci.ctl` into run-scoped `out_dir`."""
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -298,13 +318,19 @@ def export_bpp_msci_files(
         for sid, tx in zip(sample_ids, taxa_labels):
             ih.write(f"{sid}\t{tx.replace(' ', '_')}\n")
 
+    base_sub = str(substitution_model or "JC69").split("+", 1)[0].upper()
+    bpp_model = "HKY" if base_sub in ("HKY85", "TN93", "F81", "K80") else "JC69"
+    gamma_line = "alpha = 0.5\n" if "+G4" in str(substitution_model or "").upper() else ""
     species_tokens = " ".join(tx.replace(" ", "_") for tx in uniq_taxa)
     ctl_txt = (
+        f"* BIC selected substitution model: {substitution_model}\n"
         f"seed = 202611\n"
         f"seqfile = {loci_phy.name}\n"
         f"Imapfile = {imap_path.name}\n"
         f"outfile = bpp_msci_out.txt\n"
         f"mcmcfile = bpp_msci_mcmc.txt\n"
+        f"model = {bpp_model}\n"
+        f"{gamma_line}"
         f"speciesdelimitation = 0\n"
         f"speciestree = 0\n"
         f"species&tree = {len(uniq_taxa)} {species_tokens}\n"
@@ -375,6 +401,8 @@ def compute_coalescent_gdi_delimitation(
     within_call: np.ndarray,
     n_boot: int = 500,
     seed: int = 202611,
+    substitution_model: str = "JC69",
+    bpp_out_path: Optional[Path] = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Compute per-taxon and per-sample `gdi = 1 - exp(-2*tau/theta)` with locus-bootstrap 95% CIs."""
     by_taxon: Dict[str, List[int]] = defaultdict(list)
@@ -395,6 +423,7 @@ def compute_coalescent_gdi_delimitation(
             pair_dxy[(tb, ta)] = dxy
 
     taxon_rows: List[Dict[str, Any]] = []
+    adequacy_rows: List[Dict[str, Any]] = []
     taxon_gdi_map: Dict[str, Dict[str, Any]] = {}
     boot_draws = rng.integers(0, n_blk, size=(max(10, n_boot), n_blk)) if n_blk > 1 else np.zeros((10, 1), dtype=int)
 
@@ -416,13 +445,12 @@ def compute_coalescent_gdi_delimitation(
             boot_vals.append(1.0 - math.exp(-2.0 * b_tau / max(1e-4, b_ta)))
         ci_low, ci_high = float(np.percentile(boot_vals, 2.5)), float(np.percentile(boot_vals, 97.5))
 
-        # Approximate conjugate Savage-Dickey / BIC introgression Bayes factor across blocks
-        d_blk_ratio = np.divide(
-            np.sum(diff_blk[:, np.ix_(idx_a, idx_b)[0], np.ix_(idx_a, idx_b)[1]], axis=(1, 2)),
-            np.maximum(1.0, np.sum(call_blk[:, np.ix_(idx_a, idx_b)[0], np.ix_(idx_a, idx_b)[1]], axis=(1, 2))),
-        )
-        bimod_disp = float(np.std(d_blk_ratio) / max(1e-4, float(np.mean(d_blk_ratio)))) if d_blk_ratio.size >= 4 else 0.0
-        bpp_bf = round(float(math.exp(min(10.0, max(-3.0, (bimod_disp - 0.65) * 4.0)))), 4)
+        ix_r, ix_c = np.ix_(idx_a, idx_b)
+        call_mean_vec = np.mean(call_blk[:, ix_r, ix_c], axis=(1, 2))
+        diff_mean_vec = np.mean(diff_blk[:, ix_r, ix_c], axis=(1, 2))
+        d_blk_ratio = np.divide(diff_mean_vec, np.maximum(1.0, call_mean_vec))
+        bf_info = compute_coalescent_introgression_bf(d_blk_ratio, call_mean_vec, bpp_out_path=bpp_out_path)
+        bpp_bf = float(bf_info["bf_10"])
 
         if gdi_obs < 0.20:
             gdi_cls = "Single_Lineage_Oversplit"
@@ -445,9 +473,26 @@ def compute_coalescent_gdi_delimitation(
             "gdi_ci_high": round(ci_high, 4),
             "gdi_classification": gdi_cls,
             "bpp_introgression_bf": bpp_bf,
+            "substitution_model": substitution_model,
+            "bf_method": bf_info["bf_method"],
         }
         taxon_rows.append(rec)
         taxon_gdi_map[tx] = rec
+        adequacy_rows.append({
+            "taxon": tx,
+            "nearest_sister_taxon": sister,
+            "substitution_model": substitution_model,
+            "bf_method": bf_info["bf_method"],
+            "bic_m0": bf_info["bic_m0"],
+            "bic_m1": bf_info["bic_m1"],
+            "log_bf_10": bf_info["log_bf_10"],
+            "bf_10": bf_info["bf_10"],
+            "w_introgr": bf_info["w_introgr"],
+            "tau_introgr": bf_info["tau_introgr"],
+            "tau_sp": bf_info["tau_sp"],
+            "coalescent_gdi": rec["coalescent_gdi"],
+            "gdi_classification": gdi_cls,
+        })
 
     sample_rows = []
     for sid, tx in zip(sample_ids, taxa_labels):
@@ -462,7 +507,9 @@ def compute_coalescent_gdi_delimitation(
             "gdi_classification": info.get("gdi_classification"),
             "bpp_introgression_bf": info.get("bpp_introgression_bf"),
         })
-    return pd.DataFrame(taxon_rows), pd.DataFrame(sample_rows)
+    taxon_df = pd.DataFrame(taxon_rows)
+    taxon_df.attrs["adequacy_df"] = pd.DataFrame(adequacy_rows)
+    return taxon_df, pd.DataFrame(sample_rows)
 
 
 def _load_sample_metadata(
@@ -657,6 +704,40 @@ def _expand_gdi_samples(
     return pd.DataFrame(rows, columns=gdi_s_df.columns) if rows else gdi_s_df
 
 
+def _select_models_for_skimmed_fastas(
+    genomics_dir: Path,
+    exclude_paths: Sequence[Path],
+) -> List[Dict[str, Any]]:
+    """Run BIC substitution model selection across any recursive `skimmed_*.fasta` alignments."""
+    excl_resolved = {p.resolve() for p in exclude_paths}
+    candidates = sorted(
+        p for p in genomics_dir.rglob("skimmed_*.fasta")
+        if p.is_file() and not any(part.startswith(".") for part in p.parts) and p.resolve() not in excl_resolved
+    )
+    if not candidates:
+        return []
+
+    def _fit_skimmed(fa_path: Path) -> List[Dict[str, Any]]:
+        sk_sids, sk_seqs = parse_invariant_alignment(fa_path)
+        if len(sk_sids) < 3 or not sk_seqs:
+            return []
+        spec = select_nucleotide_substitution_model(dict(zip(sk_sids, sk_seqs)), sk_sids, alignment_name=fa_path.name)
+        return list(spec.get("table_rows") or [])
+
+    n_workers = min(_resolve_max_workers(), len(candidates))
+    rows: List[Dict[str, Any]] = []
+    if n_workers > 1:
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=n_workers) as pool:
+            for sub_rows in pool.map(_fit_skimmed, candidates):
+                rows.extend(sub_rows)
+    else:
+        for fa_path in candidates:
+            rows.extend(_fit_skimmed(fa_path))
+    return rows
+
+
 def run_coalescent_delimitation(
     genomics_dir: Path,
     out_dir: Path,
@@ -669,6 +750,9 @@ def run_coalescent_delimitation(
     discover_fn = importlib.import_module("scripts.data_prep.06_ingest_genetic_data").discover_genomic_inputs
     assets = discover_fn(genomics_dir)
 
+    if not assets.alignment_files and not (dosage_tsv and dosage_tsv.exists()):
+        return {"status": "skipped_empty", "n_samples": 0}
+
     pass_set, sample_taxon_map, rep_pair_map, hq_reads_map, miss_rate_map = _load_sample_metadata(
         genomics_dir, parsed_samples_csv
     )
@@ -677,6 +761,8 @@ def run_coalescent_delimitation(
     gdi_csv = out_dir / "coalescent_gdi_delimitation.csv"
     gdi_samp_csv = out_dir / "coalescent_gdi_samples.csv"
     svdq_csv = out_dir / "svdquartets_support.csv"
+    model_sel_csv = out_dir / "substitution_model_selection.csv"
+    adequacy_csv = out_dir / "coalescent_model_adequacy.csv"
 
     if assets.alignment_files:
         # Prefer PHYLIP/NEXUS alignments over generic FASTA
@@ -684,7 +770,8 @@ def run_coalescent_delimitation(
             assets.alignment_files,
             key=lambda p: (0 if p.name.lower().endswith((".phylip", ".phy", ".nex", ".nexus")) else 1, p.name),
         )
-        sids, seqs = parse_invariant_alignment(align_sorted[0])
+        primary_path = align_sorted[0]
+        sids, seqs = parse_invariant_alignment(primary_path)
         if pass_set is not None:
             kept = [(sid, sq) for sid, sq in zip(sids, seqs) if sid in pass_set]
             if len(kept) >= 4:
@@ -707,22 +794,51 @@ def run_coalescent_delimitation(
         if bpp_bin:
             logger.info("Detected external BPP binary (%s); generated control file for MSci.", bpp_bin)
 
+        primary_spec = select_nucleotide_substitution_model(
+            dict(zip(sids, seqs)),
+            sids,
+            alignment_name=primary_path.name,
+        )
+        model_rows = list(primary_spec.get("table_rows") or [])
+        model_rows.extend(_select_models_for_skimmed_fastas(genomics_dir, [primary_path]))
+        pd.DataFrame(model_rows).to_csv(model_sel_csv, index=False)
+
+        best_model = str(primary_spec.get("best_model") or "JC69")
         a1, a2 = _encode_haplotype_alleles(seqs)
-        diff_blk, call_blk, within_het, within_call = _pairwise_site_divergence_blocks(a1, a2, block_slices)
-        svdq_df = compute_svdquartets_support(a1, a2, taxa_labels, sids)
-        export_bpp_msci_files(sids, taxa_labels, seqs, block_slices, out_dir)
-        gdi_df, gdi_s_df = compute_coalescent_gdi_delimitation(sids, taxa_labels, diff_blk, call_blk, within_het, within_call, n_boot=n_boot)
+        diff_blk, call_blk, within_het, within_call = compute_model_corrected_divergence_blocks(
+            a1, a2, block_slices, model_spec=primary_spec
+        )
+        svdq_df = compute_svdquartets_support(a1, a2, taxa_labels, sids, n_boot=200, seed=202611)
+        export_bpp_msci_files(
+            sids, taxa_labels, seqs, block_slices, out_dir, substitution_model=best_model
+        )
+        gdi_df, gdi_s_df = compute_coalescent_gdi_delimitation(
+            sids,
+            taxa_labels,
+            diff_blk,
+            call_blk,
+            within_het,
+            within_call,
+            n_boot=n_boot,
+            substitution_model=best_model,
+            bpp_out_path=out_dir / "bpp_msci_out.txt",
+        )
+        adequacy_df = gdi_df.attrs.get("adequacy_df", pd.DataFrame())
         gdi_s_df = _expand_gdi_samples(gdi_s_df, group_members, orig_sids)
 
         svdq_df.to_csv(svdq_csv, index=False)
         gdi_df.to_csv(gdi_csv, index=False)
         gdi_s_df.to_csv(gdi_samp_csv, index=False)
+        adequacy_df.to_csv(adequacy_csv, index=False)
         return {
             "status": "completed_alignment",
             "n_samples": len(sids),
             "n_blocks": len(block_slices),
+            "best_substitution_model": best_model,
             "gdi_csv": str(gdi_csv),
             "svdq_csv": str(svdq_csv),
+            "model_selection_csv": str(model_sel_csv),
+            "adequacy_csv": str(adequacy_csv),
         }
 
     # Dosage-only fallback (when tests or VCF-only inputs lack full invariant PHYLIP/NEXUS)
@@ -747,16 +863,15 @@ def run_coalescent_delimitation(
         w_het = (np.nansum(mat * (1.0 - mat), axis=1, keepdims=True) * 0.02).T
         w_call = np.sum(np.isfinite(mat), axis=1, keepdims=True).astype(np.float64).T
         gdi_df, gdi_s_df = compute_coalescent_gdi_delimitation(sids, taxa_labels, diff_blk, call_blk, w_het, w_call, n_boot=50)
+        adequacy_df = gdi_df.attrs.get("adequacy_df", pd.DataFrame())
         gdi_s_df = _expand_gdi_samples(gdi_s_df, group_members, orig_sids)
         gdi_df.to_csv(gdi_csv, index=False)
         gdi_s_df.to_csv(gdi_samp_csv, index=False)
-        pd.DataFrame(columns=["quartet_id", "best_split", "svd_score_best", "svd_score_second", "quartet_support"]).to_csv(svdq_csv, index=False)
+        adequacy_df.to_csv(adequacy_csv, index=False)
+        pd.DataFrame(columns=["quartet_id", "best_split", "svd_score_best", "svd_score_second", "quartet_support", "quartet_boot_support", "quartet_p_value", "n_sites_used"]).to_csv(svdq_csv, index=False)
         return {"status": "completed_dosage_fallback", "n_samples": n_s, "gdi_csv": str(gdi_csv)}
 
-    pd.DataFrame(columns=["taxon", "coalescent_gdi", "gdi_classification", "bpp_introgression_bf"]).to_csv(gdi_csv, index=False)
-    pd.DataFrame(columns=["genetic_sample_id", "coalescent_gdi", "gdi_classification", "bpp_introgression_bf"]).to_csv(gdi_samp_csv, index=False)
-    pd.DataFrame(columns=["quartet_id", "best_split", "quartet_support"]).to_csv(svdq_csv, index=False)
-    return {"status": "empty_no_alignment", "n_samples": 0}
+    return {"status": "skipped_empty", "n_samples": 0}
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

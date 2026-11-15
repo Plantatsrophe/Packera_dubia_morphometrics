@@ -28,6 +28,8 @@ import argparse
 import csv
 import gzip
 import json
+import math
+import os
 import re
 import sqlite3
 import sys
@@ -1511,6 +1513,101 @@ def _link_sample_to_voucher(
     return {"catalogNumber": None, "voucher": None, "linkage_tier": "G4_Ungeoreferenced_Tip", "exsiccatae_key": out_ex}
 
 
+def _em_nquire_component(
+    ratios: np.ndarray,
+    centers: Sequence[float],
+    *,
+    update_means: bool = False,
+    max_iter: int = 25,
+) -> Tuple[float, float, float, np.ndarray, np.ndarray]:
+    """Fit Gaussian + U(0.10, 0.90) noise EM mixture for allele balance ratios."""
+    n = int(ratios.size)
+    c_num = len(centers)
+    mu = np.asarray(centers, dtype=np.float64).copy()
+    pi_0 = 0.05
+    pi_c = np.full(c_num, (1.0 - pi_0) / max(1, c_num), dtype=np.float64)
+    sigma = 0.07
+    log_u_dens = math.log(1.25)
+
+    def _eval_log_joint(cur_pi0: float, cur_pic: np.ndarray, cur_mu: np.ndarray, cur_sig: float) -> Tuple[np.ndarray, np.ndarray, float]:
+        log_u_col = np.full((n, 1), math.log(max(1e-9, cur_pi0)) + log_u_dens, dtype=np.float64)
+        diffs = ratios[:, None] - cur_mu[None, :]
+        inv_var = 1.0 / (2.0 * cur_sig * cur_sig)
+        log_norm = (
+            -0.5 * math.log(2.0 * math.pi * cur_sig * cur_sig)
+            - (diffs * diffs) * inv_var
+            + np.log(np.maximum(1e-9, cur_pic))[None, :]
+        )
+        log_joint = np.hstack([log_u_col, log_norm])
+        m = np.max(log_joint, axis=1)
+        lse = m + np.log(np.sum(np.exp(log_joint - m[:, None]), axis=1))
+        return log_joint, lse, float(np.sum(lse))
+
+    prev_logl = -math.inf
+    for it in range(max_iter):
+        log_joint, lse, logl = _eval_log_joint(pi_0, pi_c, mu, sigma)
+        if it > 0 and abs(logl - prev_logl) < 1e-6:
+            break
+        prev_logl = logl
+        resp = np.exp(log_joint - lse[:, None])
+        r0 = resp[:, 0]
+        rc = resp[:, 1:]
+        nk0 = float(np.sum(r0))
+        nkc = np.sum(rc, axis=0)
+        pi_0 = float(min(0.50, max(0.01, nk0 / max(1, n))))
+        rem = 1.0 - pi_0
+        sum_nkc = max(1e-9, float(np.sum(nkc)))
+        w_raw = np.maximum(1e-4, nkc / sum_nkc)
+        pi_c = rem * (w_raw / max(1e-12, float(np.sum(w_raw))))
+        if update_means:
+            mu = np.clip(np.sum(rc * ratios[:, None], axis=0) / np.maximum(1e-9, nkc), 0.12, 0.88)
+        diffs = ratios[:, None] - mu[None, :]
+        sq = float(np.sum(rc * (diffs * diffs)))
+        sig_den = max(1e-9, float(np.sum(rc)))
+        sigma = float(min(0.16, max(0.03, math.sqrt(max(1e-12, sq / sig_den)))))
+
+    _, _, final_logl = _eval_log_joint(pi_0, pi_c, mu, sigma)
+    return final_logl, sigma, pi_0, pi_c, mu
+
+
+def _fit_nquire_em_models(ratios: np.ndarray, max_iter: int = 25) -> Dict[str, Any]:
+    """Fit Weiß et al. (2018) EM Gaussian-plus-uniform-noise ploidy models (`2x/3x/4x/6x/free`)."""
+    n = max(2, int(ratios.size))
+    log_n = math.log(n)
+    specs: List[Tuple[str, Sequence[float], int, bool]] = [
+        ("2x", [0.50], 2, False),
+        ("3x", [1.0 / 3.0, 2.0 / 3.0], 3, False),
+        ("4x", [0.25, 0.50, 0.75], 4, False),
+        ("6x", [1.0 / 6.0, 2.0 / 6.0, 0.50, 4.0 / 6.0, 5.0 / 6.0], 6, False),
+        ("free", [0.25, 0.50, 0.75], 7, True),
+    ]
+    logl_map: Dict[str, float] = {}
+    bic_map: Dict[str, float] = {}
+    sigma_map: Dict[str, float] = {}
+    pi0_map: Dict[str, float] = {}
+    for label, centers, k_params, upd_means in specs:
+        logl, sig, p0, _, _ = _em_nquire_component(ratios, centers, update_means=upd_means, max_iter=max_iter)
+        logl_map[label] = float(logl)
+        bic_map[label] = float(-2.0 * logl + k_params * log_n)
+        sigma_map[label] = float(sig)
+        pi0_map[label] = float(p0)
+
+    best_label = min(("2x", "3x", "4x", "6x"), key=lambda lbl: bic_map[lbl])
+    delta_logl = float(max(0.0, logl_map["free"] - logl_map[best_label]))
+    delta_bic_vs_2x = float(max(0.0, bic_map["2x"] - bic_map[best_label]))
+    bic_gap_2x_vs_poly = float(min(bic_map["3x"], bic_map["4x"], bic_map["6x"]) - bic_map["2x"])
+    return {
+        "best_label": best_label,
+        "logL_map": logl_map,
+        "bic_map": bic_map,
+        "sigma_map": sigma_map,
+        "pi0_map": pi0_map,
+        "delta_logl": delta_logl,
+        "delta_bic_vs_2x": delta_bic_vs_2x,
+        "bic_gap_2x_vs_poly": bic_gap_2x_vs_poly,
+    }
+
+
 def _infer_sample_cytotype(
     ref_vec: np.ndarray,
     alt_vec: np.ndarray,
@@ -1519,7 +1616,7 @@ def _infer_sample_cytotype(
     species_modal_ploidy: Optional[int] = None,
     is_multi_cytotype: bool = False,
 ) -> Tuple[str, Optional[float]]:
-    """Infer cytotype (`2x`/`4x`/`6x`/`mixed/uncertain`) and delta-logLik from het allele balance."""
+    """Infer cytotype (`2x`/`3x`/`4x`/`6x`/`mixed/uncertain`) and nQuire EM BIC score."""
     valid = np.isfinite(ref_vec) & np.isfinite(alt_vec) & np.isfinite(dosage_vec)
     dp = ref_vec + alt_vec
     het_mask = valid & (dp >= 10.0) & (dosage_vec > 0.05) & (dosage_vec < 0.95)
@@ -1527,35 +1624,39 @@ def _infer_sample_cytotype(
     ratios = ratios[(ratios >= 0.10) & (ratios <= 0.90)]
     if ratios.size < 15:
         if user_ploidy in (2, 3, 4, 6, 8):
-            return f"{user_ploidy}x", 0.0
-        if species_modal_ploidy in (2, 4, 6, 8) and not is_multi_cytotype:
-            return f"{species_modal_ploidy}x", 0.0
+            return f"{int(user_ploidy)}x", 0.0
+        if species_modal_ploidy in (2, 3, 4, 6, 8) and not is_multi_cytotype:
+            return f"{int(species_modal_ploidy)}x", 0.0
         return "mixed/uncertain", None
 
-    sigma = 0.08
-    inv_var = 1.0 / (2.0 * sigma * sigma)
-
-    def _mix_ll(centers: Sequence[float]) -> float:
-        c = np.asarray(centers, dtype=np.float64)[None, :]
-        diffs = ratios[:, None] - c
-        comp = -0.5 * np.log(2.0 * np.pi * sigma * sigma) - (diffs * diffs) * inv_var - np.log(len(centers))
-        m = np.max(comp, axis=1)
-        return float(np.sum(m + np.log(np.sum(np.exp(comp - m[:, None]), axis=1))))
-
-    ll_2x = _mix_ll([0.50])
-    ll_4x = _mix_ll([0.25, 0.50, 0.75]) - 1.5 * float(np.log(max(2, ratios.size)))
-    ll_6x = _mix_ll([1.0 / 6.0, 2.0 / 6.0, 0.50, 4.0 / 6.0, 5.0 / 6.0]) - 3.0 * float(np.log(max(2, ratios.size)))
-    delta = float(max(ll_4x, ll_6x) - ll_2x)
-    diploid_prior = (user_ploidy == 2) or (
-        user_ploidy is None and species_modal_ploidy == 2 and not is_multi_cytotype
+    fit = _fit_nquire_em_models(ratios, max_iter=25)
+    best_label = str(fit["best_label"])
+    delta_bic_vs_2x = float(fit["delta_bic_vs_2x"])
+    bic_gap_2x_vs_poly = float(fit["bic_gap_2x_vs_poly"])
+    prior_p: Optional[int] = (
+        int(user_ploidy)
+        if user_ploidy in (2, 3, 4, 6)
+        else (
+            int(species_modal_ploidy)
+            if (species_modal_ploidy in (2, 3, 4, 6) and not is_multi_cytotype)
+            else None
+        )
     )
-    if delta <= 2.0:
-        return "2x", round(delta, 4)
-    if 2.0 < delta < 4.0 and diploid_prior:
-        return "2x", round(delta, 4)
-    if (ll_6x - ll_4x) > 3.0:
-        return "6x", round(delta, 4)
-    return "4x", round(delta, 4)
+
+    if best_label == "2x":
+        if prior_p in (3, 4, 6) and abs(bic_gap_2x_vs_poly) < 4.0:
+            return f"{prior_p}x", round(-bic_gap_2x_vs_poly, 4)
+        return "2x", round(-bic_gap_2x_vs_poly, 4)
+
+    strong_thresh = 6.0 if ratios.size < 40 else 4.0
+    if delta_bic_vs_2x >= strong_thresh:
+        return best_label, round(delta_bic_vs_2x, 4)
+    if prior_p == 2:
+        return "2x", round(delta_bic_vs_2x, 4)
+    if prior_p in (3, 4, 6):
+        chosen = best_label if delta_bic_vs_2x >= 4.0 else f"{prior_p}x"
+        return chosen, round(delta_bic_vs_2x, 4)
+    return "2x", round(delta_bic_vs_2x, 4)
 
 
 def _load_paraloss1272_catalog(genomics_dir: Optional[Path]) -> Dict[str, Tuple[int, float]]:
@@ -2002,7 +2103,7 @@ def run_genomic_ingestion(
 
         if ploidy in (2, 3, 4, 6, 8):
             inf_cyto = f"{ploidy}x"
-        elif sp_modal in (2, 4, 6, 8) and not sp_multi:
+        elif sp_modal in (2, 3, 4, 6, 8) and not sp_multi:
             inf_cyto = f"{sp_modal}x"
         else:
             inf_cyto = "mixed/uncertain"
