@@ -979,6 +979,7 @@ CANONICAL_CIS_MISSISSIPPI_PACKERA_SPECIES: Set[str] = {
     "Packera imparipinnata",
     "Packera indecora",
     "Packera insulae-regalis",
+    "Packera millefolia",
     "Packera millefolium",
     "Packera obovata",
     "Packera pauciflora",
@@ -987,6 +988,7 @@ CANONICAL_CIS_MISSISSIPPI_PACKERA_SPECIES: Set[str] = {
     "Packera schweinitziana",
     "Packera serpenticola",
     "Packera tampicana",
+    "Packera memmingeri",
     "Packera x memmingeri",
     "Packera ×memmingeri",
 }

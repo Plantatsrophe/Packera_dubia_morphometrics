@@ -36,26 +36,44 @@
       s <- if (length(hit) > 0L) hit[1L] else if (length(parts) >= 2L) parts[2L] else parts[1L]
     }
     s <- trimws(gsub("[[:space:]]+", " ", gsub("_+", " ", s)))
+    s <- gsub("(?i)\\b(Packera|Senecio|P\\.)\\s+(?:x\\s+|×\\s*)memmingeri\\b", "\\1 xmemmingeri", s, perl = TRUE)
+    s <- sub("^(?i)(?:Packera|P\\.)\\s+sp\\.?(?=\\s+(?:Packera|Senecio|P\\.)\\s+[A-Za-z])\\s+", "", s, perl = TRUE)
+    s <- sub("^([A-Za-z]+)\\s+[0-9]+([A-Za-z][A-Za-z-]*)$", "\\1 \\2", s, perl = TRUE)
     if (grepl("(?i)\\b(Packera|P\\.)\\s+sp\\.?\\s*nov\\b", s, perl = TRUE)) return("Packera sp. nov.")
+    if (grepl("(?i)^(?:sp\\.?|cf\\.?|aff\\.?|unk|unknown)$", s, perl = TRUE)) return("")
     m <- regexec("(?i)\\b(Packera|Senecio|P\\.)\\s+[0-9]*([A-Za-z][A-Za-z0-9.-]*)", s, perl = TRUE)
     reg <- regmatches(s, m)[[1L]]
     if (length(reg) >= 3L) {
       gen_low <- tolower(reg[2L])
       ep_raw <- sub("[-.].*$", "", reg[3L])
       ep_low <- tolower(ep_raw)
+      if (ep_low %in% c("sp", "cf", "aff", "unk", "unknown")) return("")
       sen_map <- c(
         tomentosus = "dubia", tomentosa = "dubia", aureus = "aurea",
         anonymus = "anonyma", obovatus = "obovata", pauperculus = "paupercula",
-        schweinitzianus = "schweinitziana", millefolium = "millefolium",
+        schweinitzianus = "schweinitziana", millefolium = "millefolium", millefolia = "millefolium",
         antennariifolius = "antennariifolia", glabellus = "glabella",
         plattensis = "plattensis", pseudaureus = "pseudaurea",
-        indecorus = "indecora", canus = "cana"
+        indecorus = "indecora", canus = "cana", loratifolius = "loratifolia",
+        strepthanthifolius = "streptanthifolia", streptanthifolius = "streptanthifolia",
+        fendleri = "fendleri", multilobatus = "multilobata", neomexicanus = "neomexicana",
+        debilis = "debilis", werneriifolius = "werneriifolia", hartianus = "hartiana",
+        sanguisorboides = "sanguisorboides", dimorphophyllus = "dimorphophylla",
+        crocanthes = "crocanthes", hyperborealis = "hyperborealis", porteri = "porteri",
+        bellidifolius = "bellidifolia", ganderi = "ganderi", bernardinus = "bernardina",
+        hesperius = "hesperia", macounii = "macounii", cardamine = "cardamine",
+        cynthioides = "cynthioides", cymbalaria = "cymbalaria", flettii = "flettii",
+        layneae = "layneae", cleavelandii = "clevelandii", eurycephalus = "eurycephala",
+        bolanderi = "bolanderi", breweri = "breweri", memmingeri = "xmemmingeri", xmemmingeri = "xmemmingeri"
       )
       if (gen_low == "senecio") {
         if (ep_low %in% names(sen_map)) return(paste("Packera", sen_map[[ep_low]]))
         return(paste("Senecio", ep_low))
       }
       if (ep_low %in% c("tomentosa", "tomentosus")) return("Packera dubia")
+      if (ep_low == "millefolia") return("Packera millefolium")
+      if (ep_low %in% c("memmingeri", "xmemmingeri")) return("Packera xmemmingeri")
+      if (ep_low == "strepthanthifolius") return("Packera streptanthifolia")
       return(paste("Packera", ep_low))
     }
     if (tolower(s) %in% c("tomentosa", "tomentosus")) return("Packera dubia")
@@ -143,7 +161,15 @@ select_backbone_guided_outgroup <- function(uniq_taxa, p_dist, backbone = NULL) 
   if (is.null(ref_tr)) ref_tr <- backbone$trees$ASTRALPro
   if (is.null(ref_tr)) ref_tr <- backbone$trees$wASTRAL
   if (is.null(ref_tr)) return(NULL)
-  ov <- intersect(uniq_taxa, ref_tr$tip.label)
+  norm_u <- .normalize_public_packera_taxon(uniq_taxa)
+  norm_to_orig <- character(0)
+  for (idx in seq_along(uniq_taxa)) {
+    nk <- norm_u[idx]
+    if (nzchar(nk) && (!nk %in% names(norm_to_orig) || identical(uniq_taxa[idx], nk))) {
+      norm_to_orig[[nk]] <- uniq_taxa[idx]
+    }
+  }
+  ov <- intersect(names(norm_to_orig), ref_tr$tip.label)
   if (length(ov) < 3L) return(NULL)
   pruned <- tryCatch(ape::keep.tip(ref_tr, ov), error = function(e) NULL)
   if (is.null(pruned) || length(pruned$tip.label) < 3L) return(NULL)
@@ -157,6 +183,8 @@ select_backbone_guided_outgroup <- function(uniq_taxa, p_dist, backbone = NULL) 
   lad <- ape::reorder.phylo(ape::ladderize(pruned), order = "cladewise")
   tip_ord <- lad$tip.label[lad$edge[lad$edge[, 2L] <= length(lad$tip.label), 2L]]
   base_ord <- setdiff(tip_ord, outgroup)
+  outgroup <- unname(norm_to_orig[outgroup])
+  base_ord <- unname(norm_to_orig[base_ord])
   extra <- setdiff(setdiff(uniq_taxa, outgroup), base_ord)
   for (ex in extra) {
     if (length(base_ord) == 0L) { base_ord <- c(base_ord, ex); next }
@@ -265,7 +293,7 @@ select_backbone_guided_outgroup <- function(uniq_taxa, p_dist, backbone = NULL) 
     list(locus = "plastid", qfile = "skimmed_plastid_consensus.fasta",
          refs = c("public_packera_111mapping_plastomes.fasta", "public_packera_18complete_plastomes.fasta", "public_packera_plastomes_and_cpdna.fasta")),
     list(locus = "its", qfile = "skimmed_its_consensus.fasta",
-         refs = c("public_packera_its_ets.fasta", "public_packera_bold_barcodes.fasta")),
+         refs = c("public_packera_its_ets.fasta", "public_packera_bold_barcodes.fasta", "bain_jansen_sequences.fasta")),
     list(locus = "waxy", qfile = "skimmed_waxy_consensus.fasta",
          refs = c("public_packera_waxy_nuclear.fasta"))
   )
@@ -279,9 +307,12 @@ select_backbone_guided_outgroup <- function(uniq_taxa, p_dist, backbone = NULL) 
       rp <- .find_geno_file(search_dirs, rf)
       rdf <- .read_fasta_named(rp)
       if (nrow(rdf) > 0L) {
-        rdf$ref_source <- rf
         rdf$taxon <- .normalize_public_packera_taxon(rdf$header)
-        ref_list[[length(ref_list) + 1L]] <- rdf
+        rdf <- rdf[!is.na(rdf$taxon) & nzchar(rdf$taxon), , drop = FALSE]
+        if (nrow(rdf) > 0L) {
+          rdf$ref_source <- rf
+          ref_list[[length(ref_list) + 1L]] <- rdf
+        }
       }
     }
     if (length(ref_list) == 0L) next

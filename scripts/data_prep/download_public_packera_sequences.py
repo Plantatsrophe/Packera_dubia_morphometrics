@@ -48,10 +48,14 @@ _NCBI_TERM = (
 )
 _SYNONYM_MAP: Dict[str, str] = {
     "senecio tomentosus": "Packera_dubia", "packera tomentosa": "Packera_dubia", "senecio aureus": "Packera_aurea",
-    "senecio anonymus": "Packera_anonyma", "senecio pauperculus": "Packera_paupercula",
-    "senecio schweinitzianus": "Packera_schweinitziana", "senecio millefolium": "Packera_millefolium",
-    "senecio obovatus": "Packera_obovata", "senecio plattensis": "Packera_plattensis",
-    "senecio antennariifolius": "Packera_antennariifolia", "senecio glabellus": "Packera_glabella",
+    "senecio anonymus": "Packera_anonyma", "senecio pauperculus": "Packera_paupercula", "senecio schweinitzianus": "Packera_schweinitziana",
+    "senecio millefolium": "Packera_millefolium", "packera millefolia": "Packera_millefolium", "packera memmingeri": "Packera_xmemmingeri",
+    "packera xmemmingeri": "Packera_xmemmingeri", "senecio obovatus": "Packera_obovata", "senecio plattensis": "Packera_plattensis",
+    "senecio antennariifolius": "Packera_antennariifolia", "senecio glabellus": "Packera_glabella", "senecio loratifolius": "Packera_loratifolia",
+    "senecio pseudaureus": "Packera_pseudaurea", "senecio indecorus": "Packera_indecora", "senecio canus": "Packera_cana",
+    "senecio strepthanthifolius": "Packera_streptanthifolia", "senecio streptanthifolius": "Packera_streptanthifolia",
+    "senecio fendleri": "Packera_fendleri", "senecio multilobatus": "Packera_multilobata", "senecio neomexicanus": "Packera_neomexicana",
+    "senecio debilis": "Packera_debilis", "senecio werneriifolius": "Packera_werneriifolia", "senecio hartianus": "Packera_hartiana",
 }
 _DRYAD_EXACT_MAP: Dict[str, str] = {
     "18complete_packera_plastomes.fasta": "public_packera_18complete_plastomes.fasta", "111mapping_packera_plastomes.fasta": "public_packera_111mapping_plastomes.fasta",

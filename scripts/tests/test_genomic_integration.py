@@ -1454,6 +1454,103 @@ cat("BATCHED_PHASE2_R_OK\\n")
             self.assertEqual(cyto_rows["PACAURFK1M"]["public_its_match"], "Packera aurea")
             self.assertEqual(cyto_rows["PACAURFK1M"]["waxy_lineage_match"], "Packera aurea")
 
+    def test_genomic_naming_audit_parsers_and_orthography(self) -> None:
+        from scripts.core import config as cfg
+        from scripts.tests._r_session import rscript_available, run_warm_r_cmd
+
+        ing = importlib.import_module("scripts.data_prep.06_ingest_genetic_data")
+        skim_mod = importlib.import_module("scripts.data_prep.skim_offtarget_organellar")
+
+        self.assertIn("Packera millefolia", cfg.CANONICAL_CIS_MISSISSIPPI_PACKERA_SPECIES)
+        self.assertIn("Packera memmingeri", cfg.CANONICAL_CIS_MISSISSIPPI_PACKERA_SPECIES)
+
+        og = ing.parse_sample_code("EREHIENCS1M")
+        self.assertEqual(og["taxon_code"], "EREHIE")
+        self.assertEqual(og["species_standardized"], "Erechtites hieraciifolius")
+        self.assertEqual(og["population_id"], "NCS1")
+        self.assertEqual(og["replicate_pair_id"], "EREHIENCS1")
+        self.assertEqual(og["replicate_suffix"], "M")
+        self.assertEqual(ing.parse_sample_code("EREHIE1-NCS1P")["species_standardized"], "Erechtites hieraciifolius")
+
+        self.assertEqual(ing._normalize_event_date_part("3rd August 2020"), "2020-08-03")
+        self.assertEqual(ing._normalize_event_date_part("August 3rd, 2020"), "2020-08-03")
+        keys = ing._extract_meta_exsiccatae_keys(
+            {"collector": "Brandon Fuller", "Collector_ID": "21", "eventDate": "3rd August 2020"}
+        )
+        self.assertTrue(any("21" in k and "2020-08-03" in k for k in keys))
+        self.assertEqual(ing._canonical_taxon_equiv_key("Packera millefolia"), ing._canonical_taxon_equiv_key("Packera millefolium"))
+        self.assertEqual(ing._canonical_taxon_equiv_key("Packera memmingeri"), ing._canonical_taxon_equiv_key("Packera ×memmingeri"))
+
+        with tempfile.TemporaryDirectory(prefix="packera_audit_nom_") as tmp:
+            gdir = Path(tmp) / "genomics"
+            gdir.mkdir(parents=True, exist_ok=True)
+            fcsv = Path(tmp) / "Packera_Field_Specimen_Database.csv"
+            fcsv.write_text(
+                "Collector_ID,Collector,EventDate,Taxon\n21,Brandon Fuller,3rd August 2020,Packera millefolia\n",
+                encoding="utf-8",
+            )
+            parsed_field = ing._parse_field_metadata(fcsv)
+            self.assertIn("2020-08-03", json.dumps(parsed_field, default=str))
+            self.assertIn("21", json.dumps(parsed_field, default=str))
+
+            (gdir / "vcfref_packera_rm.txt.fasta").write_text(
+                ">75949_5\nATGCATGCATGCATGCATGC\n>82071_300\nATGCATGCATGCATGCATGC\n"
+                ">49275_9\nATGCATGCATGCATGCATGC\n>16157_6\nATGCATGCATGCATGCATGC\n"
+                ">52797_44\nATGCATGCATGCATGCATGC\n>68356_89\nATGCATGCATGCATGCATGC\n"
+                ">49053_5\nATGCATGCATGCATGCATGC\n",
+                encoding="utf-8",
+            )
+            (gdir / "vcfref_packera_blast.txt").write_text(
+                "Query= 75949_5\n>ref|NC_1| Packera chloroplast complete genome\n"
+                "Query= 52797_44\n>ref|XM_1| 26S proteasome non-ATPase subunit\n"
+                "Query= 68356_89\n>ref|XM_2| 40S ribosomal protein S3\n"
+                "Query= 49053_5\n>ref|XM_3| probable plastid-lipid protein, chloroplastic-like\n"
+                "Locus:\t82071_300\thas a significant blast hit:\t>gb|M1| Senecio chloroplast psbA gene\n"
+                "Locus:\t16157_6\thas a significant blast hit:\t>gb|L1| Packera 28S ribosomal RNA gene\n"
+                "49275_9\tref|NC_2|\t100\t122\t0\t0\t1\t122\t1\t122\t1e-50\t200\tPackera rbcL chloroplast gene\n",
+                encoding="utf-8",
+            )
+            cp_s, its_s, _ = skim_mod._collect_organellar_seeds(gdir)
+            self.assertEqual(set(cp_s.keys()), {"75949_5", "82071_300", "49275_9"})
+            self.assertEqual(set(its_s.keys()), {"16157_6"})
+            self.assertEqual(
+                skim_mod._extract_species_from_seed_key("AF161693.1|Packera_sp Senecio loratifolius"),
+                "Packera loratifolia",
+            )
+            d_rows = skim_mod._detect_cytonuclear_discordance(
+                {"PACAURFK1M": "C1", "EREHIENCS1M": "C1"}, {}
+            )
+            by_id = {r["genetic_sample_id"]: r for r in d_rows}
+            self.assertEqual(by_id["EREHIENCS1M"]["nuclear_taxon"], "Erechtites hieraciifolius")
+            self.assertEqual(by_id["EREHIENCS1M"]["cytonuclear_discordant"], 0)
+
+            if rscript_available():
+                r_test = Path(tmp) / "test_norm.R"
+                r_test.write_text(
+                    "source('scripts/analysis/step06_public_backbone.R')\n"
+                    "source('scripts/analysis/genomic_triage_utils.R')\n"
+                    "got <- .normalize_public_packera_taxon(c(\n"
+                    "  'Emilia 2fosbergii', 'AF161693.1|Packera_sp Senecio loratifolius',\n"
+                    "  'L33238.1|Senecio strepthanthifolius', 'Packera millefolia',\n"
+                    "  'Packera memmingeri', 'Packera ×memmingeri',\n"
+                    "  'Packera sp.', 'Packera cf. aurea', 'Packera sp. nov.'\n"
+                    "))\n"
+                    "exp <- c('Emilia fosbergii', 'Packera loratifolia', 'Packera streptanthifolia',\n"
+                    "  'Packera millefolium', 'Packera xmemmingeri', 'Packera xmemmingeri',\n"
+                    "  '', '', 'Packera sp. nov.')\n"
+                    "stopifnot(identical(got, exp))\n"
+                    "tr <- ape::read.tree(text = '((Packera_millefolium:1,Packera_xmemmingeri:1):1,(Packera_aurea:1,Packera_cana:2):1);')\n"
+                    "tr$tip.label <- .normalize_public_packera_taxon(tr$tip.label)\n"
+                    "bg <- select_backbone_guided_outgroup(c('Packera millefolia', 'Packera memmingeri', 'Packera aurea', 'Packera cana'), NULL, list(tree = tr))\n"
+                    "stopifnot(!is.null(bg), bg$outgroup == 'Packera cana', all(c('Packera millefolia', 'Packera memmingeri', 'Packera aurea') %in% bg$tree_order))\n"
+                    "aligned <- .align_packera_orthography(c('Packera millefolium', 'Packera xmemmingeri'), c('Packera millefolia', 'Packera memmingeri'))\n"
+                    "stopifnot(identical(aligned, c('Packera millefolia', 'Packera memmingeri')))\n"
+                    "cat('R_OK\\n')\n",
+                    encoding="utf-8",
+                )
+                proc = run_warm_r_cmd(["Rscript", str(r_test)], cwd=PROJECT_ROOT, check=True)
+                self.assertIn("R_OK", proc.stdout)
+
     def test_step06_public_backbone_outgroup_and_sqlite_columns(self) -> None:
         """(d) Verify Step 06 prevents focal tree shadowing, uses public backbone outgroup polarization, and persists 6 SQLite cols."""
         if not rscript_available():

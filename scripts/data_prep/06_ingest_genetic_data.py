@@ -78,6 +78,31 @@ PAC_CODE_TO_TAXON: Dict[str, Tuple[str, str]] = {
     "NOV": ("Packera sp. nov.", "Packera sp. nov."),
 }
 
+OUTGROUP_CODE_TO_TAXON: Dict[str, Tuple[str, str]] = {
+    "EREHIE": ("Erechtites hieraciifolius", "Erechtites hieraciifolius"),
+}
+
+_TAXON_ORTHO_EQUIV: Dict[str, str] = {
+    "packera millefolia": "packera millefolium",
+    "packera memmingeri": "packera xmemmingeri",
+    "packera x memmingeri": "packera xmemmingeri",
+    "packera ×memmingeri": "packera xmemmingeri",
+    "packera × memmingeri": "packera xmemmingeri",
+    "packera xmemmingeri": "packera xmemmingeri",
+}
+
+_MONTH_MAP: Dict[str, int] = {
+    "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
+    "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
+    "aug": 8, "august": 8, "sep": 9, "sept": 9, "september": 9,
+    "oct": 10, "october": 10, "nov": 11, "november": 11, "dec": 12, "december": 12,
+}
+
+
+def _canonical_taxon_equiv_key(taxon: Any) -> str:
+    raw = re.sub(r"\s+", " ", _safe_text(taxon).replace("_", " ")).strip().lower()
+    return _TAXON_ORTHO_EQUIV.get(raw, raw) if raw else ""
+
 KNOWN_NOVEL_OR_HYBRID_POPS = {"VAL1", "VAL2", "PAR1"}
 KNOWN_NOVEL_OR_HYBRID_SAMPLE_PAIRS = {
     ("MIL", "VAL1"),
@@ -251,6 +276,20 @@ def _normalize_event_date_part(event_date: Any) -> str:
     m_ymd = re.search(r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})", raw)
     if m_ymd:
         return f"{m_ymd.group(1)}-{int(m_ymd.group(2)):02d}-{int(m_ymd.group(3)):02d}"
+    m_dmy = re.search(
+        r"\b(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]+)\.?\s*,?\s*(1[7-9]\d{2}|20\d{2})\b",
+        raw,
+        re.IGNORECASE,
+    )
+    if m_dmy and (mon := _MONTH_MAP.get(m_dmy.group(2).lower())):
+        return f"{m_dmy.group(3)}-{mon:02d}-{int(m_dmy.group(1)):02d}"
+    m_mdy = re.search(
+        r"\b([A-Za-z]+)\.?\s+(\d{1,2})(?:st|nd|rd|th)?\s*,?\s*(1[7-9]\d{2}|20\d{2})\b",
+        raw,
+        re.IGNORECASE,
+    )
+    if m_mdy and (mon := _MONTH_MAP.get(m_mdy.group(1).lower())):
+        return f"{m_mdy.group(3)}-{mon:02d}-{int(m_mdy.group(2)):02d}"
     m_ym = re.search(r"(\d{4})[-/](\d{1,2})\b", raw)
     if m_ym:
         return f"{m_ym.group(1)}-{int(m_ym.group(2)):02d}"
@@ -363,6 +402,26 @@ def parse_sample_code(sample_id: str) -> Dict[str, Optional[str]]:
             "population_id": pop,
             "replicate_pair_id": cid,
             "replicate_suffix": None,
+        }
+
+    m_og_hy = re.match(r"^EREHIE\d*[-_]([A-Z0-9]+?)(?:[-_]?([MP])|[-_]([A-Z0-9]+))?$", cid, re.IGNORECASE)
+    m_og_flat = None if m_og_hy else re.match(r"^EREHIE([A-Z0-9]+?)([MP])?$", cid, re.IGNORECASE)
+    if m_og_hy or m_og_flat:
+        code = "EREHIE"
+        tax_raw, sp_std = OUTGROUP_CODE_TO_TAXON[code]
+        if m_og_hy:
+            pop = m_og_hy.group(1).upper()
+            sfx = (m_og_hy.group(2) or m_og_hy.group(3) or "").upper() or None
+        else:
+            pop = m_og_flat.group(1).upper()
+            sfx = m_og_flat.group(2).upper() if m_og_flat.group(2) else None
+        return {
+            "taxon_code": code,
+            "taxon_raw": tax_raw,
+            "species_standardized": sp_std,
+            "population_id": pop,
+            "replicate_pair_id": f"{code}{pop}",
+            "replicate_suffix": sfx,
         }
 
     return {
@@ -496,7 +555,13 @@ def _parse_field_metadata(metadata_csvs: Sequence[Path]) -> Tuple[List[Dict[str,
         notes_col = cols_low.get("notes")
         ex_col = cols_low.get("exsiccatae_key")
         rec_by_col = cols_low.get("recordedby") or cols_low.get("collector")
-        rec_num_col = cols_low.get("recordnumber") or cols_low.get("record_number") or cols_low.get("collector_number") or cols_low.get("collection_number")
+        rec_num_col = (
+            cols_low.get("recordnumber")
+            or cols_low.get("record_number")
+            or cols_low.get("collector_number")
+            or cols_low.get("collection_number")
+            or cols_low.get("collector_id")
+        )
 
         target_family = _resolve_target_filter("resolve_target_family", "TARGET_FAMILY", "asteraceae")
         target_genus = _resolve_target_filter("resolve_target_genus", "TARGET_GENUS", "packera")
@@ -1044,7 +1109,8 @@ def _match_field_record(
     if same_code:
         return same_code[0]
 
-    same_sp = [r for r in candidates if sp_std and r.get("species_standardized") == sp_std]
+    sp_eq = _canonical_taxon_equiv_key(sp_std)
+    same_sp = [r for r in candidates if sp_eq and _canonical_taxon_equiv_key(r.get("species_standardized")) == sp_eq]
     if same_sp:
         return same_sp[0]
 
@@ -1143,6 +1209,8 @@ def _extract_meta_exsiccatae_keys(meta: Optional[Mapping[str, Any]]) -> Tuple[st
         or meta.get("record_number")
         or meta.get("collector_number")
         or meta.get("collection_number")
+        or meta.get("collector_id")
+        or meta.get("Collector_ID")
         or ""
     )
     dt = str(meta.get("eventDate") or meta.get("event_date") or meta.get("date_collected") or "")
@@ -1248,8 +1316,10 @@ def _score_voucher_match(
     if prefix_incompatible:
         return None
 
-    sp_match = bool(sp_std and v_sp == sp_std)
-    if not prefix_compatible and sp_std and v_sp and v_sp != sp_std:
+    sp_eq = _canonical_taxon_equiv_key(sp_std)
+    v_sp_eq = _canonical_taxon_equiv_key(v_sp)
+    sp_match = bool(sp_eq and v_sp_eq == sp_eq)
+    if not prefix_compatible and sp_eq and v_sp_eq and v_sp_eq != sp_eq:
         return None
 
     tier_rank = 3 - _authority_tier_rank(voucher)
@@ -1897,11 +1967,15 @@ def run_genomic_ingestion(
                 ploidy = db_priors["by_genbank"].get(gb_acc)
 
         tax_sp = str(sp_std or v_rec.get("species_standardized") or "").strip()
-        tax_info = (
-            db_priors["by_taxon"].get(tax_sp)
-            if (not is_query and tax_sp)
-            else None
-        )
+        tax_info = None
+        if not is_query and tax_sp:
+            tax_info = db_priors["by_taxon"].get(tax_sp)
+            if tax_info is None:
+                eq = _canonical_taxon_equiv_key(tax_sp)
+                tax_info = next(
+                    (v for k, v in db_priors["by_taxon"].items() if _canonical_taxon_equiv_key(k) == eq),
+                    None,
+                )
         sp_modal = tax_info.get("modal_ploidy_level") if tax_info else None
         sp_multi = bool(tax_info.get("is_multi_cytotype_taxon", 0)) if tax_info else False
 

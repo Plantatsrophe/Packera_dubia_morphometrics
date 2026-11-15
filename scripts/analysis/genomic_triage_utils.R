@@ -65,6 +65,19 @@ has_active_genomic_row_mask <- function(df) {
   pred_ok & tier_ok & qc_ok & prob_ok
 }
 
+.align_packera_orthography <- function(vec, ref_taxa) {
+  k <- function(x) {
+    s <- tolower(trimws(gsub("[[:space:]]+", " ", gsub("_+", " ", as.character(x)))))
+    s <- ifelse(s == "packera millefolia", "packera millefolium", s)
+    ifelse(s %in% c("packera memmingeri", "packera x memmingeri", "packera ×memmingeri", "packera × memmingeri", "packera xmemmingeri"), "packera xmemmingeri", s)
+  }
+  r <- unique(trimws(as.character(ref_taxa[!is.na(ref_taxa) & nzchar(trimws(as.character(ref_taxa)))])))
+  if (length(r) == 0L || length(vec) == 0L) return(as.character(vec))
+  rmap <- stats::setNames(r, k(r)); out <- as.character(vec); vk <- k(out)
+  hit <- !is.na(out) & nzchar(trimws(out)) & vk %in% names(rmap)
+  out[hit] <- unname(rmap[vk[hit]]); out
+}
+
 load_step07_genomic_metrics <- function(opts, df) {
   t_dir <- .resolve_step07_genomic_tables_dir(opts)
   r_dir <- .resolve_step07_genomic_reports_dir(opts)
@@ -144,6 +157,9 @@ load_step07_genomic_metrics <- function(opts, df) {
     if (file.exists(p)) tryCatch(utils::read.csv(p, stringsAsFactors = FALSE), error = function(e) NULL) else NULL
   }
 
+  ref_sp <- if ("species_standardized" %in% names(df)) df$species_standardized else character(0)
+  if ("geno_predicted_taxon" %in% names(ga_df)) ga_df$geno_predicted_taxon <- .align_packera_orthography(ga_df$geno_predicted_taxon, ref_sp)
+  if ("geno_predicted_taxon" %in% names(df)) df$geno_predicted_taxon <- .align_packera_orthography(df$geno_predicted_taxon, ref_sp)
   attr(df, "genomic_assignments_df") <- ga_df
   attr(df, "genomic_model_metrics") <- if (file.exists(gm_path)) tryCatch(utils::read.csv(gm_path, stringsAsFactors = FALSE), error = function(e) NULL) else NULL
   attr(df, "genomic_gdi_delimitation") <- read_opt_csv("coalescent_gdi_delimitation.csv")
@@ -203,7 +219,8 @@ export_genomic_field_triage_csv <- function(opts, triage_df) {
   is_div <- !is.na(hyb_cls) & (hyb_cls == "Divergent_NonHybrid_Lineage")
   is_adm <- if ("is_geno_admixed" %in% names(ga_df)) .safe_bool_vec_r(ga_df$is_geno_admixed) & !is_div else rep(FALSE, n_g)
   sp_std <- as.character(ga_df$species_standardized)
-  g_pred <- as.character(ga_df$geno_predicted_taxon)
+  g_pred <- .align_packera_orthography(as.character(ga_df$geno_predicted_taxon), sp_std)
+  ga_df$geno_predicted_taxon <- g_pred
   g_prob <- suppressWarnings(as.numeric(ga_df$geno_posterior_prob))
 
   ga_df$genomic_field_status[!qc_ok] <- "Failed_Extraction_QC_Dropout"
