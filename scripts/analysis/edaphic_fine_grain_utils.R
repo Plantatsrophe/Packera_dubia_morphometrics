@@ -492,6 +492,30 @@ flag_coordinate_uncertainty <- function(
   df$buffer_radius_m <- compute_uncertainty_buffer_radius(
     unc_raw, default_r = default_r, min_r = min_r, max_r = max_r
   )
+  if ("is_centroid_or_inst_coord" %in% names(df)) {
+    is_t_u <- if (exists(".identify_type_specimen_vec", mode = "function")) {
+      as.logical(.identify_type_specimen_vec(df)$is_type_specimen)
+    } else if ("is_type_specimen" %in% names(df)) {
+      as.logical(df$is_type_specimen)
+    } else {
+      rep(FALSE, n)
+    }
+    is_t_u[is.na(is_t_u)] <- FALSE
+    raw_qc <- df$is_centroid_or_inst_coord
+    q_c <- if (is.logical(raw_qc)) {
+      !is.na(raw_qc) & raw_qc
+    } else if (is.numeric(raw_qc) || is.integer(raw_qc)) {
+      !is.na(raw_qc) & is.finite(raw_qc) & (raw_qc != 0)
+    } else {
+      tolower(trimws(as.character(raw_qc))) %in% c("true", "1", "t", "yes")
+    }
+    q_c[is.na(q_c)] <- FALSE
+    bad_q <- q_c & !is_t_u
+    if (any(bad_q)) {
+      df$is_edaphic_eligible_coord[bad_q] <- FALSE
+      df$edaphic_coord_weight[bad_q] <- 0.0
+    }
+  }
   return(df)
 }
 

@@ -142,7 +142,8 @@ PACKERA_DB_LOGICAL_COLS <- c(
   "cryptic_non_clinal_pass", "hybrid_zone_cohesion_pass",
   "geno_quality_pass", "is_putative_novel_or_hybrid_query", "is_geno_admixed", "cytonuclear_discordant",
   "is_multi_cytotype_taxon", "cytotype_reproductive_barrier_pass",
-  "is_nwi_wetland", "is_hybrid_taxon", "is_native", "is_exotic", "is_historical_or_extirpated"
+  "is_nwi_wetland", "is_hybrid_taxon", "is_native", "is_exotic", "is_historical_or_extirpated",
+  "is_centroid_or_inst_coord", "env_mcd_outlier_flag"
 )
 
 PACKERA_DB_HARMONIC_COLS <- as.vector(vapply(
@@ -196,6 +197,12 @@ PACKERA_DB_WC_BIO_COLS <- c(
 }
 
 .dynamic_sqlite_table_specs_r <- function(table_name) {
+  if (identical(table_name, "vouchers")) {
+    return(c(
+      is_centroid_or_inst_coord = "INTEGER DEFAULT 0",
+      coord_quarantine_reason = "TEXT"
+    ))
+  }
   if (identical(table_name, "extracted_leaves")) {
     return(c(
       ect_path = "TEXT",
@@ -417,7 +424,9 @@ PACKERA_DB_WC_BIO_COLS <- c(
         ecotype_regime = "TEXT",
         lithic_outcrop_index = "REAL",
         summer_moisture_deficit_idx = "REAL",
-        maritime_continentality_idx = "REAL"
+        maritime_continentality_idx = "REAL",
+        env_mahal_d2 = "REAL",
+        env_mcd_outlier_flag = "INTEGER"
       )
     ))
   }
@@ -560,7 +569,7 @@ PACKERA_DB_WC_BIO_COLS <- c(
     return(FALSE)
   }
   changed <- FALSE
-  for (tbl in c("extracted_leaves", "run_active_cohort", "leaf_efa_harmonics", "otu_morphometrics", "spatial_rf_predictions", "curation_triage", "environmental_cache", "genomic_samples", "genetic_lineage_assignments", "cytological_records", "taxon_cytology_summary", "taxon_backbone_profiles", "natureserve_subnational_ranges")) {
+  for (tbl in c("vouchers", "extracted_leaves", "run_active_cohort", "leaf_efa_harmonics", "otu_morphometrics", "spatial_rf_predictions", "curation_triage", "environmental_cache", "genomic_samples", "genetic_lineage_assignments", "cytological_records", "taxon_cytology_summary", "taxon_backbone_profiles", "natureserve_subnational_ranges")) {
     if (isTRUE(.migrate_dynamic_sqlite_table_r(conn, tbl))) {
       changed <- TRUE
     }
@@ -804,7 +813,8 @@ connect_packera_db <- function(
     "is_nwi_wetland", "nwi_wetland_system", "nwi_wetland_dist_m",
     "hydro_edaphic_niche_regime", "wetland_fidelity_concordance", "basionym_synonymy_type",
     "backbone_basionym_name", "protologue_url", "natureserve_global_rank",
-    "nwpl_indicator_code", "nwpl_wetland_score"
+    "nwpl_indicator_code", "nwpl_wetland_score",
+    "is_centroid_or_inst_coord", "coord_quarantine_reason", "env_mahal_d2", "env_mcd_outlier_flag"
   ) %in% mv_fields_chk)
   if (cur_ver >= PLANTMATICS_SCHEMA_USER_VERSION &&
     el_has_zone && om_has_cauline && mv_has_latest &&
@@ -857,7 +867,8 @@ connect_packera_db <- function(
         "is_nwi_wetland", "nwi_wetland_system", "nwi_wetland_dist_m",
         "hydro_edaphic_niche_regime", "wetland_fidelity_concordance", "basionym_synonymy_type",
         "backbone_basionym_name", "protologue_url", "natureserve_global_rank",
-        "nwpl_indicator_code", "nwpl_wetland_score"
+        "nwpl_indicator_code", "nwpl_wetland_score",
+        "is_centroid_or_inst_coord", "coord_quarantine_reason", "env_mahal_d2", "env_mcd_outlier_flag"
       )
       if (length(v_cols) > 0L && !all(req_v_cols %in% v_cols)) {
         view_needs_refresh <- TRUE
@@ -1781,7 +1792,7 @@ fetch_step04_morphometrics_from_db <- function(
 
   v_cols <- tryCatch(DBI::dbListFields(conn, "vouchers"), error = function(e) character(0))
   extra_v_cols <- intersect(
-    c("usda_symbol", "usda_county_status", "exsiccatae_key", "exsiccatae_taxonomic_conflict", "exsiccatae_gold_taxon"),
+    c("usda_symbol", "usda_county_status", "exsiccatae_key", "exsiccatae_taxonomic_conflict", "exsiccatae_gold_taxon", "is_centroid_or_inst_coord", "coord_quarantine_reason"),
     v_cols
   )
   extra_v_sql <- if (length(extra_v_cols) > 0L) {
@@ -2130,8 +2141,27 @@ persist_step05_to_sqlite <- function(
   for (pc in intersect(c("primary_env_predictors", "primary_clim_predictors", "primary_edaph_predictors"), names(srf_df))) {
     srf_df[[pc]] <- .normalize_semicolon_col_r(srf_df[[pc]])
   }
-  for (nc in intersect(c("edaphic_z_score", "climatic_z_score", "type_edaphic_z_score", "lithic_outcrop_index", "summer_moisture_deficit_idx", "maritime_continentality_idx", PACKERA_DB_WC_BIO_COLS), names(srf_df))) {
+  for (nc in intersect(c("edaphic_z_score", "climatic_z_score", "type_edaphic_z_score", "env_mahal_d2", "lithic_outcrop_index", "summer_moisture_deficit_idx", "maritime_continentality_idx", PACKERA_DB_WC_BIO_COLS), names(srf_df))) {
     srf_df[[nc]] <- suppressWarnings(as.numeric(srf_df[[nc]]))
+  }
+  if ("env_mcd_outlier_flag" %in% names(srf_df)) {
+    v_mcd <- srf_df$env_mcd_outlier_flag
+    if (is.logical(v_mcd)) {
+      srf_df$env_mcd_outlier_flag <- as.integer(v_mcd)
+    } else if (is.character(v_mcd) || is.factor(v_mcd)) {
+      s_mcd <- trimws(as.character(v_mcd))
+      out_mcd <- suppressWarnings(as.integer(s_mcd))
+      u_mcd <- toupper(s_mcd)
+      out_mcd[is.na(out_mcd) & u_mcd %in% c("TRUE", "T", "YES", "Y")] <- 1L
+      out_mcd[is.na(out_mcd) & u_mcd %in% c("FALSE", "F", "NO", "N")] <- 0L
+      srf_df$env_mcd_outlier_flag <- out_mcd
+    } else {
+      v_num <- suppressWarnings(as.numeric(v_mcd))
+      out_mcd <- rep(NA_integer_, length(v_num))
+      ok_mcd <- !is.na(v_num) & is.finite(v_num)
+      out_mcd[ok_mcd] <- as.integer(v_num[ok_mcd] != 0)
+      srf_df$env_mcd_outlier_flag <- out_mcd
+    }
   }
 
   if (!("lat_lon_key" %in% names(srf_df))) {
@@ -2267,7 +2297,7 @@ try_fetch_master_view_for_cohort <- function(
       "matches_type_lithology", "primary_env_predictors", "primary_clim_predictors",
       "primary_edaph_predictors", "substrate_specialist_flag", "n_observed_modalities",
       "multimodal_concordance", "multimodal_conflict_flag", "triage_category",
-      "conflict_discordance_notes"
+      "conflict_discordance_notes", "env_mahal_d2", "env_mcd_outlier_flag"
     )
     master_df <- master_df[, setdiff(names(master_df), stale_srf_cols), drop = FALSE]
   }

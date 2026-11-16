@@ -700,6 +700,10 @@ def upsert_vouchers_records(
             row_dict["infraspecific_taxon"] = _to_str(rec.get("infraspecific_taxon"))
         if "georef_qc_status" in rec and not _is_missing(rec.get("georef_qc_status")):
             row_dict["georef_qc_status"] = _to_str(rec.get("georef_qc_status"))
+        if "is_centroid_or_inst_coord" in rec and not _is_missing(rec.get("is_centroid_or_inst_coord")):
+            row_dict["is_centroid_or_inst_coord"] = _to_bool_int(rec.get("is_centroid_or_inst_coord"), default=0)
+        if "coord_quarantine_reason" in rec and not _is_missing(rec.get("coord_quarantine_reason")):
+            row_dict["coord_quarantine_reason"] = _to_str(rec.get("coord_quarantine_reason"))
         if "spatial_balance_weight" in rec and not _is_missing(rec.get("spatial_balance_weight")):
             row_dict["spatial_balance_weight"] = _to_float(rec.get("spatial_balance_weight"))
         qc_val = _to_str(rec.get("qc_status"))
@@ -720,7 +724,7 @@ def upsert_vouchers_records(
     )
 
 
-_CSV_BOOL_VOUCHER_COLUMNS = frozenset({"is_primary_duplicate", "exsiccatae_taxonomic_conflict", "is_calibrated_mm"})
+_CSV_BOOL_VOUCHER_COLUMNS = frozenset({"is_primary_duplicate", "exsiccatae_taxonomic_conflict", "is_calibrated_mm", "is_centroid_or_inst_coord"})
 
 
 def _format_voucher_csv_value(col: str, val: Any) -> Any:
@@ -2511,6 +2515,7 @@ _SRF_BOOL_COLS: Tuple[str, ...] = (
     "substrate_specialist_flag",
     "multimodal_conflict_flag",
     "matches_type_lithology",
+    "env_mcd_outlier_flag",
 )
 _SRF_INT_COLS: Tuple[str, ...] = (
     "n_observed_modalities",
@@ -2545,6 +2550,7 @@ _SRF_FLOAT_COLS: Tuple[str, ...] = (
     "edaphic_z_score",
     "climatic_z_score",
     "type_edaphic_z_score",
+    "env_mahal_d2",
     *WC_BIO_COLUMNS,
 )
 

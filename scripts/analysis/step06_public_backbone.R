@@ -6,6 +6,13 @@
 #   PhyTop ILS/IH reticulation tables, and 11-mer organellar/ITS/waxy placement.
 # ==============================================================================
 
+if (!exists("screen_public_tree_rogue_tips", mode = "function") || !exists(".screen_public_backbone_trees_bundle", mode = "function")) {
+  .qc_srcs <- c("scripts/analysis/step06_rogue_sequence_qc.R", "step06_rogue_sequence_qc.R",
+                file.path(dirname(as.character(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)),
+                                                 unlist(lapply(sys.frames(), function(fr) fr$ofile))))), "step06_rogue_sequence_qc.R"))
+  for (.qc_p in .qc_srcs) if (!is.na(.qc_p) && nzchar(.qc_p) && file.exists(.qc_p)) { source(.qc_p); break }
+}
+
 .write_csv_safe <- function(df, path) {
   dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
   if (requireNamespace("readr", quietly = TRUE)) readr::write_csv(df, path)
@@ -116,7 +123,8 @@
 load_public_packera_backbone <- function(raw_geno_dir) {
   empty_trees <- list(MO = NULL, ASTRALPro = NULL, wASTRAL = NULL, plastome111 = NULL)
   if (is.null(raw_geno_dir) || !nzchar(raw_geno_dir) || !dir.exists(raw_geno_dir)) {
-    return(list(has_backbone = FALSE, trees = empty_trees, phytop_tables = list(), tree_files_found = character(0)))
+    return(list(has_backbone = FALSE, trees = empty_trees, reltime_trees = list(),
+                phytop_tables = list(), tree_files_found = character(0), tree_rogue_audit_df = .empty_rogue_audit_df()))
   }
   tree_map <- c(
     MO = "public_packera_MO_Astral_lpp.tre",
@@ -129,7 +137,7 @@ load_public_packera_backbone <- function(raw_geno_dir) {
   for (nm in names(tree_map)) {
     p <- .find_geno_file(raw_geno_dir, tree_map[[nm]])
     if (nzchar(p) && file.exists(p)) {
-      found_files <- c(found_files, p)
+      found_files <- c(found_files, stats::setNames(p, nm))
       trees[[nm]] <- .read_clean_public_tree(p)
     }
   }
@@ -149,8 +157,10 @@ load_public_packera_backbone <- function(raw_geno_dir) {
       phytop_tables[[basename(pf)]] <- df_res
     }
   }
-  has_bb <- any(vapply(trees, function(x) !is.null(x), logical(1L)))
-  list(has_backbone = isTRUE(has_bb), trees = trees, phytop_tables = phytop_tables, tree_files_found = found_files)
+  qc <- .screen_public_backbone_trees_bundle(trees, found_files, phytop_tables, all_gf, .read_clean_public_tree)
+  has_bb <- any(vapply(qc$trees, function(x) !is.null(x), logical(1L)))
+  list(has_backbone = isTRUE(has_bb), trees = qc$trees, reltime_trees = qc$reltime_trees,
+       phytop_tables = qc$phytop_tables, tree_files_found = unname(found_files), tree_rogue_audit_df = qc$audit_df)
 }
 
 select_backbone_guided_outgroup <- function(uniq_taxa, p_dist, backbone = NULL) {
@@ -298,10 +308,8 @@ select_backbone_guided_outgroup <- function(uniq_taxa, p_dist, backbone = NULL) 
          refs = c("public_packera_waxy_nuclear.fasta"))
   )
   rows <- list()
+  audit_list <- list()
   for (sp in locus_specs) {
-    qp <- .find_geno_file(search_dirs, sp$qfile)
-    qdf <- .read_fasta_named(qp)
-    if (nrow(qdf) == 0L) next
     ref_list <- list()
     for (rf in sp$refs) {
       rp <- .find_geno_file(search_dirs, rf)
@@ -318,6 +326,12 @@ select_backbone_guided_outgroup <- function(uniq_taxa, p_dist, backbone = NULL) 
     if (length(ref_list) == 0L) next
     refs <- do.call(rbind, ref_list)
     r_km <- lapply(refs$seq, .kmers_11)
+    qc_fa <- screen_public_fasta_outliers(refs, sp$locus, kmers_list = r_km)
+    if (!is.null(qc_fa$audit_df) && nrow(qc_fa$audit_df) > 0L) audit_list[[length(audit_list) + 1L]] <- qc_fa$audit_df
+    refs <- qc_fa$clean_refs; r_km <- qc_fa$clean_kmers
+    qp <- .find_geno_file(search_dirs, sp$qfile)
+    qdf <- .read_fasta_named(qp)
+    if (nrow(qdf) == 0L || nrow(refs) == 0L) next
     r_len <- vapply(r_km, length, integer(1L))
     valid_r <- which(r_len > 0L)
     if (length(valid_r) == 0L) next
@@ -348,12 +362,13 @@ select_backbone_guided_outgroup <- function(uniq_taxa, p_dist, backbone = NULL) 
       }
     }
   }
-  if (length(rows) > 0L) return(do.call(rbind, rows))
-  data.frame(
+  res_df <- if (length(rows) > 0L) do.call(rbind, rows) else data.frame(
     genetic_sample_id = character(0), locus = character(0), best_match_taxon = character(0),
     best_ref_header = character(0), ref_source_file = character(0), n_shared_11mers = integer(0),
     kmer_containment = numeric(0), kmer_jaccard = numeric(0), stringsAsFactors = FALSE
   )
+  attr(res_df, "fasta_rogue_audit") <- if (length(audit_list) > 0L) do.call(rbind, audit_list) else .empty_rogue_audit_df()
+  res_df
 }
 
 evaluate_public_backbone_and_organellar <- function(pass_df, raw_geno_dir, out_dir) {
@@ -411,6 +426,10 @@ evaluate_public_backbone_and_organellar <- function(pass_df, raw_geno_dir, out_d
   sids <- if (n > 0L && "genetic_sample_id" %in% names(pass_df)) as.character(pass_df$genetic_sample_id) else character(0)
   place_df <- .place_organellar_loci(raw_geno_dir, out_dir, sids)
   .write_csv_safe(place_df, file.path(out_dir, "public_organellar_placement.csv"))
+  rogue_audit_df <- .write_public_genbank_rogue_audit(
+    bb$tree_rogue_audit_df, attr(place_df, "fasta_rogue_audit"),
+    file.path(out_dir, "public_genbank_rogue_audit.csv")
+  )
 
   idx_tx <- match(sp_raw, conc_df$taxon)
   locus_vec <- function(loc) {
@@ -430,6 +449,6 @@ evaluate_public_backbone_and_organellar <- function(pass_df, raw_geno_dir, out_d
     public_plastome_match = locus_vec("plastid"),
     public_its_match = locus_vec("its"),
     waxy_lineage_match = locus_vec("waxy"),
-    backbone = bb, concordance_df = conc_df, placement_df = place_df
+    backbone = bb, concordance_df = conc_df, placement_df = place_df, rogue_audit_df = rogue_audit_df
   )
 }

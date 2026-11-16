@@ -956,7 +956,24 @@ fit_and_project_maxent_sdm_maps <- function(
   }
   cl_sdm <- if ("is_confident_label_noise" %in% names(df)) as.logical(df$is_confident_label_noise) else rep(FALSE, nrow(df))
   cl_sdm[is.na(cl_sdm)] <- FALSE
-  raw_auth_w[cl_sdm & !type_info$is_type_specimen] <- 0.0
+  coord_q_sdm <- if (exists("detect_r_centroid_or_inst_quarantine", mode = "function")) {
+    detect_r_centroid_or_inst_quarantine(df, is_type_vec = type_info$is_type_specimen)$is_quarantined
+  } else if ("is_centroid_or_inst_coord" %in% names(df)) {
+    qc_v <- tolower(trimws(as.character(df$is_centroid_or_inst_coord)))
+    (!is.na(qc_v) & qc_v %in% c("true", "1", "t", "yes")) & !type_info$is_type_specimen
+  } else {
+    rep(FALSE, nrow(df))
+  }
+  mcd_sdm <- if ("env_mcd_outlier_flag" %in% names(df)) {
+    mv <- tolower(trimws(as.character(df$env_mcd_outlier_flag)))
+    !is.na(mv) & mv %in% c("true", "1", "t", "yes")
+  } else if (!is.null(srf_res) && is.list(srf_res) && !is.null(srf_res$env_mcd_outlier_flag) && length(srf_res$env_mcd_outlier_flag) == nrow(df)) {
+    mv <- as.logical(srf_res$env_mcd_outlier_flag)
+    !is.na(mv) & mv
+  } else {
+    rep(FALSE, nrow(df))
+  }
+  raw_auth_w[(cl_sdm | coord_q_sdm | mcd_sdm) & !type_info$is_type_specimen] <- 0.0
   pos_m <- raw_auth_w > 0.0
   w_max_curr <- if (any(pos_m)) max(raw_auth_w[pos_m], 1e-6) else 1.0
   auth_w_01 <- ifelse(pos_m, pmin(1.0, pmax(0.20, raw_auth_w / w_max_curr)), 0.0)
@@ -977,7 +994,9 @@ fit_and_project_maxent_sdm_maps <- function(
   if (sum(elig_coord_only) < 4L) elig_coord_only <- is.finite(lon_all) & is.finite(lat_all)
   elig_mask <- elig_coord_only & (df$sdm_prior_weight_01 > 0.0)
   if (sum(elig_mask) < 4L) {
-    elig_mask <- elig_coord_only & (!cl_sdm | type_info$is_type_specimen)
+    elig_clean <- elig_coord_only & (!(cl_sdm | coord_q_sdm | mcd_sdm) | type_info$is_type_specimen)
+    elig_fb <- elig_coord_only & (!cl_sdm | type_info$is_type_specimen)
+    elig_mask <- if (sum(elig_clean) >= 4L || sum(elig_clean) >= sum(elig_fb)) elig_clean else elig_fb
     df$sdm_prior_weight_01[elig_mask & df$sdm_prior_weight_01 <= 0.0] <- 0.50
   }
 

@@ -53,6 +53,11 @@ for (.ef_p in c("scripts/analysis/edaphic_fine_grain_utils.R", file.path(dirname
     source(.ef_p); break
   }
 }
+for (.eo_p in c("scripts/analysis/step05_env_outlier_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "step05_env_outlier_utils.R"))) {
+  if ((!exists("screen_within_taxon_env_mcd_outliers", mode = "function") || !exists("detect_r_centroid_or_inst_quarantine", mode = "function")) && !is.na(.eo_p) && nzchar(.eo_p) && file.exists(.eo_p)) {
+    source(.eo_p); break
+  }
+}
 
 for (.db_p in c("scripts/core/db_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "..", "core", "db_utils.R"))) {
   if (!exists("persist_step05_to_sqlite", mode = "function") && !is.na(.db_p) && nzchar(.db_p) && file.exists(.db_p)) { source(.db_p); break }
@@ -1558,6 +1563,9 @@ step05_dir <- if (dir.exists("scripts/analysis")) {
   dirname(normalizePath(sys.frame(1)$ofile, mustWork = FALSE))
 }
 source(file.path(step05_dir, "step05_phenology_ecotypes.R"))
+if (!exists("screen_within_taxon_env_mcd_outliers", mode = "function") && file.exists(file.path(step05_dir, "step05_env_outlier_utils.R"))) {
+  source(file.path(step05_dir, "step05_env_outlier_utils.R"))
+}
 
 execute_crossmodal_consensus <- function(
   df,
@@ -1672,13 +1680,22 @@ execute_crossmodal_consensus <- function(
   } else {
     rep(FALSE, n)
   }
-  tier_ok_con <- tier_ok_con & !ext_con_mask
+  coord_q_con <- if (exists("detect_r_centroid_or_inst_quarantine", mode = "function")) {
+    detect_r_centroid_or_inst_quarantine(df, is_type_vec = is_t_con)$is_quarantined
+  } else {
+    rep(FALSE, n)
+  }
+  if (any(coord_q_con) && sum(tier_ok_con & !ext_con_mask & !coord_q_con & elig_coord & grp_vec %in% active_taxa) < min(2L, n)) {
+    coord_q_con <- rep(FALSE, n)
+  }
+  tier_ok_con <- tier_ok_con & !ext_con_mask & !coord_q_con
   is_anchor <- tier_ok_con & elig_coord & grp_vec %in% active_taxa & !miss_gmm_c
   if (sum(is_anchor) < min(4L, n)) {
     is_anchor <- tier_ok_con & elig_coord & grp_vec %in% active_taxa
   }
   if (!any(tier_ok_con)) {
-    is_anchor <- (!cl_con) & elig_coord & grp_vec %in% active_taxa
+    is_anchor <- (!cl_con) & (!coord_q_con) & elig_coord & grp_vec %in% active_taxa
+    if (sum(is_anchor) < min(2L, n)) is_anchor <- (!cl_con) & elig_coord & grp_vec %in% active_taxa
     if (sum(is_anchor) == 0L) is_anchor <- grp_vec %in% active_taxa
   }
   anchor_df <- df[is_anchor, , drop = FALSE]
@@ -1990,7 +2007,7 @@ execute_crossmodal_consensus <- function(
   s05_lon_v <- if ("decimalLongitude" %in% names(df)) suppressWarnings(as.numeric(df$decimalLongitude)) else rep(NA_real_, n)
   s05_cat_v <- if ("catalogNumber" %in% names(df)) as.character(df$catalogNumber) else as.character(seq_len(n))
   s05_tier_v <- if ("determiner_tier" %in% names(df)) as.character(df$determiner_tier) else rep("Tier_3_Bronze", n)
-  s05_anc_mask <- (s05_tier_v %in% c("Tier_0_Type_Anchor", "Tier_1_Gold", "Tier_2_Silver")) & !ext_con_mask
+  s05_anc_mask <- (s05_tier_v %in% c("Tier_0_Type_Anchor", "Tier_1_Gold", "Tier_2_Silver")) & !ext_con_mask & !coord_q_con
   s05_coords_by_tx <- list()
   if (can_eval_hybrids_s05) {
     for (tx_s05 in active_taxa) {
@@ -2405,7 +2422,15 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
   } else {
     rep(FALSE, n)
   }
-  is_gold_silver <- is_gold_silver & !ext_rf_mask
+  coord_q_rf <- if (exists("detect_r_centroid_or_inst_quarantine", mode = "function")) {
+    detect_r_centroid_or_inst_quarantine(df, is_type_vec = type_info_rf$is_type_specimen)$is_quarantined
+  } else {
+    rep(FALSE, n)
+  }
+  if (any(coord_q_rf) && sum(is_gold_silver & !ext_rf_mask & !coord_q_rf & elig_clim & !is.na(y)) < min(2L, n)) {
+    coord_q_rf <- rep(FALSE, n)
+  }
+  is_gold_silver <- is_gold_silver & !ext_rf_mask & !coord_q_rf
   elig_coord <- if (has_30m_edaph && sum(is_gold_silver & elig_clim & elig_edaph & !is.na(y)) >= 6L) (elig_clim & elig_edaph) else elig_clim
 
   miss_gmm_rf <- if (isTRUE(intraspecific_mode) && "is_missing_gmm_cluster" %in% names(df)) {
@@ -2426,8 +2451,12 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
   }
   if (!any(is_gold_silver)) {
     # Fallback strictly for minimal synthetic unit tests where all rows lack determiner_tier
-    anchor_mask <- (!cl_noise_rf) & elig_coord & !is.na(y) & !miss_gmm_rf
-    if (sum(anchor_mask) < 4L) anchor_mask <- (!cl_noise_rf) & !is.na(y)
+    anchor_mask <- (!cl_noise_rf) & (!coord_q_rf) & elig_coord & !is.na(y) & !miss_gmm_rf
+    if (sum(anchor_mask) < min(2L, n)) anchor_mask <- (!cl_noise_rf) & elig_coord & !is.na(y) & !miss_gmm_rf
+    if (sum(anchor_mask) < 4L) {
+      cand_fb <- (!cl_noise_rf) & (!coord_q_rf) & !is.na(y)
+      anchor_mask <- if (sum(cand_fb) >= min(2L, n)) cand_fb else (!cl_noise_rf) & !is.na(y)
+    }
     if (sum(anchor_mask) == 0L) anchor_mask <- !is.na(y)
   }
   anchor_idx <- which(anchor_mask)
@@ -2532,6 +2561,68 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
   # Impute strictly using taxon-blind active-anchor medians (zero target-label leakage!)
   X_env <- .impute_by_train_medians(X_env_raw, X_env_raw[anchor_idx, , drop = FALSE])
   X_all <- cbind(X_env, MEMs)
+
+  mcd_scr <- if (exists("screen_within_taxon_env_mcd_outliers", mode = "function")) {
+    screen_within_taxon_env_mcd_outliers(
+      df, X_env, y, anchor_mask,
+      is_type_vec = type_info_rf$is_type_specimen,
+      p_cutoff = 0.005, min_n_group = 12L, seed = 42L
+    )
+  } else {
+    list(
+      env_mahal_d2 = rep(NA_real_, n),
+      env_mcd_outlier_flag = rep(FALSE, n),
+      env_outlier_rescued_azonal = rep(FALSE, n),
+      raw_mcd_exceed_flag = rep(FALSE, n),
+      is_type_specimen = type_info_rf$is_type_specimen
+    )
+  }
+  demote_mcd <- anchor_mask & mcd_scr$env_mcd_outlier_flag
+  if (any(demote_mcd)) {
+    cand_mask <- anchor_mask & !demote_mcd
+    y_chr <- as.character(y)
+    pre_tbl <- table(y_chr[anchor_mask])
+    for (cl_k in names(pre_tbl[pre_tbl >= 2L])) {
+      kept_k <- which(cand_mask & !is.na(y_chr) & (y_chr == cl_k))
+      if (length(kept_k) < 2L) {
+        need_k <- 2L - length(kept_k)
+        dem_k <- which(anchor_mask & !cand_mask & !is.na(y_chr) & (y_chr == cl_k))
+        if (length(dem_k) > 0L) {
+          t_sc <- ifelse(type_info_rf$is_type_specimen[dem_k], 4.0,
+                  ifelse(det_tier[dem_k] == "Tier_1_Gold", 3.0,
+                  ifelse(det_tier[dem_k] == "Tier_2_Silver", 2.0,
+                  ifelse(is_promoted[dem_k], 1.5, 1.0))))
+          d2_k <- mcd_scr$env_mahal_d2[dem_k]
+          d2_k[!is.finite(d2_k)] <- Inf
+          ord_k <- order(-t_sc, d2_k, dem_k)
+          cand_mask[dem_k[ord_k[seq_len(min(need_k, length(ord_k)))]]] <- TRUE
+        }
+      }
+    }
+    if (sum(cand_mask) >= 4L && !identical(cand_mask, anchor_mask)) {
+      anchor_mask <- cand_mask
+      anchor_idx <- which(anchor_mask)
+      passive_idx <- setdiff(seq_len(n), anchor_idx)
+      y_anchor <- droplevels(y[anchor_idx])
+      X_env <- .impute_by_train_medians(X_env_raw, X_env_raw[anchor_idx, , drop = FALSE])
+      X_all <- cbind(X_env, MEMs)
+    }
+  }
+  audit_run_dir <- if (exists("env_plantmatics_or_packera", mode = "function")) {
+    trimws(env_plantmatics_or_packera("PLANTMATICS_RUN_DIR", "PACKERA_RUN_DIR"))
+  } else {
+    ""
+  }
+  if (!isTRUE(demo) && nzchar(audit_run_dir) && exists("write_env_outlier_quarantine_audit", mode = "function")) {
+    tryCatch(
+      write_env_outlier_quarantine_audit(
+        df, mcd_scr,
+        file.path(audit_run_dir, "outputs", "reports", "environmental_outlier_quarantine_audit.csv"),
+        final_anchor_mask = anchor_mask
+      ),
+      error = function(e) NULL
+    )
+  }
 
   fold_selected_sets <- list()
   .compute_cv_fold_stability <- function(fold_sets, fallback_p) {
@@ -2767,7 +2858,13 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
       residual_moran_i = 0.0, residual_moran_p = 1.0,
       single_lineage_mode = TRUE,
       ibe_summary = ibe_df,
-      accessible_background = bg_gen
+      accessible_background = bg_gen,
+      env_mahal_d2 = mcd_scr$env_mahal_d2,
+      env_mcd_outlier_flag = mcd_scr$env_mcd_outlier_flag,
+      env_outlier_rescued_azonal = mcd_scr$env_outlier_rescued_azonal,
+      env_outlier_screen = mcd_scr,
+      anchor_idx = anchor_idx,
+      passive_idx = passive_idx
     ))
   }
 
@@ -3084,7 +3181,13 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
     collinearity_screening = col_screen,
     cv_mean_fold_predictors = round(cv_stab$mean_p, 2),
     cv_fold_predictor_jaccard = round(cv_stab$jaccard, 4),
-    residual_moran_i = round(moran_i, 4), residual_moran_p = round(moran_p, 4)
+    residual_moran_i = round(moran_i, 4), residual_moran_p = round(moran_p, 4),
+    env_mahal_d2 = mcd_scr$env_mahal_d2,
+    env_mcd_outlier_flag = mcd_scr$env_mcd_outlier_flag,
+    env_outlier_rescued_azonal = mcd_scr$env_outlier_rescued_azonal,
+    env_outlier_screen = mcd_scr,
+    anchor_idx = anchor_idx,
+    passive_idx = passive_idx
   ))
 }
 
@@ -3816,9 +3919,30 @@ main <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
         DBI::dbGetQuery(conn_rac, "SELECT catalogNumber, plant_individual_id FROM run_active_cohort WHERE run_id = $1 ORDER BY catalogNumber, plant_individual_id;", params = list(rid_rac)),
         error = function(e) NULL
       )
+      v_db_fields <- tryCatch(DBI::dbListFields(conn_rac, "vouchers"), error = function(e) character(0))
+      q_v_cols <- intersect(c("is_centroid_or_inst_coord", "coord_quarantine_reason"), v_db_fields)
+      v_q_rows <- if (length(q_v_cols) > 0L) {
+        tryCatch(
+          DBI::dbGetQuery(conn_rac, sprintf("SELECT catalogNumber, %s FROM vouchers;", paste(q_v_cols, collapse = ", "))),
+          error = function(e) NULL
+        )
+      } else NULL
       disconnect_packera_db(conn_rac)
       if (!is.null(rac_rows) && nrow(rac_rows) > 0L) {
         vouchers_df <- left_join_by_voucher_individual(vouchers_df, rac_rows, c("catalogNumber", "plant_individual_id"))
+      }
+      if (!is.null(v_q_rows) && nrow(v_q_rows) > 0L) {
+        v_q_rows$catalogNumber <- as.character(v_q_rows$catalogNumber)
+        v_q_rows <- v_q_rows[!duplicated(v_q_rows$catalogNumber), , drop = FALSE]
+        if ("is_centroid_or_inst_coord" %in% names(v_q_rows)) {
+          raw_vq <- v_q_rows$is_centroid_or_inst_coord
+          v_q_rows$is_centroid_or_inst_coord <- if (exists(".coerce_bool_flag_vec", mode = "function")) {
+            .coerce_bool_flag_vec(raw_vq, nrow(v_q_rows))
+          } else {
+            ifelse(is.na(raw_vq), FALSE, suppressWarnings(as.numeric(raw_vq)) != 0)
+          }
+        }
+        vouchers_df <- left_join_by_voucher_individual(vouchers_df, v_q_rows, c("catalogNumber", q_v_cols))
       }
     }
   }
@@ -4007,6 +4131,16 @@ main <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
   vouchers_df$rf_given_taxon_prob <- srf_res$rf_given_taxon_prob
   vouchers_df$rf_prediction_source <- srf_res$rf_prediction_source
   vouchers_df$spatial_block_id <- srf_res$spatial_block_id
+  vouchers_df$env_mahal_d2 <- if (!is.null(srf_res$env_mahal_d2) && length(srf_res$env_mahal_d2) == nrow(vouchers_df)) {
+    srf_res$env_mahal_d2
+  } else {
+    rep(NA_real_, nrow(vouchers_df))
+  }
+  vouchers_df$env_mcd_outlier_flag <- if (!is.null(srf_res$env_mcd_outlier_flag) && length(srf_res$env_mcd_outlier_flag) == nrow(vouchers_df)) {
+    as.logical(srf_res$env_mcd_outlier_flag)
+  } else {
+    rep(FALSE, nrow(vouchers_df))
+  }
 
   prim_sel <- select_primary_predictors_from_rf(
     rf_res = srf_res,
@@ -4086,6 +4220,8 @@ main <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
     non_geo_df$is_clim_eligible_coord <- FALSE
     non_geo_df$is_edaphic_eligible_coord <- FALSE
     non_geo_df$edaphic_coord_weight <- 0.0
+    non_geo_df$env_mahal_d2 <- NA_real_
+    non_geo_df$env_mcd_outlier_flag <- FALSE
     non_geo_df <- execute_crossmodal_consensus(
       non_geo_df,
       intraspecific_mode = is_intra_run,
@@ -4137,6 +4273,34 @@ main <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
   }
   if (write_csv_atomic(niche_summary_df, opts$output_summary, demo = demo_mode)) {
     message(sprintf("Saved Warren's Niche Identity summary to %s.", opts$output_summary))
+  }
+  if (!isTRUE(demo_mode) && exists("write_env_outlier_quarantine_audit", mode = "function")) {
+    audit_out_csv <- file.path(dirname(opts$output_summary), "environmental_outlier_quarantine_audit.csv")
+    anc_geo <- rep(FALSE, nrow(geo_vouchers_df))
+    if (!is.null(srf_res$anchor_idx) && length(srf_res$anchor_idx) > 0L) {
+      valid_ai <- srf_res$anchor_idx[srf_res$anchor_idx >= 1L & srf_res$anchor_idx <= nrow(geo_vouchers_df)]
+      anc_geo[valid_ai] <- TRUE
+    }
+    geo_scr <- srf_res$env_outlier_screen
+    if (nrow(non_geo_df) > 0L) {
+      res_az_geo <- if (!is.null(geo_scr$env_outlier_rescued_azonal) && length(geo_scr$env_outlier_rescued_azonal) == nrow(geo_vouchers_df)) {
+        as.logical(geo_scr$env_outlier_rescued_azonal)
+      } else rep(FALSE, nrow(geo_vouchers_df))
+      full_scr <- list(
+        env_mahal_d2 = vouchers_df$env_mahal_d2,
+        env_mcd_outlier_flag = vouchers_df$env_mcd_outlier_flag,
+        env_outlier_rescued_azonal = c(res_az_geo, rep(FALSE, nrow(non_geo_df)))
+      )
+      write_env_outlier_quarantine_audit(
+        vouchers_df, full_scr, audit_out_csv,
+        final_anchor_mask = c(anc_geo, rep(FALSE, nrow(non_geo_df)))
+      )
+    } else {
+      write_env_outlier_quarantine_audit(
+        vouchers_df, geo_scr, audit_out_csv,
+        final_anchor_mask = anc_geo
+      )
+    }
   }
   if (!is.null(srf_res$ibe_summary) && is.data.frame(srf_res$ibe_summary) && nrow(srf_res$ibe_summary) > 0L) {
     ibe_out_csv <- file.path(dirname(opts$output_summary), "isolation_by_environment_summary.csv")

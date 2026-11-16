@@ -217,6 +217,8 @@ def _build_master_view_ddl() -> str:
         v.usda_county_status AS usda_county_status,
         v.infraspecific_taxon AS infraspecific_taxon,
         v.georef_qc_status AS georef_qc_status,
+        v.is_centroid_or_inst_coord AS is_centroid_or_inst_coord,
+        v.coord_quarantine_reason AS coord_quarantine_reason,
         COALESCE(rac.species_standardized, om.species_standardized, v.species_standardized) AS species_standardized,
         COALESCE(rac.is_promoted_bronze, om.is_promoted_bronze, 0) AS is_promoted_bronze,
         COALESCE(rac.authority_weight, om.authority_weight) AS authority_weight,
@@ -382,6 +384,8 @@ def _build_master_view_ddl() -> str:
         srf.multimodal_conflict_flag AS multimodal_conflict_flag,
         srf.triage_category AS triage_category,
         srf.conflict_discordance_notes AS conflict_discordance_notes,
+        srf.env_mahal_d2 AS env_mahal_d2,
+        srf.env_mcd_outlier_flag AS env_mcd_outlier_flag,
         -- Environmental Cache (Fine-grain SSURGO / POLARIS / SOLUS / 3DEP / SGMC & 19 WorldClim Rasters)
         {env_view_selects},
         {wc_view_selects},
@@ -737,6 +741,8 @@ def _build_schema_ddl() -> str:
         usda_county_status TEXT,
         infraspecific_taxon TEXT,
         georef_qc_status TEXT,
+        is_centroid_or_inst_coord INTEGER DEFAULT 0,
+        coord_quarantine_reason TEXT,
         spatial_balance_weight REAL,
         species_standardized TEXT,
         pixels_per_mm REAL,
@@ -1255,6 +1261,8 @@ def _build_schema_ddl() -> str:
         multimodal_conflict_flag INTEGER,
         triage_category TEXT,
         conflict_discordance_notes TEXT,
+        env_mahal_d2 REAL,
+        env_mcd_outlier_flag INTEGER,
         PRIMARY KEY (run_id, catalogNumber, plant_individual_id),
         FOREIGN KEY (run_id) REFERENCES pipeline_runs(run_id) ON DELETE CASCADE
     );
@@ -1386,6 +1394,8 @@ _VOUCHERS_MIGRATION_COLUMNS: Tuple[Tuple[str, str], ...] = (
     ("usda_county_status", "TEXT"),
     ("infraspecific_taxon", "TEXT"),
     ("georef_qc_status", "TEXT"),
+    ("is_centroid_or_inst_coord", "INTEGER DEFAULT 0"),
+    ("coord_quarantine_reason", "TEXT"),
     ("spatial_balance_weight", "REAL"),
 )
 
@@ -1531,6 +1541,8 @@ _DYNAMIC_TABLE_MIGRATION_SPECS: Dict[str, Tuple[Tuple[str, str], ...]] = {
             ("primary_env_predictors", "TEXT"),
             ("primary_clim_predictors", "TEXT"),
             ("primary_edaph_predictors", "TEXT"),
+            ("env_mahal_d2", "REAL"),
+            ("env_mcd_outlier_flag", "INTEGER"),
         ]
     ),
     "curation_triage": (
@@ -2208,12 +2220,18 @@ def init_db_schema(conn: sqlite3.Connection) -> None:
         }
         if required_objs.issubset(existing_objs):
             v_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(vouchers);").fetchall()}
-            if "usda_symbol" not in v_cols or "usda_county_status" not in v_cols:
+            if (
+                "usda_symbol" not in v_cols
+                or "usda_county_status" not in v_cols
+                or "is_centroid_or_inst_coord" not in v_cols
+                or "coord_quarantine_reason" not in v_cols
+            ):
                 _migrate_vouchers_schema_columns(conn)
             el_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(extracted_leaves);").fetchall()}
             om_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(otu_morphometrics);").fetchall()}
+            srf_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(spatial_rf_predictions);").fetchall()}
             mv_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(v_integrative_triage_master);").fetchall()}
-            req_mv_cols = {"is_passive", "scale_source", "AR_inv_std", "log1p_capitulum_count", "blade_cie_l_norm", "nearest_type_basionym", "reproductive_trait_status", "ecoregion_can1", "ecoregion_can2", "hybrid_zone_cohesion_pass", "hybrid_parent_1", "hybrid_parent_2", "cda_oof_posterior_prob", "self_morph_mahal_d2", "open_set_df", "cryptic_non_clinal_pass", "resurrection_basionym", "w_geno_kappa", "geno_predicted_taxon", "geno_linkage_tier", "is_geno_admixed", "coalescent_gdi", "hybrid_generation_class", "cytonuclear_discordant", "public_plastome_match", "public_its_match", "waxy_lineage_match", "public_backbone_clade", "public_phytop_ils_index", "public_phytop_ih_index", "genomic_propagation_tier", "cluster_propagated_gdi", "cytology_linkage_tier", "voucher_sporophytic_2n", "voucher_ploidy_level", "taxon_reported_cytotypes", "is_multi_cytotype_taxon", "cytotype_reproductive_barrier_pass", "soil_ca_mg_molar_ratio", "soil_ultramafic_ni_cr_index", "soil_carbonate_c_pct", "is_nwi_wetland", "nwi_wetland_system", "nwi_wetland_dist_m", "hydro_edaphic_niche_regime", "wetland_fidelity_concordance", "basionym_synonymy_type", "backbone_basionym_name", "protologue_url", "natureserve_global_rank", "nwpl_indicator_code", "nwpl_wetland_score"}
+            req_mv_cols = {"is_passive", "scale_source", "AR_inv_std", "log1p_capitulum_count", "blade_cie_l_norm", "nearest_type_basionym", "reproductive_trait_status", "ecoregion_can1", "ecoregion_can2", "hybrid_zone_cohesion_pass", "hybrid_parent_1", "hybrid_parent_2", "cda_oof_posterior_prob", "self_morph_mahal_d2", "open_set_df", "cryptic_non_clinal_pass", "resurrection_basionym", "w_geno_kappa", "geno_predicted_taxon", "geno_linkage_tier", "is_geno_admixed", "coalescent_gdi", "hybrid_generation_class", "cytonuclear_discordant", "public_plastome_match", "public_its_match", "waxy_lineage_match", "public_backbone_clade", "public_phytop_ils_index", "public_phytop_ih_index", "genomic_propagation_tier", "cluster_propagated_gdi", "cytology_linkage_tier", "voucher_sporophytic_2n", "voucher_ploidy_level", "taxon_reported_cytotypes", "is_multi_cytotype_taxon", "cytotype_reproductive_barrier_pass", "soil_ca_mg_molar_ratio", "soil_ultramafic_ni_cr_index", "soil_carbonate_c_pct", "is_nwi_wetland", "nwi_wetland_system", "nwi_wetland_dist_m", "hydro_edaphic_niche_regime", "wetland_fidelity_concordance", "basionym_synonymy_type", "backbone_basionym_name", "protologue_url", "natureserve_global_rank", "nwpl_indicator_code", "nwpl_wetland_score", "is_centroid_or_inst_coord", "coord_quarantine_reason", "env_mahal_d2", "env_mcd_outlier_flag"}
             if (
                 "leaf_zone" not in el_cols
                 or "area_mm2" not in el_cols
@@ -2231,6 +2249,8 @@ def init_db_schema(conn: sqlite3.Connection) -> None:
                 or "scale_source" not in om_cols
                 or "is_promoted_bronze" not in om_cols
                 or "within_rosette_efa_dispersion" not in om_cols
+                or "env_mahal_d2" not in srf_cols
+                or "env_mcd_outlier_flag" not in srf_cols
                 or not req_mv_cols.issubset(mv_cols)
             ):
                 _migrate_dynamic_schema_columns(conn, recreate_view=True)

@@ -114,6 +114,7 @@ from scripts.core.config import (
     _DEFAULT_CONFIG,
     resolve_target_genus,
 )
+from scripts.core.coord_hygiene_utils import evaluate_coordinate_centroid_quarantine
 from scripts.core.db import (
     get_db_connection,
     is_canonical_or_explicit_db_context,
@@ -1576,6 +1577,8 @@ def export_curated_table(
         "locality",
         "doy",
         "species_standardized",
+        "is_centroid_or_inst_coord",
+        "coord_quarantine_reason",
         "pixels_per_mm",
         "is_calibrated_mm",
         "scale_source",
@@ -1630,6 +1633,8 @@ def export_curated_table(
                                 "usda_county_status",
                                 "infraspecific_taxon",
                                 "georef_qc_status",
+                                "is_centroid_or_inst_coord",
+                                "coord_quarantine_reason",
                                 "spatial_balance_weight",
                             )
                             if c in df.columns and c not in final_cols
@@ -2257,22 +2262,27 @@ class VoucherHarvester:
 
                 state_prov = rec.get("stateProvince")
                 rec_country = str(rec.get("countryCode") or "").strip().upper()
+                hit_cks: List[str] = []
 
                 if lat_val is not None and lon_val is not None:
                     if issue_set & _FATAL_GBIF_GEO_ISSUES:
                         lat_val, lon_val = None, None
+                        hit_cks = []
                         georef_qc_status = "gbif_geo_issue_nullified"
                     elif not (-90.0 <= lat_val <= 90.0 and -180.0 <= lon_val <= 180.0):
                         lat_val, lon_val = None, None
+                        hit_cks = []
                         georef_qc_status = "out_of_bounds_nullified"
                     elif abs(lat_val) < 0.01 and abs(lon_val) < 0.01:
                         lat_val, lon_val = None, None
+                        hit_cks = []
                         georef_qc_status = "zero_coord_nullified"
                     elif (
                         lon_val > 0.0
                         and (rec_country in {"US", "CA", "MX"} or (not rec_country and self.geographic_scope in {"eastern_na", "north_america"}))
                     ):
                         lat_val, lon_val = None, None
+                        hit_cks = []
                         georef_qc_status = "hemisphere_sign_mismatch_nullified"
                     elif state_prov:
                         st_dwc_norm = _normalize_us_state_name(state_prov)
@@ -2284,7 +2294,7 @@ class VoucherHarvester:
                             cks_c = us_spatial_graph["ck_list"]
                             gid_c = us_spatial_graph["geom_id_map"]
                             neigh_c = us_spatial_graph.get("neighbors") or {}
-                            hit_cks: List[str] = []
+                            hit_cks = []
                             for h_it in tree_c.query(pt_chk):
                                 h_idx = int(h_it) if (np is not None and isinstance(h_it, (int, np.integer))) or isinstance(h_it, int) else gid_c.get(id(h_it), -1)
                                 if h_idx >= 0 and geoms_c[h_idx].covers(pt_chk):
@@ -2298,6 +2308,7 @@ class VoucherHarvester:
                                 )
                                 if not ok_state:
                                     lat_val, lon_val = None, None
+                                    hit_cks = []
                                     georef_qc_status = "state_polygon_mismatch_nullified"
                         if not checked_by_poly and lat_val is not None and lon_val is not None:
                             bbox_key = st_dwc_norm if (st_dwc_norm and st_dwc_norm in _NA_STATE_PROVINCE_BBOXES) else _normalize_ca_province_bbox_key(state_prov)
@@ -2309,6 +2320,7 @@ class VoucherHarvester:
                                     and (b_lon_min - margin_deg) <= lon_val <= (b_lon_max + margin_deg)
                                 ):
                                     lat_val, lon_val = None, None
+                                    hit_cks = []
                                     georef_qc_status = "state_polygon_mismatch_nullified"
                 else:
                     georef_qc_status = "ungeoreferenced"
@@ -2534,6 +2546,19 @@ class VoucherHarvester:
                     resolved_canonical=(resolved_packera or sci_name_val),
                     determiner_tier=determiner_tier,
                 )
+                is_cent_q, coord_q_reason = evaluate_coordinate_centroid_quarantine(
+                    lat=lat_val,
+                    lon=lon_val,
+                    locality=str(raw_loc_val or ""),
+                    habitat=str(raw_hab_val or ""),
+                    county=str(rec.get("county") or ""),
+                    state_prov=str(state_prov or ""),
+                    uncertainty_m=uncertainty_val,
+                    issues=issue_set,
+                    is_type_specimen=bool(is_rec_type or classify_nomenclatural_type_rank(type_status)[0] >= 1),
+                    us_spatial_graph=us_spatial_graph,
+                    hit_county_keys=hit_cks,
+                )
                 curated_record = {
                     "catalogNumber": catalog_number,
                     "institutionCode": inst_code,
@@ -2541,6 +2566,8 @@ class VoucherHarvester:
                     "species_raw": raw_sci_val,
                     "infraspecific_taxon": infraspecific_val,
                     "georef_qc_status": georef_qc_status,
+                    "is_centroid_or_inst_coord": bool(is_cent_q),
+                    "coord_quarantine_reason": str(coord_q_reason or ""),
                     "recordedBy": str(rec.get("recordedBy") or "").strip(),
                     "recordNumber": str(rec.get("recordNumber") or "").strip(),
                     "identifiedBy": identified_by_clean,
