@@ -243,6 +243,7 @@ class TestPublicCytologyIntegration(unittest.TestCase):
             empty_cyto = Path(tmp) / "empty_cyto"
             empty_cyto.mkdir()
             r_code = f"""
+if (grDevices::dev.cur() == 1L) grDevices::pdf(NULL)
 source("scripts/analysis/step07_cytology_integration.R")
 source("scripts/analysis/step07_genomic_propagation.R")
 source("scripts/analysis/genomic_triage_utils.R")
@@ -322,9 +323,35 @@ stopifnot(all(is.na(rz$cytology_linkage_tier)), all(is.na(rz$voucher_ploidy_leve
 dz_a <- apply_taxonomic_decision_matrix(df_z, intraspecific_mode = FALSE)
 dz_b <- apply_taxonomic_decision_matrix(rz, intraspecific_mode = FALSE)
 stopifnot(identical(dz_a$taxonomic_treatment_subtype, dz_b$taxonomic_treatment_subtype), identical(dz_a$synthesis_rationale, dz_b$synthesis_rationale))
+
+c_nq <- make_cohort(FALSE)
+c_nq$df$geno_linkage_tier <- NA_character_; c_nq$df$geno_quality_pass <- NA_integer_
+c_nq$df$inferred_cytotype <- NA_character_; c_nq$df$nquire_delta_logl <- NA_real_
+idx_g1 <- c(1L, 6L, 8L)
+c_nq$df$geno_linkage_tier[idx_g1] <- "G1_Direct_Voucher"; c_nq$df$geno_quality_pass[idx_g1] <- 1L
+c_nq$df$inferred_cytotype[idx_g1] <- c("2x", "4x", "4x"); c_nq$df$nquire_delta_logl[idx_g1] <- c(-8.5, 9.2, 9.2)
+r_nq <- run_step07_cytology_integration(c_nq$df, cytology_dir = "{empty_cyto.as_posix()}")
+stopifnot(all(r_nq$cytotype_reproductive_barrier_pass[6:10] == 1L), r_nq$is_multi_cytotype_taxon[1] == 1L, nrow(attr(r_nq, "gigas_concordance_df")) > 0L)
+stopifnot(all(r_nq$cytology_linkage_tier %in% c("C3_Taxon_Monomorphic", "C4_Taxon_MultiCytotype", NA_character_)))
+stopifnot(r_nq$voucher_ploidy_level[1] == 2L, is.na(r_nq$voucher_sporophytic_2n[1]), r_nq$voucher_ploidy_level[6] == 4L)
+d_nq <- apply_taxonomic_decision_matrix(r_nq, intraspecific_mode = FALSE)
+stopifnot(all(d_nq$taxonomic_treatment_subtype[6:10] == "Putative_Cryptic_Species"), all(grepl("[Postzygotic Heteroploid Barrier:", d_nq$synthesis_rationale[6:10], fixed = TRUE)))
+
+c_rej1 <- c_nq$df; c_rej1$nquire_delta_logl[6] <- 2.5; c_rej1$geno_linkage_tier[8] <- "G2_Conditional_Deme_Hull"
+r_rej1 <- run_step07_cytology_integration(c_rej1, cytology_dir = "{empty_cyto.as_posix()}")
+stopifnot(all(r_rej1$cytotype_reproductive_barrier_pass == 0L), is.na(r_rej1$voucher_ploidy_level[6]), is.na(r_rej1$voucher_ploidy_level[8]))
+c_rej2 <- c_nq$df; c_rej2$nquire_delta_logl[1] <- 0.0
+r_rej2 <- run_step07_cytology_integration(c_rej2, cytology_dir = "{empty_cyto.as_posix()}")
+stopifnot(all(r_rej2$cytotype_reproductive_barrier_pass == 0L), is.na(r_rej2$voucher_ploidy_level[1]))
+
+c_c1 <- c_nq$df; c_c1$inferred_cytotype[1] <- "4x"; c_c1$nquire_delta_logl[1] <- 8.0
+r_c1 <- run_step07_cytology_integration(c_c1, opts = list(cytological_records_df = c_nq$rec[1, , drop = FALSE]))
+stopifnot(r_c1$voucher_ploidy_level[1] == 2L, r_c1$voucher_sporophytic_2n[1] == 44L, r_c1$cytology_linkage_tier[1] == "C1_Direct_Cytovoucher")
 cat("R_CYTO_PASS\\n")
 """
-            proc = subprocess.run(["Rscript", "-e", r_code], cwd=str(PROJECT_ROOT), capture_output=True, text=True)
+            r_file = Path(tmp) / "test_cyto.R"
+            r_file.write_text(r_code, encoding="utf-8")
+            proc = subprocess.run(["Rscript", str(r_file)], cwd=str(PROJECT_ROOT), capture_output=True, text=True)
             self.assertEqual(proc.returncode, 0, msg=f"R failed:\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}")
             self.assertIn("R_CYTO_PASS", proc.stdout)
 

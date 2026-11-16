@@ -4,6 +4,11 @@ All notable methodological, statistical, figure, and SQLite relational schema ch
 
 The structure follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [5.13.0] - 2026-11-16 (`UNC-BOT-SOP-2026-04-REV5` | SQLite Schema `20261127`)
+
+### Changed
+- **Sign-Verified Step 06 `nQuire` Cytotype Anchoring in Step 07 (`scripts/analysis/step07_cytology_integration.R`, `scripts/tests/test_public_cytology_integration.py`, `docs/TAXONOMIC_SOP.md`):** I wired sign-verified Step 06 `nQuire` EM/BIC ploidy calls (`inferred_cytotype` paired with `nquire_delta_logl <= -4.0` for `2x` and `>= +4.0` for `3x`/`4x`/`6x` on QC-passing, non-recently-admixed `G1` accessions) into `run_step07_cytology_integration()`, so sequenced anchors populate `voucher_ploidy_level` alongside `is_multi_cytotype_taxon` while informing `cytotype_reproductive_barrier_pass` and the post-hoc Gigas audit whenever physical `C1`/`C2` counts are absent. Physical `C1_Direct_Cytovoucher` and `C2_Exsiccatae_Cytoduplicate` counts retain strict precedence over `nQuire`, and `nQuire`-only anchors keep `voucher_sporophytic_2n` at `NA_integer_` while `cytology_linkage_tier` remains restricted to `C1` to `C4` enums. I verified pure-`nQuire` heteroploid barriers alongside `C1` precedence and rejection of weak or fallback calls inside `test_public_cytology_integration.py`, and I updated `docs/TAXONOMIC_SOP.md` to match the sign-directional BIC thresholds.
+
 ## [5.12.0] - 2026-11-16 (`UNC-BOT-SOP-2026-04-REV5` | SQLite Schema `20261127`)
 
 ### Added

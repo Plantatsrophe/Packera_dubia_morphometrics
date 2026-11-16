@@ -145,7 +145,20 @@ run_step07_cytology_integration <- function(df, conn = NULL, cytology_dir = "dat
   has_rec <- is.data.frame(rec_df) && nrow(rec_df) > 0L
   has_tax <- is.data.frame(tax_df) && nrow(tax_df) > 0L
 
-  if (!has_rec && !has_tax) {
+  nq_pl_raw <- .pick_col_raw(df, c("inferred_cytotype"))
+  nq_pl <- if (is.null(nq_pl_raw)) rep(NA_integer_, n) else .parse_ploidy_int(nq_pl_raw)
+  nq_dl_raw <- .pick_col_raw(df, c("nquire_delta_logl"))
+  nq_dl <- if (is.null(nq_dl_raw)) rep(NA_real_, n) else suppressWarnings(as.numeric(as.character(nq_dl_raw)))
+  g_tier <- .pick_col_chr(df, c("geno_linkage_tier", "linkage_tier"), "")
+  g_qc <- if (any(c("geno_quality_pass", "qc_pass") %in% names(df))) .safe_bool_cyto(.pick_col_raw(df, c("geno_quality_pass", "qc_pass"))) else rep(TRUE, n)
+  q12_raw <- .pick_col_raw(df, c("interclass_het_Q12", "interspecific_ancestry_q12"))
+  q12_v <- if (is.null(q12_raw)) rep(NA_real_, n) else suppressWarnings(as.numeric(as.character(q12_raw)))
+  g_adm_recent <- if ("is_geno_admixed" %in% names(df)) (.safe_bool_cyto(df$is_geno_admixed) & (is.na(q12_v) | q12_v >= 0.35)) else rep(FALSE, n)
+  hq_nq_mask <- (g_tier %in% c("G1_Direct_Voucher", "G1_Exsiccatae_Isoduplicate")) &
+    g_qc & !g_adm_recent & !is.na(nq_pl) & is.finite(nq_dl) &
+    ((nq_pl == 2L & nq_dl <= -4.0) | (nq_pl >= 3L & nq_dl >= 4.0))
+
+  if (!has_rec && !has_tax && !any(hq_nq_mask)) {
     attr(df, "cytology_markdown_lines") <- character(0); attr(df, "cytotype_barrier_labels") <- character(0)
     return(df)
   }
@@ -189,6 +202,27 @@ run_step07_cytology_integration <- function(df, conn = NULL, cytology_dir = "dat
     }
   }
 
+  is_nq_anchor <- rep(FALSE, n)
+  nq_direct <- which(!is_typed & is.na(tier) & hq_nq_mask)
+  if (length(nq_direct) > 0L) {
+    v_pl[nq_direct] <- nq_pl[nq_direct]; is_typed[nq_direct] <- TRUE; is_nq_anchor[nq_direct] <- TRUE
+  }
+  if (any(hq_nq_mask)) {
+    t_stat_all <- tolower(.pick_col_chr(df, c("type_status"), ""))
+    a_tier_all <- tolower(.pick_col_chr(df, c("authority_tier", "determiner_tier"), ""))
+    is_type_col <- if ("is_type_specimen" %in% names(df)) .safe_bool_cyto(df$is_type_specimen) else rep(FALSE, n)
+    is_nom_type <- is_type_col | grepl("(^|[^a-z])(holo|iso|lecto|neo|syn)type([^a-z]|$)", t_stat_all) | (a_tier_all == "tier_0_type")
+    for (j in which(!is_typed & is.na(tier) & nzchar(d_ex) & !is_nom_type)) {
+      nq_ex_hits <- which(hq_nq_mask & d_ex == d_ex[j])
+      if (length(nq_ex_hits) > 0L) {
+        pl_nq_ex <- .unanimous_or_na_int(nq_pl[nq_ex_hits])
+        if (!is.na(pl_nq_ex)) {
+          v_pl[j] <- pl_nq_ex; is_typed[j] <- TRUE; is_nq_anchor[j] <- TRUE
+        }
+      }
+    }
+  }
+
   tax_rep_map <- list(); tax_multi_map <- list()
   if (has_tax) {
     t_sp <- .pick_col_chr(tax_df, c("species_standardized"), "")
@@ -215,7 +249,7 @@ run_step07_cytology_integration <- function(df, conn = NULL, cytology_dir = "dat
     rep_final <- if (length(all_pl) > 0L) paste(paste0(all_pl, "x"), collapse = ", ") else if (has_tax_entry && nzchar(rep_txt)) rep_txt else NA_character_
     is_m <- isTRUE(tax_multi_map[[sp]]) || length(all_pl) >= 2L || length(unique(obs_bx[!is.na(obs_bx)])) >= 2L
     tx_cyt_str[idx_sp] <- rep_final; tx_multi_vec[idx_sp] <- if (is_m) 1L else 0L
-    untyped <- idx_sp[!is_typed[idx_sp]]; need_tier <- untyped[is.na(tier[untyped])]
+    need_tier <- idx_sp[is.na(tier[idx_sp])]
     if (length(need_tier) > 0L) tier[need_tier] <- if (is_m) "C4_Taxon_MultiCytotype" else "C3_Taxon_Monomorphic"
   }
 
@@ -256,8 +290,9 @@ run_step07_cytology_integration <- function(df, conn = NULL, cytology_dir = "dat
   }
 
   n_c1 <- sum(!is.na(tier) & tier == "C1_Direct_Cytovoucher"); n_c2 <- sum(!is.na(tier) & tier == "C2_Exsiccatae_Cytoduplicate")
-  n_mc <- length(unique(d_sp[!is.na(tx_multi_vec) & tx_multi_vec == 1L]))
-  md_lines <- c(sprintf("- **Step 07 Cytological Linkage:** %d `C1` direct cytovouchers, %d `C2` exsiccatae cytoduplicates, %d typed anchors total across %d multi-cytotype taxa.", n_c1, n_c2, sum(is_typed), n_mc))
+  n_nq <- sum(is_nq_anchor); n_mc <- length(unique(d_sp[!is.na(tx_multi_vec) & tx_multi_vec == 1L]))
+  nq_txt <- if (n_nq > 0L) sprintf(", %d Step06 `nQuire` high-confidence anchor(s)", n_nq) else ""
+  md_lines <- c(sprintf("- **Step 07 Cytological Linkage:** %d `C1` direct cytovouchers, %d `C2` exsiccatae cytoduplicates%s, %d typed anchors total across %d multi-cytotype taxa.", n_c1, n_c2, nq_txt, sum(is_typed), n_mc))
   if (length(barrier_labels) > 0L) md_lines <- c(md_lines, sprintf("- **Postzygotic Heteroploid Barriers:** %d cohesive cluster(s) passed heteroploid/dysploid isolation (%s).", length(barrier_labels), paste(paste(names(barrier_labels), barrier_labels, sep = ": "), collapse = "; ")))
   if (nrow(gigas_df) > 0L) md_lines <- c(md_lines, sprintf("- **Post-Hoc Gigas Morphometric Audit:** Evaluated %d cytotype-trait comparison(s) across `area_mm2`, `petiole_width_mm`, and capitula without circular trait feedback.", nrow(gigas_df)))
 
