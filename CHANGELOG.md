@@ -4,6 +4,14 @@ All notable methodological, statistical, figure, and SQLite relational schema ch
 
 The structure follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [5.12.0] - 2026-11-16 (`UNC-BOT-SOP-2026-04-REV5` | SQLite Schema `20261127`)
+
+### Added
+- **Quality-Gated Reference Cytonuclear Capture & Maternal Hybrid Utilities (`scripts/data_prep/organellar_cytonuclear_utils.py`, `scripts/analysis/step07_organellar_triage_utils.R`, `scripts/tests/test_step07_organellar_triage.py`):** I extracted public organellar k-mer lineage matching (`match_best_public_lineage_with_metrics()`) into `organellar_cytonuclear_utils.py` (`< 220` lines) and added small-batch reference cytonuclear capture detection (`containment >= 0.80` and `n_shared >= 80`) when a *Packera* ingroup plastome matches a distinct canonical species without matching nuclear `ITS` or `waxy`. In Step 07, I added `step07_organellar_triage_utils.R` (`< 260` lines) to hydrate 11-mer placement metrics from `public_organellar_placement.csv` across voucher and `G1` isoduplicate rows, gate reference cytonuclear capture, annotate confirmed Stage 2 hybrids with maternal cpDNA polarity (`[Maternal cpDNA Parent: ...; Putative Pollen Donor: ...]`), and append non-mutating `[Out-of-Panel Nuclear Locus Match: ITS+waxy=...]` rationales when both loci agree (`containment >= 0.85` and `n_shared_11mers >= 80`) on a taxon absent from sequenced NextRAD reference anchors. I verified all four invariants with `test_step07_organellar_triage.py` (`< 280` lines) and registered strict line ceilings inside `scripts/tests/test_code_hygiene.py`.
+
+### Changed
+- **Step 06 Organellar Skimmer & Step 07 Synthesis Wiring (`scripts/data_prep/skim_offtarget_organellar.py`, `scripts/analysis/07_triage_dashboard_synthesis.R`, `scripts/analysis/genomic_triage_utils.R`, `scripts/analysis/step07_genomic_propagation.R`):** I wired `match_best_public_lineage_with_metrics()` and `plastome_match_metrics` into `run_offtarget_organellar_skim()` while keeping Stage 1 (`Misidentification_Reassign`) strictly invariant in `apply_taxonomic_decision_matrix()`. Confirmed Stage 2 `Hybrid_Introgressant` calls use `hq_donor_hint` strictly as an unresolved `geno_parent_2` fallback alongside `[Maternal cpDNA Parent: ...]`, while quality-gated reference capture routes pure nuclear `G1`/`G2` accessions through `geno_ancient_introg_v` to prevent false Stage 2 elevation. I also restored compact formatting in `genomic_triage_utils.R` (`488` lines) and `step07_genomic_propagation.R` (`372` lines) to comply with strict line ceilings.
+
 ## [5.11.0] - 2026-11-16 (`UNC-BOT-SOP-2026-04-REV5` | SQLite Schema `20261127`)
 
 ### Added

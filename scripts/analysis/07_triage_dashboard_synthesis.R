@@ -68,6 +68,9 @@ for (.cy_p in c("scripts/analysis/step07_cytology_integration.R", file.path(dirn
 for (.gw_p in c("scripts/analysis/edaphic_geochem_wetland_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "edaphic_geochem_wetland_utils.R"))) {
   if (!exists("evaluate_step07_hydro_edaphic_and_basionym_guards", mode = "function") && !is.na(.gw_p) && nzchar(.gw_p) && file.exists(.gw_p)) { source(.gw_p); break }
 }
+for (.ot_p in c("scripts/analysis/step07_organellar_triage_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "step07_organellar_triage_utils.R"))) {
+  if (!exists("evaluate_step07_organellar_and_oop_signals", mode = "function") && !is.na(.ot_p) && nzchar(.ot_p) && file.exists(.ot_p)) { source(.ot_p); break }
+}
 
 .step07_safe_bool <- function(x) {
   if (exists(".safe_bool_vec_r", mode = "function")) return(.safe_bool_vec_r(x))
@@ -1944,9 +1947,12 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
   geno_cyt_dv <- .chr_col(df, "inferred_cytotype", n, default = NA_character_)
   geno_plast_dv <- .chr_col(df, "plastid_clade", n, default = NA_character_)
   geno_its_dv <- .chr_col(df, "its_ribotype", n, default = NA_character_)
+  if (exists("hydrate_step07_organellar_placement_metrics", mode = "function")) df <- hydrate_step07_organellar_placement_metrics(df, opts)
+  org_sig <- if (exists("evaluate_step07_organellar_and_oop_signals", mode = "function")) evaluate_step07_organellar_and_oop_signals(df) else NULL
   geno_cytonuc_dv <- if ("cytonuclear_discordant" %in% df_nms_d) {
     if (exists(".safe_bool_vec_r", mode = "function")) .safe_bool_vec_r(df$cytonuclear_discordant) else (!is.na(df$cytonuclear_discordant) & as.logical(df$cytonuclear_discordant))
   } else rep(FALSE, n)
+  if (!is.null(org_sig)) geno_cytonuc_dv <- geno_cytonuc_dv | org_sig$ref_cytonuc_capture
   geno_divergent_nonhybrid_v <- has_geno_dv & (
     (!is.na(geno_hyb_cls_dv) & geno_hyb_cls_dv == "Divergent_NonHybrid_Lineage") |
     (is.finite(geno_gdi_dv) & geno_gdi_dv > 0.70 & (!is.finite(geno_q12_dv) | geno_q12_dv < 0.15))
@@ -3280,6 +3286,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
         explicit_p2,
         if (has_geno_i && (geno_adm_dv[i] || geno_contemp_hybrid_i) && !is.na(geno_p1_dv[i]) && geno_p1_dv[i] != given_sp) geno_p1_dv[i] else NA_character_,
         if (has_geno_i && (geno_adm_dv[i] || geno_contemp_hybrid_i) && !is.na(geno_p2_dv[i]) && geno_p2_dv[i] != given_sp) geno_p2_dv[i] else NA_character_,
+        if (!is.null(org_sig)) org_sig$hq_donor_hint[i] else NA_character_,
         if (morph_is_taxon && morph_sp != given_sp) morph_sp else NA_character_,
         if (sec_is_taxon && cda_sec_taxon != given_sp) cda_sec_taxon else NA_character_,
         if (!is.na(min_cong_tx_i) && min_cong_tx_i != given_sp) min_cong_tx_i else NA_character_,
@@ -3471,7 +3478,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
           hyb_cand_t_ab[ci],
           ifelse(is.finite(hyb_cand_d2_perp[ci]), hyb_cand_d2_perp[ci], 0.0),
           n_deme_vouchers
-        ), hyb_cyto_note)
+        ), hyb_cyto_note, if (!is.null(org_sig)) org_sig$format_stage2_maternal_note(ci, p_a, p_b) else "")
         treat_broad[ci] <- "Hybrid / Introgressant"
         treat_sub[ci] <- "Hybrid_Introgressant"
       } else if (isTRUE(cyto_barrier_pass_v[ci])) {
@@ -3637,7 +3644,8 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
       if (!is.na(geno_hyb_cls_dv[gi]) && nzchar(geno_hyb_cls_dv[gi])) phase2_bits <- c(phase2_bits, geno_hyb_cls_dv[gi])
       p2_str <- if (length(phase2_bits) > 0L) paste0("; ", paste(phase2_bits, collapse = ", ")) else ""
       anc_str <- if (geno_ancient_introg_v[gi]) {
-        sprintf("; Ancient Introgression / Organellar Capture (f_b=%s, cytonuc=%s; nuclear determination retained)", ifelse(is.finite(geno_fb_max_dv[gi]), sprintf("%.3f", geno_fb_max_dv[gi]), "NA"), ifelse(isTRUE(geno_cytonuc_dv[gi]), "1", "0"))
+        cp_det <- if (!is.null(org_sig) && nzchar(org_sig$ref_cytonuc_note[gi])) paste0(", ", org_sig$ref_cytonuc_note[gi]) else ""
+        sprintf("; Ancient Introgression / Organellar Capture (f_b=%s, cytonuc=%s%s; nuclear determination retained)", ifelse(is.finite(geno_fb_max_dv[gi]), sprintf("%.3f", geno_fb_max_dv[gi]), "NA"), ifelse(isTRUE(geno_cytonuc_dv[gi]), "1", "0"), cp_det)
       } else ""
       qry_tag <- if (geno_divergent_nonhybrid_v[gi]) {
         "; Divergent_NonHybrid_Lineage"
@@ -3744,6 +3752,12 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
           sprintf(" [Hydro-Edaphic Discordance: taxon NWPL=%s in %s (wetland_concordance=%.2f%s%s)]", nwpl_code_v[hi], reg_s, df$wetland_fidelity_concordance[hi], wk_s, mp_s)
         )
       }
+    }
+  }
+  if (!is.null(org_sig)) {
+    for (oi in which(nzchar(org_sig$oop_rationale_note))) {
+      cur_r_o <- ifelse(is.na(df$synthesis_rationale[oi]), "", as.character(df$synthesis_rationale[oi]))
+      if (!grepl("Out-of-Panel Nuclear Locus Match:", cur_r_o, fixed = TRUE)) df$synthesis_rationale[oi] <- paste0(cur_r_o, org_sig$oop_rationale_note[oi])
     }
   }
   has_morph <- if ("can1" %in% names(df)) !is.na(df$can1) else if ("cda_predicted_taxon" %in% names(df)) !is.na(df$cda_predicted_taxon) else rep(TRUE, n)
@@ -4260,6 +4274,9 @@ build_triage_queue <- function(opts) {
 
   if (exists("load_step07_genomic_metrics", mode = "function")) {
     vouchers <- load_step07_genomic_metrics(opts, vouchers)
+  }
+  if (exists("hydrate_step07_organellar_placement_metrics", mode = "function")) {
+    vouchers <- hydrate_step07_organellar_placement_metrics(vouchers, opts)
   }
   opts_cyto_q <- opts
   if (is.null(opts_cyto_q$db_path)) {

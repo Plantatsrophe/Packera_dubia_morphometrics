@@ -28,6 +28,11 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.core.logger import setup_logging
+from scripts.data_prep.organellar_cytonuclear_utils import (
+    _NON_EPITHET_TOKENS, _SEED_SYNONYM_TAXA, _cluster_haplotypes,
+    _detect_cytonuclear_discordance, _extract_species_from_seed_key,
+    _match_best_public_lineage, _revcomp, match_best_public_lineage_with_metrics,
+)
 
 logger = setup_logging(name="packera.genomics.organellar")
 
@@ -37,19 +42,6 @@ _SEED_PLASTID_ANCHORS: Dict[str, str] = {
 }
 _SEED_ITS_ANCHORS: Dict[str, str] = {"Packera_ITS_58S_core": "CGTGAACCATCGAGTCTTTGAACGCAAGTTGCGCCCGAAGCCATTAGGTTGAGGGCACGTCTGCCTGGGCGTCACGCATCGCGTCGCCCCCCACCATCCATCCCCTTAGGGATGGGGTGTGTTGGGGGCGGGGGGATATTGGCCTCCCGTGCGCTCGGTGCGCGGTTGGCCTAAATAGGAGTCCTCGGCGACGGACGTCGCGACAAGTGGTGGTTGTAAAACCCTCGTTCTCGTCGTCGTGC"}
 _SEED_WAXY_ANCHORS: Dict[str, str] = {"Packera_waxy_GBSSI_core": "ATGGTGGATTGTGTTCCATTTGTTGGTGGTGATGGAAAGGTTTTTGGTACTGCTGATGGACCTTTTGAAGGACTTAAGAAAGAGCTTCTCGTTGATGGTGTTGCTGATCCATCTAAGGTTTTCTTCGTTGCAACTCTTGAGGCTGCTAAGCGTGGTGGTATTGCACCAAAGATTGATCCAGCTCTTATGGGTTCTACTG"}
-_SEED_SYNONYM_TAXA: Dict[str, str] = {
-    "senecio tomentosus": "Packera dubia", "packera tomentosa": "Packera dubia", "senecio aureus": "Packera aurea",
-    "senecio anonymus": "Packera anonyma", "senecio pauperculus": "Packera paupercula", "senecio schweinitzianus": "Packera schweinitziana",
-    "senecio millefolium": "Packera millefolium", "packera millefolia": "Packera millefolium", "packera memmingeri": "Packera x memmingeri",
-    "packera xmemmingeri": "Packera x memmingeri", "senecio obovatus": "Packera obovata", "senecio plattensis": "Packera plattensis",
-    "senecio antennariifolius": "Packera antennariifolia", "senecio glabellus": "Packera glabella", "senecio loratifolius": "Packera loratifolia",
-    "senecio pseudaureus": "Packera pseudaurea", "senecio indecorus": "Packera indecora", "senecio canus": "Packera cana",
-    "senecio strepthanthifolius": "Packera streptanthifolia", "senecio streptanthifolius": "Packera streptanthifolia",
-    "senecio fendleri": "Packera fendleri", "senecio multilobatus": "Packera multilobata", "senecio neomexicanus": "Packera neomexicana",
-    "senecio debilis": "Packera debilis", "senecio werneriifolius": "Packera werneriifolia", "senecio hartianus": "Packera hartiana",
-    "kf584255": "Packera serpenticola", "kf584257": "Packera serpenticola", "42947": "Packera serpenticola", "42949": "Packera serpenticola",
-}
-_NON_EPITHET_TOKENS = frozenset({"rbcl", "trnl", "its", "its1", "its2", "58s", "waxy", "gbssi", "core", "plastid", "chloroplast", "plastome", "ribosomal", "nuclear", "sp", "unk", "unknown", "var", "subsp", "cf", "aff"})
 _IUPAC_PAIR = {("A", "G"): "R", ("G", "A"): "R", ("C", "T"): "Y", ("T", "C"): "Y", ("G", "C"): "S", ("C", "G"): "S", ("A", "T"): "W", ("T", "A"): "W", ("G", "T"): "K", ("T", "G"): "K", ("A", "C"): "M", ("C", "A"): "M"}
 _MAX_BUCKET_READS = 25000
 _FQ_PAT = re.compile(r"\.(fastq|fq)(\.gz)?$", re.IGNORECASE)
@@ -63,9 +55,6 @@ def _resolve_threads(threads: Optional[int] = None) -> int:
 
 def _clean_sample_id(raw: str) -> str:
     return importlib.import_module("scripts.data_prep.06_ingest_genetic_data").clean_sample_id(raw)
-
-def _revcomp(seq: str) -> str:
-    return seq.translate(str.maketrans("ACGTNacgtn", "TGCANtgcan"))[::-1]
 
 def _read_fasta(path: Path, keep_label: bool = False) -> Dict[str, str]:
     out: Dict[str, str] = {}
@@ -315,106 +304,6 @@ def _assemble_baited_consensus(
     return cons_out
 
 
-def _cluster_haplotypes(seqs: Mapping[str, str], prefix: str, k: int = 13, pos_maps: Optional[Mapping[str, Mapping[int, str]]] = None, min_id: float = 0.990) -> Dict[str, str]:
-    """Cluster consensus haplotypes deterministically by shared-site identity or 13-mer overlap."""
-    if not seqs: return {}
-    samples = sorted(seqs.keys(), key=lambda s: (-sum(c != "N" for c in seqs[s]), s))
-    ksets = {sid: {seqs[sid][i : i + k] for i in range(max(0, len(seqs[sid]) - k + 1)) if "N" not in seqs[sid][i : i + k]} for sid in samples}
-    reps: List[Tuple[str, set[str], Mapping[int, str]]] = []
-    out: Dict[str, str] = {}
-    for sid in samples:
-        ks, spos = ksets[sid], (pos_maps.get(sid, {}) if pos_maps is not None else {})
-        best_label, best_sim = None, -1.0
-        for lbl, rks, rpos in reps:
-            shared_p = (spos.keys() & rpos.keys()) if pos_maps is not None else set()
-            if len(shared_p) >= 150:
-                ident = sum(1 for p in shared_p if spos[p] == rpos[p]) / float(len(shared_p))
-                if ident >= min_id and ident > best_sim: best_label, best_sim = lbl, ident
-            elif min(len(ks), len(rks)) >= 30 and (ov := len(ks & rks) / float(min(len(ks), len(rks)))) >= 0.88 and ov > best_sim: best_label, best_sim = lbl, ov
-            if best_label is None and prefix != "cp_Clade" and min(len(ks), len(rks)) >= 30 and (ov := len(ks & rks) / float(min(len(ks), len(rks)))) >= 0.94 and ov > best_sim: best_label, best_sim = lbl, ov
-        if best_label is not None: out[sid] = best_label
-        else: lbl = f"{prefix}_{len(reps) + 1}"; reps.append((lbl, ks, spos)); out[sid] = lbl
-    return out
-
-
-def _extract_species_from_seed_key(seed_key: str) -> str:
-    norm = re.sub(r"[|_/\t]+", " ", seed_key).lower()
-    for syn, canon in _SEED_SYNONYM_TAXA.items():
-        if syn in norm: return canon
-    if m := re.search(r"\bpackera\s+[0-9]*([a-z]+(?:-[a-z]+)?)(?=\s|$|[0-9])", norm):
-        ep = m.group(1).strip("-")
-        if ep and ep not in _NON_EPITHET_TOKENS: return "Packera dubia" if ep == "tomentosa" else f"Packera {ep}"
-    return ""
-
-
-def _match_best_public_lineage(seq: str, ref_seeds: Mapping[str, str], k: int = 13, _kcache: Optional[Dict[str, Any]] = None, q_pos: Optional[Mapping[int, str]] = None) -> str:
-    """Identify the closest public Packera taxon reference using strand-aware k-mer recall and IDF specificity."""
-    _ = q_pos
-    if not ref_seeds or not seq: return ""
-    cache = _kcache if _kcache is not None else {}
-    max_ref_len = max((len(s) for s in ref_seeds.values()), default=0)
-    use_k = 17 if (len(seq) > 5000 and max_ref_len >= 20000) else k
-    if len(seq) < use_k: return ""
-    q_kmers = {seq[i : i + use_k] for i in range(len(seq) - use_k + 1) if "N" not in seq[i : i + use_k]}
-    min_i = 15 if len(q_kmers) >= 30 else max(3, len(q_kmers) // 3)
-    if not q_kmers: return ""
-    if "__refs__" not in cache:
-        ref_list, sp_kmers = [], defaultdict(set)
-        for rkey, rseq in ref_seeds.items():
-            if not (sp := _extract_species_from_seed_key(rkey)) or len(rseq) < use_k: continue
-            rc = _revcomp(rseq)
-            rk = {rseq[i : i + use_k] for i in range(len(rseq) - use_k + 1) if "N" not in rseq[i : i + use_k]}
-            rk |= {rc[i : i + use_k] for i in range(len(rc) - use_k + 1) if "N" not in rc[i : i + use_k]}
-            if rk:
-                low_rk = rkey.lower()
-                is_pure_its = (180 <= len(rseq) <= 670) and ("large|subunit" not in low_rk) and ("external" not in low_rk)
-                ref_list.append((sp, rk, len(rseq), is_pure_its)); sp_kmers[sp].update(rk)
-        cache["__refs__"] = (ref_list, Counter(km for rset in sp_kmers.values() for km in rset))
-    ref_list, df_cnt = cache["__refs__"]
-    is_plastome_q = len(seq) > 5000 and max_ref_len >= 20000
-    complete_refs = [(sp, rk, rl, p_its) for sp, rk, rl, p_its in ref_list if rl >= 125000] if is_plastome_q else []
-    pure_its_refs = [(sp, rk, rl, p_its) for sp, rk, rl, p_its in ref_list if p_its] if (not is_plastome_q and len(seq) <= 5000) else []
-    pools = ((complete_refs, 0.20), (ref_list, 0.35)) if complete_refs else (((pure_its_refs, 0.35), (ref_list, 0.35)) if pure_its_refs else ((ref_list, 0.35),))
-    for pool, min_cov in pools:
-        best_sp, best_sc = "", (0.0, 0.0, 0.0)
-        for sp, r_kmers, rl, _ in pool:
-            if len(shared := (q_kmers & r_kmers)) < min_i: continue
-            denom = float(len(q_kmers) if is_plastome_q else min(len(q_kmers), len(r_kmers)))
-            if (cov_base := len(shared) / denom) < min_cov: continue
-            cov_key = round(cov_base, 4) if is_plastome_q else cov_base
-            idf_sc = sum(1.0 / float(df_cnt[km]) for km in shared if (not is_plastome_q or df_cnt[km] < 15)) / denom
-            if (sc := (cov_key, idf_sc, float(rl >= 500))) > best_sc: best_sc, best_sp = sc, sp
-        if best_sp: return best_sp
-    return ""
-
-
-def _detect_cytonuclear_discordance(
-    plastid_clades: Mapping[str, str], its_ribotypes: Mapping[str, str], nuclear_tree_path: Optional[Path] = None,
-    public_plastome_matches: Optional[Mapping[str, str]] = None, public_its_matches: Optional[Mapping[str, str]] = None, waxy_lineage_matches: Optional[Mapping[str, str]] = None,
-) -> List[Dict[str, Any]]:
-    """Compare organellar clade vs. nuclear taxon/sister group to flag cytonuclear capture."""
-    parse_code = importlib.import_module("scripts.data_prep.06_ingest_genetic_data").parse_sample_code
-    _ = nuclear_tree_path
-    samples = sorted(set(plastid_clades.keys()) | set(its_ribotypes.keys()) | set((waxy_lineage_matches or {}).keys()))
-    taxon_of = {sid: (parse_code(sid).get("species_standardized") or "Unknown") for sid in samples}
-    by_clade: Dict[str, Counter[str]] = defaultdict(Counter)
-    for sid, pc in plastid_clades.items():
-        if taxon_of[sid].startswith("Packera "): by_clade[pc][taxon_of[sid]] += 1
-    clade_maj_taxon: Dict[str, str] = {pc: cnt.most_common(1)[0][0] for pc, cnt in by_clade.items()}
-
-    rows: List[Dict[str, Any]] = []
-    for sid in samples:
-        pc, sp = plastid_clades.get(sid), taxon_of[sid]
-        # Flag cytonuclear capture when a Packera sample carries a chloroplast clade dominated by another species
-        discordant = 1 if (pc and sp.startswith("Packera ") and pc in clade_maj_taxon and clade_maj_taxon[pc] != sp and by_clade[pc][sp] < by_clade[pc][clade_maj_taxon[pc]]) else 0
-        rows.append({
-            "genetic_sample_id": sid, "nuclear_taxon": sp, "plastid_clade": pc or "", "its_ribotype": its_ribotypes.get(sid) or "",
-            "cytonuclear_discordant": discordant, "public_plastome_match": (public_plastome_matches or {}).get(sid, ""),
-            "public_its_match": (public_its_matches or {}).get(sid, ""), "waxy_lineage_match": (waxy_lineage_matches or {}).get(sid, ""),
-        })
-    return rows
-
-
 def run_offtarget_organellar_skim(
     fastq_source: Optional[Path], genomics_dir: Path, nuclear_tree: Optional[Path] = None,
     out_dir: Optional[Path] = None, threads: Optional[int] = None,
@@ -464,10 +353,16 @@ def run_offtarget_organellar_skim(
     its_ribo = _cluster_haplotypes(its_cons, "ITS_Ribotype", pos_maps=its_pos, min_id=0.990)
     waxy_clades = _cluster_haplotypes(waxy_cons, "Waxy_Lineage", pos_maps=wx_pos, min_id=0.990)
     cp_cache, its_cache, waxy_cache = {}, {}, {}
-    pub_cp_match = {sid: _match_best_public_lineage(seq, plastid_seeds, _kcache=cp_cache, q_pos=cp_pos.get(sid)) for sid, seq in cp_cons.items()}
+    cp_full = {sid: match_best_public_lineage_with_metrics(seq, plastid_seeds, _kcache=cp_cache, q_pos=cp_pos.get(sid)) for sid, seq in cp_cons.items()}
+    pub_cp_match = {sid: vals[0] for sid, vals in cp_full.items()}
+    cp_metrics = {sid: (vals[1], vals[2]) for sid, vals in cp_full.items()}
     pub_its_match = {sid: _match_best_public_lineage(seq, its_seeds, _kcache=its_cache) for sid, seq in its_cons.items()}
     waxy_match = {sid: _match_best_public_lineage(seq, waxy_seeds, _kcache=waxy_cache) or waxy_clades.get(sid, "") for sid, seq in waxy_cons.items()}
-    cyto_rows = _detect_cytonuclear_discordance(cp_clades, its_ribo, nuclear_tree_path=nuclear_tree, public_plastome_matches=pub_cp_match, public_its_matches=pub_its_match, waxy_lineage_matches=waxy_match)
+    cyto_rows = _detect_cytonuclear_discordance(
+        cp_clades, its_ribo, nuclear_tree_path=nuclear_tree,
+        public_plastome_matches=pub_cp_match, public_its_matches=pub_its_match,
+        waxy_lineage_matches=waxy_match, plastome_match_metrics=cp_metrics,
+    )
 
     target_dir = out_dir if out_dir is not None else (genomics_dir if genomics_dir.name == "public_organellar_and_loci" else (genomics_dir / "public_organellar_and_loci"))
     target_dir.mkdir(parents=True, exist_ok=True)
