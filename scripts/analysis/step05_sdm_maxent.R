@@ -114,14 +114,24 @@ compute_continuous_boyce_index <- function(suitability_all, suitability_pres, n_
   list(auc = round(min(1.0, max(0.0, auc_val)), 4), fpr = fpr, tpr = tpr)
 }
 
-.fit_single_maxent_model <- function(p_vec, X_df, w_vec = NULL) {
+.fit_single_maxent_model <- function(p_vec, X_df, w_vec = NULL, rm_grid = c(0.5, 1.0, 2.0, 3.0, 4.0)) {
   if (requireNamespace("glmnet", quietly = TRUE)) {
     tryCatch(glmnet::glmnet.control(factory = TRUE), error = function(e) NULL)
     on.exit(tryCatch(glmnet::glmnet.control(factory = TRUE), error = function(e) NULL), add = TRUE)
   }
 
   p_num <- as.integer(as.numeric(p_vec) > 0.5)
-  X_mat <- as.data.frame(X_df)
+  X_mat <- as.data.frame(X_df, check.names = FALSE, stringsAsFactors = FALSE)
+  if (ncol(X_mat) == 0L) stop("X_df has zero columns")
+  cn_init <- colnames(X_mat)
+  if (is.null(cn_init) || any(!nzchar(cn_init))) {
+    cn_fill <- paste0("V", seq_len(ncol(X_mat)))
+    if (!is.null(cn_init)) {
+      has_nm <- nzchar(cn_init)
+      cn_fill[has_nm] <- cn_init[has_nm]
+    }
+    colnames(X_mat) <- make.unique(cn_fill)
+  }
   pred_cols <- colnames(X_mat)
   n_rows <- nrow(X_mat)
   for (cn in pred_cols) {
@@ -162,21 +172,28 @@ compute_continuous_boyce_index <- function(suitability_all, suitability_pres, n_
   w_ipp <- c(w_pres_norm, rep(100.0, nrow(X_bg_aug)))
   n_bg_ipp <- nrow(X_bg_aug)
 
-  # Unified [0, 1]-Rescaled, Collinearity-Pruned Inhomogeneous Poisson Process (IPP) MaxEnt Engine
-  # (Phillips & Dudik 2008; Renner & Warton 2013; Phillips et al. 2017):
-  #   - Avoids calling maxnet::maxnet() directly because maxnet mutates global glmnet.control(fdev = 0)
-  #     and passes unscaled quadratic (~10^6) + 98-knot collinear hinge columns with standardize = FALSE,
-  #     which causes coordinate-descent non-convergence on collinear raster surfaces.
-  #   - Rescales all linear, quadratic, and 10-knot piecewise-linear hinge features strictly onto [0, 1],
-  #     prunes redundant collinear basis functions (|r| > 0.985), and solves the exact Phillips & Dudik (2008)
-  #     class-penalized IPP objective via standardized single-pass glmnet in milliseconds.
+  .align_newdata_df <- function(new_df) {
+    nd <- as.data.frame(new_df, check.names = FALSE, stringsAsFactors = FALSE)
+    if (nrow(nd) == 0L) return(nd)
+    nd_cn <- colnames(nd)
+    if (is.null(nd_cn) || (any(!nzchar(nd_cn)) && ncol(nd) == length(pred_cols))) {
+      colnames(nd) <- pred_cols[seq_len(ncol(nd))]
+    } else if (!all(pred_cols %in% nd_cn) && ncol(nd) == length(pred_cols) && all(grepl("^V[0-9]+$", nd_cn))) {
+      colnames(nd) <- pred_cols
+    }
+    nd
+  }
+
+  # Unified [0, 1]-Rescaled IPP Basis & ENMeval-Style AICc Model Selection
+  # (Phillips & Dudik 2008; Warren & Seifert 2011; Phillips et al. 2017)
   vmin_ipp <- vapply(pred_cols, function(cn) min(as.numeric(X_ipp[[cn]]), na.rm = TRUE), numeric(1))
   vmax_ipp <- vapply(pred_cols, function(cn) max(as.numeric(X_ipp[[cn]]), na.rm = TRUE), numeric(1))
   vrng_ipp <- pmax(vmax_ipp - vmin_ipp, 1e-6)
   med_ipp  <- vapply(pred_cols, function(cn) stats::median(as.numeric(X_mat[[cn]]), na.rm = TRUE), numeric(1))
   hinge_knots <- seq(1.0 / 11.0, 10.0 / 11.0, length.out = 10L)
 
-  .build_ipp_maxent_basis <- function(df_in, cl_mode = "lq") {
+  .build_ipp_maxent_basis <- function(df_in, cl_mode = "LQ") {
+    cl_lc <- tolower(paste(as.character(cl_mode), collapse = ""))
     nr <- nrow(df_in)
     np <- length(pred_cols)
     U <- matrix(0.0, nrow = nr, ncol = np, dimnames = list(NULL, paste0("l__", pred_cols)))
@@ -188,13 +205,13 @@ compute_continuous_boyce_index <- function(suitability_all, suitability_pres, n_
     }
     mats <- list(U)
     ftypes <- rep("l", np)
-    if (grepl("q", cl_mode, fixed = TRUE)) {
+    if (grepl("q", cl_lc, fixed = TRUE)) {
       Uq <- U * U
       colnames(Uq) <- paste0("q__", pred_cols)
       mats[[length(mats) + 1L]] <- Uq
       ftypes <- c(ftypes, rep("q", np))
     }
-    if (grepl("h", cl_mode, fixed = TRUE)) {
+    if (grepl("h", cl_lc, fixed = TRUE)) {
       nk <- length(hinge_knots)
       H_mat <- matrix(0.0, nrow = nr, ncol = 2L * nk * np)
       h_nms <- character(2L * nk * np)
@@ -221,125 +238,268 @@ compute_continuous_boyce_index <- function(suitability_all, suitability_pres, n_
     B_out
   }
 
-  cls_cascade <- if (n_pres >= 15L && n_bg_raw >= 60L) c("lqh", "lq", "l") else if (n_pres >= 8L) c("lq", "l") else c("l")
+  fc_candidates <- if (n_pres >= 15L) {
+    c("L", "LQ", "LQH")
+  } else if (n_pres >= 8L) {
+    c("L", "LQ")
+  } else {
+    c("L")
+  }
+  rm_vals <- sort(unique(as.numeric(rm_grid[is.finite(rm_grid) & rm_grid > 0.0])), decreasing = TRUE)
+  if (length(rm_vals) == 0L) rm_vals <- c(4.0, 3.0, 2.0, 1.0, 0.5)
 
   if (requireNamespace("glmnet", quietly = TRUE) && n_pres >= 3L && n_bg_ipp >= 4L && length(pred_cols) >= 1L) {
-    for (cl_opt in cls_cascade) {
-      w_fit <- tryCatch({
+    cand_list <- list()
+    l_basis_cache <- NULL
+    w_tot <- sum(w_ipp)
+    sum_p_eff <- sum(w_ipp[p_ipp == 1L])
+    w_bg <- rep(1.0, sum(p_ipp == 0L))
+
+    reg_lin <- stats::approx(x = c(0, 10, 30, 100), y = c(1.00, 1.00, 0.20, 0.05), xout = n_pres, rule = 2)$y
+    reg_quad <- stats::approx(x = c(0, 10, 17, 30, 100), y = c(1.30, 1.30, 0.80, 0.50, 0.05), xout = n_pres, rule = 2)$y
+    reg_hinge <- 0.50
+
+    for (cl_mode in fc_candidates) {
+      tryCatch({
         glmnet::glmnet.control(factory = TRUE)
-        mm_raw <- .build_ipp_maxent_basis(X_ipp, cl_mode = cl_opt)
+        mm_raw <- .build_ipp_maxent_basis(X_ipp, cl_mode = cl_mode)
         ft_raw <- attr(mm_raw, "ftypes")
-        col_sds <- apply(mm_raw, 2L, stats::sd)
-        keep_v <- which(is.finite(col_sds) & col_sds > 1e-5)
-        if (length(keep_v) < 1L) stop("zero-variance basis")
-        mm <- mm_raw[, keep_v, drop = FALSE]
-        ft <- ft_raw[keep_v]
+        b_mu_all <- colMeans(mm_raw)
+        b_sd_all <- apply(mm_raw, 2L, stats::sd)
+        keep_b <- which(is.finite(b_mu_all) & is.finite(b_sd_all) & b_sd_all > 1e-8)
+        if (length(keep_b) < 1L) stop("zero-variance basis")
 
-        # Deduplicate near-collinear basis columns (|r| > 0.985), prioritizing strongest presence-background contrast
-        if (ncol(mm) > 2L) {
-          mu_pr <- colMeans(mm[p_ipp == 1L, , drop = FALSE])
-          mu_bg <- colMeans(mm[p_ipp == 0L, , drop = FALSE])
-          sep_score <- abs(mu_pr - mu_bg)
-          ord_c <- order(sep_score, decreasing = TRUE)
-          C_mat <- suppressWarnings(abs(stats::cor(mm[, ord_c, drop = FALSE])))
-          C_mat[!is.finite(C_mat)] <- 0.0
-          keep_ord <- logical(ncol(mm))
-          for (ci in seq_len(ncol(mm))) {
-            if (ci == 1L || all(C_mat[ci, which(keep_ord)] <= 0.985)) {
-              keep_ord[ci] <- TRUE
-            }
-          }
-          sel_idx <- sort(ord_c[keep_ord])
-          mm <- mm[, sel_idx, drop = FALSE]
-          ft <- ft[sel_idx]
-        }
+        b_mu <- b_mu_all[keep_b]
+        names(b_mu) <- colnames(mm_raw)[keep_b]
+        b_sd <- b_sd_all[keep_b]
+        names(b_sd) <- colnames(mm_raw)[keep_b]
+        feat_types <- ft_raw[keep_b]
+        mm <- sweep(sweep(mm_raw[, keep_b, drop = FALSE], 2L, b_mu, "-"), 2L, b_sd, "/")
 
-        # Phillips & Dudik (2008, Table 1 & Eq. 4) empirical feature-dispersion L1 regularization schedule
-        c_lq <- stats::approx(x = c(0, 10, 15, 30, 100), y = c(1.00, 0.80, 0.50, 0.25, 0.05), xout = n_pres, rule = 2)$y
-        c_mult <- ifelse(ft == "h", 0.50, c_lq)
+        # Phillips & Dudik (2008) Table 1 base L1 regularization penalties scaled to presence dispersion
+        c_mult <- ifelse(feat_types == "l", reg_lin, ifelse(feat_types == "q", reg_quad, reg_hinge))
         mm_pr <- mm[p_ipp == 1L, , drop = FALSE]
-        wp_norm <- w_ipp[p_ipp == 1L] / max(sum(w_ipp[p_ipp == 1L]), 1e-8)
+        wp_raw <- w_ipp[p_ipp == 1L]
+        wp_norm <- wp_raw / max(sum(wp_raw), 1e-12)
         mu_p <- as.numeric(crossprod(wp_norm, mm_pr))
         var_p <- as.numeric(crossprod(wp_norm, sweep(mm_pr, 2L, mu_p, "-")^2))
-        reg <- c_mult * sqrt(pmax(var_p, 0.0) + (1.0 / max(n_pres, 1L))) / sqrt(max(n_pres, 1L))
-        reg[!is.finite(reg) | reg <= 1e-6] <- 1e-3
+        pf_base <- c_mult * sqrt(pmax(var_p, 0.0) + (1.0 / max(n_pres, 1L))) / sqrt(max(n_pres, 1L))
+        pf_base[!is.finite(pf_base) | pf_base <= 1e-6] <- 1e-3
+        pf_norm <- pf_base / max(mean(pf_base), 1e-12)
 
-        # Rescale penalty.factor by weighted column SD so standardize = TRUE optimizes exact IPP objective with O(1) conditioning
-        w_tot <- sum(w_ipp)
-        w_rel <- w_ipp / max(w_tot, 1e-8)
-        mu_all <- as.numeric(crossprod(w_rel, mm))
-        sd_all <- sqrt(pmax(as.numeric(crossprod(w_rel, sweep(mm, 2L, mu_all, "-")^2)), 1e-8))
-        pf <- pmax(1e-4, reg / sd_all)
-        pf <- pf / max(mean(pf), 1e-8)
-
-        sum_p_eff <- sum(w_ipp[p_ipp == 1L])
-        lam_seq <- (10^seq(3.2, 0.0, length.out = 50L)) * mean(reg) * (sum_p_eff / w_tot)
-        pad_added <- FALSE
-        if (ncol(mm) == 1L) {
-          mm <- cbind(mm, `__zero_pad__` = 0.0)
-          pf <- c(pf, 1.0)
-          pad_added <- TRUE
+        mm_fit <- mm
+        pf_fit <- pf_norm
+        if (ncol(mm_fit) == 1L) {
+          mm_fit <- cbind(mm_fit, `__zero_pad__` = 0.0)
+          pf_fit <- c(pf_fit, 1.0)
         }
-        gn <- suppressWarnings(glmnet::glmnet(
-          x = mm,
+        if (cl_mode == "L") {
+          l_basis_cache <- list(
+            mm = mm, mm_fit = mm_fit, pf_base = pf_base,
+            pf_fit = pf_fit, b_mu = b_mu, b_sd = b_sd
+          )
+        }
+
+        lam_grid <- rm_vals * mean(pf_base) * (sum_p_eff / max(1e-12, w_tot))
+        lam_hi <- max(lam_grid) * 20.0
+        lam_lo <- min(lam_grid) * 0.99
+        lam_fill <- exp(seq(log(max(lam_hi, 1e-10)), log(max(lam_lo, 1e-12)), length.out = 50L))
+        lam_seq <- sort(unique(c(lam_fill, lam_grid)), decreasing = TRUE)
+
+        fit_gl <- suppressWarnings(glmnet::glmnet(
+          x = mm_fit,
           y = as.factor(p_ipp),
           family = "binomial",
-          standardize = TRUE,
-          penalty.factor = pf,
+          alpha = 1.0,
+          standardize = FALSE,
+          penalty.factor = pf_fit,
           lambda = lam_seq,
           weights = w_ipp,
           thresh = 1e-5,
           maxit = 1500L
         ))
-        if (is.null(gn$beta) || ncol(gn$beta) < 1L) stop("glmnet returned empty path")
-        bb <- as.numeric(gn$beta[, ncol(gn$beta)])
-        names(bb) <- rownames(gn$beta)
-        if (pad_added) bb <- bb[names(bb) != "__zero_pad__"]
-        betas <- bb[is.finite(bb) & abs(bb) > 0.0]
-        mm_bg <- mm[p_ipp == 0L, , drop = FALSE]
-        lp_bg <- if (length(betas) > 0L) as.numeric(mm_bg[, names(betas), drop = FALSE] %*% betas) else rep(0.0, nrow(mm_bg))
-        lp_shift <- max(lp_bg, na.rm = TRUE)
-        if (!is.finite(lp_shift)) lp_shift <- 0.0
-        rr <- exp(pmin(50.0, pmax(-50.0, lp_bg - lp_shift)))
-        sum_rr <- max(sum(rr), 1e-12)
-        raw <- rr / sum_rr
-        ent <- -sum(raw * ifelse(raw > 1e-15, log(raw), 0.0))
-        alp <- -log(sum_rr) - lp_shift
-        list(cl_opt = cl_opt, betas = betas, entropy = ent, alpha = alp)
-      }, error = function(e) NULL)
+        if (is.null(fit_gl$beta) || ncol(fit_gl$beta) < 1L) stop("glmnet returned empty path")
 
-      if (!is.null(w_fit)) {
-        cl_saved <- w_fit$cl_opt
-        betas_saved <- w_fit$betas
-        ent_saved <- w_fit$entropy
-        alp_saved <- w_fit$alpha
-        eng_lbl <- if (has_nonuniform_weights) sprintf("weighted_maxnet_glmnet (%s/cloglog)", cl_saved) else sprintf("maxnet_ipp_glmnet (%s/cloglog)", cl_saved)
-        return(list(
-          engine = eng_lbl,
-          model = w_fit,
-          predict_cloglog = function(new_df) {
-            nd <- as.data.frame(new_df)
-            if (nrow(nd) == 0L) return(numeric(0))
-            if (length(betas_saved) == 0L) {
-              pr0 <- rep(1.0 - exp(-exp(ent_saved + alp_saved)), nrow(nd))
-              pr0[!is.finite(pr0)] <- 0.5
-              return(pmin(1.0, pmax(0.0, pr0)))
-            }
-            B_new <- .build_ipp_maxent_basis(nd, cl_mode = cl_saved)
-            use_b <- intersect(names(betas_saved), colnames(B_new))
-            if (length(use_b) == 0L) return(rep(0.5, nrow(nd)))
-            lp <- as.numeric(B_new[, use_b, drop = FALSE] %*% betas_saved[use_b]) + alp_saved
-            pr <- 1.0 - exp(-exp(pmin(10.0, pmax(-20.0, ent_saved + lp))))
-            pr[!is.finite(pr)] <- 0.0
-            pmin(1.0, pmax(0.0, pr))
+        for (idx_rm in seq_along(rm_vals)) {
+          rm_cur <- rm_vals[idx_rm]
+          lam_rm <- lam_grid[idx_rm]
+          co_mat <- stats::coef(fit_gl, s = lam_rm)
+          co_vec <- as.numeric(co_mat)
+          names(co_vec) <- rownames(co_mat)
+          betas_cand <- co_vec[colnames(mm)]
+          betas_cand[!is.finite(betas_cand)] <- 0.0
+          names(betas_cand) <- colnames(mm)
+
+          eta_all <- as.numeric(mm %*% betas_cand)
+          eta_pres <- eta_all[p_ipp == 1L]
+          eta_bg <- eta_all[p_ipp == 0L]
+          eta_shift <- max(eta_all[is.finite(eta_all)])
+          if (!is.finite(eta_shift)) eta_shift <- 0.0
+          bg_denom <- max(1e-300, sum(w_bg * exp(eta_bg - eta_shift)))
+          q_pres <- exp(eta_pres - eta_shift) / bg_denom
+          logL_ipp <- sum(log(pmax(q_pres, 1e-300)))
+          k_nz <- as.integer(sum(abs(betas_cand) > 1e-8))
+          aicc_val <- if (n_pres > 5L && k_nz >= 1L && k_nz < (n_pres - 1L)) {
+            -2.0 * logL_ipp + 2.0 * k_nz + (2.0 * k_nz * (k_nz + 1.0)) / (n_pres - k_nz - 1.0)
+          } else {
+            Inf
           }
-        ))
+
+          cand_list[[length(cand_list) + 1L]] <- list(
+            cl_mode = cl_mode, rm = rm_cur, betas_all = betas_cand,
+            b_mu = b_mu, b_sd = b_sd, k_nz = k_nz,
+            loglik_ipp = logL_ipp, aicc = aicc_val,
+            eta_bg = eta_bg, is_ridge = FALSE
+          )
+        }
+      }, error = function(e) NULL)
+    }
+
+    best_cand <- NULL
+    if (length(cand_list) > 0L) {
+      aicc_all <- vapply(cand_list, function(cnd) cnd$aicc, numeric(1))
+      fin_idx <- which(is.finite(aicc_all))
+      if (n_pres > 5L && length(fin_idx) > 0L) {
+        min_aicc <- min(aicc_all[fin_idx])
+        near_idx <- fin_idx[(aicc_all[fin_idx] - min_aicc) < 0.5]
+        k_near <- vapply(cand_list[near_idx], function(cnd) cnd$k_nz, integer(1))
+        rm_near <- vapply(cand_list[near_idx], function(cnd) cnd$rm, numeric(1))
+        ord_near <- order(k_near, -rm_near, aicc_all[near_idx])
+        best_cand <- cand_list[[near_idx[ord_near[1L]]]]
+      } else {
+        # Small-N or degenerate-AICc fallback: parsimonious linear ("L") selection
+        l_idx <- which(vapply(cand_list, function(cnd) identical(cnd$cl_mode, "L"), logical(1)))
+        rm_pref_seq <- c(2.0, 1.0, 0.5, 3.0, 4.0)
+        rm_rank_fn <- function(r) {
+          m <- match(round(r, 4), rm_pref_seq)
+          if (is.na(m)) 99L else m
+        }
+        if (length(l_idx) > 0L) {
+          k_lim <- max(1L, n_pres - 2L)
+          l_pars <- l_idx[vapply(cand_list[l_idx], function(cnd) cnd$k_nz >= 1L && cnd$k_nz <= k_lim, logical(1))]
+          if (length(l_pars) > 0L) {
+            r_ord <- vapply(cand_list[l_pars], function(cnd) rm_rank_fn(cnd$rm), integer(1))
+            k_ord <- vapply(cand_list[l_pars], function(cnd) cnd$k_nz, integer(1))
+            best_cand <- cand_list[[l_pars[order(r_ord, k_ord)[1L]]]]
+          } else {
+            l_any <- l_idx[vapply(cand_list[l_idx], function(cnd) cnd$k_nz >= 1L, logical(1))]
+            if (length(l_any) > 0L) {
+              k_ord <- vapply(cand_list[l_any], function(cnd) cnd$k_nz, integer(1))
+              r_ord <- vapply(cand_list[l_any], function(cnd) rm_rank_fn(cnd$rm), integer(1))
+              best_cand <- cand_list[[l_any[order(k_ord, r_ord)[1L]]]]
+            }
+          }
+        }
+        if (!is.null(best_cand)) best_cand$aicc <- NA_real_
       }
+    }
+
+    if (is.null(best_cand) && !is.null(l_basis_cache)) {
+      # Ridge (alpha = 0) fallback on standardized linear IPP basis if all L1 fits zeroed out
+      tryCatch({
+        mm_l <- l_basis_cache$mm
+        mm_l_fit <- l_basis_cache$mm_fit
+        pf_l_fit <- l_basis_cache$pf_fit
+        lam_r1 <- 1.0 * mean(l_basis_cache$pf_base) * (sum_p_eff / max(1e-12, w_tot))
+        lam_r_seq <- sort(unique(c(
+          exp(seq(log(max(lam_r1 * 20.0, 1e-10)), log(max(lam_r1 * 0.99, 1e-12)), length.out = 25L)),
+          lam_r1
+        )), decreasing = TRUE)
+        fit_ridge <- suppressWarnings(glmnet::glmnet(
+          x = mm_l_fit,
+          y = as.factor(p_ipp),
+          family = "binomial",
+          alpha = 0.0,
+          standardize = FALSE,
+          penalty.factor = pf_l_fit,
+          lambda = lam_r_seq,
+          weights = w_ipp,
+          thresh = 1e-5,
+          maxit = 1500L
+        ))
+        if (!is.null(fit_ridge$beta) && ncol(fit_ridge$beta) >= 1L) {
+          co_mat <- stats::coef(fit_ridge, s = lam_r1)
+          co_vec <- as.numeric(co_mat)
+          names(co_vec) <- rownames(co_mat)
+          betas_r <- co_vec[colnames(mm_l)]
+          betas_r[!is.finite(betas_r)] <- 0.0
+          names(betas_r) <- colnames(mm_l)
+          eta_all <- as.numeric(mm_l %*% betas_r)
+          eta_pres <- eta_all[p_ipp == 1L]
+          eta_bg <- eta_all[p_ipp == 0L]
+          eta_shift <- max(eta_all[is.finite(eta_all)])
+          if (!is.finite(eta_shift)) eta_shift <- 0.0
+          bg_denom <- max(1e-300, sum(w_bg * exp(eta_bg - eta_shift)))
+          q_pres <- exp(eta_pres - eta_shift) / bg_denom
+          logL_ipp <- sum(log(pmax(q_pres, 1e-300)))
+          best_cand <- list(
+            cl_mode = "L", rm = 1.0, betas_all = betas_r,
+            b_mu = l_basis_cache$b_mu, b_sd = l_basis_cache$b_sd,
+            k_nz = as.integer(sum(abs(betas_r) > 1e-8)),
+            loglik_ipp = logL_ipp, aicc = NA_real_,
+            eta_bg = eta_bg, is_ridge = TRUE
+          )
+        }
+      }, error = function(e) NULL)
+    }
+
+    if (!is.null(best_cand)) {
+      betas_nz <- best_cand$betas_all[is.finite(best_cand$betas_all) & abs(best_cand$betas_all) > 1e-8]
+      eta_bg <- best_cand$eta_bg
+      bg_shift <- max(eta_bg[is.finite(eta_bg)])
+      if (!is.finite(bg_shift)) bg_shift <- 0.0
+      w_bg_exp <- w_bg * exp(eta_bg - bg_shift)
+      sum_bg_rel <- max(1e-300, sum(w_bg_exp))
+      q_bg <- w_bg_exp / sum_bg_rel
+      ent_ipp <- -sum(q_bg * log(pmax(q_bg, 1e-16)))
+      if (!is.finite(ent_ipp)) ent_ipp <- 0.0
+      alp_saved <- -log(sum_bg_rel) - bg_shift
+      cl_saved <- best_cand$cl_mode
+      b_mu_saved <- best_cand$b_mu
+      b_sd_saved <- best_cand$b_sd
+      base_eng <- if (has_nonuniform_weights) {
+        if (isTRUE(best_cand$is_ridge)) "weighted_maxnet_ridge" else "weighted_maxnet_glmnet"
+      } else {
+        if (isTRUE(best_cand$is_ridge)) "maxnet_ipp_ridge" else "maxnet_ipp_glmnet"
+      }
+      eng_lbl <- sprintf("%s (%s_rm%.2g/cloglog)", base_eng, cl_saved, best_cand$rm)
+      return(list(
+        engine = eng_lbl,
+        model = list(
+          cl_opt = cl_saved, rm = best_cand$rm,
+          betas = betas_nz, b_mu = b_mu_saved, b_sd = b_sd_saved,
+          entropy = ent_ipp, alpha = alp_saved,
+          aicc = best_cand$aicc, loglik_ipp = best_cand$loglik_ipp
+        ),
+        selected_feature_class = as.character(cl_saved),
+        selected_reg_multiplier = as.numeric(best_cand$rm),
+        maxent_aicc = as.numeric(best_cand$aicc),
+        maxent_loglik_ipp = as.numeric(best_cand$loglik_ipp),
+        n_nonzero_betas = as.integer(best_cand$k_nz),
+        predict_cloglog = function(new_df) {
+          nd <- .align_newdata_df(new_df)
+          if (nrow(nd) == 0L) return(numeric(0))
+          if (length(betas_nz) == 0L) {
+            pr0 <- rep(1.0 - exp(-exp(ent_ipp + alp_saved)), nrow(nd))
+            pr0[!is.finite(pr0)] <- 0.5
+            return(pmin(1.0 - 1e-6, pmax(1e-6, pr0)))
+          }
+          B_new_raw <- .build_ipp_maxent_basis(nd, cl_mode = cl_saved)
+          use_b <- intersect(names(betas_nz), colnames(B_new_raw))
+          if (length(use_b) == 0L) return(rep(0.5, nrow(nd)))
+          B_sub <- sweep(sweep(B_new_raw[, use_b, drop = FALSE], 2L, b_mu_saved[use_b], "-"), 2L, b_sd_saved[use_b], "/")
+          lp <- as.numeric(B_sub %*% betas_nz[use_b]) + alp_saved
+          pr <- 1.0 - exp(-exp(pmin(10.0, pmax(-20.0, ent_ipp + lp))))
+          pr[!is.finite(pr)] <- 1e-6
+          pmin(1.0 - 1e-6, pmax(1e-6, pr))
+        }
+      ))
     }
   }
 
   # 2. Secondary Fallback Engine: Standardized IPP Cloglog Cross-Validated GLM (glmnet::cv.glmnet)
-  Phi <- .build_ipp_maxent_basis(X_ipp, cl_mode = if (n_pres >= 8L) "lq" else "l")
+  cl_fb <- if (n_pres >= 8L) "LQ" else "L"
+  Phi <- .build_ipp_maxent_basis(X_ipp, cl_mode = cl_fb)
   if (requireNamespace("glmnet", quietly = TRUE) && ncol(Phi) >= 2L && n_pres >= 4L && n_bg_ipp >= 4L) {
     glmnet::glmnet.control(factory = TRUE)
     sum_p_eff <- sum(w_ipp[p_ipp == 1L])
@@ -361,17 +521,24 @@ compute_continuous_boyce_index <- function(suitability_all, suitability_pres, n_
       med_eta_p <- stats::median(eta_tr[p_ipp == 1L], na.rm = TRUE)
       if (!is.finite(med_eta_p)) med_eta_p <- 0.0
       c_ent <- -med_eta_p
-      cl_fb <- if (n_pres >= 8L) "lq" else "l"
+      co_fb <- as.numeric(stats::coef(cv_fit, s = s_use))[-1L]
       return(list(
         engine = sprintf("glmnet_maxent (%s/cloglog)", cl_fb),
         model = cv_fit,
+        selected_feature_class = cl_fb,
+        selected_reg_multiplier = 1.0,
+        maxent_aicc = NA_real_,
+        maxent_loglik_ipp = NA_real_,
+        n_nonzero_betas = as.integer(sum(is.finite(co_fb) & abs(co_fb) > 1e-8)),
         predict_cloglog = function(new_df) {
-          B_new <- .build_ipp_maxent_basis(as.data.frame(new_df), cl_mode = cl_fb)
+          nd <- .align_newdata_df(new_df)
+          if (nrow(nd) == 0L) return(numeric(0))
+          B_new <- .build_ipp_maxent_basis(nd, cl_mode = cl_fb)
           eta <- tryCatch(as.numeric(stats::predict(cv_fit, newx = B_new, s = s_use, type = "link")) + c_ent, error = function(e) rep(0.0, nrow(B_new)))
           eta <- pmin(10.0, pmax(-15.0, eta))
           pr <- 1.0 - exp(-exp(eta))
-          pr[!is.finite(pr)] <- 0.0
-          pmin(1.0, pmax(0.0, pr))
+          pr[!is.finite(pr)] <- 1e-6
+          pmin(1.0 - 1e-6, pmax(1e-6, pr))
         }
       ))
     }
@@ -392,17 +559,24 @@ compute_continuous_boyce_index <- function(suitability_all, suitability_pres, n_
   med_eta_p <- stats::median(eta_tr[p_ipp == 1L], na.rm = TRUE)
   if (!is.finite(med_eta_p)) med_eta_p <- 0.0
   c_ent <- -med_eta_p
-  cl_fb2 <- if (n_pres >= 8L) "lq" else "l"
+  cl_fb2 <- cl_fb
 
   list(
     engine = sprintf("weighted_glm_maxent (%s/cloglog)", cl_fb2),
     model = list(beta = beta_hat, c_ent = c_ent),
+    selected_feature_class = cl_fb2,
+    selected_reg_multiplier = 1.0,
+    maxent_aicc = NA_real_,
+    maxent_loglik_ipp = NA_real_,
+    n_nonzero_betas = as.integer(sum(is.finite(beta_hat[-1L]) & abs(beta_hat[-1L]) > 1e-8)),
     predict_cloglog = function(new_df) {
-      B_new <- cbind(Intercept = 1.0, .build_ipp_maxent_basis(as.data.frame(new_df), cl_mode = cl_fb2))
+      nd <- .align_newdata_df(new_df)
+      if (nrow(nd) == 0L) return(numeric(0))
+      B_new <- cbind(Intercept = 1.0, .build_ipp_maxent_basis(nd, cl_mode = cl_fb2))
       eta <- pmin(10.0, pmax(-15.0, as.numeric(B_new %*% beta_hat) + c_ent))
       pr <- 1.0 - exp(-exp(eta))
-      pr[!is.finite(pr)] <- 0.0
-      pmin(1.0, pmax(0.0, pr))
+      pr[!is.finite(pr)] <- 1e-6
+      pmin(1.0 - 1e-6, pmax(1e-6, pr))
     }
   )
 }
@@ -984,6 +1158,10 @@ fit_and_project_maxent_sdm_maps <- function(
       N_Presences = as.integer(n_pres),
       N_Background = as.integer(n_bg),
       MaxEnt_Engine = as.character(mx_full$engine),
+      Selected_Feature_Class = if (!is.null(mx_full$selected_feature_class)) as.character(mx_full$selected_feature_class) else "L",
+      Selected_Reg_Multiplier = if (!is.null(mx_full$selected_reg_multiplier) && is.finite(mx_full$selected_reg_multiplier)) round(as.numeric(mx_full$selected_reg_multiplier), 3) else NA_real_,
+      MaxEnt_AICc = if (!is.null(mx_full$maxent_aicc) && is.finite(mx_full$maxent_aicc)) round(as.numeric(mx_full$maxent_aicc), 3) else NA_real_,
+      MaxEnt_NonZero_Betas = if (!is.null(mx_full$n_nonzero_betas)) as.integer(mx_full$n_nonzero_betas) else NA_integer_,
       AUC_Block_MaxEnt = round(auc_mx, 4),
       CBI_MaxEnt = round(as.numeric(cbi_mx), 4),
       AUC_Block_SpatialRF = round(auc_rf, 4),
@@ -1068,7 +1246,9 @@ fit_and_project_maxent_sdm_maps <- function(
   } else {
     data.frame(
       Taxon_or_Morphotype = character(0), N_Presences = integer(0), N_Background = integer(0),
-      MaxEnt_Engine = character(0), AUC_Block_MaxEnt = numeric(0), CBI_MaxEnt = numeric(0),
+      MaxEnt_Engine = character(0), Selected_Feature_Class = character(0), Selected_Reg_Multiplier = numeric(0),
+      MaxEnt_AICc = numeric(0), MaxEnt_NonZero_Betas = integer(0),
+      AUC_Block_MaxEnt = numeric(0), CBI_MaxEnt = numeric(0),
       AUC_Block_SpatialRF = numeric(0), CBI_SpatialRF = numeric(0), AUC_Block_Ensemble = numeric(0),
       CBI_Ensemble = numeric(0), Top_Climatic_Predictor = character(0), Top_Edaphic_Predictor = character(0),
       stringsAsFactors = FALSE

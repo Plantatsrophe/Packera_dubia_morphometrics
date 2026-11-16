@@ -3,6 +3,27 @@
 # Extracted from 05_multimodal_spatial_rf.R
 # ==============================================================================
 
+.step05_pheno_env <- environment()
+.step05_hop_cands <- c(
+  file.path("scripts", "analysis", "step05_circular_hopkins_models.R"),
+  file.path(getwd(), "scripts", "analysis", "step05_circular_hopkins_models.R"),
+  file.path("analysis", "step05_circular_hopkins_models.R"),
+  "step05_circular_hopkins_models.R"
+)
+.step05_oframes <- vapply(sys.frames(), function(f) if (!is.null(f$ofile)) as.character(f$ofile) else "", character(1))
+.step05_ohits <- .step05_oframes[nzchar(.step05_oframes)]
+if (length(.step05_ohits) > 0L) {
+  .step05_hop_cands <- c(file.path(dirname(utils::tail(.step05_ohits, 1L)), "step05_circular_hopkins_models.R"), .step05_hop_cands)
+}
+.step05_cfile <- sub("^--file=", "", grep("^--file=", commandArgs(trailingOnly = FALSE), value = TRUE))
+if (length(.step05_cfile) > 0L) {
+  .step05_hop_cands <- c(file.path(dirname(.step05_cfile[1L]), "step05_circular_hopkins_models.R"), .step05_hop_cands)
+}
+.step05_hop_hit <- .step05_hop_cands[file.exists(.step05_hop_cands)][1L]
+if (!is.na(.step05_hop_hit) && nzchar(.step05_hop_hit)) {
+  source(.step05_hop_hit, local = .step05_pheno_env)
+}
+
 .is_step05_extralimital_non_type <- function(df, group_vec = NULL, clean_base_mask = NULL, is_type_vec = NULL) {
   if (is.null(df) || !is.data.frame(df) || nrow(df) == 0L) {
     return(logical(0))
@@ -136,173 +157,150 @@ wrap_doy_365 <- function(doy_vec) {
 }
 
 model_latitudinal_spring_baseline <- function(flowering_df, circ_mean_doy = NULL, lat_bounds = NULL) {
-  message("Modeling Cohort-Adaptive Latitudinal Anthesis Baseline (Hopkins' Bioclimatic Law, Hopkins 1918) on verified anthesis cohort...")
+  message("Modeling Circular von Mises Latitudinal Anthesis Baseline (AICc Selection over Hopkins 1918 & Empirical Models)...")
 
-  lat_col <- if ("decimalLatitude" %in% names(flowering_df) && any(!is.na(flowering_df$decimalLatitude))) {
-    suppressWarnings(as.numeric(flowering_df$decimalLatitude))
-  } else if ("latitude" %in% names(flowering_df)) {
-    suppressWarnings(as.numeric(flowering_df$latitude))
+  df_in <- as.data.frame(flowering_df, check.names = FALSE, stringsAsFactors = FALSE)
+  lat_col <- if ("decimalLatitude" %in% names(df_in) && any(!is.na(df_in$decimalLatitude))) {
+    suppressWarnings(as.numeric(df_in$decimalLatitude))
+  } else if ("latitude" %in% names(df_in)) {
+    suppressWarnings(as.numeric(df_in$latitude))
   } else {
-    rep(NA_real_, nrow(flowering_df))
+    rep(NA_real_, nrow(df_in))
   }
-  flowering_df$decimalLatitude <- lat_col
-  doy_num <- suppressWarnings(as.numeric(flowering_df$doy))
-  flowering_df$doy <- doy_num
+  df_in$decimalLatitude <- lat_col
+  doy_num <- if ("doy" %in% names(df_in)) suppressWarnings(as.numeric(df_in$doy)) else rep(NA_real_, nrow(df_in))
+  df_in$doy <- doy_num
 
-  keep_valid <- !is.na(flowering_df$decimalLatitude) & is.finite(flowering_df$decimalLatitude) &
-                flowering_df$decimalLatitude >= -90.0 & flowering_df$decimalLatitude <= 90.0 &
-                !is.na(flowering_df$doy) & is.finite(flowering_df$doy) &
-                flowering_df$doy >= 1.0 & flowering_df$doy <= 366.0
+  keep_valid <- !is.na(df_in$decimalLatitude) & is.finite(df_in$decimalLatitude) &
+                df_in$decimalLatitude >= -90.0 & df_in$decimalLatitude <= 90.0 &
+                !is.na(df_in$doy) & is.finite(df_in$doy) &
+                df_in$doy >= 1.0 & df_in$doy <= 366.0
   if (!is.null(lat_bounds) && length(lat_bounds) == 2L && all(is.finite(lat_bounds))) {
     keep_valid <- keep_valid &
-                  flowering_df$decimalLatitude >= min(lat_bounds) &
-                  flowering_df$decimalLatitude <= max(lat_bounds)
+                  df_in$decimalLatitude >= min(lat_bounds) &
+                  df_in$decimalLatitude <= max(lat_bounds)
   }
-  valid <- flowering_df[keep_valid, , drop = FALSE]
+  valid <- df_in[keep_valid, , drop = FALSE]
+  day_per_rad <- 365.25 / (2.0 * pi)
 
-  ref_circ_doy <- if (!is.null(circ_mean_doy) && length(circ_mean_doy) >= 1L && is.finite(circ_mean_doy[1])) {
-    as.numeric(circ_mean_doy[1])
+  ref_circ_doy <- if (!is.null(circ_mean_doy) && length(circ_mean_doy) >= 1L && is.finite(circ_mean_doy[1L])) {
+    as.numeric(circ_mean_doy[1L])
   } else {
     compute_circular_mean_doy(valid$doy)
   }
 
-  if (nrow(valid) == 0L) {
+  circ_fit <- select_circular_hopkins_baseline_model(valid)
+  n_v <- nrow(valid)
+  mu_0_doy <- wrap_doy_365(circ_fit$mu_0 * day_per_rad)
+  b_lat <- as.numeric(circ_fit$b_lat)
+  b_yr <- as.numeric(circ_fit$b_year)
+  min_lat <- if (n_v > 0L) min(valid$decimalLatitude, na.rm = TRUE) else NA_real_
+
+  if (n_v == 0L) {
     message("[WARN] Zero georeferenced anthesis records with valid DOY available for latitudinal baseline.")
+    valid$expected_doy <- numeric(0)
+    valid$hopkins_expected <- numeric(0)
+    valid$delta_doy <- numeric(0)
     return(list(
-      intercept = ref_circ_doy, slope = 0.0,
+      intercept = ref_circ_doy, slope = 0.0, slope_lat = 0.0, slope_year = 0.0,
+      b_lon = 0.0, ref_lon = 0.0, b_year = 0.0, ref_year = 1990.0,
       b_elev = 0.0, ref_elev = 0.0, b_mat = 0.0, ref_mat = 0.0,
       min_lat = NA_real_, pred_min_lat = ref_circ_doy,
-      circ_mean_doy = ref_circ_doy,
-      hopkins_expected = numeric(0), r_squared = 0.0, p_value = NA_real_,
-      n = 0L, model = NULL
+      circ_mean_doy = ref_circ_doy, hopkins_expected = numeric(0),
+      r_squared = 0.0, p_value = NA_real_, n = 0L, model = NULL,
+      df = valid, r2 = 0.0, p_val = NA_real_, status = "insufficient_sample",
+      selected_model = circ_fit$selected_model, model_selection_table = circ_fit$model_selection_table,
+      aicc_weight = circ_fit$aicc_weight, delta_aicc_vs_hopkins1918 = circ_fit$delta_aicc_vs_hopkins1918,
+      rayleigh_z = circ_fit$rayleigh_z, rayleigh_p = circ_fit$rayleigh_p, r_bar = circ_fit$r_bar,
+      is_uniform_null = TRUE, predict_doy_rad = circ_fit$predict_doy_rad
     ))
   }
 
-  # Unwrap circular DOY continuously around cohort circular mean DOY so winter/wrap-around
-  # and late-summer alpine cohorts regress smoothly without calendar boundary discontinuities
-  valid$doy_offset <- circular_signed_doy_offset(valid$doy, ref_circ_doy)
-  valid$doy_unwrapped <- ref_circ_doy + valid$doy_offset
+  theta_obs <- doy_to_rad(valid$doy)
+  theta_hat <- circ_fit$predict_doy_rad(valid)
+  hopkins_expected <- wrap_doy_365(theta_hat * day_per_rad)
+  delta_doy <- wrap_rad(theta_obs - theta_hat) * day_per_rad
+  valid$expected_doy <- hopkins_expected
+  valid$hopkins_expected <- hopkins_expected
+  valid$delta_doy <- delta_doy
 
-  # Multivariate Hopkins (1918) + herbarium secular spring-advancement (Davis et al. 2015) baseline:
-  # Standardize physical elevation (+4.0 d per 400 ft = +4.0 / 121.92 m = +0.0328084 d/m; Hopkins 1918)
-  # and longitude (+0.8 d / deg E = -4 d per 5 deg W) BEFORE outlier trimming and latitudinal regression
-  # so high-elevation montane sheets neither get trimmed as raw DOY outliers nor bias the latitudinal slope.
-  lon_full <- if ("decimalLongitude" %in% names(valid)) {
-    suppressWarnings(as.numeric(valid$decimalLongitude))
-  } else if ("longitude" %in% names(valid)) {
-    suppressWarnings(as.numeric(valid$longitude))
-  } else {
-    rep(NA_real_, nrow(valid))
-  }
-  elev_col_nm <- intersect(c("elevation_m", "elevation", "minimumElevationInMeters"), names(valid))
-  elev_full <- if (length(elev_col_nm) > 0L) {
-    suppressWarnings(as.numeric(valid[[elev_col_nm[1L]]]))
-  } else {
-    rep(NA_real_, nrow(valid))
-  }
+  min_row <- valid[which.min(valid$decimalLatitude)[1L], , drop = FALSE]
+  pred_min_lat <- wrap_doy_365(circ_fit$predict_doy_rad(min_row)[1L] * day_per_rad)
+  lin_intercept <- mu_0_doy - b_lat * circ_fit$lat_ref
 
-  b_elev <- 0.0; ref_elev <- 0.0; b_lon <- 0.0; ref_lon <- 0.0; b_year <- 0.0; ref_year <- 1990.0; b_mat <- 0.0; ref_mat <- 0.0
-  has_elev <- sum(is.finite(elev_full)) >= 5L && stats::sd(elev_full, na.rm = TRUE) > 5.0
-  if (has_elev) {
-    ref_elev <- stats::median(elev_full, na.rm = TRUE)
-    b_elev <- 4.0 / 121.92 # Hopkins' Bioclimatic Law (1918): +4.0 days per +400 ft (+121.92 m) = +0.0328084 d/m
-  }
-  if (sum(is.finite(lon_full)) >= 10L && stats::sd(lon_full, na.rm = TRUE) > 0.5) {
-    ref_lon <- stats::median(lon_full, na.rm = TRUE)
-    b_lon <- 0.80 # Hopkins' Bioclimatic Law: +4.0 days per 5 deg eastward (+0.80 d / deg lon)
-  }
-
-  valid$lon_adj_hop <- ifelse(is.finite(lon_full) & b_lon != 0.0, b_lon * (lon_full - ref_lon), 0.0)
-  valid$elev_adj_hop <- ifelse(is.finite(elev_full) & b_elev != 0.0, b_elev * (elev_full - ref_elev), 0.0)
-  valid$doy_hop_std <- valid$doy_unwrapped - valid$lon_adj_hop - valid$elev_adj_hop
-  valid$doy_hop_offset <- valid$doy_hop_std - stats::median(valid$doy_hop_std, na.rm = TRUE)
-
-  if (nrow(valid) >= 30L) {
-    p1 <- as.numeric(stats::quantile(valid$doy_hop_offset, 0.01, na.rm = TRUE))
-    p99 <- as.numeric(stats::quantile(valid$doy_hop_offset, 0.99, na.rm = TRUE))
-    valid_trimmed <- valid[valid$doy_hop_offset >= p1 & valid$doy_hop_offset <= p99, , drop = FALSE]
-    if (nrow(valid_trimmed) < 3L) valid_trimmed <- valid
-  } else {
-    valid_trimmed <- valid
-  }
-
-  min_lat <- min(valid_trimmed$decimalLatitude, na.rm = TRUE)
-  lat_sd <- if (nrow(valid_trimmed) >= 2L) stats::sd(valid_trimmed$decimalLatitude, na.rm = TRUE) else 0.0
-  if (nrow(valid_trimmed) < 3L || !is.finite(lat_sd) || lat_sd <= 1e-6) {
-    b0 <- ref_circ_doy
-    b_lat <- 0.0
-    pred_min_lat <- ref_circ_doy
-    hopkins_expected <- pred_min_lat + 4.0 * (valid_trimmed$decimalLatitude - min_lat)
+  if (n_v < 6L) {
+    message(sprintf("[WARN] Small anthesis cohort (N=%d < 6); returning conservative circular fallback baseline.", n_v))
     return(list(
-      intercept = b0, slope = b_lat,
-      b_lon = b_lon, ref_lon = ref_lon, b_year = 0.0, ref_year = ref_year,
-      b_elev = b_elev, ref_elev = ref_elev, b_mat = 0.0, ref_mat = 0.0,
+      intercept = lin_intercept, slope = b_lat, slope_lat = b_lat, slope_year = b_yr,
+      b_lon = circ_fit$b_lon, ref_lon = circ_fit$lon_ref,
+      b_year = b_yr, ref_year = circ_fit$year_ref,
+      b_elev = circ_fit$b_elev, ref_elev = circ_fit$elev_ref,
+      b_mat = circ_fit$b_mat, ref_mat = circ_fit$mat_ref,
       min_lat = min_lat, pred_min_lat = pred_min_lat,
-      circ_mean_doy = ref_circ_doy,
-      hopkins_expected = hopkins_expected, r_squared = 0.0, p_value = NA_real_,
-      n = nrow(valid_trimmed), model = NULL
+      circ_mean_doy = ref_circ_doy, hopkins_expected = hopkins_expected,
+      r_squared = 0.0, p_value = circ_fit$rayleigh_p, n = as.integer(n_v), model = circ_fit,
+      df = valid, r2 = 0.0, p_val = circ_fit$rayleigh_p, status = "insufficient_sample",
+      selected_model = circ_fit$selected_model, model_selection_table = circ_fit$model_selection_table,
+      aicc_weight = circ_fit$aicc_weight, delta_aicc_vs_hopkins1918 = circ_fit$delta_aicc_vs_hopkins1918,
+      rayleigh_z = circ_fit$rayleigh_z, rayleigh_p = circ_fit$rayleigh_p, r_bar = circ_fit$r_bar,
+      is_uniform_null = circ_fit$is_uniform_null, predict_doy_rad = circ_fit$predict_doy_rad
     ))
   }
 
-  fit <- if (requireNamespace("MASS", quietly = TRUE)) {
-    tryCatch(
-      MASS::rlm(doy_hop_std ~ decimalLatitude, data = valid_trimmed),
-      error = function(e) stats::lm(doy_hop_std ~ decimalLatitude, data = valid_trimmed)
-    )
+  r_null <- circ_fit$r_bar
+  r_res <- mean(cos(wrap_rad(theta_obs - theta_hat)), na.rm = TRUE)
+  r2_val <- if (is.finite(r_null) && is.finite(r_res) && (1.0 - r_null) > 1e-8) {
+    max(0.0, min(1.0, (r_res - r_null) / (1.0 - r_null)))
   } else {
-    stats::lm(doy_hop_std ~ decimalLatitude, data = valid_trimmed)
+    0.0
   }
-  coefs <- stats::coef(fit)
-  b0 <- as.numeric(coefs[1])
-  b_lat <- if (length(coefs) >= 2L && is.finite(coefs[2])) as.numeric(coefs[2]) else 0.0
-  pred_min_lat <- b0 + b_lat * min_lat
-  decimalLatitude <- valid_trimmed$decimalLatitude
-  hopkins_expected <- pred_min_lat + 4.0 * (decimalLatitude - min_lat)
-  valid_trimmed$hopkins_expected <- hopkins_expected
 
-  yr_col <- if ("year" %in% names(valid_trimmed)) suppressWarnings(as.numeric(valid_trimmed$year)) else rep(NA_real_, nrow(valid_trimmed))
-  yr_col[!is.finite(yr_col) | yr_col < 1750 | yr_col > 2100] <- NA_real_
-  mat_col <- if ("bio1_temp_mean" %in% names(valid_trimmed)) {
-    suppressWarnings(as.numeric(valid_trimmed$bio1_temp_mean))
+  tbl <- circ_fit$model_selection_table
+  sel_idx <- which(tbl$Model == circ_fit$selected_model)[1L]
+  k_sel <- if (!is.na(sel_idx)) tbl$k_params[sel_idx] else 2L
+  ll_sel <- if (!is.na(sel_idx)) tbl$LogLik[sel_idx] else NA_real_
+  m0_idx <- which(tbl$Model == "M0_Constant_Phase")[1L]
+  ll_m0 <- if (!is.na(m0_idx)) tbl$LogLik[m0_idx] else NA_real_
+
+  p_val <- if (is.finite(k_sel) && k_sel > 2L && is.finite(ll_sel) && is.finite(ll_m0)) {
+    stats::pchisq(max(0.0, 2.0 * (ll_sel - ll_m0)), df = k_sel - 2L, lower.tail = FALSE)
+  } else if (identical(circ_fit$selected_model, "M1_Hopkins_1918_Fixed")) {
+    d_obs_c <- circular_signed_doy_offset(valid$doy, mu_0_doy)
+    d_pred_c <- wrap_rad(theta_hat - circ_fit$mu_0) * day_per_rad
+    if (length(d_pred_c) >= 3L && is.finite(stats::sd(d_pred_c, na.rm = TRUE)) && stats::sd(d_pred_c, na.rm = TRUE) > 1e-8) {
+      tryCatch({
+        sm <- summary(stats::lm(d_obs_c ~ d_pred_c))
+        if (nrow(sm$coefficients) >= 2L && ncol(sm$coefficients) >= 4L) as.numeric(sm$coefficients[2L, 4L]) else circ_fit$rayleigh_p
+      }, error = function(e) circ_fit$rayleigh_p)
+    } else {
+      circ_fit$rayleigh_p
+    }
   } else {
-    rep(NA_real_, nrow(valid_trimmed))
+    circ_fit$rayleigh_p
   }
+  status_str <- if (isTRUE(circ_fit$is_uniform_null)) "uniform_null" else "ok"
 
-  if (sum(is.finite(yr_col)) >= 15L && stats::sd(yr_col, na.rm = TRUE) >= 10.0) {
-    ref_year <- stats::median(yr_col, na.rm = TRUE)
-    resid_hop <- valid_trimmed$doy_hop_std - (b0 + b_lat * decimalLatitude)
-    fit_yr <- tryCatch(stats::lm(resid_hop ~ yr_col), error = function(e) NULL)
-    if (!is.null(fit_yr) && length(stats::coef(fit_yr)) >= 2L && is.finite(stats::coef(fit_yr)[2])) {
-      b_year <- max(-0.25, min(0.10, as.numeric(stats::coef(fit_yr)[2])))
-    }
-  }
-  # Only use bio1_temp_mean fallback when elevation is unavailable (prevents double-subtracting lapse rate!)
-  if (!has_elev && sum(is.finite(mat_col)) >= 10L && stats::sd(mat_col, na.rm = TRUE) > 0.5) {
-    ref_mat <- stats::median(mat_col, na.rm = TRUE)
-    fit_mat <- tryCatch(
-      stats::lm(I(doy_hop_std - (b0 + b_lat * decimalLatitude)) ~ mat_col, data = valid_trimmed),
-      error = function(e) NULL
-    )
-    if (!is.null(fit_mat) && length(stats::coef(fit_mat)) >= 2L && is.finite(stats::coef(fit_mat)[2])) {
-      b_mat <- max(-2.5, min(2.5, as.numeric(stats::coef(fit_mat)[2])))
-    }
-  }
+  message(sprintf(
+    "Circular Hopkins AICc Selected [%s]: slope=%.3f d/deg (b_elev=%.4f, b_mat=%.3f, b_yr=%.4f, kappa=%.2f, AICc_w=%.3f, Rayleigh_p=%.3e, R2_circ=%.4f, N=%d)",
+    circ_fit$selected_model, b_lat, circ_fit$b_elev, circ_fit$b_mat, b_yr,
+    circ_fit$kappa, ifelse(is.finite(circ_fit$aicc_weight), circ_fit$aicc_weight, NA_real_),
+    circ_fit$rayleigh_p, r2_val, n_v
+  ))
 
-  fit_ols <- stats::lm(doy_hop_std ~ decimalLatitude, data = valid_trimmed)
-  s_ols <- summary(fit_ols)
-  r2 <- if (!is.null(s_ols$r.squared) && is.finite(s_ols$r.squared)) s_ols$r.squared else 0.0
-  p_val <- if (nrow(s_ols$coefficients) >= 2L && ncol(s_ols$coefficients) >= 4L) s_ols$coefficients[2, 4] else NA_real_
-
-  message(sprintf("Empirical Baseline (Hopkins 1918 + Secular Year): DOY = %.3f + %.3f*Lat (circ_mean=%.1f, b_lon=%.2f d/deg, b_elev=%.4f d/m, b_year=%.4f d/yr, R2=%.4f, p=%.4e, N=%d)",
-                  b0, b_lat, ref_circ_doy, b_lon, b_elev, b_year, r2, p_val, nrow(valid_trimmed)))
   return(list(
-    intercept = b0, slope = b_lat,
-    b_lon = b_lon, ref_lon = ref_lon, b_year = b_year, ref_year = ref_year,
-    b_elev = b_elev, ref_elev = ref_elev, b_mat = b_mat, ref_mat = ref_mat,
+    intercept = lin_intercept, slope = b_lat, slope_lat = b_lat, slope_year = b_yr,
+    b_lon = circ_fit$b_lon, ref_lon = circ_fit$lon_ref,
+    b_year = b_yr, ref_year = circ_fit$year_ref,
+    b_elev = circ_fit$b_elev, ref_elev = circ_fit$elev_ref,
+    b_mat = circ_fit$b_mat, ref_mat = circ_fit$mat_ref,
     min_lat = min_lat, pred_min_lat = pred_min_lat,
-    circ_mean_doy = ref_circ_doy,
-    hopkins_expected = hopkins_expected, r_squared = r2, p_value = p_val,
-    n = nrow(valid_trimmed), model = fit_ols
+    circ_mean_doy = ref_circ_doy, hopkins_expected = hopkins_expected,
+    r_squared = r2_val, p_value = p_val, n = as.integer(n_v), model = circ_fit,
+    df = valid, r2 = r2_val, p_val = p_val, status = status_str,
+    selected_model = circ_fit$selected_model, model_selection_table = circ_fit$model_selection_table,
+    aicc_weight = circ_fit$aicc_weight, delta_aicc_vs_hopkins1918 = circ_fit$delta_aicc_vs_hopkins1918,
+    rayleigh_z = circ_fit$rayleigh_z, rayleigh_p = circ_fit$rayleigh_p, r_bar = circ_fit$r_bar,
+    is_uniform_null = circ_fit$is_uniform_null, predict_doy_rad = circ_fit$predict_doy_rad
   ))
 }
 
@@ -478,62 +476,35 @@ compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = 
     lat_bounds = c(lat_min_gate, lat_max_gate)
   )
 
+  day_per_rad <- 365.25 / (2.0 * pi)
   df$expected_doy <- NA_real_
   df$hopkins_expected <- NA_real_
+  df$is_pheno_uniform_null <- isTRUE(baseline$is_uniform_null)
   has_lat <- valid_lat
-  lon_v <- if ("decimalLongitude" %in% names(df)) {
-    suppressWarnings(as.numeric(df$decimalLongitude))
-  } else if ("longitude" %in% names(df)) {
-    suppressWarnings(as.numeric(df$longitude))
-  } else {
-    rep(NA_real_, nrow(df))
-  }
-  elev_col_df <- intersect(c("elevation_m", "elevation", "minimumElevationInMeters"), names(df))
-  elev_v <- if (length(elev_col_df) > 0L) {
-    suppressWarnings(as.numeric(df[[elev_col_df[1L]]]))
-  } else {
-    rep(NA_real_, nrow(df))
-  }
-  yr_v <- if ("year" %in% names(df)) suppressWarnings(as.numeric(df$year)) else rep(NA_real_, nrow(df))
-  yr_v[!is.finite(yr_v) | yr_v < 1750 | yr_v > 2100] <- NA_real_
-  mat_v <- if ("bio1_temp_mean" %in% names(df)) {
-    suppressWarnings(as.numeric(df$bio1_temp_mean))
-  } else {
-    rep(NA_real_, nrow(df))
-  }
-  lon_adj <- ifelse(is.finite(lon_v) & !is.null(baseline$b_lon) & baseline$b_lon != 0,
-                    baseline$b_lon * (lon_v - baseline$ref_lon), 0.0)
-  elev_adj <- ifelse(is.finite(elev_v) & !is.null(baseline$b_elev) & baseline$b_elev != 0,
-                     baseline$b_elev * (elev_v - baseline$ref_elev), 0.0)
-  yr_adj <- ifelse(is.finite(yr_v) & !is.null(baseline$b_year) & baseline$b_year != 0,
-                   baseline$b_year * (yr_v - baseline$ref_year), 0.0)
-  mat_adj <- ifelse(is.finite(mat_v) & !is.null(baseline$b_mat) & baseline$b_mat != 0,
-                    baseline$b_mat * (mat_v - baseline$ref_mat), 0.0)
-
-  if (any(has_lat) && is.finite(baseline$intercept) && is.finite(baseline$slope)) {
-    exp_unwrapped <- baseline$intercept + baseline$slope * df$decimalLatitude[has_lat] +
-                     lon_adj[has_lat] + elev_adj[has_lat] + yr_adj[has_lat] + mat_adj[has_lat]
-    df$expected_doy[has_lat] <- wrap_doy_365(exp_unwrapped)
-    if (is.finite(baseline$min_lat) && is.finite(baseline$pred_min_lat)) {
-      hop_unwrapped <- baseline$pred_min_lat + 4.0 * (df$decimalLatitude[has_lat] - baseline$min_lat) +
-                       lon_adj[has_lat] + elev_adj[has_lat]
-      df$hopkins_expected[has_lat] <- wrap_doy_365(hop_unwrapped)
-    }
+  theta_pred <- rep(NA_real_, nrow(df))
+  if (any(has_lat) && is.function(baseline$predict_doy_rad)) {
+    theta_pred_sub <- baseline$predict_doy_rad(df[has_lat, , drop = FALSE])
+    theta_pred[has_lat] <- theta_pred_sub
+    exp_doy_sub <- ifelse(is.finite(theta_pred_sub), wrap_doy_365(theta_pred_sub * day_per_rad), NA_real_)
+    df$expected_doy[has_lat] <- exp_doy_sub
+    df$hopkins_expected[has_lat] <- exp_doy_sub
   }
 
   df$delta_doy <- NA_real_
-  has_both <- valid_doy & df$is_verified_anthesis & !is.na(df$expected_doy) & is.finite(df$expected_doy)
+  has_both <- valid_doy & df$is_verified_anthesis & is.finite(theta_pred) & is.finite(df$expected_doy)
   if (any(has_both)) {
-    df$delta_doy[has_both] <- circular_signed_doy_offset(df$doy[has_both], df$expected_doy[has_both])
+    theta_obs_b <- doy_to_rad(df$doy[has_both])
+    df$delta_doy[has_both] <- wrap_rad(theta_obs_b - theta_pred[has_both]) * day_per_rad
   }
 
   # Hopkins-adjusted flowering DOY & circular coordinates (sin_doy, cos_doy) standardized to empirical cohort median latitude
   med_cohort_lat <- if (any(has_lat)) stats::median(df$decimalLatitude[has_lat], na.rm = TRUE) else NA_real_
-  ref_doy_base <- if (is.finite(med_cohort_lat) && is.finite(baseline$intercept) && is.finite(baseline$slope)) {
-    wrap_doy_365(baseline$intercept + baseline$slope * med_cohort_lat)
+  ref_doy_base <- if (is.finite(med_cohort_lat) && is.function(baseline$predict_doy_rad)) {
+    wrap_doy_365(baseline$predict_doy_rad(data.frame(decimalLatitude = med_cohort_lat))[1L] * day_per_rad)
   } else {
     circ_mean_doy
   }
+  if (!is.finite(ref_doy_base)) ref_doy_base <- circ_mean_doy
   df$hopkins_adjusted_doy <- ifelse(
     has_both & is.finite(ref_doy_base),
     wrap_doy_365(ref_doy_base + df$delta_doy),
@@ -543,32 +514,59 @@ compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = 
   df$sin_doy <- ifelse(valid_hdoy, round(sin(2.0 * pi * df$hopkins_adjusted_doy / 365.25), 6), NA_real_)
   df$cos_doy <- ifelse(valid_hdoy, round(cos(2.0 * pi * df$hopkins_adjusted_doy / 365.25), 6), NA_real_)
 
+  is_unif <- isTRUE(baseline$is_uniform_null)
   df$pheno_timing_category <- "Unknown"
-  df$pheno_timing_category[has_both & df$delta_doy < -7.0] <- "Early_Flowering"
-  df$pheno_timing_category[has_both & df$delta_doy > 7.0] <- "Late_Flowering"
-  df$pheno_timing_category[has_both & abs(df$delta_doy) <= 7.0] <- "Synchronous_with_Cline"
+  if (is_unif) {
+    df$pheno_timing_category[has_both] <- "Aseasonal_Uniform_Null"
+  } else {
+    df$pheno_timing_category[has_both & df$delta_doy < -7.0] <- "Early_Flowering"
+    df$pheno_timing_category[has_both & df$delta_doy > 7.0] <- "Late_Flowering"
+    df$pheno_timing_category[has_both & abs(df$delta_doy) <= 7.0] <- "Synchronous_with_Cline"
+  }
   df$pheno_timing_category[!df$is_verified_anthesis] <- "Excluded_Non_Anthesis"
 
-  if (!is.null(output_csv)) {
+  .pheno_write_csv <- function(x_df, path, demo_flag = FALSE) {
+    if (exists("write_csv_atomic", mode = "function")) {
+      return(write_csv_atomic(x_df, path, demo = demo_flag))
+    }
+    dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
+    utils::write.csv(x_df, file = path, row.names = FALSE)
+    TRUE
+  }
+
+  if (!is.null(output_csv) && nzchar(trimws(as.character(output_csv)))) {
     keep_cols <- c("catalogNumber", "plant_individual_id", "institutionCode", "scientificName", "species_raw",
                    "species_standardized", "decimalLatitude", "decimalLongitude",
-                   "eventDate", "year", "month", "day", "doy", "expected_doy", "delta_doy",
-                   "pheno_timing_category", "is_verified_anthesis", "anthesis_filter_status",
+                   "eventDate", "year", "month", "day", "doy", "expected_doy", "hopkins_expected", "delta_doy",
+                   "pheno_timing_category", "is_pheno_uniform_null", "is_verified_anthesis", "anthesis_filter_status",
                    "voucher_phenological_state", "regional_group")
     export_df <- df[, intersect(keep_cols, names(df)), drop = FALSE]
-    if (write_csv_atomic(export_df, output_csv, demo = demo)) {
+    if (.pheno_write_csv(export_df, output_csv, demo_flag = demo)) {
       message(sprintf("Exported %d voucher phenological anomalies to %s.", nrow(export_df), output_csv))
     }
   }
 
   # Statistical divergence testing across target taxa strictly on active verified-anthesis reference cohort
-  active_tx <- get_active_packera_taxa(df$species_standardized)
+  active_tx <- if (exists("get_active_packera_taxa", mode = "function")) {
+    get_active_packera_taxa(df$species_standardized)
+  } else {
+    sort(unique(as.character(df$species_standardized[!is.na(df$species_standardized) & nzchar(df$species_standardized)])))
+  }
   tf_mask <- df$species_standardized %in% active_tx & !is.na(df$delta_doy) & df$is_verified_anthesis
   target_flowering <- if (sum(tf_mask & is_active_ref) >= 5L) {
     df[tf_mask & is_active_ref, , drop = FALSE]
   } else {
     df[tf_mask, , drop = FALSE]
   }
+
+  circ_grp_theta <- if (nrow(target_flowering) > 0L && "hopkins_adjusted_doy" %in% names(target_flowering) && any(is.finite(target_flowering$hopkins_adjusted_doy))) {
+    doy_to_rad(target_flowering$hopkins_adjusted_doy)
+  } else if (nrow(target_flowering) > 0L) {
+    wrap_rad(doy_to_rad(target_flowering$delta_doy))
+  } else {
+    numeric(0)
+  }
+  circ_phase_test <- run_circular_multigroup_phase_test(circ_grp_theta, target_flowering$species_standardized, B = 999L, seed = 42L)
 
   if (nrow(target_flowering) >= 5L && length(unique(target_flowering$species_standardized)) > 1L) {
     aov_fit <- stats::aov(delta_doy ~ species_standardized, data = target_flowering)
@@ -594,7 +592,11 @@ compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = 
     Median_Delta_DOY = NA_real_, IQR_Delta_DOY = NA_real_, CI_Lower_95 = NA_real_, CI_Upper_95 = NA_real_,
     Statistic_Primary = round(baseline$slope, 3), Statistic_Secondary = round(baseline$intercept, 3), Effect_or_R2 = round(baseline$r_squared, 4),
     P_Value = if (!is.na(baseline$p_value)) sprintf("%.4e", baseline$p_value) else "NA",
-    Interpretation = sprintf("Empirical anthesis advance slope = +%.2f days/degree N (Hopkins' Law)", baseline$slope),
+    Interpretation = if (is_unif) {
+      sprintf("Uniform circular phase null retained (Rayleigh p=%.3e, R_bar=%.3f; selected %s)", baseline$rayleigh_p, baseline$r_bar, baseline$selected_model)
+    } else {
+      sprintf("Circular AICc selected [%s] slope = %+.2f d/deg N (Hopkins circular)", baseline$selected_model, baseline$slope)
+    },
     stringsAsFactors = FALSE
   )
   summary_records[[2]] <- data.frame(
@@ -603,7 +605,13 @@ compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = 
     Median_Delta_DOY = NA_real_, IQR_Delta_DOY = NA_real_, CI_Lower_95 = NA_real_, CI_Upper_95 = NA_real_,
     Statistic_Primary = round(f_stat, 3), Statistic_Secondary = df_b, Effect_or_R2 = aov_eta2,
     P_Value = if (!is.na(p_val_aov)) sprintf("%.4e", p_val_aov) else "NA",
-    Interpretation = if (!is.na(p_val_aov) && p_val_aov < 0.05) "Significant phenological divergence between taxa" else "No significant divergence or insufficient sample size",
+    Interpretation = if (is_unif) {
+      "Gated: uniform circular phase null (aseasonal cohort; divergence calls suppressed)"
+    } else if (!is.na(p_val_aov) && p_val_aov < 0.05) {
+      "Significant phenological divergence between taxa"
+    } else {
+      "No significant divergence or insufficient sample size"
+    },
     stringsAsFactors = FALSE
   )
   for (tx in active_tx) {
@@ -619,7 +627,15 @@ compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = 
         CI_Upper_95 = if (is.finite(se)) round(m + 1.96 * se, 3) else NA_real_,
         Statistic_Primary = NA_real_, Statistic_Secondary = NA_real_, Effect_or_R2 = NA_real_,
         P_Value = "",
-        Interpretation = if (m < -3) "Early blooming relative to latitude" else if (m > 3) "Late blooming relative to latitude" else "Conforms to latitudinal cline",
+        Interpretation = if (is_unif) {
+          "Gated: aseasonal / uniform phase null (timing anomaly suppressed)"
+        } else if (m < -3) {
+          "Early blooming relative to latitude"
+        } else if (m > 3) {
+          "Late blooming relative to latitude"
+        } else {
+          "Conforms to latitudinal cline"
+        },
         stringsAsFactors = FALSE
       )
     }
@@ -642,18 +658,37 @@ compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = 
         Median_Delta_DOY = NA_real_, IQR_Delta_DOY = NA_real_, CI_Lower_95 = round(lwr, 3), CI_Upper_95 = round(upr, 3),
         Statistic_Primary = round(diff_val, 3), Statistic_Secondary = NA_real_, Effect_or_R2 = NA_real_,
         P_Value = sprintf("%.4e", p_adj),
-        Interpretation = if (p_adj < 0.05) sprintf("Statistically significant temporal separation (%.1f days)", abs(diff_val)) else "Phenologically synchronous / overlapping",
+        Interpretation = if (is_unif) {
+          sprintf("Gated under Rayleigh uniform phase null (raw diff %.1f days)", abs(diff_val))
+        } else if (p_adj < 0.05) {
+          sprintf("Statistically significant temporal separation (%.1f days)", abs(diff_val))
+        } else {
+          "Phenologically synchronous / overlapping"
+        },
         stringsAsFactors = FALSE
       )
     }
   }
   summary_report <- do.call(rbind, summary_records)
-  if (!is.null(summary_csv)) {
-    if (write_csv_atomic(summary_report, summary_csv, demo = demo)) {
+  summary_report$Selected_Hopkins_Model <- as.character(baseline$selected_model)
+  summary_report$Hopkins_AICc_Weight <- if (!is.null(baseline$aicc_weight) && is.finite(baseline$aicc_weight)) round(as.numeric(baseline$aicc_weight), 6) else NA_real_
+  summary_report$Rayleigh_R_Bar <- if (!is.null(baseline$r_bar) && is.finite(baseline$r_bar)) round(as.numeric(baseline$r_bar), 6) else NA_real_
+  summary_report$Rayleigh_P <- if (!is.null(baseline$rayleigh_p) && is.finite(baseline$rayleigh_p)) as.numeric(baseline$rayleigh_p) else NA_real_
+  summary_report$Circ_Watson_F <- if (!is.null(circ_phase_test$watson_f) && is.finite(circ_phase_test$watson_f)) round(as.numeric(circ_phase_test$watson_f), 4) else NA_real_
+  summary_report$Circ_Perm_P <- if (!is.null(circ_phase_test$perm_p) && is.finite(circ_phase_test$perm_p)) as.numeric(circ_phase_test$perm_p) else NA_real_
+
+  if (!is.null(summary_csv) && nzchar(trimws(as.character(summary_csv)))) {
+    if (.pheno_write_csv(summary_report, summary_csv, demo_flag = demo)) {
       message(sprintf("Exported phenological anomaly ANOVA/Tukey summary to %s.", summary_csv))
     }
+    if (!is.null(baseline$model_selection_table) && is.data.frame(baseline$model_selection_table) && nrow(baseline$model_selection_table) > 0L) {
+      sel_tbl_csv <- file.path(dirname(summary_csv), "hopkins_circular_model_selection.csv")
+      if (.pheno_write_csv(baseline$model_selection_table, sel_tbl_csv, demo_flag = demo)) {
+        message(sprintf("Exported Hopkins circular AICc model selection table to %s.", sel_tbl_csv))
+      }
+    }
   }
-  return(list(df = df, baseline = baseline, anova = aov_fit, tukey = tukey_res, summary = summary_report))
+  return(list(df = df, baseline = baseline, anova = aov_fit, tukey = tukey_res, circular_phase_test = circ_phase_test, summary = summary_report))
 }
 
 export_phenological_latitudinal_figures <- function(df, baseline, out_path) {

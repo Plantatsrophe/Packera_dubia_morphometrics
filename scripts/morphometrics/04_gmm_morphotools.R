@@ -34,6 +34,7 @@ for (.pf_p in c("scripts/morphometrics/pub_figures_utils.R", file.path(dirname(c
 }
 for (.aw_p in c("scripts/morphometrics/authority_weighting_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "authority_weighting_utils.R"))) if (!exists("compute_empirical_bayes_authority_weights", mode = "function") && !is.na(.aw_p) && nzchar(.aw_p) && file.exists(.aw_p)) { source(.aw_p); break }
 for (.pm_p in c("scripts/morphometrics/plasticity_mitigation_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "plasticity_mitigation_utils.R"))) if (!exists("merge_plastic_gmm_components_ridgeline", mode = "function") && !is.na(.pm_p) && nzchar(.pm_p) && file.exists(.pm_p)) { source(.pm_p); break }
+for (.gi_p in c("scripts/morphometrics/gmm_icl_bootstrap_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "gmm_icl_bootstrap_utils.R"))) if (!exists("apply_gmm_icl_bootstrap_gate", mode = "function") && !is.na(.gi_p) && nzchar(.gi_p) && file.exists(.gi_p)) { source(.gi_p); break }
 for (.db_p in c("scripts/core/db_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "..", "core", "db_utils.R"))) {
   if (!exists("fetch_step04_morphometrics_from_db", mode = "function") && !is.na(.db_p) && nzchar(.db_p) && file.exists(.db_p)) { source(.db_p); break }
 }
@@ -179,7 +180,7 @@ run_gmm_cluster_analysis <- function(df, feature_cols, max_k = 8, use_clustvarse
   valid_rows <- which(complete.cases(df[, req_cols, drop = FALSE])); N_valid <- length(valid_rows)
   if (N_valid < 3) {
     return(list(classification = rep(NA_integer_, nrow(df)), uncertainty = rep(NA_real_, nrow(df)), best_k = 1, model_name = "None",
-                selected_features = feature_cols, bic_table = data.frame(K = seq_len(max_k), BIC = NA_real_, Two_Delta_BIC = NA_real_, Evidence = "Inconclusive")))
+                selected_features = feature_cols, bic_table = data.frame(K = seq_len(max_k), BIC = NA_real_, Two_Delta_BIC = NA_real_, ICL = NA_real_, Delta_ICL_vs_Null = NA_real_, Boot_LRT_Stat_K1_vs_K2 = NA_real_, Boot_LRT_P_K1_vs_K2 = NA_real_, Evidence = "Inconclusive", stringsAsFactors = FALSE)))
   }
   sub_v <- df[valid_rows, , drop = FALSE]
   is_tier1_pure <- if ("morph_tier_source" %in% names(sub_v)) (is.na(sub_v$morph_tier_source) | !(sub_v$morph_tier_source %in% c("Cauline_Only_Fallback", "Transitional_Passive"))) else rep(TRUE, N_valid)
@@ -192,7 +193,7 @@ run_gmm_cluster_analysis <- function(df, feature_cols, max_k = 8, use_clustvarse
   for (j in seq_len(ncol(X))) if (any(is.na(X[, j]))) X[is.na(X[, j]), j] <- if (any(!is.na(X[ref_cand, j]))) stats::median(X[ref_cand, j], na.rm = TRUE) else 0.0
   if (exists("screen_gmm_point_mass_columns", mode = "function")) X <- X[, screen_gmm_point_mass_columns(X, ref_cand), drop = FALSE]
   selected_cols <- select_morphometric_subspace(X[ref_cand, , drop = FALSE], aux_df = sub_v[ref_cand, , drop = FALSE]); X <- X[, selected_cols, drop = FALSE]
-  seed_i <- as.integer(if (!is.null(seed) && is.finite(seed)) seed else 42L); set.seed(seed_i); best_k <- 1; best_name <- "Full_Covariance_EM"; bic_table <- NULL; bic_raw_mat <- NULL; cls_sub <- NULL; unc_sub <- NULL; did_merge <- FALSE
+  seed_i <- as.integer(if (!is.null(seed) && is.finite(seed)) seed else 42L); set.seed(seed_i); best_k <- 1; best_name <- "Full_Covariance_EM"; bic_table <- NULL; bic_raw_mat <- NULL; pure_res <- NULL; cls_sub <- NULL; unc_sub <- NULL; did_merge <- FALSE; did_icl_collapse <- FALSE
   X_mah <- X[, if (length(intersect(pc_guard_cols, colnames(X))) > 0) intersect(pc_guard_cols, colnames(X)) else colnames(X), drop = FALSE]
   mahal_outliers <- screen_regime_stratified_mcd_outliers(X_mah, fit_pos = which(ref_cand), solidity_vec = sub_v$solidity, is_dissected_vec = sub_v$is_dissected, k_mcd = ncol(X_mah), p_cutoff = 0.005, seed = seed_i)
   anchor_mask <- ref_cand & !mahal_outliers
@@ -223,6 +224,10 @@ run_gmm_cluster_analysis <- function(df, feature_cols, max_k = 8, use_clustvarse
     mrg <- merge_plastic_gmm_components_ridgeline(X_pcs, X_core, z_eval_mat, z_eval_mat[core_idx, , drop = FALSE], intraspecific_mode = is_intra_gmm)
     if (isTRUE(mrg$merged_any)) { did_merge <- TRUE; message(sprintf("[Plasticity Gate] Morphological ridgeline unimodality test merged GMM K=%d -> K=%d.", best_k, mrg$best_k)); best_k <- mrg$best_k; cls_sub <- mrg$classification; unc_sub <- mrg$uncertainty; best_name <- paste0(best_name, "_RidgelineMerged") }
   }
+  if (exists("apply_gmm_icl_bootstrap_gate", mode = "function") && !is.null(bic_table)) {
+    icl_g <- apply_gmm_icl_bootstrap_gate(X_core, X_pcs, bic_table, best_k, best_name, cls_sub, unc_sub, modelNames = modelNames, pure_res = pure_res, is_intra_gmm = is_intra_gmm, seed = seed_i)
+    bic_table <- icl_g$bic_table; best_k <- icl_g$best_k; best_name <- icl_g$best_name; cls_sub <- icl_g$cls_sub; unc_sub <- icl_g$unc_sub; did_icl_collapse <- isTRUE(icl_g$did_icl_collapse)
+  }
   if (is.null(cls_sub)) { best_k <- 1L; best_name <- "Unimodal_G1_Null"; cls_sub <- rep(1L, nrow(X_pcs)); unc_sub <- rep(0.0, nrow(X_pcs)) }
   relab <- .canonical_relabel_gmm_clusters(sub_v, cls_sub, best_k, ref_cand, core_idx); cls_sub <- relab$cls_sub; cls <- rep(NA_integer_, nrow(df)); unc <- rep(NA_real_, nrow(df)); cls[valid_rows] <- cls_sub; unc[valid_rows] <- unc_sub
   n_core_g <- max(2.0, nrow(X_core)); n_eff_g <- max(2.0, n_core_g * min(1.0, max(0.10, relab$n_eff_ratio))); p_g <- ncol(X_pcs)
@@ -234,7 +239,9 @@ run_gmm_cluster_analysis <- function(df, feature_cols, max_k = 8, use_clustvarse
   bic_table$Evidence <- sapply(seq_len(nrow(bic_table)), function(idx_b) { # Kass & Raftery (1995) deviance-scale 2*ln(BF) = Delta_BIC_mclust vs G = 1
     if (idx_b == 1L) return("Null Model (G = 1)"); val <- bic_table$Two_Delta_BIC[idx_b]
     ev_str <- if (is.na(val) || val < 0) "Negative (favors G = 1)" else if (val < 2) "Weak / Inconclusive" else if (val < 6) "Positive Evidence" else if (val < 10) "Strong Evidence" else "Decisive Evidence (Species Boundary)"
-    if (did_merge && bic_table$K[idx_b] > best_k) paste0(ev_str, sprintf(" [Ridgeline Merged -> K=%d]", best_k)) else ev_str
+    if (did_merge && bic_table$K[idx_b] > best_k) ev_str <- paste0(ev_str, sprintf(" [Ridgeline Merged -> K=%d]", best_k))
+    if (did_icl_collapse && bic_table$K[idx_b] > best_k) ev_str <- paste0(ev_str, " [ICL/Bootstrap Collapsed -> K=1]")
+    ev_str
   })
   return(list(classification = cls, uncertainty = unc, best_k = best_k, model_name = best_name, selected_features = selected_cols, bic_table = bic_table))
 }

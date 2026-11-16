@@ -1840,13 +1840,15 @@ screen_collinear_predictors <- function(
   cor.threshold = 0.70,
   vif.threshold = 5.0,
   anchor_groups = NULL,
-  var_scores = NULL
+  var_scores = NULL,
+  quiet = FALSE
 ) {
   X_df <- as.data.frame(X_env, check.names = FALSE)
   all_cols <- colnames(X_df)
   if (length(all_cols) == 0L) {
     return(list(
       selected_variables = character(0),
+      selected_vars = character(0),
       kept_vars = character(0),
       pruned_variables = character(0),
       anchor_scores = numeric(0)
@@ -1855,6 +1857,7 @@ screen_collinear_predictors <- function(
   if (length(all_cols) == 1L) {
     return(list(
       selected_variables = all_cols,
+      selected_vars = all_cols,
       kept_vars = all_cols,
       pruned_variables = character(0),
       anchor_scores = stats::setNames(1.0, all_cols)
@@ -1866,6 +1869,7 @@ screen_collinear_predictors <- function(
   if (length(keep_cols) == 0L) {
     return(list(
       selected_variables = all_cols[1],
+      selected_vars = all_cols[1],
       kept_vars = all_cols[1],
       pruned_variables = setdiff(all_cols, all_cols[1]),
       anchor_scores = stats::setNames(rep(0.0, length(all_cols)), all_cols)
@@ -1874,6 +1878,7 @@ screen_collinear_predictors <- function(
   if (length(keep_cols) == 1L) {
     return(list(
       selected_variables = keep_cols,
+      selected_vars = keep_cols,
       kept_vars = keep_cols,
       pruned_variables = setdiff(all_cols, keep_cols),
       anchor_scores = stats::setNames(1.0, keep_cols)
@@ -1972,12 +1977,15 @@ screen_collinear_predictors <- function(
   }
 
   pruned_vars <- setdiff(all_cols, sel_vars)
-  message(sprintf(
-    "Collinearity Screening (Dormann et al. 2013; Benito 2021; |r| <= %.2f, VIF <= %.1f): retained %d / %d predictors.",
-    cor.threshold, vif.threshold, length(sel_vars), ncol(X_df)
-  ))
+  if (!isTRUE(quiet)) {
+    message(sprintf(
+      "Collinearity Screening (Dormann et al. 2013; Benito 2021; |r| <= %.2f, VIF <= %.1f): retained %d / %d predictors.",
+      cor.threshold, vif.threshold, length(sel_vars), ncol(X_df)
+    ))
+  }
   list(
     selected_variables = sel_vars,
+    selected_vars = sel_vars,
     kept_vars = sel_vars,
     pruned_variables = pruned_vars,
     anchor_scores = scores_sub
@@ -1991,7 +1999,8 @@ screen_collinear_predictors_by_block <- function(
   cor.threshold = 0.70,
   vif.threshold = 5.0,
   topo_vars = NULL,
-  anchor_groups = NULL
+  anchor_groups = NULL,
+  quiet = FALSE
 ) {
   # Applies spatialRF::auto_cor(cor.threshold = 0.70) and
   # spatialRF::auto_vif(vif.threshold = 5.0) separately within 3 ecological blocks:
@@ -2005,6 +2014,7 @@ screen_collinear_predictors_by_block <- function(
   if (length(all_cols) == 0L) {
     return(list(
       selected_variables = character(0),
+      selected_vars = character(0),
       kept_vars = character(0),
       selected_edaphic = character(0),
       selected_climatic = character(0),
@@ -2053,7 +2063,8 @@ screen_collinear_predictors_by_block <- function(
       cor.threshold = cor.threshold,
       vif.threshold = vif.threshold,
       anchor_groups = anchor_groups,
-      var_scores = scores_all
+      var_scores = scores_all,
+      quiet = quiet
     )$selected_variables
   } else {
     character(0)
@@ -2065,7 +2076,8 @@ screen_collinear_predictors_by_block <- function(
       cor.threshold = cor.threshold,
       vif.threshold = vif.threshold,
       anchor_groups = anchor_groups,
-      var_scores = scores_all
+      var_scores = scores_all,
+      quiet = quiet
     )$selected_variables
   } else {
     character(0)
@@ -2077,7 +2089,8 @@ screen_collinear_predictors_by_block <- function(
       cor.threshold = cor.threshold,
       vif.threshold = vif.threshold,
       anchor_groups = anchor_groups,
-      var_scores = scores_all
+      var_scores = scores_all,
+      quiet = quiet
     )$selected_variables
   } else {
     character(0)
@@ -2173,16 +2186,19 @@ screen_collinear_predictors_by_block <- function(
     sel_clim <- intersect(sel_clim, sel_joint)
   }
   pruned_joint <- setdiff(all_cols, sel_joint)
-  message(sprintf(
-    "Partitioned 3-Block + Cross-Block Collinearity Pruning (VIF <= %.1f): retained %d Edaphic-Lithic (%s), %d Topographic (%s), and %d Climatic (%s)%s.",
-    vif.threshold,
-    length(sel_edaph), paste(sel_edaph, collapse = ", "),
-    length(sel_topo), paste(sel_topo, collapse = ", "),
-    length(sel_clim), paste(sel_clim, collapse = ", "),
-    if (length(cross_pruned) > 0L) sprintf(" [cross-block pruned: %s]", paste(cross_pruned, collapse = ", ")) else ""
-  ))
+  if (!isTRUE(quiet)) {
+    message(sprintf(
+      "Partitioned 3-Block + Cross-Block Collinearity Pruning (VIF <= %.1f): retained %d Edaphic-Lithic (%s), %d Topographic (%s), and %d Climatic (%s)%s.",
+      vif.threshold,
+      length(sel_edaph), paste(sel_edaph, collapse = ", "),
+      length(sel_topo), paste(sel_topo, collapse = ", "),
+      length(sel_clim), paste(sel_clim, collapse = ", "),
+      if (length(cross_pruned) > 0L) sprintf(" [cross-block pruned: %s]", paste(cross_pruned, collapse = ", ")) else ""
+    ))
+  }
   list(
     selected_variables = sel_joint,
+    selected_vars = sel_joint,
     kept_vars = sel_joint,
     selected_edaphic = sel_edaph,
     selected_climatic = sel_clim,
@@ -2192,6 +2208,251 @@ screen_collinear_predictors_by_block <- function(
     topo_variables = sel_topo,
     pruned_variables = pruned_joint,
     anchor_scores = scores_all
+  )
+}
+
+enforce_epv_predictor_budget <- function(
+  df,
+  env_vars = NULL,
+  selected_vars = NULL,
+  n_anchors = nrow(df),
+  anchor_groups = NULL,
+  n_mems_planned = 0L,
+  min_env = 4L,
+  max_env = 12L,
+  intraspecific_mode = FALSE,
+  quiet = FALSE
+) {
+  df <- as.data.frame(df, check.names = FALSE)
+  ban_cols <- if (exists("NON_ENM_RAW_GEOCHEM_HYDRO_COLS", inherits = TRUE)) {
+    get("NON_ENM_RAW_GEOCHEM_HYDRO_COLS", inherits = TRUE)
+  } else {
+    c(
+      "soil_ca_mg_molar_ratio", "soil_ultramafic_ni_cr_index", "soil_carbonate_c_pct",
+      "is_nwi_wetland", "nwi_wetland_dist_m", "nwpl_wetland_score"
+    )
+  }
+  cand_in <- if (!is.null(selected_vars)) selected_vars else env_vars
+  if (is.null(cand_in)) cand_in <- colnames(df)
+  env_vars_clean <- setdiff(unique(intersect(as.character(cand_in), colnames(df))), ban_cols)
+
+  n_anchors <- max(1L, as.integer(n_anchors))
+  total_budget <- max(1L, as.integer(floor(n_anchors / 5L)))
+  n_mems_planned <- max(0L, as.integer(n_mems_planned))
+  mem_cap <- if (n_anchors < 30L) 2L else min(5L, max(2L, total_budget - as.integer(min_env)))
+  max_mems_out <- if (n_mems_planned > 0L) min(n_mems_planned, as.integer(mem_cap)) else 0L
+  env_cap <- as.integer(min(as.integer(max_env), max(as.integer(min_env), total_budget - max_mems_out)))
+
+  kept_env <- env_vars_clean
+  if (length(env_vars_clean) > env_cap && env_cap >= 1L) {
+    sep_scores <- if (exists("compute_anchor_separation_scores", mode = "function")) {
+      compute_anchor_separation_scores(df[, env_vars_clean, drop = FALSE], anchor_groups = anchor_groups)
+    } else {
+      stats::setNames(rep(1.0, length(env_vars_clean)), env_vars_clean)
+    }
+    sep_scores[!is.finite(sep_scores)] <- 0.0
+    prox_tie <- intersect(env_vars_clean, c("ultramafic_calcareous_gradient", "wetland_seepage_index", "lithic_outcrop_index"))
+    if (length(prox_tie) > 0L) sep_scores[prox_tie] <- sep_scores[prox_tie] + 0.02
+    ord_env <- names(sort(sep_scores[env_vars_clean], decreasing = TRUE))
+    kept_env <- ord_env[seq_len(env_cap)]
+
+    if (env_cap >= 2L) {
+      clim_pat <- "^(bio[0-9]*_|summer_moisture_|maritime_continentality_)"
+      topo_pat <- "^(topo_|elevation($|_)|elev_)"
+      all_clim <- grep(clim_pat, env_vars_clean, value = TRUE, ignore.case = TRUE)
+      all_edaph <- setdiff(env_vars_clean, unique(c(all_clim, grep(topo_pat, env_vars_clean, value = TRUE, ignore.case = TRUE))))
+
+      .pick_swap_target <- function(pool_vec, protect_set = character(0)) {
+        dup_pool <- pool_vec[order(sep_scores[pool_vec], decreasing = FALSE)]
+        blk_counts <- c(
+          clim = sum(pool_vec %in% all_clim),
+          edaph = sum(pool_vec %in% all_edaph),
+          topo = sum(!(pool_vec %in% c(all_clim, all_edaph)))
+        )
+        drop_cands <- dup_pool[vapply(dup_pool, function(v) {
+          b <- if (v %in% all_clim) "clim" else if (v %in% all_edaph) "edaph" else "topo"
+          blk_counts[[b]] >= 2L
+        }, logical(1))]
+        if (length(drop_cands) > 0L) return(drop_cands[1L])
+        non_prot <- setdiff(dup_pool, protect_set)
+        if (length(non_prot) > 0L) return(non_prot[1L])
+        dup_pool[1L]
+      }
+
+      if (length(all_clim) > 0L && !any(kept_env %in% all_clim)) {
+        best_c <- names(sort(sep_scores[all_clim], decreasing = TRUE))[1L]
+        drop_target <- .pick_swap_target(kept_env)
+        kept_env <- unique(c(setdiff(kept_env, drop_target), best_c))
+      }
+      if (length(all_edaph) > 0L && !any(kept_env %in% all_edaph)) {
+        best_e <- names(sort(sep_scores[all_edaph], decreasing = TRUE))[1L]
+        drop_target <- .pick_swap_target(kept_env, protect_set = all_clim)
+        kept_env <- unique(c(setdiff(kept_env, drop_target), best_e))
+      }
+    }
+    kept_env <- kept_env[order(sep_scores[kept_env], decreasing = TRUE)]
+  }
+
+  if (!isTRUE(quiet)) {
+    if (length(kept_env) >= 1L && length(kept_env) < length(env_vars_clean)) {
+      message(sprintf(
+        "[EPV Predictor Budget] Capped predictors for N_anchors=%d (total budget=%d, MEMs=%d, env cap=%d): retained %d / %d env predictors (%s).",
+        n_anchors, total_budget, max_mems_out, env_cap,
+        length(kept_env), length(env_vars_clean), paste(kept_env, collapse = ", ")
+      ))
+    } else if (n_anchors < 30L && max_mems_out > 0L) {
+      message(sprintf(
+        "[EPV Predictor Budget] Small-anchor guard (N_anchors=%d < 30): scaled MEMs to %d and retained %d env predictors.",
+        n_anchors, max_mems_out, length(kept_env)
+      ))
+    }
+  }
+
+  list(
+    env_vars = kept_env,
+    selected_vars = kept_env,
+    max_mems = max_mems_out,
+    total_budget = total_budget
+  )
+}
+
+apply_fold_imputation <- function(X_te_raw_df, selected_vars, train_medians) {
+  X_te_df <- as.data.frame(X_te_raw_df, check.names = FALSE)
+  selected_vars <- as.character(selected_vars)
+  n_te <- nrow(X_te_df)
+  if (length(selected_vars) == 0L) {
+    return(X_te_df[, character(0), drop = FALSE])
+  }
+  out_list <- vector("list", length(selected_vars))
+  names(out_list) <- selected_vars
+  for (i in seq_along(selected_vars)) {
+    vn <- selected_vars[i]
+    med_v <- if (!is.null(train_medians) && vn %in% names(train_medians)) {
+      suppressWarnings(as.numeric(train_medians[[vn]]))
+    } else {
+      NA_real_
+    }
+    if (length(med_v) != 1L || !is.finite(med_v)) med_v <- 0.0
+    col_v <- if (vn %in% colnames(X_te_df)) {
+      suppressWarnings(as.numeric(X_te_df[[vn]]))
+    } else {
+      rep(NA_real_, n_te)
+    }
+    if (length(col_v) != n_te) col_v <- rep(med_v, n_te)
+    if (n_te > 0L) col_v[!is.finite(col_v)] <- med_v
+    out_list[[i]] <- col_v
+  }
+  out_df <- as.data.frame(out_list, stringsAsFactors = FALSE, check.names = FALSE)
+  colnames(out_df) <- selected_vars
+  out_df
+}
+
+screen_predictors_within_cv_fold <- function(
+  X_tr_raw_df,
+  cand_vars,
+  clim_vars = character(0),
+  edaph_vars = character(0),
+  topo_vars = character(0),
+  y_tr = NULL,
+  cor.threshold = 0.70,
+  vif.threshold = 5.0,
+  intraspecific_mode = FALSE
+) {
+  X_tr_df <- as.data.frame(X_tr_raw_df, check.names = FALSE)
+  cand_present <- intersect(as.character(cand_vars), colnames(X_tr_df))
+  if (length(cand_present) == 0L) {
+    return(list(
+      selected_vars = character(0),
+      train_medians = numeric(0),
+      X_tr_imp = X_tr_df[, character(0), drop = FALSE]
+    ))
+  }
+
+  n_tr <- nrow(X_tr_df)
+  min_fin_50 <- max(2L, as.integer(ceiling(0.50 * n_tr)))
+  pass_50 <- vapply(cand_present, function(vn) {
+    v <- suppressWarnings(as.numeric(X_tr_df[[vn]]))
+    f <- is.finite(v)
+    sum(f) >= min_fin_50 && is.finite(stats::sd(v[f])) && stats::sd(v[f]) > 1e-8
+  }, logical(1))
+  ok_cols <- cand_present[pass_50]
+  if (length(ok_cols) < 2L) {
+    pass_var <- vapply(cand_present, function(vn) {
+      v <- suppressWarnings(as.numeric(X_tr_df[[vn]]))
+      f <- is.finite(v)
+      sum(f) >= 2L && is.finite(stats::sd(v[f])) && stats::sd(v[f]) > 1e-8
+    }, logical(1))
+    ok_cols <- cand_present[pass_var]
+  }
+  if (length(ok_cols) == 0L) {
+    ok_cols <- cand_present[1L]
+  }
+
+  med_tr <- vapply(ok_cols, function(vn) {
+    v <- suppressWarnings(as.numeric(X_tr_df[[vn]]))
+    f <- is.finite(v)
+    if (any(f)) {
+      m <- stats::median(v[f], na.rm = TRUE)
+      if (is.finite(m)) m else 0.0
+    } else {
+      0.0
+    }
+  }, numeric(1))
+  names(med_tr) <- ok_cols
+
+  X_tr_imp <- apply_fold_imputation(X_tr_df[, ok_cols, drop = FALSE], ok_cols, med_tr)
+
+  c_in <- intersect(as.character(clim_vars), colnames(X_tr_imp))
+  e_in <- intersect(as.character(edaph_vars), colnames(X_tr_imp))
+  t_in <- intersect(as.character(topo_vars), colnames(X_tr_imp))
+  use_blocks <- (length(c_in) + length(e_in) + length(t_in)) > 0L
+
+  scr_tr <- screen_collinear_predictors_by_block(
+    X_tr_imp,
+    clim_vars = if (use_blocks) c_in else NULL,
+    edaph_vars = if (use_blocks) e_in else NULL,
+    cor.threshold = cor.threshold,
+    vif.threshold = vif.threshold,
+    topo_vars = if (use_blocks) t_in else NULL,
+    anchor_groups = y_tr,
+    quiet = TRUE
+  )
+  scr_cands <- if (!is.null(scr_tr$selected_vars) && length(scr_tr$selected_vars) > 0L) {
+    scr_tr$selected_vars
+  } else {
+    colnames(X_tr_imp)
+  }
+
+  epv_cap_tr <- max(1L, as.integer(floor(nrow(X_tr_imp) / 5L)))
+  min_env_fold <- min(4L, epv_cap_tr)
+  max_env_fold <- min(12L, epv_cap_tr)
+  epv_tr <- enforce_epv_predictor_budget(
+    X_tr_imp,
+    selected_vars = scr_cands,
+    n_anchors = nrow(X_tr_imp),
+    anchor_groups = y_tr,
+    n_mems_planned = 0L,
+    min_env = min_env_fold,
+    max_env = max_env_fold,
+    intraspecific_mode = intraspecific_mode,
+    quiet = TRUE
+  )
+  sel_v <- intersect(as.character(epv_tr$selected_vars), colnames(X_tr_imp))
+  if (length(sel_v) == 0L && ncol(X_tr_imp) >= 1L) {
+    v_sds <- vapply(colnames(X_tr_imp), function(cn) {
+      sv <- stats::sd(X_tr_imp[[cn]], na.rm = TRUE)
+      if (is.finite(sv)) sv else 0.0
+    }, numeric(1))
+    sel_v <- colnames(X_tr_imp)[which.max(v_sds)]
+  }
+  if (nrow(X_tr_imp) >= 5L && length(sel_v) > epv_cap_tr) {
+    sel_v <- sel_v[seq_len(epv_cap_tr)]
+  }
+
+  list(
+    selected_vars = sel_v,
+    train_medians = med_tr,
+    X_tr_imp = as.data.frame(X_tr_imp[, sel_v, drop = FALSE], stringsAsFactors = FALSE, check.names = FALSE)
   )
 }
 

@@ -17,7 +17,6 @@ Description:
 from __future__ import annotations
 
 import re
-
 import ast
 import sys
 import unittest
@@ -339,6 +338,9 @@ class TestCodeHygiene(unittest.TestCase):
             PROJECT_ROOT / "scripts" / "analysis" / "step06_model_selection.R",
             PROJECT_ROOT / "scripts" / "analysis" / "step06_spatial_landscape_genomics.R",
             PROJECT_ROOT / "scripts" / "tests" / "test_step06_model_selection.py",
+            PROJECT_ROOT / "scripts" / "morphometrics" / "gmm_icl_bootstrap_utils.R",
+            PROJECT_ROOT / "scripts" / "analysis" / "step05_circular_hopkins_models.R",
+            PROJECT_ROOT / "scripts" / "tests" / "test_step04_05_model_selection.py",
         )
         strict_ceilings = {
             PROJECT_ROOT / "scripts" / "data_prep" / "download_public_packera_sequences.py": 500,
@@ -355,6 +357,9 @@ class TestCodeHygiene(unittest.TestCase):
             PROJECT_ROOT / "scripts" / "analysis" / "step06_model_selection.R": 380,
             PROJECT_ROOT / "scripts" / "analysis" / "step06_spatial_landscape_genomics.R": 380,
             PROJECT_ROOT / "scripts" / "tests" / "test_step06_model_selection.py": 420,
+            PROJECT_ROOT / "scripts" / "morphometrics" / "gmm_icl_bootstrap_utils.R": 280,
+            PROJECT_ROOT / "scripts" / "analysis" / "step05_circular_hopkins_models.R": 320,
+            PROJECT_ROOT / "scripts" / "tests" / "test_step04_05_model_selection.py": 400,
         }
         for mod_path in bounded_paths:
             self.assertTrue(mod_path.exists(), f"Missing expected bounded module: {mod_path}")
