@@ -233,11 +233,18 @@ _R_QUARANTINE_SCRIPT = textwrap.dedent(
     )
     writeLines(fasta_lines, file.path(geno_dir, "public_packera_its_ets.fasta"))
     writeLines(c(">S1", paste0(mutate_k(glabella_base, c(35L)), collapse = "")), file.path(geno_dir, "skimmed_its_consensus.fasta"))
+    rt_dir <- file.path(geno_dir, "public_reltime_trees"); dir.create(rt_dir, recursive = TRUE, showWarnings = FALSE)
+    writeLines(c("#NEXUS", "Begin Taxa; Dimensions ntax=7; End;", "Begin Trees;", "  Translate",
+                 "    1 Packera_aurea,", "    2 Packera_dubia,", "    3 Packera_obovata,", "    5 Packera_glabella,",
+                 "    6 Packera_anonyma,", "    8 Packera_cana,", "    9 Packera_werneriifolia;",
+                 "  tree TREE1 = [&R] ((((1:1.0,2[&rate=NA,divtime_95%_CI={0.5,2.0}]:1.0):1.0,3:2.0):1.0,5:3.0):1.0,(6:1.5,(8:1.0,9:1.0):0.5):2.5);", "End;"),
+               file.path(rt_dir, "public_packera_RelTime_test_nexus.tre"))
     pass_df <- data.frame(
       genetic_sample_id = "S1", catalogNumber = "NCU_S1",
       species_standardized = "Packera glabella", species_raw = "Packera glabella", stringsAsFactors = FALSE
     )
     bb_res <- evaluate_public_backbone_and_organellar(pass_df, geno_dir, out_dir)
+    stopifnot(length(bb_res$backbone$reltime_trees) == 1L, is.finite(ape::node.depth.edgelength(bb_res$backbone$reltime_trees[[1L]])[1L]))
     stopifnot(identical(as.character(bb_res$public_its_match[1]), "Packera glabella"))
 
     rogue_csv <- file.path(out_dir, "public_genbank_rogue_audit.csv")

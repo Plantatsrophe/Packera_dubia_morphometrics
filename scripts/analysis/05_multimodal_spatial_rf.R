@@ -1067,48 +1067,50 @@ classify_ssurgo_outcrop <- function(
   return(list(is_rock_outcrop = is_outcrop, outcrop_class = outcrop_class))
 }
 
-query_ssurgo_sda_batch <- function(batch_df, cache_dir, batch_idx, max_retries = 4, demo = FALSE, batch_size = 75) {
-  canonical_cols <- c(
-    "catalogNumber", "latitude", "longitude",
-    "musym", "muname", "taxsuborder", "taxgreatgroup",
-    "is_rock_outcrop", "outcrop_class",
-    "ssurgo_rock_outcrop_pct", "ssurgo_bedrock_depth_cm",
-    "ssurgo_sand_pct", "ssurgo_clay_pct", "ssurgo_ph",
-    "ssurgo_om_pct", "ssurgo_cec", "ssurgo_aws_0_50cm"
-  )
-  normalize_ssurgo_cols <- function(d) {
-    d <- as.data.frame(d, stringsAsFactors = FALSE)
-    for (col in c("catalogNumber", "musym", "muname", "taxsuborder", "taxgreatgroup", "outcrop_class")) {
-      if (!(col %in% names(d))) {
-        d[[col]] <- if (col == "outcrop_class") "Non-outcrop matrix" else NA_character_
-      } else {
-        d[[col]] <- as.character(d[[col]])
-      }
-    }
-    for (col in c("latitude", "longitude")) {
-      if (!(col %in% names(d))) {
-        d[[col]] <- NA_real_
-      } else {
-        d[[col]] <- as.numeric(d[[col]])
-      }
-    }
-    if (!("is_rock_outcrop" %in% names(d))) {
-      d$is_rock_outcrop <- FALSE
+SSURGO_CANONICAL_COLS <- c(
+  "catalogNumber", "latitude", "longitude",
+  "musym", "muname", "taxsuborder", "taxgreatgroup",
+  "is_rock_outcrop", "outcrop_class",
+  "ssurgo_rock_outcrop_pct", "ssurgo_bedrock_depth_cm",
+  "ssurgo_sand_pct", "ssurgo_clay_pct", "ssurgo_ph",
+  "ssurgo_om_pct", "ssurgo_cec", "ssurgo_aws_0_50cm"
+)
+
+normalize_ssurgo_cols <- function(d) {
+  d <- as.data.frame(d, stringsAsFactors = FALSE)
+  for (col in c("catalogNumber", "musym", "muname", "taxsuborder", "taxgreatgroup", "outcrop_class")) {
+    if (!(col %in% names(d))) {
+      d[[col]] <- if (col == "outcrop_class") "Non-outcrop matrix" else NA_character_
     } else {
-      d$is_rock_outcrop <- as.logical(d$is_rock_outcrop)
-      d$is_rock_outcrop[is.na(d$is_rock_outcrop)] <- FALSE
+      d[[col]] <- as.character(d[[col]])
     }
-    d$outcrop_class[is.na(d$outcrop_class) | !nzchar(d$outcrop_class)] <- "Non-outcrop matrix"
-    if (exists("enrich_ssurgo_pedology_from_series", mode = "function")) {
-      d <- enrich_ssurgo_pedology_from_series(d)
-    } else {
-      for (sc in c("ssurgo_rock_outcrop_pct", "ssurgo_bedrock_depth_cm", "ssurgo_sand_pct",
-                   "ssurgo_clay_pct", "ssurgo_ph", "ssurgo_om_pct", "ssurgo_cec", "ssurgo_aws_0_50cm")) {
-        if (!(sc %in% names(d))) d[[sc]] <- NA_real_
-      }
-    }
-    return(d[, canonical_cols, drop = FALSE])
   }
+  for (col in c("latitude", "longitude")) {
+    if (!(col %in% names(d))) {
+      d[[col]] <- NA_real_
+    } else {
+      d[[col]] <- as.numeric(d[[col]])
+    }
+  }
+  if (!("is_rock_outcrop" %in% names(d))) {
+    d$is_rock_outcrop <- FALSE
+  } else {
+    d$is_rock_outcrop <- as.logical(d$is_rock_outcrop)
+    d$is_rock_outcrop[is.na(d$is_rock_outcrop)] <- FALSE
+  }
+  d$outcrop_class[is.na(d$outcrop_class) | !nzchar(d$outcrop_class)] <- "Non-outcrop matrix"
+  if (exists("enrich_ssurgo_pedology_from_series", mode = "function")) {
+    d <- enrich_ssurgo_pedology_from_series(d)
+  } else {
+    for (sc in c("ssurgo_rock_outcrop_pct", "ssurgo_bedrock_depth_cm", "ssurgo_sand_pct",
+                 "ssurgo_clay_pct", "ssurgo_ph", "ssurgo_om_pct", "ssurgo_cec", "ssurgo_aws_0_50cm")) {
+      if (!(sc %in% names(d))) d[[sc]] <- NA_real_
+    }
+  }
+  return(d[, SSURGO_CANONICAL_COLS, drop = FALSE])
+}
+
+query_ssurgo_sda_batch <- function(batch_df, cache_dir, batch_idx, max_retries = 4, demo = FALSE, batch_size = 75) {
 
   # Build deterministic batch cache key
   pt_str <- paste(batch_df$catalogNumber, batch_df$latitude, batch_df$longitude, collapse = ";")

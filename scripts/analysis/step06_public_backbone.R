@@ -90,6 +90,10 @@ if (!exists("screen_public_tree_rogue_tips", mode = "function") || !exists(".scr
 
 .read_clean_public_tree <- function(tre_path) {
   if (!nzchar(tre_path) || !file.exists(tre_path) || !requireNamespace("ape", quietly = TRUE)) return(NULL)
+  if (exists(".read_nexus_phylo_qc", mode = "function")) {
+    nx_tr <- .read_nexus_phylo_qc(tre_path)
+    if (!is.null(nx_tr)) return(nx_tr)
+  }
   tr <- tryCatch(ape::read.tree(tre_path), error = function(e) NULL)
   if (is.null(tr) || inherits(tr, "multiPhylo") || length(tr$tip.label) < 3L) return(NULL)
   norm_lbls <- .normalize_public_packera_taxon(tr$tip.label)
@@ -105,6 +109,8 @@ if (!exists("screen_public_tree_rogue_tips", mode = "function") || !exists(".scr
   }
   if (is.null(tr$edge.length)) tr$edge.length <- rep(1.0, nrow(tr$edge))
   tr$edge.length[!is.finite(tr$edge.length) | tr$edge.length < 0] <- 0.0
+  storage.mode(tr$edge) <- "integer"
+  if (exists(".is_valid_phylo_qc", mode = "function") && !.is_valid_phylo_qc(tr)) return(NULL)
   tr
 }
 
@@ -335,20 +341,27 @@ select_backbone_guided_outgroup <- function(uniq_taxa, p_dist, backbone = NULL) 
     r_len <- vapply(r_km, length, integer(1L))
     valid_r <- which(r_len > 0L)
     if (length(valid_r) == 0L) next
+    r_sk <- lapply(seq_along(r_km), function(ri) if (r_len[ri] > 6000L) r_km[[ri]][endsWith(r_km[[ri]], "AA")] else r_km[[ri]])
+    r_sk_len <- vapply(r_sk, length, integer(1L))
     for (qi in seq_len(nrow(qdf))) {
       sid <- sub("\\|.*$", "", sub("\\s.*$", "", qdf$header[qi]))
       if (length(sample_ids) > 0L && !(sid %in% sample_ids)) next
       qf <- .kmers_11(qdf$seq[qi]); qr <- .kmers_11(.revcomp_seq(qdf$seq[qi]))
       q_len <- length(qf)
       if (q_len < 3L) next
+      use_q_sk <- q_len > 6000L
+      qf_u <- if (use_q_sk) qf[endsWith(qf, "AA")] else qf
+      qr_u <- if (use_q_sk) qr[endsWith(qr, "AA")] else qr
+      q_eff <- length(qf_u); if (q_eff < 3L) { qf_u <- qf; qr_u <- qr; q_eff <- q_len; use_q_sk <- FALSE }
       best <- list(score = -1, sh = 0L, cont = 0, jac = 0, ri = NA_integer_)
       for (ri in valid_r) {
-        rk <- r_km[[ri]]
-        sh <- max(sum(qf %in% rk), sum(qr %in% rk))
+        rk <- if (use_q_sk) r_sk[[ri]] else r_km[[ri]]; rl <- if (use_q_sk) r_sk_len[ri] else r_len[ri]
+        if (rl < 3L) next
+        sh <- max(sum(qf_u %in% rk), sum(qr_u %in% rk))
         if (sh < 3L) next
-        cont <- sh / q_len
+        cont <- sh / q_eff
         if (cont < 0.05) next
-        jac <- sh / (q_len + r_len[ri] - sh)
+        jac <- sh / (q_eff + rl - sh)
         sc <- cont + 1e-4 * jac
         if (sc > best$score) best <- list(score = sc, sh = sh, cont = cont, jac = jac, ri = ri)
       }
