@@ -1,10 +1,9 @@
 # ==============================================================================
 # LeafMachine3 + Plantmatics: Soil Geochemistry, NWI Wetland, and Basionym Guard Helpers
-# Purpose: Backfill DS-801 soil geochemistry and USFWS NWI wetland predictors from
-#          SQLite environmental_cache, derive variance-guarded composite indices,
-#          and compute Step 07 hydro-edaphic regimes plus homotypic synonymy guards.
 # ==============================================================================
-
+for (.lh_p in c("scripts/analysis/step05_layer_hygiene_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "step05_layer_hygiene_utils.R"))) {
+  if (!exists("mask_micro_scale_predictors_by_uncertainty", mode = "function") && !is.na(.lh_p) && nzchar(.lh_p) && file.exists(.lh_p)) { source(.lh_p); break }
+}
 .GW_RAW_NUM_COLS <- c("soil_ca_mg_molar_ratio", "soil_ultramafic_ni_cr_index", "soil_carbonate_c_pct", "nwi_wetland_dist_m")
 
 .is_valid_gw_db <- function(db_conn) {
@@ -172,6 +171,7 @@ enrich_geochem_wetland_predictors <- function(df, db_conn = NULL, env_dir = "dat
       df$wetland_seepage_index[ok_wsi] <- round(pmin(1.0, pmax(0.0, wsi_raw[ok_wsi])), 4)
     }
   }
+  if (exists("mask_micro_scale_predictors_by_uncertainty", mode = "function")) df <- mask_micro_scale_predictors_by_uncertainty(df, cols = "wetland_seepage_index", max_uncertainty_m = 250.0)
   df
 }
 

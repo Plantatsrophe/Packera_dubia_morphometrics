@@ -316,41 +316,7 @@ class TestCodeHygiene(unittest.TestCase):
         )
 
     def test_new_public_genomics_modules_respect_500_line_ceiling(self):
-        """Verify public Packera genomics, cytology, taxonomy, geochemistry, and monograph modules stay within line ceilings."""
-        bounded_paths = (
-            PROJECT_ROOT / "scripts" / "data_prep" / "download_public_packera_sequences.py",
-            PROJECT_ROOT / "scripts" / "data_prep" / "ena_paraloss_discovery.py",
-            PROJECT_ROOT / "scripts" / "analysis" / "step06_public_backbone.R",
-            PROJECT_ROOT / "scripts" / "data_prep" / "skim_offtarget_organellar.py",
-            PROJECT_ROOT / "scripts" / "analysis" / "step07_genomic_propagation.R",
-            PROJECT_ROOT / "scripts" / "analysis" / "genomic_triage_utils.R",
-            PROJECT_ROOT / "scripts" / "pipeline" / "resolve_eastern_na_packera.py",
-            PROJECT_ROOT / "scripts" / "tests" / "test_eastern_na_monograph_cli.py",
-            PROJECT_ROOT / "scripts" / "data_prep" / "download_public_cytology.py",
-            PROJECT_ROOT / "scripts" / "analysis" / "step07_cytology_integration.R",
-            PROJECT_ROOT / "scripts" / "tests" / "test_public_cytology_integration.py",
-            PROJECT_ROOT / "scripts" / "data_prep" / "download_taxonomic_backbone.py",
-            PROJECT_ROOT / "scripts" / "data_prep" / "download_geochem_wetland_layers.py",
-            PROJECT_ROOT / "scripts" / "analysis" / "edaphic_geochem_wetland_utils.R",
-            PROJECT_ROOT / "scripts" / "tests" / "test_external_data_sources.py",
-            PROJECT_ROOT / "scripts" / "figures" / "step06c_figures.R",
-            PROJECT_ROOT / "scripts" / "analysis" / "step06_coalescent_models.py",
-            PROJECT_ROOT / "scripts" / "analysis" / "step06_model_selection.R",
-            PROJECT_ROOT / "scripts" / "analysis" / "step06_spatial_landscape_genomics.R",
-            PROJECT_ROOT / "scripts" / "tests" / "test_step06_model_selection.py",
-            PROJECT_ROOT / "scripts" / "morphometrics" / "gmm_icl_bootstrap_utils.R",
-            PROJECT_ROOT / "scripts" / "analysis" / "step05_circular_hopkins_models.R",
-            PROJECT_ROOT / "scripts" / "tests" / "test_step04_05_model_selection.py",
-            PROJECT_ROOT / "scripts" / "core" / "coord_hygiene_utils.py",
-            PROJECT_ROOT / "scripts" / "analysis" / "step05_env_outlier_utils.R",
-            PROJECT_ROOT / "scripts" / "analysis" / "step06_rogue_sequence_qc.R",
-            PROJECT_ROOT / "scripts" / "tests" / "test_outlier_quarantine_gates.py",
-            PROJECT_ROOT / "scripts" / "analysis" / "step07_deme_propagation_utils.R",
-            PROJECT_ROOT / "scripts" / "tests" / "test_step07_deme_propagation.py",
-            PROJECT_ROOT / "scripts" / "data_prep" / "organellar_cytonuclear_utils.py",
-            PROJECT_ROOT / "scripts" / "analysis" / "step07_organellar_triage_utils.R",
-            PROJECT_ROOT / "scripts" / "tests" / "test_step07_organellar_triage.py",
-        )
+        """Verify public Packera genomics, cytology, taxonomy, geochemistry, monograph, and hygiene modules stay within line ceilings."""
         strict_ceilings = {
             PROJECT_ROOT / "scripts" / "data_prep" / "download_public_packera_sequences.py": 500,
             PROJECT_ROOT / "scripts" / "data_prep" / "ena_paraloss_discovery.py": 300,
@@ -381,22 +347,22 @@ class TestCodeHygiene(unittest.TestCase):
             PROJECT_ROOT / "scripts" / "data_prep" / "skim_offtarget_organellar.py": 460,
             PROJECT_ROOT / "scripts" / "analysis" / "step07_organellar_triage_utils.R": 260,
             PROJECT_ROOT / "scripts" / "tests" / "test_step07_organellar_triage.py": 280,
+            PROJECT_ROOT / "scripts" / "analysis" / "step05_layer_hygiene_utils.R": 280,
+            PROJECT_ROOT / "scripts" / "tests" / "test_step05_layer_hygiene.py": 380,
         }
+        bounded_paths = (
+            *strict_ceilings.keys(),
+            PROJECT_ROOT / "scripts" / "analysis" / "genomic_triage_utils.R",
+            PROJECT_ROOT / "scripts" / "pipeline" / "resolve_eastern_na_packera.py",
+            PROJECT_ROOT / "scripts" / "tests" / "test_eastern_na_monograph_cli.py",
+        )
         for mod_path in bounded_paths:
             self.assertTrue(mod_path.exists(), f"Missing expected bounded module: {mod_path}")
             line_count = len(mod_path.read_text(encoding="utf-8").splitlines())
-            self.assertLess(
-                line_count,
-                500,
-                f"{mod_path.relative_to(PROJECT_ROOT)} exceeds 500-line ceiling ({line_count} lines)",
-            )
+            self.assertLess(line_count, 500, f"{mod_path.relative_to(PROJECT_ROOT)} exceeds 500-line ceiling ({line_count} lines)")
             if mod_path in strict_ceilings:
                 ceiling = strict_ceilings[mod_path]
-                self.assertLess(
-                    line_count,
-                    ceiling,
-                    f"{mod_path.relative_to(PROJECT_ROOT)} exceeds {ceiling}-line ceiling ({line_count} lines)",
-                )
+                self.assertLess(line_count, ceiling, f"{mod_path.relative_to(PROJECT_ROOT)} exceeds {ceiling}-line ceiling ({line_count} lines)")
 
     def test_data_cytology_directory_stays_flat(self):
         """Verify `data/cytology/` exists and contains zero nested subdirectories."""

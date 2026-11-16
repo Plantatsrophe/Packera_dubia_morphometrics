@@ -908,6 +908,9 @@ resolve_analysis_group <- function(
     "pixels_per_mm", "duplicate_count", "is_rock_outcrop", "is_azonal_lithology",
     "azonal_lithology_presence_buffer",
     "soil_ca_mg_molar_ratio", "soil_ultramafic_ni_cr_index", "soil_carbonate_c_pct",
+    "ultramafic_calcareous_gradient",
+    "polaris_ph_30m", "polaris_sand_30m", "polaris_clay_30m",
+    "polaris_om_30m", "polaris_bd_30m", "polaris_ksat_30m",
     "is_nwi_wetland", "nwi_wetland_system", "nwi_wetland_dist_m",
     "nwpl_indicator_code", "nwpl_wetland_score"
   )
@@ -915,6 +918,12 @@ resolve_analysis_group <- function(
   # Coalesce partial-coverage buffered edaphic NAs onto a working copy (leaving raw df unchanged)
   # so incomplete buffer coverage never collapses into constant median Dirac spikes
   df_rag <- df
+  if (exists("mask_micro_scale_predictors_by_uncertainty", mode = "function")) {
+    df_rag <- mask_micro_scale_predictors_by_uncertainty(df_rag, max_uncertainty_m = 250.0)
+  }
+  if (exists("sanitize_disabled_polaris_columns", mode = "function")) {
+    df_rag <- sanitize_disabled_polaris_columns(df_rag)
+  }
   .fill_nonfinite_col <- function(dframe, target_col, fallback_cols) {
     if (!(target_col %in% names(dframe))) return(dframe)
     cur <- suppressWarnings(as.numeric(dframe[[target_col]]))
@@ -975,7 +984,7 @@ resolve_analysis_group <- function(
 
   if (length(cand_env) == 0L) {
     num_cands <- names(df_rag)[vapply(names(df_rag), function(nm) {
-      if (nm %in% exclude_cols) return(FALSE)
+      if (nm %in% exclude_cols || grepl("^polaris_", nm, ignore.case = TRUE)) return(FALSE)
       if (grepl("^(PC[0-9]+|ECT_|Cauline_|can[0-9]+|sym_|asym_|MEM[0-9]+|basal_|petiole_|blade_|plant_height|involucre_|capitula_)", nm)) return(FALSE)
       is.numeric(df_rag[[nm]]) || is.integer(df_rag[[nm]])
     }, logical(1))]
@@ -1019,8 +1028,8 @@ resolve_analysis_group <- function(
 
   assign_eco_domain <- function(vn) {
     vl <- tolower(vn)
-    if (grepl("bedrock|outcrop|lithic|cfvo|fragvol|resdept|ultramafic|calcareous", vl)) return("Lithic_Outcrop")
-    if (grepl("ph|cec|ilr_texture|sand|clay|silt|aws|polaris|solus|ssurgo|soil|wetland|seepage", vl)) return("Rhizosphere_Pedology")
+    if (grepl("bedrock|outcrop|lithic|cfvo|fragvol|resdept", vl)) return("Lithic_Outcrop")
+    if (grepl("ph|cec|ilr_texture|sand|clay|silt|aws|solus|ssurgo|soil|wetland|seepage", vl)) return("Rhizosphere_Pedology")
     if (grepl("topo_|slope|tpi|twi|hli|elev", vl)) return("Microtopography")
     "Hydrothermal_Maritime_Climate"
   }
@@ -1029,7 +1038,7 @@ resolve_analysis_group <- function(
   # Deduplicate within-domain collinear predictors (|r| > 0.75) before PCA/k-means
   # so redundant lithic/climatic rasters do not inflate single-axis microsite splits
   prio_mech_vars <- c(
-    "lithic_outcrop_index", "ultramafic_calcareous_gradient", "wetland_seepage_index",
+    "lithic_outcrop_index", "wetland_seepage_index",
     "min_bedrock_depth_buffer_cm", "ssurgo_rock_outcrop_pct",
     "fine_bedrock_depth_cm", "fine_soil_ph", "ilr_texture_1",
     "summer_moisture_deficit_idx", "maritime_continentality_idx",
@@ -1416,11 +1425,14 @@ select_primary_predictors_from_rf <- function(
   }
   raw_geochem_hydro_excl <- c(
     "soil_ca_mg_molar_ratio", "soil_ultramafic_ni_cr_index", "soil_carbonate_c_pct",
+    "ultramafic_calcareous_gradient",
+    "polaris_ph_30m", "polaris_sand_30m", "polaris_clay_30m",
+    "polaris_om_30m", "polaris_bd_30m", "polaris_ksat_30m",
     "is_nwi_wetland", "nwi_wetland_system", "nwi_wetland_dist_m",
     "nwpl_indicator_code", "nwpl_wetland_score"
   )
   cand_vars <- setdiff(
-    unique(cand_vars[!is.na(cand_vars) & nzchar(cand_vars) & !grepl("^MEM[0-9]*$", cand_vars)]),
+    unique(cand_vars[!is.na(cand_vars) & nzchar(cand_vars) & !grepl("^MEM[0-9]*$|^polaris_", cand_vars, ignore.case = TRUE)]),
     raw_geochem_hydro_excl
   )
   if (!is.null(df_env) && is.data.frame(df_env)) {

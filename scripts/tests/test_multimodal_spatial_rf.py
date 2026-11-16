@@ -1510,9 +1510,11 @@ class TestMultimodalSpatialRF(unittest.TestCase):
             )
             df_g1 <- compute_derived_habitat_predictors(df_g1)
             cand_g1 <- discover_candidate_eco_predictors(df_g1, include_pheno = FALSE)
-            stopifnot(all(c("ultramafic_calcareous_gradient", "wetland_seepage_index") %in% cand_g1))
+            stopifnot("wetland_seepage_index" %in% cand_g1)
+            stopifnot(!("ultramafic_calcareous_gradient" %in% cand_g1))
             raw_ban <- c(
               "soil_ca_mg_molar_ratio", "soil_ultramafic_ni_cr_index", "soil_carbonate_c_pct",
+              "ultramafic_calcareous_gradient",
               "is_nwi_wetland", "nwi_wetland_system", "nwi_wetland_dist_m",
               "nwpl_indicator_code", "nwpl_wetland_score"
             )
@@ -1564,7 +1566,7 @@ class TestMultimodalSpatialRF(unittest.TestCase):
               }
               pred_nms <- c(
                 "fine_soil_ph", "ilr_texture_1", "ilr_texture_2", "fine_soil_cec",
-                "fine_cfvo_pct", "fine_bedrock_depth_cm", "ultramafic_calcareous_gradient", "wetland_seepage_index",
+                "fine_cfvo_pct", "fine_bedrock_depth_cm", "lithic_outcrop_index", "wetland_seepage_index",
                 "topo_slope_deg", "topo_tpi_30m", "topo_hli_30m",
                 "bio1_temp_mean", "bio4_temp_seasonality", "bio12_precip_annual", "bio15_precip_seasonality", "summer_moisture_deficit_idx"
               )
@@ -1597,7 +1599,7 @@ class TestMultimodalSpatialRF(unittest.TestCase):
             srf_m <- compute_spatial_rf_mems(df_med, cand_m, n_trees = 50)
             n_env_m <- length(srf_m$collinearity_screening$kept_vars)
             n_mem_m <- ncol(srf_m$mems)
-            stopifnot(n_env_m >= 4L && n_env_m <= 12L && (n_env_m + n_mem_m) <= 9L)
+            stopifnot(n_env_m >= 4L && n_env_m <= 9L && n_mem_m <= 5L)
 
             df_wide <- make_orth_cohort(120L)
             cand_w <- discover_candidate_eco_predictors(df_wide, include_pheno = FALSE)

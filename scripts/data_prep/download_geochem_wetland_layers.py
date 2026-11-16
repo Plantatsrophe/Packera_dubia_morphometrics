@@ -76,7 +76,7 @@ def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 
 def compute_idw_soil_geochem(
-    lat: float, lon: float, ds801_sites: Sequence[Dict[str, Any]], max_dist_km: float = 75.0, k: int = 5,
+    lat: float, lon: float, ds801_sites: Sequence[Dict[str, Any]], max_dist_km: float = 10.0, k: int = 5,
 ) -> Dict[str, Optional[float]]:
     """Interpolate USGS DS-801 Ca/Mg molar ratio, ultramafic Ni+Cr index, and carbonate C%."""
     empty: Dict[str, Optional[float]] = {"soil_ca_mg_molar_ratio": None, "soil_ultramafic_ni_cr_index": None, "soil_carbonate_c_pct": None}
