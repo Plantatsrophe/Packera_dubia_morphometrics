@@ -748,10 +748,13 @@ compute_probabilistic_consensus_scores <- function(df) {
   geno_qry_cv <- if ("is_putative_novel_or_hybrid_query" %in% df_nms_c) {
     if (exists(".safe_bool_vec_r", mode = "function")) .safe_bool_vec_r(df$is_putative_novel_or_hybrid_query) else (!is.na(df$is_putative_novel_or_hybrid_query) & as.logical(df$is_putative_novel_or_hybrid_query))
   } else rep(FALSE, n)
+  deme_w_cv <- if ("geno_deme_weight_scale" %in% df_nms_c) suppressWarnings(as.numeric(df$geno_deme_weight_scale)) else rep(NA_real_, n)
   geno_link_scale <- ifelse(geno_tier_cv == "G1_Direct_Voucher", 1.00,
                      ifelse(geno_tier_cv == "G1_Exsiccatae_Isoduplicate", 0.95,
                      ifelse(geno_tier_cv == "G2_Population_Voucher_Proxy", 0.90,
-                     ifelse(geno_tier_cv == "G2_Conditional_Deme_Hull", 0.75, 0.00))))
+                     ifelse(geno_tier_cv == "G2_Conditional_Deme_Hull",
+                            ifelse(is.finite(deme_w_cv) & deme_w_cv > 0.0, pmin(0.75, pmax(0.45, deme_w_cv)), 0.75),
+                            0.00))))
   geno_link_scale[is.na(geno_link_scale)] <- 0.0
   run_has_geno <- any(has_geno_row) && is.finite(w_geno_base)
   df$w_geno_kappa <- if (run_has_geno) ifelse(has_geno_row, round(w_geno_base * geno_link_scale, 4), 0.0) else NA_real_
@@ -3751,6 +3754,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
   if (!("tier0_calibrated_prob" %in% names(df))) df$tier0_calibrated_prob <- rep(NA_real_, n) else df$tier0_calibrated_prob <- suppressWarnings(as.numeric(df$tier0_calibrated_prob))
   if (!("tier0_abstention_flag" %in% names(df))) df$tier0_abstention_flag <- rep(NA_integer_, n) else df$tier0_abstention_flag <- suppressWarnings(as.integer(df$tier0_abstention_flag))
   if (!("deme_mahal_d2" %in% names(df))) df$deme_mahal_d2 <- rep(NA_real_, n) else df$deme_mahal_d2 <- suppressWarnings(as.numeric(df$deme_mahal_d2))
+  if (!("geno_deme_weight_scale" %in% names(df))) df$geno_deme_weight_scale <- rep(NA_real_, n) else df$geno_deme_weight_scale <- suppressWarnings(as.numeric(df$geno_deme_weight_scale))
   if (!("cluster_propagated_gdi" %in% names(df))) df$cluster_propagated_gdi <- rep(NA_real_, n) else df$cluster_propagated_gdi <- suppressWarnings(as.numeric(df$cluster_propagated_gdi))
   if (!("cytology_linkage_tier" %in% names(df))) df$cytology_linkage_tier <- rep(NA_character_, n) else df$cytology_linkage_tier <- as.character(df$cytology_linkage_tier)
   if (!("voucher_sporophytic_2n" %in% names(df))) df$voucher_sporophytic_2n <- rep(NA_integer_, n) else df$voucher_sporophytic_2n <- suppressWarnings(as.integer(df$voucher_sporophytic_2n))

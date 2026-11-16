@@ -4,6 +4,14 @@ All notable methodological, statistical, figure, and SQLite relational schema ch
 
 The structure follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [5.11.0] - 2026-11-16 (`UNC-BOT-SOP-2026-04-REV5` | SQLite Schema `20261127`)
+
+### Added
+- **Step 07 Conflict-Only Deme Utilities & Soft Weight Attenuation (`scripts/analysis/step07_deme_propagation_utils.R`, `scripts/tests/test_step07_deme_propagation.py`):** I extracted Step 07 genomic propagation helpers into `step07_deme_propagation_utils.R` (`< 260` lines) and added `geno_deme_weight_scale` across `[0.45, 0.75]` so reliability scales down softly under `1000 to 2000 m` or `NA` precision beyond `1.0 km` (`0.85x`) and unobserved multi-cytotype ploidy (`0.85x`) alongside outer-buffer edaphic or anthesis offsets (`0.88x`). I paired these gates with a single-subprocess warm-R contract suite (`test_step07_deme_propagation.py`, `< 280` lines) and registered strict line ceilings in `scripts/tests/test_code_hygiene.py`.
+
+### Changed
+- **Step 07 Conflict-Only `G2` Deme & Tier 4 `gdi` Propagation (`scripts/analysis/step07_genomic_propagation.R`, `scripts/analysis/07_triage_dashboard_synthesis.R`, `scripts/analysis/genomic_triage_utils.R`):** I refactored `propagate_conditional_deme_priors()` so missing ploidy and distant allopatric polyploids alongside moderate coordinate uncertainty up to `2000 m`, outer-buffer soil or phenology noise, and unsequenced `Tier_2_Silver`/`Tier_3_Bronze` misidentifications no longer hard-veto valid local demes. Explicit local `2.0 km` cytotype mismatches and `is_azonal_lithology` mismatches alongside verified `G1`/`Tier_1_Gold` micro-sympatry and `> 2000 m` uncertainty remain hard-vetoed. I also refactored `propagate_cluster_gdi_governance()` to block `cluster_propagated_gdi` strictly on observed cytotype conflicts inside `coancestry_cluster` or `2.0 km` alongside direct recipient mismatches, and I wired `geno_deme_weight_scale` into `compute_probabilistic_consensus_scores()`.
+
 ## [5.10.0] - 2026-11-15 (`UNC-BOT-SOP-2026-04-REV5` | SQLite Schema `20261127`)
 
 ### Added

@@ -345,6 +345,8 @@ class TestCodeHygiene(unittest.TestCase):
             PROJECT_ROOT / "scripts" / "analysis" / "step05_env_outlier_utils.R",
             PROJECT_ROOT / "scripts" / "analysis" / "step06_rogue_sequence_qc.R",
             PROJECT_ROOT / "scripts" / "tests" / "test_outlier_quarantine_gates.py",
+            PROJECT_ROOT / "scripts" / "analysis" / "step07_deme_propagation_utils.R",
+            PROJECT_ROOT / "scripts" / "tests" / "test_step07_deme_propagation.py",
         )
         strict_ceilings = {
             PROJECT_ROOT / "scripts" / "data_prep" / "download_public_packera_sequences.py": 500,
@@ -369,6 +371,9 @@ class TestCodeHygiene(unittest.TestCase):
             PROJECT_ROOT / "scripts" / "analysis" / "step06_rogue_sequence_qc.R": 280,
             PROJECT_ROOT / "scripts" / "tests" / "test_outlier_quarantine_gates.py": 400,
             PROJECT_ROOT / "scripts" / "analysis" / "step06_public_backbone.R": 475,
+            PROJECT_ROOT / "scripts" / "analysis" / "step07_deme_propagation_utils.R": 260,
+            PROJECT_ROOT / "scripts" / "analysis" / "step07_genomic_propagation.R": 400,
+            PROJECT_ROOT / "scripts" / "tests" / "test_step07_deme_propagation.py": 300,
         }
         for mod_path in bounded_paths:
             self.assertTrue(mod_path.exists(), f"Missing expected bounded module: {mod_path}")

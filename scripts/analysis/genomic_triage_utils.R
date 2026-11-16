@@ -10,8 +10,12 @@
 # ==============================================================================
 
 .safe_bool_vec_r <- function(x) {
-  if (is.logical(x)) return(!is.na(x) & x)
-  if (is.numeric(x) || is.integer(x)) return(!is.na(x) & x != 0)
+  if (is.logical(x)) {
+    return(!is.na(x) & x)
+  }
+  if (is.numeric(x) || is.integer(x)) {
+    return(!is.na(x) & x != 0)
+  }
   s <- toupper(trimws(as.character(x)))
   s %in% c("1", "TRUE", "T", "YES", "Y")
 }
@@ -42,8 +46,8 @@
   for (cd in cands) {
     if (nzchar(cd) && (
       file.exists(file.path(cd, "coalescent_gdi_delimitation.csv")) ||
-      file.exists(file.path(cd, "landscape_mmrr_feems_summary.csv")) ||
-      file.exists(file.path(cd, "genomic_assignments.csv"))
+        file.exists(file.path(cd, "landscape_mmrr_feems_summary.csv")) ||
+        file.exists(file.path(cd, "genomic_assignments.csv"))
     )) {
       return(cd)
     }
@@ -53,9 +57,13 @@
 
 has_active_genomic_row_mask <- function(df) {
   n <- nrow(df)
-  if (n == 0L) return(logical(0))
+  if (n == 0L) {
+    return(logical(0))
+  }
   nms <- names(df)
-  if (!("geno_predicted_taxon" %in% nms)) return(rep(FALSE, n))
+  if (!("geno_predicted_taxon" %in% nms)) {
+    return(rep(FALSE, n))
+  }
   pred <- as.character(df$geno_predicted_taxon)
   pred_ok <- !is.na(pred) & nzchar(trimws(pred)) & (pred != "Unknown")
   tier_col <- if ("geno_linkage_tier" %in% nms) as.character(df$geno_linkage_tier) else if ("linkage_tier" %in% names(df)) as.character(df$linkage_tier) else rep("G1_Direct_Voucher", n)
@@ -72,10 +80,15 @@ has_active_genomic_row_mask <- function(df) {
     ifelse(s %in% c("packera memmingeri", "packera x memmingeri", "packera ×memmingeri", "packera × memmingeri", "packera xmemmingeri"), "packera xmemmingeri", s)
   }
   r <- unique(trimws(as.character(ref_taxa[!is.na(ref_taxa) & nzchar(trimws(as.character(ref_taxa)))])))
-  if (length(r) == 0L || length(vec) == 0L) return(as.character(vec))
-  rmap <- stats::setNames(r, k(r)); out <- as.character(vec); vk <- k(out)
+  if (length(r) == 0L || length(vec) == 0L) {
+    return(as.character(vec))
+  }
+  rmap <- stats::setNames(r, k(r))
+  out <- as.character(vec)
+  vk <- k(out)
   hit <- !is.na(out) & nzchar(trimws(out)) & vk %in% names(rmap)
-  out[hit] <- unname(rmap[vk[hit]]); out
+  out[hit] <- unname(rmap[vk[hit]])
+  out
 }
 
 load_step07_genomic_metrics <- function(opts, df) {
@@ -100,8 +113,8 @@ load_step07_genomic_metrics <- function(opts, df) {
     "mmrr_beta_ibd", "mmrr_beta_ibe", "mmrr_p_ibe",
     "public_plastome_match", "public_its_match", "waxy_lineage_match",
     "public_backbone_clade", "public_phytop_ils_index", "public_phytop_ih_index",
-    "genomic_propagation_tier", "deme_mahal_d2", "tier0_calibrated_taxon",
-    "tier0_calibrated_prob", "tier0_abstention_flag", "cluster_propagated_gdi"
+    "genomic_propagation_tier", "deme_mahal_d2", "geno_deme_weight_scale",
+    "tier0_calibrated_taxon", "tier0_calibrated_prob", "tier0_abstention_flag", "cluster_propagated_gdi"
   )
 
   ga_df <- if (file.exists(ga_path)) tryCatch(utils::read.csv(ga_path, stringsAsFactors = FALSE), error = function(e) NULL) else NULL
@@ -114,8 +127,8 @@ load_step07_genomic_metrics <- function(opts, df) {
     pass_ga <- ga_df[
       !is.na(ga_df$catalogNumber) & nzchar(trimws(ga_df$catalogNumber)) &
         .safe_bool_vec_r(ga_df$geno_quality_pass) &
-        as.character(ga_df$linkage_tier) %in% c("G1_Direct_Voucher", "G2_Population_Voucher_Proxy"),
-      , drop = FALSE
+        as.character(ga_df$linkage_tier) %in% c("G1_Direct_Voucher", "G2_Population_Voucher_Proxy"), ,
+      drop = FALSE
     ]
     if (nrow(pass_ga) > 0L) {
       tier_ord <- ifelse(pass_ga$linkage_tier == "G1_Direct_Voucher", 1L, 2L)
@@ -146,7 +159,7 @@ load_step07_genomic_metrics <- function(opts, df) {
   for (cn in c("genomic_propagation_tier", "tier0_calibrated_taxon")) {
     if (!(cn %in% names(df))) df[[cn]] <- rep(NA_character_, n_df)
   }
-  for (cn in c("deme_mahal_d2", "tier0_calibrated_prob", "cluster_propagated_gdi")) {
+  for (cn in c("deme_mahal_d2", "geno_deme_weight_scale", "tier0_calibrated_prob", "cluster_propagated_gdi")) {
     if (!(cn %in% names(df))) df[[cn]] <- rep(NA_real_, n_df)
   }
   if (!("tier0_abstention_flag" %in% names(df))) df[["tier0_abstention_flag"]] <- rep(NA_integer_, n_df)
@@ -170,11 +183,15 @@ load_step07_genomic_metrics <- function(opts, df) {
 
 compute_genomic_kappa_weight <- function(df, metrics_df = NULL) {
   active_mask <- has_active_genomic_row_mask(df)
-  if (!any(active_mask)) return(NA_real_)
+  if (!any(active_mask)) {
+    return(NA_real_)
+  }
   if (is.null(metrics_df)) metrics_df <- attr(df, "genomic_model_metrics")
   if (!is.null(metrics_df) && nrow(metrics_df) > 0L && "loro_cv_kappa" %in% names(metrics_df)) {
     k_val <- suppressWarnings(as.numeric(metrics_df$loro_cv_kappa[1L]))
-    if (is.finite(k_val)) return(max(0.05, min(1.0, k_val)))
+    if (is.finite(k_val)) {
+      return(max(0.05, min(1.0, k_val)))
+    }
   }
   sub_g <- df[active_mask, , drop = FALSE]
   yt <- as.character(sub_g$species_standardized)
@@ -191,9 +208,13 @@ export_genomic_field_triage_csv <- function(opts, triage_df) {
   r_dir <- .resolve_step07_genomic_reports_dir(opts)
   ga_path <- file.path(t_dir, "genomic_assignments.csv")
   if (!file.exists(ga_path)) ga_path <- file.path(r_dir, "genomic_assignments.csv")
-  if (!file.exists(ga_path)) return(invisible(NULL))
+  if (!file.exists(ga_path)) {
+    return(invisible(NULL))
+  }
   ga_df <- tryCatch(utils::read.csv(ga_path, stringsAsFactors = FALSE), error = function(e) NULL)
-  if (is.null(ga_df) || nrow(ga_df) == 0L) return(invisible(NULL))
+  if (is.null(ga_df) || nrow(ga_df) == 0L) {
+    return(invisible(NULL))
+  }
 
   ga_df$catalogNumber <- as.character(ga_df$catalogNumber)
   n_g <- nrow(ga_df)
@@ -241,13 +262,16 @@ export_genomic_field_triage_csv <- function(opts, triage_df) {
 
 .build_cytology_summary_lines_r <- function(df) {
   out <- character(0)
-  if (!is.data.frame(df) || nrow(df) == 0L) return(out)
+  if (!is.data.frame(df) || nrow(df) == 0L) {
+    return(out)
+  }
   cy_lines <- attr(df, "cytology_markdown_lines")
   if (length(cy_lines) > 0L) {
     out <- c(out, cy_lines)
   } else if ("cytology_linkage_tier" %in% names(df)) {
     ct_v <- as.character(df$cytology_linkage_tier)
-    n_c1 <- sum(!is.na(ct_v) & ct_v == "C1_Direct_Cytovoucher"); n_c2 <- sum(!is.na(ct_v) & ct_v == "C2_Exsiccatae_Cytoduplicate")
+    n_c1 <- sum(!is.na(ct_v) & ct_v == "C1_Direct_Cytovoucher")
+    n_c2 <- sum(!is.na(ct_v) & ct_v == "C2_Exsiccatae_Cytoduplicate")
     mc_v <- if ("is_multi_cytotype_taxon" %in% names(df)) suppressWarnings(as.integer(df$is_multi_cytotype_taxon)) else rep(NA_integer_, nrow(df))
     sp_v <- if ("species_standardized" %in% names(df)) trimws(as.character(df$species_standardized)) else rep("", nrow(df))
     n_mc <- length(unique(sp_v[!is.na(mc_v) & mc_v == 1L & nzchar(sp_v)]))
@@ -261,9 +285,11 @@ export_genomic_field_triage_csv <- function(opts, triage_df) {
     rep_v <- if ("taxon_reported_cytotypes" %in% names(df)) as.character(df$taxon_reported_cytotypes) else rep(NA_character_, nrow(df))
     sp_v <- if ("species_standardized" %in% names(df)) trimws(as.character(df$species_standardized)) else rep("", nrow(df))
     cat_v <- if ("catalogNumber" %in% names(df)) trimws(as.character(df$catalogNumber)) else as.character(seq_len(nrow(df)))
-    disc_lbls <- character(0); n_chk <- 0L
+    disc_lbls <- character(0)
+    n_chk <- 0L
     for (r_i in which(!is.na(nq_pl) & qc_v)) {
-      lit_pl <- suppressWarnings(as.integer(sub("x$", "", unlist(strsplit(tolower(as.character(rep_v[r_i])), "[,;/ ]+"))))); lit_pl <- lit_pl[!is.na(lit_pl)]
+      lit_pl <- suppressWarnings(as.integer(sub("x$", "", unlist(strsplit(tolower(as.character(rep_v[r_i])), "[,;/ ]+")))))
+      lit_pl <- lit_pl[!is.na(lit_pl)]
       if (!is.na(v_pl[r_i]) || length(lit_pl) > 0L) n_chk <- n_chk + 1L
       if ((!is.na(v_pl[r_i]) && (nq_pl[r_i] != v_pl[r_i])) || (length(lit_pl) > 0L && !(nq_pl[r_i] %in% lit_pl))) {
         exp_s <- if (!is.na(v_pl[r_i])) paste0(v_pl[r_i], "x") else as.character(rep_v[r_i])
@@ -298,7 +324,9 @@ build_genomic_markdown_summary <- function(opts, df) {
     for (d in cands) {
       if (nzchar(d)) {
         p <- file.path(d, fname)
-        if (file.exists(p)) return(p)
+        if (file.exists(p)) {
+          return(p)
+        }
       }
     }
     ""
@@ -309,7 +337,9 @@ build_genomic_markdown_summary <- function(opts, df) {
   pbc_path <- resolve_csv("public_backbone_concordance.csv")
   pop_path <- resolve_csv("public_organellar_placement.csv")
   tc_path <- resolve_csv("taxon_complexes.csv")
-  if (!nzchar(ga_path) && !any(has_active_genomic_row_mask(df))) return(.build_cytology_summary_lines_r(df))
+  if (!nzchar(ga_path) && !any(has_active_genomic_row_mask(df))) {
+    return(.build_cytology_summary_lines_r(df))
+  }
 
   ga_df <- if (nzchar(ga_path)) tryCatch(utils::read.csv(ga_path, stringsAsFactors = FALSE), error = function(e) NULL) else NULL
   gm_df <- if (nzchar(gm_path)) tryCatch(utils::read.csv(gm_path, stringsAsFactors = FALSE), error = function(e) NULL) else NULL
@@ -363,7 +393,9 @@ build_genomic_markdown_summary <- function(opts, df) {
         lines <- c(lines, sprintf("- **Allele-Balance Cytotype & Hybrid Architecture:** Inferred ploidies (%s)%s.", ct_str, if ("hybrid_generation_class" %in% names(ga_df)) {
           hc <- as.character(ga_df$hybrid_generation_class[!is.na(ga_df$hybrid_generation_class) & nzchar(ga_df$hybrid_generation_class)])
           if (length(hc) > 0L) sprintf("; `(h, Q12)` classes: %s", paste(sprintf("%s=%d", names(table(hc)), as.integer(table(hc))), collapse = ", ")) else ""
-        } else ""))
+        } else {
+          ""
+        }))
       }
     }
   }
@@ -389,7 +421,9 @@ build_genomic_markdown_summary <- function(opts, df) {
       donor_s <- if ("donor_taxon" %in% names(top_fb)) as.character(top_fb$donor_taxon[1L]) else "NA"
       pol_s <- if ("polarization_source" %in% names(top_fb) && !is.na(top_fb$polarization_source[1L]) && nzchar(as.character(top_fb$polarization_source[1L]))) {
         sprintf("; polarization `%s`", as.character(top_fb$polarization_source[1L]))
-      } else ""
+      } else {
+        ""
+      }
       lines <- c(lines, sprintf("- **Tree-Guided Introgression (`f-branch`):** Maximum `f_b` = %.4f (donor `%s`%s).", fmax, donor_s, pol_s))
     }
   }
@@ -429,7 +463,8 @@ build_genomic_markdown_summary <- function(opts, df) {
     n_mo <- if ("in_mo_backbone" %in% names(pbc_df)) sum(.safe_bool_vec_r(pbc_df$in_mo_backbone), na.rm = TRUE) else 0L
     n_ap <- if ("in_astralpro_backbone" %in% names(pbc_df)) sum(.safe_bool_vec_r(pbc_df$in_astralpro_backbone), na.rm = TRUE) else 0L
     cmask <- if ("mo_astralpro_concordant" %in% names(pbc_df)) !is.na(pbc_df$mo_astralpro_concordant) else rep(FALSE, nrow(pbc_df))
-    n_both <- sum(cmask); n_conc <- if (n_both > 0L) sum(.safe_bool_vec_r(pbc_df$mo_astralpro_concordant[cmask])) else 0L
+    n_both <- sum(cmask)
+    n_conc <- if (n_both > 0L) sum(.safe_bool_vec_r(pbc_df$mo_astralpro_concordant[cmask])) else 0L
     jacc_v <- if ("mo_astralpro_jaccard" %in% names(pbc_df)) suppressWarnings(as.numeric(pbc_df$mo_astralpro_jaccard)) else numeric(0)
     jacc_v <- jacc_v[is.finite(jacc_v)]
     clades <- if ("public_backbone_clade" %in% names(pbc_df)) unique(as.character(pbc_df$public_backbone_clade[!is.na(pbc_df$public_backbone_clade) & nzchar(pbc_df$public_backbone_clade)])) else character(0)
@@ -438,13 +473,17 @@ build_genomic_markdown_summary <- function(opts, df) {
     hot_str <- if (any(is.finite(ih_v)) || any(is.finite(ils_v))) {
       hi <- if (any(is.finite(ih_v))) which.max(ifelse(is.finite(ih_v), ih_v, -Inf)) else which.max(ifelse(is.finite(ils_v), ils_v, -Inf))
       htx <- if ("taxon" %in% names(pbc_df)) as.character(pbc_df$taxon[hi]) else "NA"
-      sprintf("PhyTop ILS vs IH hotspot: `%s` (ILS_index=%s, IH_index=%s; median ILS=%s, max IH=%s)",
-              htx,
-              if (length(ils_v) >= hi && is.finite(ils_v[hi])) sprintf("%.3f", ils_v[hi]) else "NA",
-              if (length(ih_v) >= hi && is.finite(ih_v[hi])) sprintf("%.3f", ih_v[hi]) else "NA",
-              if (any(is.finite(ils_v))) sprintf("%.3f", stats::median(ils_v[is.finite(ils_v)])) else "NA",
-              if (any(is.finite(ih_v))) sprintf("%.3f", max(ih_v[is.finite(ih_v)])) else "NA")
-    } else "PhyTop ILS_index/IH_index not staged"
+      sprintf(
+        "PhyTop ILS vs IH hotspot: `%s` (ILS_index=%s, IH_index=%s; median ILS=%s, max IH=%s)",
+        htx,
+        if (length(ils_v) >= hi && is.finite(ils_v[hi])) sprintf("%.3f", ils_v[hi]) else "NA",
+        if (length(ih_v) >= hi && is.finite(ih_v[hi])) sprintf("%.3f", ih_v[hi]) else "NA",
+        if (any(is.finite(ils_v))) sprintf("%.3f", stats::median(ils_v[is.finite(ils_v)])) else "NA",
+        if (any(is.finite(ih_v))) sprintf("%.3f", max(ih_v[is.finite(ih_v)])) else "NA"
+      )
+    } else {
+      "PhyTop ILS_index/IH_index not staged"
+    }
     lines <- c(lines, sprintf(
       "- **Public 111-Taxon Nuclear Backbone (MO vs. ASTRAL-Pro & PhyTop):** %d/%d taxa mapped to MO and %d to ASTRAL-Pro (%d/%d shared clades concordant, median Jaccard=%s); clades: %s; %s%s.",
       n_mo, nrow(pbc_df), n_ap, n_conc, n_both,
@@ -468,7 +507,9 @@ build_genomic_markdown_summary <- function(opts, df) {
     ))
   } else if (!is.null(ga_df) && nrow(ga_df) > 0L && any(c("public_plastome_match", "public_its_match", "waxy_lineage_match") %in% names(ga_df))) {
     cnt_nn <- function(col) if (col %in% names(ga_df)) sum(!is.na(ga_df[[col]]) & nzchar(trimws(as.character(ga_df[[col]])))) else 0L
-    n_pl <- cnt_nn("public_plastome_match"); n_it <- cnt_nn("public_its_match"); n_wx <- cnt_nn("waxy_lineage_match")
+    n_pl <- cnt_nn("public_plastome_match")
+    n_it <- cnt_nn("public_its_match")
+    n_wx <- cnt_nn("waxy_lineage_match")
     if ((n_pl + n_it + n_wx) > 0L) {
       lines <- c(lines, sprintf("- **GenBank/BOLD Plastid-ITS-waxy Placement:** plastid=%d, ITS=%d, waxy=%d sample matches recorded in `genomic_assignments.csv`%s.", n_pl, n_it, n_wx, if (is.null(pbc_df) || nrow(pbc_df) == 0L) cx_str else ""))
     }
@@ -486,4 +527,3 @@ build_genomic_markdown_summary <- function(opts, df) {
   }
   c(lines, .build_cytology_summary_lines_r(df))
 }
-
