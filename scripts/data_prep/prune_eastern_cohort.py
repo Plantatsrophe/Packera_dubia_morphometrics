@@ -102,7 +102,7 @@ def prune_workspace_cohort(
     db_path: Optional[Path] = None,
     *,
     western_longitude_threshold: float = -100.0,
-    transcontinental_longitude_threshold: float = -95.5,
+    transcontinental_longitude_threshold: Optional[float] = None,
     cis_longitude_threshold: float = -90.5,
     min_cis_records: int = 10,
     min_cis_fraction: float = 0.05,
@@ -112,9 +112,10 @@ def prune_workspace_cohort(
     vacuum: bool = True,
     dry_run: bool = False,
 ) -> Dict[str, Any]:
-    """Prune SQLite database, CSV manifests, and optional disk assets to Cis-Mississippi + Disjunct scope."""
+    """Prune SQLite database, CSV manifests, and disk assets to Cis-Mississippi + ecoregion-gated scope."""
     if str(workspace_root) not in sys.path:
         sys.path.insert(0, str(workspace_root))
+    _ = transcontinental_longitude_threshold
 
     from scripts.core.db import load_taxon_synonyms, resolve_db_path
     from scripts.core.harvester import _DYNAMIC_SYNONYM_TO_CANONICAL, standardize_packera_taxon
@@ -146,9 +147,7 @@ def prune_workspace_cohort(
     elif curated_csv.is_file():
         v_df = pd.read_csv(curated_csv, low_memory=False)
     else:
-        raise FileNotFoundError(
-            f"Neither SQLite database ({eff_db}) nor curated CSV ({curated_csv}) was found."
-        )
+        raise FileNotFoundError(f"Neither SQLite ({eff_db}) nor curated CSV ({curated_csv}) was found.")
 
     if curated_csv.is_file() and curated_csv.stat().st_size > 0:
         csv_v_df = pd.read_csv(curated_csv, low_memory=False)
@@ -157,14 +156,11 @@ def prune_workspace_cohort(
             extra_csv = csv_v_df[~csv_v_df["catalogNumber"].astype(str).str.strip().isin(db_cats)]
             if not extra_csv.empty:
                 v_df = pd.concat([v_df, extra_csv], ignore_index=True)
-    else:
-        csv_v_df = pd.DataFrame()
 
     keep_mask, stats = evaluate_eastern_na_cohort_filter(
         v_df,
         standardize_packera_taxon,
         western_longitude_threshold=western_longitude_threshold,
-        transcontinental_longitude_threshold=transcontinental_longitude_threshold,
         cis_longitude_threshold=cis_longitude_threshold,
         min_cis_records=min_cis_records,
         min_cis_fraction=min_cis_fraction,
@@ -179,12 +175,12 @@ def prune_workspace_cohort(
     ) if "catalogNumber" in v_df.columns else set()
 
     print("=" * 86)
-    print("CIS-MISSISSIPPI EASTERN PACKERA + DISJUNCT COHORT PRUNER")
-    print(f"  Workspace Root           : {workspace_root}")
-    print(f"  SQLite Database          : {eff_db} ({'FOUND' if has_db else 'MISSING'})")
-    print(f"  Disjunct West Ceiling    : {western_longitude_threshold:.2f} deg W (Eastern taxa)")
-    print(f"  Transcontinental Ceiling : {transcontinental_longitude_threshold:.2f} deg W (P. paupercula / P. indecora)")
-    print(f"  Mode                     : {'DRY-RUN (no files modified)' if dry_run else 'LIVE IN-PLACE PRUNE'}")
+    print("CIS-MISSISSIPPI EASTERN PACKERA + ECOREGION-BOUNDED COHORT PRUNER")
+    print(f"  Workspace Root        : {workspace_root}")
+    print(f"  SQLite Database       : {eff_db} ({'FOUND' if has_db else 'MISSING'})")
+    print(f"  Disjunct West Ceiling : {western_longitude_threshold:.2f} deg W (Eastern taxa)")
+    print("  Transcontinental Gate : EPA/CEC Level III ecoregion-bounded (boreal shield/forests retained)")
+    print(f"  Mode                  : {'DRY-RUN (no files modified)' if dry_run else 'LIVE IN-PLACE PRUNE'}")
     print("-" * 86)
     print(f"{'Taxon':<28} {'Total':>7} {'Cis-MS':>7} {'Disjunct':>9} {'Retained':>9} {'Dropped':>8}  {'Status'}")
     print("-" * 86)
@@ -401,71 +397,21 @@ def build_cli_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description=(
             "Prune SQLite database and CSV manifests in place to Cis-Mississippi Eastern "
-            "Packera species plus trans-Mississippi disjuncts up to -100.0W."
+            "Packera species plus ecoregion-bounded transcontinental boreal extensions."
         )
     )
-    p.add_argument("--workspace-root", type=str, default=None, help="Repository root directory (default: auto-detected).")
-    p.add_argument("--db", type=str, default=None, help="Path to SQLite database (default: data/plantmatics.sqlite).")
-    p.add_argument(
-        "--western-lon",
-        type=float,
-        default=-100.0,
-        help="Western longitude ceiling for trans-Mississippi disjuncts of Eastern species (default: -100.0).",
-    )
-    p.add_argument(
-        "--paupercula-lon",
-        type=float,
-        default=-95.5,
-        help="Western longitude ceiling for transcontinental P. paupercula / P. indecora (default: -95.5).",
-    )
-    p.add_argument(
-        "--cis-lon",
-        type=float,
-        default=-90.5,
-        help="Cis-Mississippi longitude threshold for un-stated eastern coordinates (default: -90.5).",
-    )
-    p.add_argument(
-        "--min-cis-records",
-        type=int,
-        default=10,
-        help="Minimum cis-Mississippi records required for non-whitelisted species discovery (default: 10).",
-    )
-    p.add_argument(
-        "--min-cis-fraction",
-        type=float,
-        default=0.05,
-        help="Minimum fraction of species records east of the Mississippi (default: 0.05).",
-    )
-    p.add_argument(
-        "--strict-whitelist",
-        action="store_true",
-        default=False,
-        help="Restrict strictly to the curated CANONICAL_CIS_MISSISSIPPI_PACKERA_SPECIES checklist.",
-    )
-    p.add_argument(
-        "--delete-dropped-assets",
-        action="store_true",
-        default=False,
-        help="Also delete dropped raw .webp images, masks, contours, and ECT files from disk.",
-    )
-    p.add_argument(
-        "--quarantine-raw",
-        action="store_true",
-        default=False,
-        help="Move dropped raw voucher images to data/raw_vouchers_quarantine/ instead of leaving or deleting them.",
-    )
-    p.add_argument(
-        "--no-vacuum",
-        action="store_true",
-        default=False,
-        help="Skip SQLite VACUUM compaction after row deletion.",
-    )
-    p.add_argument(
-        "--dry-run",
-        action="store_true",
-        default=False,
-        help="Print per-species before/after retention audit without modifying SQLite or CSV files.",
-    )
+    p.add_argument("--workspace-root", type=str, default=None, help="Repository root directory.")
+    p.add_argument("--db", type=str, default=None, help="Path to SQLite database.")
+    p.add_argument("--western-lon", type=float, default=-100.0, help="Western longitude ceiling (default: -100.0).")
+    p.add_argument("--paupercula-lon", type=float, default=-100.0, help="Deprecated alias retained for compatibility.")
+    p.add_argument("--cis-lon", type=float, default=-90.5, help="Cis-Mississippi longitude fallback (default: -90.5).")
+    p.add_argument("--min-cis-records", type=int, default=10, help="Minimum cis-Mississippi records (default: 10).")
+    p.add_argument("--min-cis-fraction", type=float, default=0.05, help="Minimum cis-Mississippi share (default: 0.05).")
+    p.add_argument("--strict-whitelist", action="store_true", default=False, help="Restrict strictly to whitelist.")
+    p.add_argument("--delete-dropped-assets", action="store_true", default=False, help="Delete dropped disk files.")
+    p.add_argument("--quarantine-raw", action="store_true", default=False, help="Move dropped raw scans to quarantine.")
+    p.add_argument("--no-vacuum", action="store_true", default=False, help="Skip SQLite VACUUM compaction.")
+    p.add_argument("--dry-run", action="store_true", default=False, help="Audit counts without modifying files.")
     return p
 
 

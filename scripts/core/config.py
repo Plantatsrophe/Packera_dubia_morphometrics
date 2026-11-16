@@ -370,6 +370,11 @@ class TaxaConfig:
     outgroups: List[str] = field(default_factory=list)
     target_genus: str = "Packera"
     target_family: str = "Asteraceae"
+    synonym_genera: List[str] = field(default_factory=lambda: ["Packera", "Senecio", "Cineraria"])
+    eastern_resident_whitelist: List[str] = field(default_factory=list)
+    transcontinental_boreal_taxa: List[str] = field(
+        default_factory=lambda: ["Packera paupercula", "Packera indecora", "Packera pauciflora"]
+    )
 
     @property
     def target_taxa(self) -> List[str]:
@@ -496,12 +501,13 @@ class HarvestingConfig:
     western_longitude_threshold: float = -100.0
     cis_mississippi_longitude_threshold: float = -90.5
     min_cis_mississippi_fraction: float = 0.05
-    transcontinental_longitude_threshold: float = -95.5
+    transcontinental_ecoregion_gate: bool = True
+    transcontinental_longitude_threshold: float = -100.0
     home_herbarium: str = "NCU"
     min_megapixels: float = 8.0
     min_file_size_kb: float = 500.0
     min_sharpness_laplacian: float = 80.0
-    check_sharpness: bool = False
+    check_sharpness: bool = True
     webp_quality: int = 92
     download_concurrency: int = 15
     usda_county_filter: bool = False
@@ -669,12 +675,31 @@ class PipelineConfig:
             or str(taxa_dict.get("target_family", "") or "").strip()
             or "Asteraceae"
         )
+        raw_syn_gen = [
+            str(g).strip()
+            for g in (taxa_dict.get("synonym_genera") or ("Packera", "Senecio", "Cineraria"))
+            if str(g).strip()
+        ]
+        if target_genus_val and target_genus_val not in raw_syn_gen:
+            raw_syn_gen.insert(0, target_genus_val)
+        raw_wl = [str(s).strip() for s in (taxa_dict.get("eastern_resident_whitelist") or []) if str(s).strip()]
+        raw_tc = [
+            str(s).strip()
+            for s in (
+                taxa_dict.get("transcontinental_boreal_taxa")
+                or ("Packera paupercula", "Packera indecora", "Packera pauciflora")
+            )
+            if str(s).strip()
+        ]
         taxa = TaxaConfig(
             target_species=list(taxa_dict.get("target_species", legacy_taxa) or []),
             synonyms=dict(taxa_dict.get("synonyms", {}) or {}),
             outgroups=list(taxa_dict.get("outgroups", []) or []),
             target_genus=target_genus_val,
             target_family=target_family_val,
+            synonym_genera=raw_syn_gen,
+            eastern_resident_whitelist=raw_wl,
+            transcontinental_boreal_taxa=raw_tc,
         )
 
         thresh_dict = raw_cfg.get("thresholds", {})
@@ -757,6 +782,8 @@ class PipelineConfig:
             harv_kwargs["usda_county_buffer_km"] = float(harv_kwargs["usda_county_buffer_km"])
         if "usda_exempt_gold" in harv_kwargs:
             harv_kwargs["usda_exempt_gold"] = bool(harv_kwargs["usda_exempt_gold"])
+        if "transcontinental_ecoregion_gate" in harv_kwargs:
+            harv_kwargs["transcontinental_ecoregion_gate"] = bool(harv_kwargs["transcontinental_ecoregion_gate"])
         harvesting = HarvestingConfig(**harv_kwargs)
 
         leaf_seg_fallback = raw_cfg.get("leaf_segmentation", {}) or {}
@@ -869,7 +896,6 @@ SPECIALIST_PATTERNS: List[str] = [
     r"\bJ\.?\s*G\.?\s*Packer\b|\bJohn\s+G\.?\s+Packer\b|\bPacker\s*,\s*(?:J\.?\s*G\.?|John)\b",
     r"\bC\.?\s*Jeffrey\b|\bCharles\s+Jeffrey\b|\bJeffrey\s*,\s*(?:C\.?|Charles)\b",
     r"\bMabberley\b", r"\bD\.?\s*J\.?\s*Mabberley\b",
-    r"\b(?:J\.?\s*B\.?|(?:J\.?\s+)?Brandon)\s+Fuller\b|\bFuller\s*,\s*(?:J\.?\s*B\.?|J\.?\s*Brandon|Brandon)\b",
     r"\bMandel\b", r"\bJ\.?\s*R\.?\s*Mandel\b", r"\bJennifer\s+R\.?\s+Mandel\b",
     r"\bMoore[-\s]?Pollard\b",
     r"\b(?:E\.?\s*R\.?|Erika\s+R\.?)\s+Moore\b|\bMoore\s*,\s*(?:E\.?\s*R\.?|Erika)\b",
@@ -965,43 +991,10 @@ GREAT_PLAINS_STRADDLING_STATES: Set[str] = {
     "KS", "KANSAS", "OK", "OKLAHOMA", "TX", "TEXAS", "MB", "MANITOBA",
 }
 
-# Verified native/established cis-Mississippi Eastern North American Packera species
-CANONICAL_CIS_MISSISSIPPI_PACKERA_SPECIES: Set[str] = {
-    "Packera anonyma",
-    "Packera antennariifolia",
-    "Packera aurea",
-    "Packera balsamitae",
-    "Packera crawfordii",
-    "Packera dubia",
-    "Packera gaspensis",
-    "Packera glabella",
-    "Packera glabrata",
-    "Packera imparipinnata",
-    "Packera indecora",
-    "Packera insulae-regalis",
-    "Packera millefolia",
-    "Packera millefolium",
-    "Packera obovata",
-    "Packera pauciflora",
-    "Packera paupercula",
-    "Packera plattensis",
-    "Packera schweinitziana",
-    "Packera serpenticola",
-    "Packera tampicana",
-    "Packera memmingeri",
-    "Packera x memmingeri",
-    "Packera ×memmingeri",
-}
-
-# Transcontinental boreal/cordilleran species whose Great Plains / Western sheets must be capped at the Mississippi corridor
-TRANSCONTINENTAL_BOREAL_PACKERA_SPECIES: Set[str] = {
-    "Packera paupercula",
-    "Packera indecora",
-    "Packera pauciflora",
-}
-
 # Module-level defaults instantiated dynamically from configuration YAML
 _DEFAULT_CONFIG = PipelineConfig.from_yaml()
+CANONICAL_CIS_MISSISSIPPI_PACKERA_SPECIES: Set[str] = set(_DEFAULT_CONFIG.taxa.eastern_resident_whitelist)
+TRANSCONTINENTAL_BOREAL_PACKERA_SPECIES: Set[str] = set(_DEFAULT_CONFIG.taxa.transcontinental_boreal_taxa)
 DEFAULT_WORKSPACE = _DEFAULT_CONFIG.paths.workspace_root
 DEFAULT_DB_PATH = _DEFAULT_CONFIG.paths.db_path
 DEFAULT_RAW_DIR = _DEFAULT_CONFIG.paths.raw_vouchers_dir

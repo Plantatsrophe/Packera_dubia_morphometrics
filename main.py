@@ -679,12 +679,6 @@ def run_harvest(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         cmd.append("--harvest-full-continental-range")
     elif getattr(args, "harvest_full_continental_range", None) is False:
         cmd.append("--no-harvest-full-continental-range")
-    if getattr(args, "spatial_thin_km", None) is not None:
-        cmd.extend(["--spatial-thin-km", str(args.spatial_thin_km)])
-    if getattr(args, "max_per_state", None) is not None:
-        cmd.extend(["--max-per-state", str(args.max_per_state)])
-    if getattr(args, "max_per_region", None) is not None:
-        cmd.extend(["--max-per-region", str(args.max_per_region)])
 
     if args.download_images:
         cmd.append("--download-images")

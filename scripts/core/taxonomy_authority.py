@@ -39,17 +39,14 @@ if Image is not None:
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 from scripts.core.config import (
-    DEFAULT_COUNTRIES,
-    CANONICAL_CIS_MISSISSIPPI_PACKERA_SPECIES,
     CIS_MISSISSIPPI_STATES_PROVINCES,
     DEFAULT_CIS_MISSISSIPPI_LON,
+    DEFAULT_COUNTRIES,
     DEFAULT_GEOGRAPHIC_SCOPE,
     DEFAULT_HOME_HERBARIUM,
     DEFAULT_MIN_CIS_MISSISSIPPI_FRAC,
-    DEFAULT_TRANSCONTINENTAL_LON,
     EXCLUDED_WESTERN_STATES,
     GREAT_PLAINS_STRADDLING_STATES,
-    TRANSCONTINENTAL_BOREAL_PACKERA_SPECIES,
     MAJOR_HERBARIA_CODES,
     PRIMARY_TYPE_STATUSES,
     SECONDARY_TYPE_STATUSES,
@@ -332,11 +329,12 @@ def stratify_duplicates(
       2. If collection number is missing, falls back to geographic coordinate proximity (< 50 m)
          within identical collection dates.
 
-    Designates exactly one primary voucher per duplicate group using institutional hierarchy:
-      Priority 1: Verified Type Status
-      Priority 2: Home Herbarium (default: NCU; configurable via home_herbarium)
-      Priority 3: Tier 1 Specialist determinations
-      Priority 4: Highest specimen image resolution
+    Designates exactly one primary voucher per duplicate group using authority-first hierarchy:
+      Priority 1: Verified Type Status (and ICN Art. 9.6 sub-rank)
+      Priority 2: Documented in-range standing
+      Priority 3: Determiner tier (`Tier_1_Gold` > `Tier_2_Silver` > `Tier_3_Bronze`)
+      Priority 4: Home Herbarium (default: NCU; configurable via home_herbarium)
+      Priority 5: Highest specimen image resolution
 
     Adds/updates columns:
       - exsiccatae_key: Standardized signature string
@@ -515,8 +513,7 @@ def stratify_duplicates(
 
     df["exsiccatae_key"] = group_labels
 
-    # Pass 3: Cross-duplicate taxonomic conflict auditing, institutional priority,
-    # and Tier_1_Gold duplicate determination elevation onto conflicting Bronze primaries
+    # Pass 3: Cross-duplicate taxonomic conflict auditing and authority-first duplicate ranking
     grouped = df.groupby("exsiccatae_key", sort=False)
     df["duplicate_count"] = grouped["catalogNumber"].transform("count")
 
@@ -529,7 +526,6 @@ def stratify_duplicates(
         "" if (v is None or (pd is not None and pd.isna(v))) else str(v).strip()
         for v in pre_gold_col
     ]
-    elevations_to_apply: List[Tuple[Any, str, Any]] = []
 
     for key, group_df in grouped:
         indices = list(group_df.index)
@@ -576,7 +572,7 @@ def stratify_duplicates(
 
             cat_tiebreak = str(row.get("catalogNumber", idx))
 
-            score_tuple = (has_type, type_subrank, in_range_rank, is_home_herb, tier_score, res_score, cat_tiebreak)
+            score_tuple = (has_type, type_subrank, in_range_rank, tier_score, is_home_herb, res_score, cat_tiebreak)
             scored_candidates.append((score_tuple, idx))
             idx_to_std_tx[idx] = _resolve_row_standardized_packera(row)
             idx_to_tier[idx] = tier
@@ -640,45 +636,9 @@ def stratify_duplicates(
         primary_idx = scored_candidates[0][1]
         is_primary_list[idx_to_pos[primary_idx]] = True
 
-        primary_tier = idx_to_tier.get(primary_idx, "")
-        primary_tx = idx_to_std_tx.get(primary_idx, "")
-        if (
-            best_gold_taxon
-            and not multi_gold_disagreement
-            and best_gold_source_idx is not None
-            and primary_tier in {"Tier_3_Bronze", ""}
-            and primary_tx != best_gold_taxon
-            and not (not best_gold_from_inrange and not idx_to_extra.get(primary_idx, False))
-        ):
-            elevations_to_apply.append((primary_idx, best_gold_taxon, best_gold_source_idx))
-
     df["is_primary_duplicate"] = is_primary_list
     df["exsiccatae_taxonomic_conflict"] = conflict_list
     df["exsiccatae_gold_taxon"] = gold_taxon_list
-
-    for prim_idx, gold_tx, gold_src_idx in elevations_to_apply:
-        gold_row = df.loc[gold_src_idx]
-        gold_cat = str(gold_row.get("catalogNumber", gold_src_idx)).strip()
-        gold_det = str(
-            gold_row.get("identifiedBy")
-            if (not pd.isna(gold_row.get("identifiedBy", "")) and str(gold_row.get("identifiedBy", "")).strip())
-            else ""
-        ).strip() or "Tier_1_Gold specialist"
-        if "scientificName" in df.columns:
-            df.at[prim_idx, "scientificName"] = gold_tx
-        if "species_standardized" in df.columns:
-            df.at[prim_idx, "species_standardized"] = gold_tx
-        # Elevate conflicting Bronze primary to Mahalanobis-screened Tier_2_Silver (guarding against mixed gatherings)
-        if "determiner_tier" in df.columns:
-            df.at[prim_idx, "determiner_tier"] = "Tier_2_Silver"
-        if "identifiedBy" in df.columns:
-            df.at[prim_idx, "identifiedBy"] = f"{gold_det} [exsiccatae Tier_1_Gold duplicate {gold_cat}]"
-        if logger:
-            prim_cat = str(df.loc[prim_idx].get("catalogNumber", prim_idx)).strip()
-            logger.info(
-                f"Exsiccatae Conflict Resolution: Elevated Tier_1_Gold determination '{gold_tx}' "
-                f"(from duplicate {gold_cat}) onto conflicting Tier_3_Bronze primary sheet {prim_cat}."
-            )
 
     if logger:
         n_prim = sum(is_primary_list)
@@ -1181,7 +1141,7 @@ def spatially_balance_and_thin_vouchers(
         out_df["spatial_balance_weight"] = pd.Series(dtype=float)
         return out_df
 
-    # Step E: Compute Continuous `spatial_balance_weight`
+    # Step E: Compute Continuous `spatial_balance_weight` strictly over non-quarantined active anchors
     ret_lats = np.array(
         [lats[i] if lats[i] is not None else np.nan for i in active_indices],
         dtype=float,
@@ -1190,11 +1150,27 @@ def spatially_balance_and_thin_vouchers(
         [lons[i] if lons[i] is not None else np.nan for i in active_indices],
         dtype=float,
     )
-    ret_states = [
-        str(out_df.iloc[k].get("stateProvince", "") if not pd.isna(out_df.iloc[k].get("stateProvince", "")) else "").strip().upper()
-        for k in range(len(out_df))
-    ]
     ret_taxa = out_df["species_standardized"].astype(str).tolist()
+    has_auth_wt = "authority_weight" in out_df.columns
+    eligible_anchor_mask = np.ones(len(out_df), dtype=bool)
+    for k in range(len(out_df)):
+        row_k = out_df.iloc[k]
+        if _as_bool_flag(row_k.get("is_centroid_or_inst_coord")):
+            eligible_anchor_mask[k] = False
+            continue
+        raw_ts_k = row_k.get("type_status") if not pd.isna(row_k.get("type_status", "")) else row_k.get("typeStatus")
+        if classify_nomenclatural_type_rank(raw_ts_k)[0] >= 1:
+            continue
+        if has_auth_wt and not pd.isna(row_k.get("authority_weight")):
+            try:
+                if float(row_k.get("authority_weight")) <= 0.0:
+                    eligible_anchor_mask[k] = False
+                    continue
+            except (ValueError, TypeError):
+                pass
+        tier_k = str(row_k.get("determiner_tier", "") if not pd.isna(row_k.get("determiner_tier", "")) else "").strip()
+        if tier_k == "Tier_3_Bronze" and not _as_bool_flag(row_k.get("is_promoted_bronze")):
+            eligible_anchor_mask[k] = False
 
     spatial_weights = np.ones(len(out_df), dtype=float)
     bandwidth_km = 25.0
@@ -1205,7 +1181,7 @@ def spatially_balance_and_thin_vouchers(
 
     for _sp_name, t_idxs in taxon_to_rows.items():
         t_arr = np.array(t_idxs, dtype=int)
-        valid_geo_mask = np.isfinite(ret_lats[t_arr]) & np.isfinite(ret_lons[t_arr])
+        valid_geo_mask = np.isfinite(ret_lats[t_arr]) & np.isfinite(ret_lons[t_arr]) & eligible_anchor_mask[t_arr]
         geo_idxs = t_arr[valid_geo_mask]
         if len(geo_idxs) == 0:
             continue
@@ -1259,58 +1235,6 @@ def sanitize_filename(name: str) -> str:
     return clean if clean else "voucher_unknown"
 
 
-_IPNI_AUTHOR_ABBREVIATIONS: Dict[str, str] = {
-    "spreng": "sprengel",
-    "mabb": "mabberley",
-    "michx": "michaux",
-    "nutt": "nuttall",
-    "torr": "torrey",
-    "rydb": "rydberg",
-    "greenm": "greenman",
-    "cronq": "cronquist",
-    "hook": "hooker",
-    "ell": "elliott",
-    "britt": "britton",
-    "woot": "wooton",
-    "standl": "standley",
-    "spellenb": "spellenberg",
-    "blank": "blankinship",
-    "hend": "henderson",
-    "hult": "hulten",
-    "muhl": "muhlenberg",
-    "willd": "willdenow",
-    "less": "lessing",
-    "hemsl": "hemsley",
-    "lag": "lagasca",
-    "moc": "mocino",
-    "bip": "schultz-bipontinus",
-    "dc": "candolle",
-    "l": "linnaeus",
-    "boivin": "boivin",
-    "pippen": "pippen",
-    "kral": "kral",
-    "godfrey": "godfrey",
-    "sorrie": "sorrie",
-    "strother": "strother",
-    "brouillet": "brouillet",
-    "semple": "semple",
-    "schill": "schilling",
-    "floden": "floden",
-    "estes": "estes",
-    "poind": "poindexter",
-    "wieboldt": "wieboldt",
-    "mcmillan": "mcmillan",
-    "beauchamp": "beauchamp",
-    "judz": "judziewicz",
-    "okennon": "okennon",
-    "atwood": "atwood",
-    "okane": "okane",
-    "yeatts": "yeatts",
-    "mandel": "mandel",
-    "gramling": "gramling",
-    "soderholm": "soderholm",
-}
-
 GENERIC_DETERMINER_TOKENS: Set[str] = {
     "",
     "unknown",
@@ -1357,88 +1281,6 @@ def _fold_ascii(text: str) -> str:
     """Fold Unicode diacritics to base ASCII lowercase characters (e.g., 'Löve' -> 'love')."""
     norm = unicodedata.normalize("NFKD", text)
     return "".join(ch for ch in norm if not unicodedata.combining(ch)).lower()
-
-
-def extract_protologue_authors(raw_names: Union[str, Iterable[Any]]) -> Set[str]:
-    """
-    Layer 2 Authority Engine: Extracts taxonomic authority surnames and standard IPNI
-    abbreviations from Darwin Core `scientificName` strings.
-
-    Examples:
-      - "Packera dubia (Spreng.) Trock & Mabb." -> {"spreng", "sprengel", "trock", "mabb", "mabberley"}
-    """
-    if raw_names is None:
-        return set()
-    if isinstance(raw_names, (str, bytes)):
-        items: Iterable[Any] = [raw_names.decode("utf-8", errors="ignore") if isinstance(raw_names, bytes) else raw_names]
-    else:
-        items = raw_names
-
-    authors: Set[str] = set()
-    for raw in items:
-        if raw is None or (isinstance(raw, float) and math.isnan(raw)):
-            continue
-        txt = str(raw).strip()
-        if not txt or txt.lower() in {"none", "nan", "null", "na", "unknown"}:
-            continue
-
-        # Strip leading Genus + optional hybrid marker + specific epithet
-        m_binom = re.match(r"^[A-Z][a-z]+\s+(?:[x×]\s*)?[a-z][a-z-]*\b(.*)$", txt)
-        if not m_binom:
-            continue
-        rem = m_binom.group(1).strip()
-        if not rem:
-            continue
-
-        # Strip infraspecific rank + epithet segments (var., subsp., ssp., f., forma, nothovar.)
-        rem = re.sub(
-            r"\b(?:var\.?|subsp\.?|ssp\.?|forma|f\.?|nothosubsp\.?|nothovar\.?)\s+[a-z][a-z-]*\b",
-            " ",
-            rem,
-        )
-        # Strip open-nomenclature qualifiers and 4-digit publication years
-        rem = re.sub(r"\b(?:sp\.?|spp\.?|cf\.?|aff\.?|ined\.?|nom\.?\s*nud\.?|s\.?\s*l\.?|s\.?\s*str\.?)\b", " ", rem, flags=re.IGNORECASE)
-        rem = re.sub(r"\b\d{4}\b", " ", rem)
-        rem = rem.strip()
-        if not rem:
-            continue
-
-        # Split basionym and combination author groups
-        segments = re.split(r"[(),;&/]+|\b(?:ex|in|et|and)\b", rem)
-        for seg in segments:
-            s_clean = seg.strip()
-            if not s_clean:
-                continue
-            # Strip trailing filius marker ('Hook.f.' -> 'Hook.')
-            s_clean = re.sub(r"\.?\s*\b(?:fil|f)\.?$", ".", s_clean, flags=re.IGNORECASE).strip()
-            # Strip leading abbreviated given names/initials ('Á.Löve' -> 'Löve', 'W.A.Weber' -> 'Weber', 'Alph.Wood' -> 'Wood')
-            m_init = re.match(r"^(?:[A-ZÁÉÍÓÚÄÖÜ][a-zà-ÿ]{0,4}\.\s*)+([A-ZÁÉÍÓÚÄÖÜ][A-Za-zÀ-ÿ-]+(?:\.)?)$", s_clean)
-            if m_init:
-                s_clean = m_init.group(1).strip()
-            else:
-                # Also handle space-separated initials without periods ('A Love' -> 'Love')
-                tokens = [t for t in s_clean.split() if len(t.rstrip(".")) > 1]
-                if tokens:
-                    s_clean = tokens[-1]
-
-            tok = s_clean.strip(" .-_'\"")
-            if not tok:
-                continue
-            tok_low = tok.lower()
-            tok_ascii = _fold_ascii(tok)
-
-            if len(tok_low) >= 3 and re.search(r"[a-zà-ÿ]", tok_low):
-                authors.add(tok_low)
-            if len(tok_ascii) >= 3 and re.search(r"[a-z]", tok_ascii):
-                authors.add(tok_ascii)
-
-            for key_cand in (tok_low, tok_ascii):
-                if key_cand in _IPNI_AUTHOR_ABBREVIATIONS:
-                    expanded = _IPNI_AUTHOR_ABBREVIATIONS[key_cand]
-                    if len(expanded) >= 3:
-                        authors.add(expanded)
-
-    return authors
 
 
 _MISSING_IDENTIFIED_BY_TOKENS: Set[str] = {
@@ -1506,7 +1348,6 @@ PACKERA_SPECIALISTS: Set[str] = CORE_PACKERA_MONOGRAPHERS | REGIONAL_FLORA_SPECI
 _CORE_QUALIFIED_SPECIALIST_REGEXES: Tuple[re.Pattern, ...] = tuple(
     re.compile(pat, re.IGNORECASE)
     for pat in (
-        r"\b(?:j\.?\s*b\.?|b\.?|(?:j\.?\s+)?brandon)\s+fuller\b|\bfuller\s*,\s*(?:j\.?\s*b\.?|b\.?|j\.?\s*brandon|brandon)\b",
         r"\b(?:c\.?\s*c\.?|craig(?:\s+c\.?)?)\s+freeman\b|\bfreeman\s*,\s*(?:c\.?\s*c\.?|craig)\b",
         r"\b(?:w\.?\s*a\.?|william\s+a\.?)\s+weber\b|\bweber\s*,\s*(?:w\.?\s*a\.?|william)\b",
         r"\b(?:j\.?\s*l\.?|judith\s+l\.?)\s+golden\b|\bgolden\s*,\s*(?:j\.?\s*l\.?|judith)\b",
@@ -2092,8 +1933,9 @@ def parse_determiner_tier(
                 # Prolific regional flora collectors on blank-identifiedBy field labels route to Silver
                 is_regional_collector_fallback_silver = True
 
-    # Dynamic specialists and protologue authors apply ONLY to explicit determinations/unoverridden history,
-    # NEVER via collector fallback (recordedBy alone or collector reference).
+    # Corpus-discovered multi-herbarium specialists cap at Tier_2_Silver (never Tier_1_Gold),
+    # and apply ONLY to explicit determinations/unoverridden history (never collector fallback).
+    is_dynamic_corpus_specialist_silver = False
     if not is_specialist and dynamic_specialists and (has_explicit_det or eff_hist_for_specialist):
         dyn_spec_set: Set[str] = set()
         for item in dynamic_specialists:
@@ -2109,20 +1951,20 @@ def parse_determiner_tier(
             for src in det_sources:
                 det_surnames.update(normalize_determiner_surnames(src))
             if det_surnames & dyn_spec_set:
-                is_specialist = True
+                is_dynamic_corpus_specialist_silver = True
             else:
                 det_audit_raw = " | ".join(det_sources).lower()
                 det_audit_ascii = _fold_ascii(det_audit_raw)
                 for spec_tok in dyn_spec_set:
                     pat = rf"(?<![a-zA-ZÀ-ÿ]){re.escape(spec_tok)}(?![a-zA-ZÀ-ÿ])"
                     if re.search(pat, det_audit_raw) or re.search(pat, det_audit_ascii):
-                        is_specialist = True
+                        is_dynamic_corpus_specialist_silver = True
                         break
 
     if is_type or is_specialist:
         return "Tier_1_Gold", type_status_clean, identified_by_combined
 
-    if is_regional_collector_fallback_silver:
+    if is_regional_collector_fallback_silver or is_dynamic_corpus_specialist_silver:
         return "Tier_2_Silver", type_status_clean, identified_by_combined
 
     if "[exsiccatae " in identified_by.lower():
@@ -2176,11 +2018,9 @@ def apply_corpus_authority_tiers(
         eff_specs = set(dynamic_specialists)
         eff_herbs = set(dynamic_herbaria)
 
-    from scripts.core.harvester import _DYNAMIC_TAXON_AUTHOR_STRINGS, standardize_packera_taxon
+    from scripts.core.harvester import standardize_packera_taxon
 
-    # Collect per-taxon protologue authors across the corpus + cached GBIF synonyms
-    taxon_protologue_map: Dict[str, Set[str]] = {}
-    # Also tally (institutionCode, identifiedBy) batch statistics to detect undated institutional batch transfers
+    # Tally (institutionCode, identifiedBy) batch statistics to detect undated institutional batch transfers
     batch_voucher_counts: Dict[Tuple[str, str], int] = {}
     batch_collectors: Dict[Tuple[str, str], Set[str]] = {}
     batch_dates: Dict[Tuple[str, str], Set[str]] = {}
@@ -2200,11 +2040,6 @@ def apply_corpus_authority_tiers(
                 break
         if not std_sp:
             std_sp = _resolve_row_standardized_packera(row)
-        if std_sp:
-            extra_cached = list(_DYNAMIC_TAXON_AUTHOR_STRINGS.get(std_sp, set()))
-            auths = extract_protologue_authors([*raw_names_row, *extra_cached])
-            if auths:
-                taxon_protologue_map.setdefault(std_sp, set()).update(auths)
 
         inst_r = row.get("institutionCode")
         inst_key = "" if (inst_r is None or pd.isna(inst_r)) else str(inst_r).strip().upper()
@@ -2298,8 +2133,6 @@ def apply_corpus_authority_tiers(
 
         raw_sci = row.get("scientificName") or row.get("species_raw")
         std_sp = standardize_packera_taxon(raw_sci) or _resolve_row_standardized_packera(row)
-        row_proto_auths = set(taxon_protologue_map.get(std_sp, set())) if std_sp else set()
-        row_proto_auths |= extract_protologue_authors([row.get("scientificName"), row.get("species_raw")])
 
         tier_eval, type_clean, _ = parse_determiner_tier(
             type_status_raw=t_raw,
@@ -2309,7 +2142,7 @@ def apply_corpus_authority_tiers(
             institution_code_raw=inst_raw,
             locality_raw=loc_raw,
             habitat_raw=hab_raw,
-            dynamic_specialists=eff_specs | row_proto_auths,
+            dynamic_specialists=eff_specs,
             dynamic_herbaria=eff_herbs,
         )
 
@@ -2512,32 +2345,40 @@ def evaluate_eastern_na_cohort_filter(
     standardize_taxon_fn: Any,
     *,
     western_longitude_threshold: float = WESTERN_LONGITUDE_THRESHOLD,
-    transcontinental_longitude_threshold: float = DEFAULT_TRANSCONTINENTAL_LON,
+    transcontinental_longitude_threshold: Optional[float] = None,
     cis_longitude_threshold: float = DEFAULT_CIS_MISSISSIPPI_LON,
     min_cis_records: int = 10,
     min_cis_fraction: float = DEFAULT_MIN_CIS_MISSISSIPPI_FRAC,
     strict_species_whitelist: bool = False,
 ) -> Tuple["pd.Series", Dict[str, Any]]:
     """
-    Two-stage Cis-Mississippi Eastern North America + Disjunct cohort filter:
-      1. Species Gate: Retains only genuinely cis-Mississippi Eastern Packera species
-         (either in `CANONICAL_CIS_MISSISSIPPI_PACKERA_SPECIES` or meeting both
-         `cis_count >= eff_min_cis` and `cis_fraction >= min_cis_fraction` east of the
-         Mississippi River), dropping Cordilleran and Great Plains species (e.g. P. cana,
-         P. tridenticulata, P. streptanthifolia, P. pseudaurea, P. multilobata, P. bolanderi).
+    Two-stage Cis-Mississippi Eastern North America + Ecoregion-Bounded cohort filter:
+      1. Species Gate: Retains genuinely cis-Mississippi Eastern Packera species from
+         `resolve_eastern_resident_whitelist()` (YAML + SQLite TDWG/NatureServe) or
+         meeting `cis_count >= eff_min_cis` and `cis_fraction >= min_cis_fraction`.
       2. Voucher Gate: Retains cis-Mississippi vouchers plus trans-Mississippi disjuncts
-         (MO, AR, LA, IA, MN, and eastern TX/OK/KS/NE/SD/ND) up to `western_longitude_threshold`
-         (default `-100.0W`) for predominantly Eastern taxa (e.g. P. dubia, P. obovata, P. aurea),
-         while capping transcontinental boreal/cordilleran species (`P. paupercula`, `P. indecora`)
-         at `transcontinental_longitude_threshold` (`-95.5W`, excluding `GREAT_PLAINS_STRADDLING_STATES`)
-         and unconditionally rescuing verified nomenclatural types of retained Eastern species.
+         up to `western_longitude_threshold` (default `-100.0W`), screens transcontinental
+         boreal taxa by EPA/CEC Level III ecoregion via `evaluate_transcontinental_ecoregion_gate()`,
+         and rescues verified nomenclatural types of retained Eastern species.
     """
     if df is None or df.empty:
         empty_mask = pd.Series(dtype=bool, index=df.index if df is not None else None)
-        return empty_mask, {"retained_species": [], "dropped_species": [], "species_breakdown": {}}
+        return empty_mask, {
+            "retained_species": [],
+            "dropped_species": [],
+            "species_breakdown": {},
+            "biogeographic_boundary_status": {},
+        }
 
-    canonical_whitelist_low = {s.lower(): s for s in CANONICAL_CIS_MISSISSIPPI_PACKERA_SPECIES}
-    transcontinental_low = {s.lower() for s in TRANSCONTINENTAL_BOREAL_PACKERA_SPECIES}
+    from scripts.core.step01_biogeography_utils import (
+        _canonical_taxon_equiv_key,
+        evaluate_transcontinental_ecoregion_gate,
+        resolve_eastern_resident_whitelist,
+        resolve_transcontinental_taxa,
+    )
+    _ = transcontinental_longitude_threshold
+    whitelist_keys = {_canonical_taxon_equiv_key(s): s for s in resolve_eastern_resident_whitelist()}
+    transcontinental_keys = {_canonical_taxon_equiv_key(s) for s in resolve_transcontinental_taxa()}
 
     def _resolve_sp(row: Mapping[str, Any]) -> str:
         for col in ("species_standardized", "scientificName", "species_raw"):
@@ -2558,6 +2399,7 @@ def evaluate_eastern_na_cohort_filter(
     is_cis_list: List[bool] = []
     is_west_excl_list: List[bool] = []
     is_transcont_west_list: List[bool] = []
+    bio_status_list: List[str] = []
 
     records = df.to_dict(orient="records")
     for rec in records:
@@ -2588,20 +2430,27 @@ def evaluate_eastern_na_cohort_filter(
         )
         is_west_excl_list.append(west_excl)
 
-        # Stricter western/Plains cap for transcontinental boreal/cordilleran taxa (e.g. P. paupercula)
         tc_west = False
-        if not is_t and sp.lower() in transcontinental_low:
-            up_st = _clean_upper_state_province(st_val)
-            if up_st in GREAT_PLAINS_STRADDLING_STATES or up_st in EXCLUDED_WESTERN_STATES:
-                tc_west = True
-            elif lon_val is not None:
-                try:
-                    lf = float(lon_val)
-                    if math.isfinite(lf) and lf < float(transcontinental_longitude_threshold):
-                        tc_west = True
-                except (ValueError, TypeError):
-                    pass
+        sp_key = _canonical_taxon_equiv_key(sp)
+        if not is_t and sp_key in transcontinental_keys:
+            tc_west, bio_status = evaluate_transcontinental_ecoregion_gate(
+                st_val,
+                lat=lat_val,
+                lon=lon_val,
+                regional_group=rec.get("regional_group"),
+                is_type_specimen=is_t,
+                western_longitude_threshold=western_longitude_threshold,
+            )
+        elif is_t:
+            bio_status = "type_exempt"
+        elif west_excl:
+            bio_status = "excluded_plains_cordilleran"
+        elif cis_ok:
+            bio_status = "core_eastern"
+        else:
+            bio_status = "disjunct_western_extension"
         is_transcont_west_list.append(tc_west)
+        bio_status_list.append(bio_status)
 
     eff_min_cis = int(min_cis_records) if n_rows >= 50 else min(3, max(1, int(min_cis_records)))
 
@@ -2622,20 +2471,19 @@ def evaluate_eastern_na_cohort_filter(
         cis_n = sp_cis_counts.get(sp, 0)
         nt_n = max(1, sp_non_type_totals.get(sp, 0))
         cis_frac = float(cis_n) / float(nt_n)
-        in_whitelist = sp.lower() in canonical_whitelist_low
+        sp_key = _canonical_taxon_equiv_key(sp)
+        in_whitelist = sp_key in whitelist_keys
         if strict_species_whitelist:
             if in_whitelist:
                 retained_species.add(sp)
         else:
             if in_whitelist and (cis_n >= 1 or tot_n == sp_totals[sp] - sp_non_type_totals.get(sp, 0) or n_rows < 50):
-                # Canonical cis-Mississippi species with >=1 cis-Mississippi sheet (or type-only / small test cohort)
                 if cis_n >= 1 or sp_non_type_totals.get(sp, 0) == 0:
                     retained_species.add(sp)
                 elif cis_frac >= float(min_cis_fraction):
                     retained_species.add(sp)
                 else:
-                    # Even if only trans-Mississippi disjuncts of P. dubia / P. obovata were loaded in a subset CSV, retain canonical Eastern endemics
-                    if sp.lower() not in transcontinental_low:
+                    if sp_key not in transcontinental_keys:
                         retained_species.add(sp)
             elif cis_n >= eff_min_cis and cis_frac >= float(min_cis_fraction):
                 retained_species.add(sp)
@@ -2652,23 +2500,28 @@ def evaluate_eastern_na_cohort_filter(
             "resident_accepted": sp in retained_species,
         }
 
-    for sp, is_t, is_cis, west_excl, tc_west in zip(
-        sp_list, is_type_list, is_cis_list, is_west_excl_list, is_transcont_west_list
+    bio_status_counts: Dict[str, int] = {}
+    for sp, is_t, is_cis, west_excl, tc_west, b_st in zip(
+        sp_list, is_type_list, is_cis_list, is_west_excl_list, is_transcont_west_list, bio_status_list
     ):
         if not sp or sp not in retained_species:
             keep_flags.append(False)
+            bio_status_counts["excluded_non_resident_taxon"] = bio_status_counts.get("excluded_non_resident_taxon", 0) + 1
             if sp in species_breakdown:
                 species_breakdown[sp]["dropped"] += 1
             continue
         if is_t:
             keep_flags.append(True)
+            bio_status_counts["type_exempt"] = bio_status_counts.get("type_exempt", 0) + 1
             species_breakdown[sp]["retained"] += 1
             continue
         if west_excl or tc_west:
             keep_flags.append(False)
+            bio_status_counts["excluded_plains_cordilleran"] = bio_status_counts.get("excluded_plains_cordilleran", 0) + 1
             species_breakdown[sp]["dropped"] += 1
             continue
         keep_flags.append(True)
+        bio_status_counts[b_st] = bio_status_counts.get(b_st, 0) + 1
         species_breakdown[sp]["retained"] += 1
         if not is_cis:
             species_breakdown[sp]["disjunct_retained"] += 1
@@ -2682,6 +2535,7 @@ def evaluate_eastern_na_cohort_filter(
         "retained_species": sorted(retained_species),
         "dropped_species": dropped_species,
         "species_breakdown": species_breakdown,
+        "biogeographic_boundary_status": bio_status_counts,
     }
     return keep_series, stats
 

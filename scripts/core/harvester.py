@@ -92,14 +92,11 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.core.config import (
-    CANONICAL_CIS_MISSISSIPPI_PACKERA_SPECIES,
     CIS_MISSISSIPPI_STATES_PROVINCES,
     DEFAULT_CIS_MISSISSIPPI_LON,
     DEFAULT_GEOGRAPHIC_SCOPE,
     DEFAULT_HOME_HERBARIUM,
     DEFAULT_MIN_CIS_MISSISSIPPI_FRAC,
-    DEFAULT_TRANSCONTINENTAL_LON,
-    TRANSCONTINENTAL_BOREAL_PACKERA_SPECIES,
     DEFAULT_MIN_FILE_SIZE_KB,
     DEFAULT_MIN_MEGAPIXELS,
     DEFAULT_MIN_SHARPNESS_LAPLACIAN,
@@ -123,9 +120,14 @@ from scripts.core.db import (
     upsert_taxon_synonyms,
     upsert_vouchers_records,
 )
+from scripts.core.step01_biogeography_utils import (
+    normalize_packera_orthography,
+    resolve_eastern_resident_whitelist,
+    resolve_synonym_genera,
+)
 from scripts.core.usda_plants_ranges import filter_vouchers_by_usda_county_range
 
-_SYNONYM_GENERA: Set[str] = {"Packera", "Senecio", "Cineraria"}
+_SYNONYM_GENERA: Set[str] = resolve_synonym_genera()
 _OPEN_NOMENCLATURE_EPITHETS: Set[str] = {
     "sp", "spp", "cf", "aff", "indet", "hybrid", "unknown", "na", "x", "×",
 }
@@ -949,7 +951,7 @@ def standardize_packera_taxon(raw_name: Any) -> Optional[str]:
     if m:
         epithet = m.group(1).lower().strip("-")
         if len(epithet) >= 2 and epithet not in _OPEN_NOMENCLATURE_EPITHETS:
-            return f"Packera {epithet}"
+            return normalize_packera_orthography(f"Packera {epithet}")
         return None
 
     # 3. Dynamic GBIF Backbone resolution for historical Senecio / Cineraria synonyms
@@ -969,7 +971,6 @@ from scripts.core.taxonomy_authority import (
     classify_nomenclatural_type_rank,
     discover_corpus_authorities,
     evaluate_eastern_na_cohort_filter,
-    extract_protologue_authors,
     is_cis_mississippi_record,
     is_excluded_western_region,
     parse_determiner_tier,
@@ -977,7 +978,6 @@ from scripts.core.taxonomy_authority import (
     resolve_voucher_image_path,
     reconcile_cross_taxon_exsiccatae_with_db,
     sanitize_filename,
-    spatially_balance_and_thin_vouchers,
     stratify_duplicates,
 )
 from scripts.core.epa_ecoregions import (
@@ -1116,7 +1116,20 @@ def validate_image_quality(
                 y0, y1 = int(ch * 0.15), max(int(ch * 0.85), 1)
                 x0, x1 = int(cw * 0.15), max(int(cw * 0.85), 1)
                 roi_cv = img_cv[y0:y1, x0:x1] if (y1 > y0 and x1 > x0) else img_cv
-                sharpness_score = round(float(cv2.Laplacian(roi_cv, cv2.CV_64F).var()), 2)
+                lap_roi = cv2.Laplacian(roi_cv, cv2.CV_64F)
+                global_lap_var = float(lap_roi.var())
+                rh, rw = lap_roi.shape[:2]
+                tile_vars: List[float] = []
+                if rh >= 8 and rw >= 8:
+                    ys = np.linspace(0, rh, 9, dtype=int)
+                    xs = np.linspace(0, rw, 9, dtype=int)
+                    for ti in range(8):
+                        for tj in range(8):
+                            tile = lap_roi[ys[ti]:ys[ti + 1], xs[tj]:xs[tj + 1]]
+                            if tile.size > 0:
+                                tile_vars.append(float(tile.var()))
+                tile_p90_lap_var = float(np.percentile(tile_vars, 90)) if tile_vars else global_lap_var
+                sharpness_score = round(max(global_lap_var, tile_p90_lap_var), 2)
                 if sharpness_score < min_sharpness:
                     return False, {
                         "valid": False,
@@ -1931,9 +1944,6 @@ class VoucherHarvester:
         workspace_dir: Path = DEFAULT_WORKSPACE,
         logger: Optional[logging.Logger] = None,
         force: bool = False,
-        spatial_thin_km: float = 0.0,
-        max_per_state: Optional[int] = None,
-        max_per_region: Optional[int] = None,
         geographic_scope: str = DEFAULT_GEOGRAPHIC_SCOPE,
         countries: Optional[Union[str, List[str]]] = None,
         include_western: bool = False,
@@ -1951,8 +1961,8 @@ class VoucherHarvester:
         min_eastern_residency_records: int = 10,
         cis_mississippi_longitude_threshold: float = DEFAULT_CIS_MISSISSIPPI_LON,
         min_cis_mississippi_fraction: float = DEFAULT_MIN_CIS_MISSISSIPPI_FRAC,
-        transcontinental_longitude_threshold: float = DEFAULT_TRANSCONTINENTAL_LON,
         webp_quality: int = 92,
+        **_unused_kwargs: Any,
     ):
         self.logger = logger or logging.getLogger("VoucherHarvester")
         self.db_path = db_path
@@ -2054,7 +2064,13 @@ class VoucherHarvester:
                                     k_int = int(item["name"])
                                     cis_key_counts[k_int] = cis_key_counts.get(k_int, 0) + int(item.get("count", 0))
 
-                    canon_whitelist_low = {s.lower() for s in CANONICAL_CIS_MISSISSIPPI_PACKERA_SPECIES}
+                    canon_whitelist_low = {
+                        s.lower()
+                        for s in resolve_eastern_resident_whitelist(
+                            db_path=self.db_path,
+                            workspace_root=workspace_dir,
+                        )
+                    }
                     base_set_lower = {b.lower(): b for b in base_taxa}
                     resolved_names = set()
                     for sk, c_cis in cis_key_counts.items():
@@ -2175,9 +2191,6 @@ class VoucherHarvester:
         self.workspace_dir = Path(workspace_dir)
         self.logger = logger or logging.getLogger("VoucherHarvester")
         self.force = force
-        self.spatial_thin_km = float(spatial_thin_km or 0.0)
-        self.max_per_state = max_per_state
-        self.max_per_region = max_per_region
         self.usda_county_filter = bool(usda_county_filter)
         self.usda_county_buffer_km = float(usda_county_buffer_km)
         self.usda_exempt_gold = bool(usda_exempt_gold)
@@ -2189,7 +2202,6 @@ class VoucherHarvester:
         self.min_eastern_residency_records = max(1, int(min_eastern_residency_records))
         self.cis_mississippi_longitude_threshold = float(cis_mississippi_longitude_threshold)
         self.min_cis_mississippi_fraction = float(min_cis_mississippi_fraction)
-        self.transcontinental_longitude_threshold = float(transcontinental_longitude_threshold)
         self.webp_quality = max(1, min(100, int(webp_quality)))
         self.last_usda_filter_stats: Optional[Dict[str, Any]] = None
         self._secondary_duplicate_pool: Optional[pd.DataFrame] = None
@@ -2511,13 +2523,6 @@ class VoucherHarvester:
 
                 raw_loc_val = rec.get("locality") or rec.get("verbatimLocality")
                 raw_hab_val = rec.get("habitat")
-                # Exclude parenthetical pre-Packera basionym authors (e.g. '(L.)', '(Michx.)', '(Spreng.)') on non-types
-                non_paren_names = [re.sub(r"\([^)]*\)", " ", nm) for nm in (raw_sci_val, sci_name_val, taxon) if nm]
-                proto_auths = (
-                    extract_protologue_authors([raw_sci_val, sci_name_val, taxon])
-                    if is_rec_type
-                    else (extract_protologue_authors(non_paren_names) - {"weber", "love", "löve"})
-                )
 
                 # 5. Initial Layer 1 + Layer 2 Determiner Tier Stratification
                 determiner_tier, type_status, identified_by_clean = parse_determiner_tier(
@@ -2528,7 +2533,7 @@ class VoucherHarvester:
                     institution_code_raw=inst_code,
                     locality_raw=raw_loc_val,
                     habitat_raw=raw_hab_val,
-                    dynamic_specialists=proto_auths,
+                    dynamic_specialists=None,
                 )
 
                 # 6. North American (CEC / US EPA) Level III Ecoregion Polygon Assignment
@@ -2599,20 +2604,22 @@ class VoucherHarvester:
                 taxon_retained += 1
 
             use_server_lon_filter = bool(self.exclude_western and not self.harvest_full_continental_range)
-            canon_query_bin = _extract_canonical_binomial(taxon, {"Packera"}) or standardize_packera_taxon(taxon) or ""
-            is_transcont_query = bool(
-                self.is_genus_wide
-                and canon_query_bin.lower() in {s.lower() for s in TRANSCONTINENTAL_BOREAL_PACKERA_SPECIES}
-            )
-            eff_query_west_lon = (
-                self.transcontinental_longitude_threshold if is_transcont_query else self.western_longitude_threshold
-            )
-            for country_code in country_targets:
-                offset = 0
-                limit = 300
-                while taxon_retained < self.max_records_per_taxon:
+            eff_query_west_lon = self.western_longitude_threshold
+            limit = 300
+            n_countries = max(1, len(country_targets))
+            pass1_quota = max(1, math.ceil(self.max_records_per_taxon / n_countries))
+            country_offsets: Dict[Optional[str], int] = {c: 0 for c in country_targets}
+            country_retained: Dict[Optional[str], int] = {c: 0 for c in country_targets}
+            country_exhausted: Dict[Optional[str], bool] = {c: False for c in country_targets}
+
+            def _run_country_pages(country_code: Optional[str], stop_at_country_quota: Optional[int]) -> None:
+                while taxon_retained < self.max_records_per_taxon and not country_exhausted[country_code]:
+                    if stop_at_country_quota is not None and country_retained[country_code] >= stop_at_country_quota:
+                        break
+                    offset = country_offsets[country_code]
                     search_kwargs: Dict[str, Any] = {
                         "basisOfRecord": "PRESERVED_SPECIMEN",
+                        "mediaType": "StillImage",
                         "limit": limit,
                         "offset": offset,
                     }
@@ -2628,25 +2635,53 @@ class VoucherHarvester:
                         response = occ.search(**search_kwargs)
                     except Exception as e:
                         self.logger.error(f"GBIF API query error for '{taxon}' (country={country_code}) at offset {offset}: {e}")
+                        country_exhausted[country_code] = True
                         break
 
+                    if not isinstance(response, dict):
+                        country_exhausted[country_code] = True
+                        break
                     results = response.get("results", [])
-                    count = response.get("count", 0)
+                    raw_count = response.get("count")
                     if not results:
+                        country_exhausted[country_code] = True
                         break
 
+                    eff_count = int(raw_count) if raw_count is not None else (offset + len(results))
+                    page_processed = 0
                     for rec in results:
-                        _ingest_occurrence_record(rec, require_type=False)
                         if taxon_retained >= self.max_records_per_taxon:
                             break
+                        if stop_at_country_quota is not None and country_retained[country_code] >= stop_at_country_quota:
+                            break
+                        pre_ret = taxon_retained
+                        _ingest_occurrence_record(rec, require_type=False)
+                        page_processed += 1
+                        if taxon_retained > pre_ret:
+                            country_retained[country_code] += (taxon_retained - pre_ret)
 
-                    offset += len(results)
-                    if offset >= count:
-                        break
+                    country_offsets[country_code] = offset + page_processed
+                    if (page_processed == len(results) and country_offsets[country_code] >= eff_count) or page_processed == 0:
+                        country_exhausted[country_code] = True
                     time.sleep(0.1)
 
-                # Secondary Type-Specimen Rescue Query ensuring nomenclatural types are always captured
-                if self.exclude_western and taxon_retained < self.max_records_per_taxon:
+            for country_code in country_targets:
+                if taxon_retained >= self.max_records_per_taxon:
+                    break
+                _run_country_pages(country_code, pass1_quota)
+
+            if taxon_retained < self.max_records_per_taxon:
+                for country_code in country_targets:
+                    if taxon_retained >= self.max_records_per_taxon:
+                        break
+                    if not country_exhausted[country_code]:
+                        _run_country_pages(country_code, None)
+
+            # Secondary Type-Specimen Rescue Query ensuring nomenclatural types are always captured
+            if self.exclude_western and taxon_retained < self.max_records_per_taxon:
+                for country_code in country_targets:
+                    if taxon_retained >= self.max_records_per_taxon:
+                        break
                     type_search_kwargs: Dict[str, Any] = {
                         "basisOfRecord": "PRESERVED_SPECIMEN",
                         "typeStatus": "*",
@@ -2669,9 +2704,6 @@ class VoucherHarvester:
                             break
                         _ingest_occurrence_record(t_rec, require_type=True)
 
-                if taxon_retained >= self.max_records_per_taxon:
-                    break
-
             self.logger.info(
                 f"Taxon '{taxon}': Processed {taxon_harvested} occurrences -> "
                 f"Retained {taxon_retained} candidate records "
@@ -2692,7 +2724,6 @@ class VoucherHarvester:
                         df,
                         standardize_packera_taxon,
                         western_longitude_threshold=self.western_longitude_threshold,
-                        transcontinental_longitude_threshold=self.transcontinental_longitude_threshold,
                         cis_longitude_threshold=self.cis_mississippi_longitude_threshold,
                         min_cis_records=self.min_eastern_residency_records,
                         min_cis_fraction=self.min_cis_mississippi_fraction,
@@ -2863,22 +2894,34 @@ class VoucherHarvester:
             # Cache secondary duplicate sheets so download_and_validate_media() can promote a fallback
             # duplicate whenever a primary sheet's image URL 404s or fails optical resolution QC
             if "is_primary_duplicate" in df.columns:
-                sec_mask = ~df["is_primary_duplicate"].map(
+                prim_mask = df["is_primary_duplicate"].map(
                     lambda v: v is True or str(v).strip().lower() in {"true", "1", "t", "yes"}
                 )
-                self._secondary_duplicate_pool = df.loc[sec_mask].copy()
+                self._secondary_duplicate_pool = df.loc[~prim_mask].copy()
+                ts_col_h = "type_status" if "type_status" in df.columns else (
+                    "typeStatus" if "typeStatus" in df.columns else None
+                )
+                if ts_col_h is not None:
+                    type_mask_h = df[ts_col_h].map(lambda t: classify_nomenclatural_type_rank(t)[0] >= 1)
+                    keep_prim_or_type = prim_mask | type_mask_h
+                else:
+                    keep_prim_or_type = prim_mask
+                self._pre_thin_curated_pool = df.copy()
+                df = df.loc[keep_prim_or_type].reset_index(drop=True)
             else:
                 self._secondary_duplicate_pool = None
-            self._pre_thin_curated_pool = df.copy()
-            df = spatially_balance_and_thin_vouchers(
-                df,
-                spatial_thin_km=self.spatial_thin_km,
-                max_per_state=self.max_per_state,
-                max_per_region=self.max_per_region,
-                primary_duplicates_only=True,
-                preserve_all_gold=True,
-                workspace_dir=self.workspace_dir,
+                self._pre_thin_curated_pool = df.copy()
+            src_col_h = "scientificName" if "scientificName" in df.columns else (
+                "species_raw" if "species_raw" in df.columns else None
             )
+            if src_col_h is not None:
+                df["species_standardized"] = df[src_col_h].map(
+                    lambda x: (standardize_packera_taxon(str(x)) or str(x).strip() or "Unknown")
+                    if not pd.isna(x) else "Unknown"
+                )
+            elif "species_standardized" not in df.columns:
+                df["species_standardized"] = "Unknown"
+            df["spatial_balance_weight"] = 1.0
         return df
 
     def download_and_validate_media(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, Any]]:
@@ -3021,16 +3064,9 @@ class VoucherHarvester:
                 logger=self.logger,
                 home_herbarium=self.home_herbarium,
             )
-            if "spatial_balance_weight" in df.columns:
-                df_filtered = spatially_balance_and_thin_vouchers(
-                    df_filtered,
-                    spatial_thin_km=self.spatial_thin_km,
-                    max_per_state=self.max_per_state,
-                    max_per_region=self.max_per_region,
-                    primary_duplicates_only=True,
-                    preserve_all_gold=True,
-                    workspace_dir=self.workspace_dir,
-                )
+            df_filtered["spatial_balance_weight"] = 1.0
+        elif "spatial_balance_weight" in df.columns:
+            df_filtered["spatial_balance_weight"] = pd.Series(dtype=float)
         stats["quality_rejected"] = quality_rejected
         if mp_values:
             stats["median_mp"] = float(np.median(mp_values))

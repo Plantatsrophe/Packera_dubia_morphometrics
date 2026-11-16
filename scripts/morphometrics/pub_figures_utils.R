@@ -34,7 +34,8 @@ compute_spatial_balance_weights <- function(df, bandwidth_km = 25.0, regional_ba
   n_rows <- nrow(df)
   if (!isTRUE(recompute) && is.null(active_mask) && ("spatial_balance_weight" %in% names(df))) {
     w_in <- suppressWarnings(as.numeric(df$spatial_balance_weight))
-    if (any(is.finite(w_in) & w_in > 0)) {
+    pos_w <- w_in[is.finite(w_in) & w_in > 0]
+    if (length(pos_w) > 0L && any(abs(pos_w - 1.0) > 1e-6)) {
       w_in[!is.finite(w_in) | w_in <= 0] <- 1.0
       return(pmin(3.0, pmax(0.20, w_in)))
     }
@@ -47,6 +48,28 @@ compute_spatial_balance_weights <- function(df, bandwidth_km = 25.0, regional_ba
   lats <- suppressWarnings(as.numeric(df$decimalLatitude))
   lons <- suppressWarnings(as.numeric(df$decimalLongitude))
   ok_geo <- is.finite(lats) & is.finite(lons) & (abs(lats) <= 90.0) & (abs(lons) <= 180.0)
+  if ("is_centroid_or_inst_coord" %in% names(df)) {
+    c_raw <- df$is_centroid_or_inst_coord
+    is_cent <- if (is.logical(c_raw)) !is.na(c_raw) & c_raw else tolower(trimws(as.character(c_raw))) %in% c("true", "1", "t", "yes")
+    ok_geo <- ok_geo & !is_cent
+  }
+  if ("authority_weight" %in% names(df)) {
+    aw_num <- suppressWarnings(as.numeric(df$authority_weight))
+    if (any(is.finite(aw_num) & aw_num > 0.0)) ok_geo <- ok_geo & is.finite(aw_num) & (aw_num > 0.0)
+  } else if (is.null(active_mask) && ("determiner_tier" %in% names(df))) {
+    dt_chr <- trimws(as.character(df$determiner_tier))
+    is_tp <- if ("is_type_specimen" %in% names(df)) {
+      tr <- df$is_type_specimen
+      if (is.logical(tr)) !is.na(tr) & tr else tolower(trimws(as.character(tr))) %in% c("true", "1", "t", "yes")
+    } else rep(FALSE, n_rows)
+    is_pr <- if ("is_promoted_bronze" %in% names(df)) {
+      pr <- df$is_promoted_bronze
+      if (is.logical(pr)) !is.na(pr) & pr else tolower(trimws(as.character(pr))) %in% c("true", "1", "t", "yes")
+    } else rep(FALSE, n_rows)
+    if (any((dt_chr != "Tier_3_Bronze") | is_tp | is_pr, na.rm = TRUE)) {
+      ok_geo <- ok_geo & ((dt_chr != "Tier_3_Bronze") | is_tp | is_pr)
+    }
+  }
 
   eval_cohort_kernel <- function(cohort_idx) {
     w_c <- rep(1.0, length(cohort_idx))

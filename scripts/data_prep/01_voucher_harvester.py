@@ -194,24 +194,6 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help=argparse.SUPPRESS,
     )
     parser.add_argument(
-        "--spatial-thin-km",
-        type=float,
-        default=0.0,
-        help="Minimum spatial grid thinning distance in km per species (default: 0.0, disabled).",
-    )
-    parser.add_argument(
-        "--max-per-state",
-        type=int,
-        default=None,
-        help="Maximum vouchers retained per (species, stateProvince) (default: None, unlimited).",
-    )
-    parser.add_argument(
-        "--max-per-region",
-        type=int,
-        default=None,
-        help="Maximum vouchers retained per (species, regional_group) (default: None, unlimited).",
-    )
-    parser.add_argument(
         "--usda-county-filter",
         action=argparse.BooleanOptionalAction,
         default=cfg.harvesting.usda_county_filter,
@@ -305,9 +287,6 @@ def main(argv: list[str] | None = None) -> None:
         workspace_dir=cfg.paths.workspace_root,
         logger=logger,
         force=args.force,
-        spatial_thin_km=args.spatial_thin_km,
-        max_per_state=args.max_per_state,
-        max_per_region=args.max_per_region,
         geographic_scope=eff_scope,
         countries=eff_countries,
         include_western=arg_include_western,
@@ -325,7 +304,6 @@ def main(argv: list[str] | None = None) -> None:
         min_eastern_residency_records=int(cfg.harvesting.min_eastern_residency_records),
         cis_mississippi_longitude_threshold=float(cfg.harvesting.cis_mississippi_longitude_threshold),
         min_cis_mississippi_fraction=float(cfg.harvesting.min_cis_mississippi_fraction),
-        transcontinental_longitude_threshold=float(cfg.harvesting.transcontinental_longitude_threshold),
         webp_quality=int(cfg.harvesting.webp_quality),
     )
 

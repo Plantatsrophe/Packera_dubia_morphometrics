@@ -1513,13 +1513,16 @@ cat("BATCHED_PHASE2_R_OK\\n")
 
     def test_genomic_naming_audit_parsers_and_orthography(self) -> None:
         from scripts.core import config as cfg
+        from scripts.core.step01_biogeography_utils import _canonical_taxon_equiv_key, resolve_eastern_resident_whitelist
         from scripts.tests._r_session import rscript_available, run_warm_r_cmd
 
         ing = importlib.import_module("scripts.data_prep.06_ingest_genetic_data")
         skim_mod = importlib.import_module("scripts.data_prep.skim_offtarget_organellar")
 
-        self.assertIn("Packera millefolia", cfg.CANONICAL_CIS_MISSISSIPPI_PACKERA_SPECIES)
+        self.assertIn("Packera millefolium", cfg.CANONICAL_CIS_MISSISSIPPI_PACKERA_SPECIES)
         self.assertIn("Packera memmingeri", cfg.CANONICAL_CIS_MISSISSIPPI_PACKERA_SPECIES)
+        self.assertEqual(_canonical_taxon_equiv_key("Packera millefolia"), "packera millefolium")
+        self.assertIn("Packera millefolium", resolve_eastern_resident_whitelist())
 
         og = ing.parse_sample_code("EREHIENCS1M")
         self.assertEqual(og["taxon_code"], "EREHIE")

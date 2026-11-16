@@ -25,7 +25,7 @@ Three cross-language invariants govern every column documented below:
 | :--- | :---: | :--- | :--- |
 | `raw_name_lower` | `TEXT` | Lowercase binomial/trinomial | Normalized raw taxon string queried from GBIF, iDigBio, or historical *Senecio* and *Cineraria* labels. |
 | `canonical_packera` | `TEXT` | *Packera* taxon string | Accepted *Packera* binomial or infraspecific taxon (`subsp.` / `var.`) resolved via GBIF Backbone and Weakley (2026). |
-| `protologue_authors_json` | `TEXT` | JSON string array | Parsed basionym and combination author surnames used by the monographer loan guard in Step 01. |
+| `protologue_authors_json` | `TEXT` | JSON string array | Optional legacy metadata array retained for schema compatibility; Step 01 never promotes non-type sheets from author-string matches. |
 | `updated_at` | `TEXT` | ISO-8601 UTC timestamp | Timestamp of the most recent taxonomic backbone verification. |
 
 ### 2.2 `usda_county_ranges` (Step 01 County Distribution Cache)
@@ -69,7 +69,7 @@ Three cross-language invariants govern every column documented below:
 | `coordinateUncertainty` | `REAL` | Meters (`m`) | Reported horizontal georeferencing uncertainty (`coordinateUncertaintyInMeters`). |
 | `georef_qc_status` | `TEXT` | Georeference QC enum | Coordinate audit tag (`PASS`, `UN_GEOREFERENCED_RESCUED_TYPE`, `COUNTY_CENTROID_SCRUBBED`, `HIGH_UNCERTAINTY`). |
 | `regional_group` | `TEXT` | US EPA Level III name | Assigned EPA Level III Ecoregion from point-in-polygon lookup (or $\ge 95\%$ single-ecoregion county fallback). |
-| `spatial_balance_weight` | `REAL` | Dimensionless $(0, 1]$ | Inverse spatial density weight moderating over-collected counties in downstream models. |
+| `spatial_balance_weight` | `REAL` | Dimensionless $(0, 3]$ | Set to neutral `1.0` during lossless Step 01 Tier A ingestion, then recomputed downstream across non-quarantined active anchors in Steps 03 to 05 and Tier B preflight. |
 | `year`, `month`, `day` | `INTEGER` | Calendar integers | Parsed collection year, month (`1` to `12`), and day (`1` to `31`). |
 | `eventDate` | `TEXT` | ISO-8601 date | Standardized collection date (`YYYY-MM-DD`). |
 | `doy` | `REAL` | Day of Year (`1.0` to `366.0`) | Ordinal collection day; set to `NULL` when month/day are absent or represent `YYYY-01-01` placeholder artifacts. |
@@ -78,7 +78,7 @@ Three cross-language invariants govern every column documented below:
 | `is_primary_duplicate` | `INTEGER` | `{0, 1}` | Equals `1` for the highest-resolution / highest-authority sheet retained from a duplicate gathering set. |
 | `duplicate_count` | `INTEGER` | Count $\ge 1$ | Total duplicate sheets detected across herbaria for `exsiccatae_key`. |
 | `exsiccatae_taxonomic_conflict` | `INTEGER` | `{0, 1}` | Equals `1` when duplicate sheets of the exact same gathering carry conflicting *Packera* determinations across herbaria. |
-| `exsiccatae_gold_taxon` | `TEXT` | *Packera* taxon string | Consensus `Tier_1_Gold` or `Tier_0_Type_Anchor` determination propagated across a split duplicate gathering when present. |
+| `exsiccatae_gold_taxon` | `TEXT` | *Packera* taxon string | Non-mutating diagnostic `Tier_1_Gold` or `Tier_0_Type_Anchor` determination recorded alongside `exsiccatae_taxonomic_conflict` without altering conflicting sheet labels. |
 | `usda_symbol` | `TEXT` | USDA PLANTS code | Matched USDA PLANTS symbol for `species_standardized`. |
 | `usda_county_status` | `TEXT` | Range audit enum | `in_range`, `buffered_50km`, `out_of_range`, `state_only_match`, or `unverified` (`50 km` county border tolerance; audit-only by default). |
 | `pixels_per_mm` | `REAL` | $\text{px}\cdot\text{mm}^{-1}$ | Sheet optical resolution updated by Step 02 ruler tick-lattice or FieldPrism calibration. |

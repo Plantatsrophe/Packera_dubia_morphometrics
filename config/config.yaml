@@ -52,6 +52,36 @@ taxa:
   target_species: []
   synonyms: {}
   outgroups: []
+  synonym_genera:
+    - "Packera"
+    - "Senecio"
+    - "Cineraria"
+  eastern_resident_whitelist:
+    - "Packera anonyma"
+    - "Packera antennariifolia"
+    - "Packera aurea"
+    - "Packera balsamitae"
+    - "Packera crawfordii"
+    - "Packera dubia"
+    - "Packera gaspensis"
+    - "Packera glabella"
+    - "Packera glabrata"
+    - "Packera imparipinnata"
+    - "Packera indecora"
+    - "Packera insulae-regalis"
+    - "Packera memmingeri"
+    - "Packera millefolium"
+    - "Packera obovata"
+    - "Packera pauciflora"
+    - "Packera paupercula"
+    - "Packera plattensis"
+    - "Packera schweinitziana"
+    - "Packera serpenticola"
+    - "Packera tampicana"
+  transcontinental_boreal_taxa:
+    - "Packera paupercula"
+    - "Packera indecora"
+    - "Packera pauciflora"
 
 # Backward compatibility: Target focal taxa (empty = dynamic genus-wide Packera discovery)
 taxonomy:
@@ -111,12 +141,12 @@ harvesting:
   western_longitude_threshold: -100.0
   cis_mississippi_longitude_threshold: -90.5
   min_cis_mississippi_fraction: 0.05
-  transcontinental_longitude_threshold: -95.5
+  transcontinental_ecoregion_gate: true
   home_herbarium: "NCU"
   min_megapixels: 8.0
   min_file_size_kb: 500.0
   min_sharpness_laplacian: 80.0
-  check_sharpness: false
+  check_sharpness: true
   webp_quality: 92
   download_concurrency: 15
   usda_county_filter: false

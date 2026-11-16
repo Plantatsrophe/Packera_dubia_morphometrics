@@ -978,18 +978,31 @@ class TestSpatialBalancingAndThinning(unittest.TestCase):
         self.assertGreater(mean_w_ar, mean_w_nc)
 
     def test_max_per_region_and_cli_arguments(self):
-        """Verify max_per_region quota balancing and CLI argument parsing in 01_voucher_harvester.py."""
+        """Verify max_per_region quota balancing on Tier B thinning and Step 01 CLI defaults/removals."""
         import importlib
         cli_mod = importlib.import_module("scripts.data_prep.01_voucher_harvester")
         parser = cli_mod.build_cli_parser()
-        args = parser.parse_args([
-            "--spatial-thin-km", "15.0",
-            "--max-per-state", "50",
-            "--max-per-region", "150",
+        args = parser.parse_args([])
+        self.assertTrue(args.check_sharpness)
+        for removed_flag in ("--spatial-thin-km", "--max-per-state", "--max-per-region"):
+            with self.assertRaises(SystemExit):
+                parser.parse_args([removed_flag, "15"])
+
+        df_reg = pd.DataFrame([
+            {
+                "catalogNumber": f"REG_R1_{i}",
+                "species_standardized": "Packera dubia",
+                "determiner_tier": "Tier_2_Silver",
+                "regional_group": "Piedmont",
+                "stateProvince": "NC" if i % 2 == 0 else "VA",
+                "decimalLatitude": 35.5 + i * 0.2,
+                "decimalLongitude": -79.0 - i * 0.2,
+                "is_primary_duplicate": True,
+            }
+            for i in range(6)
         ])
-        self.assertAlmostEqual(args.spatial_thin_km, 15.0)
-        self.assertEqual(args.max_per_state, 50)
-        self.assertEqual(args.max_per_region, 150)
+        thinned_reg = spatially_balance_and_thin_vouchers(df_reg, max_per_region=3, primary_duplicates_only=True)
+        self.assertEqual(len(thinned_reg), 3)
 
 
 class TestEPALevel3EcoregionAssignment(unittest.TestCase):
@@ -1106,31 +1119,24 @@ class TestEPALevel3EcoregionAssignment(unittest.TestCase):
 class TestDynamicAuthorityEngineAndSynonymExpansion(unittest.TestCase):
     """Test suite for the 3-Layer Dynamic Authority Engine, GBIF synonym expansion, and geographic scopes."""
 
-    def test_extract_protologue_authors_basionym_and_combination(self):
-        """Verify Layer 2 extracts basionym/combination authors and IPNI expansions from scientificName strings."""
-        from scripts.core.taxonomy_authority import extract_protologue_authors
+    def test_protologue_author_promotion_retired(self):
+        """Verify protologue-author extraction is retired and historical authors do not auto-promote non-types."""
+        from scripts.core import taxonomy_authority as ta
 
-        dubia_authors = extract_protologue_authors(["Packera dubia (Spreng.) Trock & Mabb."])
-        self.assertTrue(
-            {"spreng", "sprengel", "trock", "mabb", "mabberley"}.issubset(dubia_authors),
-            f"Expected Spreng./Trock/Mabb. tokens in {dubia_authors}",
-        )
+        self.assertFalse(hasattr(ta, "extract_" + "protologue_authors"))
+        for non_type_author in ("K. Sprengel", "F. Michaux", "A. Michaux"):
+            tier_nt, _, _ = parse_determiner_tier(
+                type_status_raw=None,
+                identified_by_raw=non_type_author,
+                recorded_by_raw="Field Collector",
+                history_raw=None,
+                institution_code_raw="XYZ_LOCAL",
+                locality_raw="Sandy slope",
+                habitat_raw=None,
+            )
+            self.assertEqual(tier_nt, "Tier_3_Bronze")
 
-        paupercula_authors = extract_protologue_authors(["Packera paupercula (Michx.) Á.Löve & D.Löve"])
-        self.assertTrue(
-            {"michx", "michaux", "love", "löve"}.issubset(paupercula_authors),
-            f"Expected Michx./Löve tokens in {paupercula_authors}",
-        )
-
-        western_authors = extract_protologue_authors([
-            "Packera streptanthifolia (Greene) W.A.Weber & Á.Löve",
-            "Packera aurea var. gracilis (Pursh) Wight",
-        ])
-        self.assertTrue({"greene", "weber", "love", "pursh", "wight"}.issubset(western_authors))
-        self.assertNotIn("gracilis", western_authors)
-        self.assertNotIn("var", western_authors)
-
-        # Verify Layer 2 promotes nomenclatural author annotations to Tier_1_Gold
+        # Curated monographer (D. J. Mabberley) still classifies as Tier_1_Gold
         tier, _, _ = parse_determiner_tier(
             type_status_raw=None,
             identified_by_raw="D. J. Mabberley",
@@ -1139,7 +1145,6 @@ class TestDynamicAuthorityEngineAndSynonymExpansion(unittest.TestCase):
             institution_code_raw="XYZ_LOCAL",
             locality_raw="Sandy slope",
             habitat_raw=None,
-            dynamic_specialists=dubia_authors,
         )
         self.assertEqual(tier, "Tier_1_Gold")
 
@@ -1275,8 +1280,8 @@ class TestDynamicAuthorityEngineAndSynonymExpansion(unittest.TestCase):
         df_scored = apply_corpus_authority_tiers(df, dynamic_specialists=dyn_specs, dynamic_herbaria=dyn_herbs)
         tier_by_cat = dict(zip(df_scored["catalogNumber"], df_scored["determiner_tier"]))
 
-        self.assertEqual(tier_by_cat["LOAN_00"], "Tier_1_Gold")
-        self.assertEqual(tier_by_cat["LOAN_04"], "Tier_1_Gold")
+        self.assertEqual(tier_by_cat["LOAN_00"], "Tier_2_Silver")
+        self.assertEqual(tier_by_cat["LOAN_04"], "Tier_2_Silver")
         self.assertEqual(tier_by_cat["LOCAL_NCU_00"], "Tier_2_Silver")
         self.assertEqual(tier_by_cat["LOCAL_BRONZE_00"], "Tier_3_Bronze")
         self.assertEqual(tier_by_cat["GENERIC_00"], "Tier_3_Bronze")
@@ -2085,15 +2090,16 @@ class TestPhase1AuthorityHygieneAndExsiccataeConflict(unittest.TestCase):
         self.assertTrue((strat_df["exsiccatae_gold_taxon"] == "Packera obovata").all())
         mo_gold = strat_df[strat_df["catalogNumber"] == "MO-DUP-2"].iloc[0]
         self.assertFalse(bool(mo_gold["exsiccatae_taxonomic_conflict"]))
+        self.assertTrue(bool(mo_gold["is_primary_duplicate"]))
 
-        prim = strat_df[strat_df["catalogNumber"] == "NCU-DUP-1"].iloc[0]
-        self.assertTrue(bool(prim["exsiccatae_taxonomic_conflict"]))
-        self.assertTrue(bool(prim["is_primary_duplicate"]))
-        self.assertEqual(prim["scientificName"], "Packera obovata")
-        self.assertEqual(prim["determiner_tier"], "Tier_2_Silver")
-        # Verbatim original taxon field and exsiccatae provenance remain intact for auditability
-        self.assertEqual(prim["species_raw"], "Packera aurea")
-        self.assertIn("[exsiccatae Tier_1_Gold duplicate MO-DUP-2]", prim["identifiedBy"])
+        brz_dup = strat_df[strat_df["catalogNumber"] == "NCU-DUP-1"].iloc[0]
+        self.assertTrue(bool(brz_dup["exsiccatae_taxonomic_conflict"]))
+        self.assertFalse(bool(brz_dup["is_primary_duplicate"]))
+        # Conflicted Bronze sheet preserves original taxon, tier, and determiner without silent relabeling
+        self.assertEqual(brz_dup["scientificName"], "Packera aurea")
+        self.assertEqual(brz_dup["determiner_tier"], "Tier_3_Bronze")
+        self.assertEqual(brz_dup["species_raw"], "Packera aurea")
+        self.assertEqual(brz_dup["identifiedBy"], "Field Student")
 
         with tempfile.TemporaryDirectory() as tmp_d:
             tmp_p = Path(tmp_d)
@@ -2115,8 +2121,8 @@ class TestPhase1AuthorityHygieneAndExsiccataeConflict(unittest.TestCase):
             finally:
                 conn.close()
             self.assertIsNotNone(row_db)
-            self.assertEqual(row_db[0], "Packera obovata")
-            self.assertEqual(row_db[1], "Tier_2_Silver")
+            self.assertEqual(row_db[0], "Packera aurea")
+            self.assertEqual(row_db[1], "Tier_3_Bronze")
             self.assertEqual(int(row_db[2]), 1)
             self.assertEqual(row_db[3], "Packera obovata")
 
@@ -3092,8 +3098,8 @@ class TestStep1SystematicsAndDownstreamAuthorityAudit(unittest.TestCase):
             )
             self.assertEqual(tier, "Tier_3_Bronze", f"Non-specialist '{non_spec}' falsely promoted to {tier}")
 
-        # While initial-qualified core Packera specialists DO get Tier_1_Gold
-        for real_spec in ("T.M. Barkley", "Debra K. Trock", "R.R. Kowal", "J.F. Bain", "B.L. Turner", "C.C. Freeman", "B. Fuller"):
+        # While initial-qualified core Packera specialists DO get Tier_1_Gold (investigator Fuller routes Silver/Bronze)
+        for real_spec in ("T.M. Barkley", "Debra K. Trock", "R.R. Kowal", "J.F. Bain", "B.L. Turner", "C.C. Freeman"):
             tier, _, _ = parse_determiner_tier(
                 type_status_raw=None,
                 identified_by_raw=real_spec,
@@ -3104,6 +3110,14 @@ class TestStep1SystematicsAndDownstreamAuthorityAudit(unittest.TestCase):
                 habitat_raw=None,
             )
             self.assertEqual(tier, "Tier_1_Gold", f"Core specialist '{real_spec}' failed Tier_1_Gold: {tier}")
+        self.assertEqual(
+            parse_determiner_tier(None, "B. Fuller", "Field Collector", None, "NCU", "Granite outcrop near Wake Forest", None)[0],
+            "Tier_2_Silver",
+        )
+        self.assertEqual(
+            parse_determiner_tier(None, "B. Fuller", "Field Collector", None, "UNKNOWN_HERB", "Roadside", None)[0],
+            "Tier_3_Bronze",
+        )
 
         # 3. Verbatim identification history does NOT override a later explicit generalist identifiedBy
         tier_reannot, _, _ = parse_determiner_tier(
@@ -3677,12 +3691,9 @@ class TestStep1SystematicsAndDownstreamAuthorityAudit(unittest.TestCase):
             root_main.run_harvest(args_flags, cfg_stub)
             sent_cmd = m_sub.call_args[0][0]
             self.assertIn("--no-harvest-full-continental-range", sent_cmd)
-            self.assertIn("--spatial-thin-km", sent_cmd)
-            self.assertIn("12.5", sent_cmd)
-            self.assertIn("--max-per-state", sent_cmd)
-            self.assertIn("40", sent_cmd)
-            self.assertIn("--max-per-region", sent_cmd)
-            self.assertIn("80", sent_cmd)
+            self.assertNotIn("--spatial-thin-km", sent_cmd)
+            self.assertNotIn("--max-per-state", sent_cmd)
+            self.assertNotIn("--max-per-region", sent_cmd)
 
         # Verify R .load_authority_weight_config reads nested thresholds$authority_weights from YAML
         self.assertIn("cfg$thresholds$authority_weights", aw_r_src)
