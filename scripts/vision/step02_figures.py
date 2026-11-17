@@ -130,12 +130,12 @@ def _atomic_save_matplotlib_fig(fig: Any, out_base_path: Path, dpi: int = 300) -
 
 
 def _standardize_packera_species_py(raw_val: Any, infraspecific_val: Any = None) -> str:
-    """Standardize Packera species, nothospecies, infraspecific ranks (subsp./var./f.), or morphotype IDs."""
+    """Standardize species, nothospecies, infraspecific ranks (subsp./var./f.), or morphotype IDs."""
     if raw_val is None or pd.isna(raw_val):
-        return "Unassigned_Packera"
+        return "Unassigned_Taxon"
     s_raw = str(raw_val).strip()
-    if not s_raw or s_raw.lower() in {"none", "nan", "null", "na", "unknown", "unassigned_packera"}:
-        return "Unassigned_Packera"
+    if not s_raw or s_raw.lower() in {"none", "nan", "null", "na", "unknown", "unassigned", "unassigned_taxon", "unassigned_packera"}:
+        return "Unassigned_Taxon"
 
     if re.match(r"^(?:Morphotype|Ecotype|Complex)_[A-Za-z0-9_.-]+$", s_raw):
         return s_raw
@@ -162,15 +162,18 @@ def _standardize_packera_species_py(raw_val: Any, infraspecific_val: Any = None)
 
     base_std = None
     try:
-        from scripts.core.harvester import standardize_packera_taxon
+        from scripts.core import harvester as _harv_mod
 
-        std = standardize_packera_taxon(s_raw)
+        _std_fn = getattr(_harv_mod, "standardize_taxon_name", getattr(_harv_mod, "standardize_packera_taxon", None))
+        std = _std_fn(s_raw) if callable(_std_fn) else None
         if std and str(std).strip() and str(std).strip().lower() not in {
             "none",
             "nan",
             "null",
             "na",
             "unknown",
+            "unassigned",
+            "unassigned_taxon",
             "unassigned_packera",
         }:
             base_std = str(std).strip()
@@ -179,13 +182,13 @@ def _standardize_packera_species_py(raw_val: Any, infraspecific_val: Any = None)
 
     if base_std is None:
         cleaned = s_raw.split("(")[0].strip()
-        m_binom = re.match(r"^([A-Za-z][a-z]+)\s+(?:([x×])\s+)?([a-z][a-z-]+)\b", cleaned)
+        m_binom = re.match(r"^([A-Za-z][a-z-]+)\s+(?:(?:([x×])\s+|(×)\s*))?([a-z][a-z-]+)\b", cleaned)
         if m_binom:
             genus = m_binom.group(1).capitalize()
-            hyb = "× " if m_binom.group(2) else ""
-            base_std = f"{genus} {hyb}{m_binom.group(3).lower()}"
+            hyb = "× " if (m_binom.group(2) or m_binom.group(3)) else ""
+            base_std = f"{genus} {hyb}{m_binom.group(4).lower()}"
 
-    has_hybrid_mark = bool(re.search(r"(?:^|\s)[×x]\s+[a-z]", s_raw))
+    has_hybrid_mark = bool(re.search(r"(?:^|\s)(?:[×x]\s+|×\s*)[a-z]", s_raw))
     if base_std and has_hybrid_mark and "×" not in base_std:
         b_parts = base_std.split()
         if len(b_parts) >= 2:
@@ -199,7 +202,7 @@ def _standardize_packera_species_py(raw_val: Any, infraspecific_val: Any = None)
             return f"{base_std}{infra_suffix}"
         return base_std
 
-    return "Unassigned_Packera"
+    return "Unassigned_Taxon"
 
 
 def format_icn_taxon_mathtext(label_raw: Any, abbreviate_genus: bool = False) -> str:
@@ -709,7 +712,7 @@ def export_taxon_ect_exemplars(
             else:
                 df_work["species_clean"] = df_work[sp_col].apply(_standardize_packera_species_py)
         else:
-            df_work["species_clean"] = "Unassigned_Packera"
+            df_work["species_clean"] = "Unassigned_Taxon"
 
     if "leaf_zone" in df_work.columns:
         lz_norm = df_work["leaf_zone"].astype(str).str.strip().str.lower()
@@ -754,7 +757,7 @@ def export_taxon_ect_exemplars(
         return {}
 
     sp_counts = df_zone["species_clean"].value_counts()
-    valid_sp = [s for s in sp_counts.index if s not in {"Unassigned_Packera", "Unknown", ""} and pd.notna(s)]
+    valid_sp = [s for s in sp_counts.index if s not in {"Unassigned_Taxon", "Unassigned_Packera", "Unknown", ""} and pd.notna(s)]
     target_sp = valid_sp[: int(max_taxa)] if (max_taxa is not None and int(max_taxa) > 0) else valid_sp
     style_map = get_combinatorial_taxon_style(target_sp)
 
@@ -1301,7 +1304,7 @@ def generate_step02_publication_figures(
         else:
             df["species_clean"] = df[sp_col].apply(_standardize_packera_species_py)
     else:
-        df["species_clean"] = "Unassigned_Packera"
+        df["species_clean"] = "Unassigned_Taxon"
 
     df["solidity_clean"] = pd.to_numeric(df.get("solidity", df.get("sol_val", np.nan)), errors="coerce")
     df["ar_clean"] = pd.to_numeric(df.get("aspect_ratio", df.get("ar_val", np.nan)), errors="coerce")
@@ -1386,7 +1389,7 @@ def generate_step02_publication_figures(
     df["exemplar_ok"] = [_is_exemplar_eligible(r) for _, r in df.iterrows()]
 
     sp_counts = df["species_clean"].value_counts()
-    valid_taxa = [s for s in sp_counts.index if s not in {"Unassigned_Packera", "Unknown", ""} and pd.notna(s)]
+    valid_taxa = [s for s in sp_counts.index if s not in {"Unassigned_Taxon", "Unassigned_Packera", "Unknown", ""} and pd.notna(s)]
     if not valid_taxa:
         valid_taxa = [str(s) for s in sp_counts.index if str(s).strip()]
     active_taxa = sorted(valid_taxa)

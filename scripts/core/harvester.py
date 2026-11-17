@@ -120,6 +120,7 @@ from scripts.core.db import (
     upsert_taxon_synonyms,
     upsert_vouchers_records,
 )
+from scripts.core.progress_telemetry import StepETATracker, emit_progress
 from scripts.core.step01_biogeography_utils import (
     normalize_packera_orthography,
     resolve_eastern_resident_whitelist,
@@ -128,6 +129,24 @@ from scripts.core.step01_biogeography_utils import (
 from scripts.core.usda_plants_ranges import filter_vouchers_by_usda_county_range
 
 _SYNONYM_GENERA: Set[str] = resolve_synonym_genera()
+
+
+def _effective_target_genus(target_genus: Optional[str] = None) -> str:
+    """Resolve active target genus dynamically from explicit arg, env, or config."""
+    return (resolve_target_genus(explicit_genus=target_genus) or "Packera").strip().capitalize()
+
+
+def _effective_synonym_genera(target_genus: Optional[str] = None) -> Set[str]:
+    """Resolve genus + historical synonym genera dynamically without leaking Packera defaults."""
+    eff_g = _effective_target_genus(target_genus)
+    if eff_g.lower() == "packera":
+        return set(resolve_synonym_genera()) | {eff_g}
+    cfg_gens = set(resolve_synonym_genera())
+    if cfg_gens == {"Packera", "Senecio", "Cineraria"}:
+        return {eff_g}
+    return cfg_gens | {eff_g}
+
+
 _OPEN_NOMENCLATURE_EPITHETS: Set[str] = {
     "sp", "spp", "cf", "aff", "indet", "hybrid", "unknown", "na", "x", "×",
 }
@@ -319,15 +338,17 @@ _GBIF_REJECTED_SYNONYM_STATUSES: Set[str] = {
     "PROPARTE_SYNONYM",
 }
 _DYNAMIC_SYNONYM_TO_CANONICAL: Dict[str, str] = {}
+_INIT_TARGET_GENUS = _effective_target_genus()
+_INIT_SYN_GENERA = _effective_synonym_genera(_INIT_TARGET_GENUS)
 for _cfg_canon, _cfg_syns in (_DEFAULT_CONFIG.taxa.synonyms or {}).items():
-    _canon_norm = _extract_canonical_binomial(_cfg_canon, {"Packera"}) or _cfg_canon.strip()
+    _canon_norm = _extract_canonical_binomial(_cfg_canon, {_INIT_TARGET_GENUS}) or _cfg_canon.strip()
     if _canon_norm:
         _DYNAMIC_SYNONYM_TO_CANONICAL[_canon_norm.lower()] = _canon_norm
         for _cs in _cfg_syns or []:
             _cs_low = re.sub(r"\s+", " ", str(_cs).strip().lower())
             if _cs_low:
                 _DYNAMIC_SYNONYM_TO_CANONICAL[_cs_low] = _canon_norm
-            _cs_bin = _extract_canonical_binomial(_cs, _SYNONYM_GENERA)
+            _cs_bin = _extract_canonical_binomial(_cs, _INIT_SYN_GENERA)
             if _cs_bin:
                 _DYNAMIC_SYNONYM_TO_CANONICAL[_cs_bin.lower()] = _canon_norm
 
@@ -375,33 +396,36 @@ def _is_gbif_species_mocked() -> bool:
 
 
 def _register_dynamic_synonyms(
-    canonical_packera: str,
+    canonical_taxon: str,
     synonyms: Iterable[Any],
     author_strings: Optional[Iterable[str]] = None,
     allow_packera_species_remap: bool = True,
+    target_genus: Optional[str] = None,
 ) -> None:
     """Register discovered synonyms and author strings in the in-memory standardization cache."""
-    if not canonical_packera or not canonical_packera.startswith("Packera "):
+    eff_genus = _effective_target_genus(target_genus)
+    eff_syn_genera = _effective_synonym_genera(eff_genus)
+    if not canonical_taxon or not canonical_taxon.startswith(f"{eff_genus} "):
         return
-    _DYNAMIC_SYNONYM_TO_CANONICAL[canonical_packera.lower()] = canonical_packera
+    _DYNAMIC_SYNONYM_TO_CANONICAL[canonical_taxon.lower()] = canonical_taxon
     if author_strings:
         clean_authors = {str(a).strip() for a in author_strings if a and str(a).strip()}
         if clean_authors:
-            _DYNAMIC_TAXON_AUTHOR_STRINGS.setdefault(canonical_packera, set()).update(clean_authors)
+            _DYNAMIC_TAXON_AUTHOR_STRINGS.setdefault(canonical_taxon, set()).update(clean_authors)
             for auth_sci in clean_authors:
                 auth_low = re.sub(r"\s+", " ", auth_sci.lower())
-                auth_p_bin = _extract_canonical_binomial(auth_sci, {"Packera"})
+                auth_p_bin = _extract_canonical_binomial(auth_sci, {eff_genus})
                 if (
                     not allow_packera_species_remap
                     and auth_p_bin
-                    and auth_p_bin.lower() != canonical_packera.lower()
+                    and auth_p_bin.lower() != canonical_taxon.lower()
                     and not re.search(r"\b(?:var|subsp|ssp|f)\b", auth_low)
                 ):
                     continue
-                _DYNAMIC_SYNONYM_TO_CANONICAL[auth_low] = canonical_packera
-                auth_bin = _extract_canonical_binomial(auth_sci, _SYNONYM_GENERA)
+                _DYNAMIC_SYNONYM_TO_CANONICAL[auth_low] = canonical_taxon
+                auth_bin = _extract_canonical_binomial(auth_sci, eff_syn_genera)
                 if auth_bin:
-                    _DYNAMIC_SYNONYM_TO_CANONICAL[auth_bin.lower()] = canonical_packera
+                    _DYNAMIC_SYNONYM_TO_CANONICAL[auth_bin.lower()] = canonical_taxon
 
     for item in synonyms:
         if not item:
@@ -410,18 +434,18 @@ def _register_dynamic_synonyms(
         if not item_str:
             continue
         item_low = item_str.lower()
-        item_p_bin = _extract_canonical_binomial(item_str, {"Packera"})
+        item_p_bin = _extract_canonical_binomial(item_str, {eff_genus})
         if (
             not allow_packera_species_remap
             and item_p_bin
-            and item_p_bin.lower() != canonical_packera.lower()
+            and item_p_bin.lower() != canonical_taxon.lower()
             and not re.search(r"\b(?:var|subsp|ssp|f)\b", item_low)
         ):
             continue
-        _DYNAMIC_SYNONYM_TO_CANONICAL[item_low] = canonical_packera
-        item_bin = _extract_canonical_binomial(item_str, _SYNONYM_GENERA)
+        _DYNAMIC_SYNONYM_TO_CANONICAL[item_low] = canonical_taxon
+        item_bin = _extract_canonical_binomial(item_str, eff_syn_genera)
         if item_bin:
-            _DYNAMIC_SYNONYM_TO_CANONICAL[item_bin.lower()] = canonical_packera
+            _DYNAMIC_SYNONYM_TO_CANONICAL[item_bin.lower()] = canonical_taxon
 
 
 def _call_and_normalize_gbif_backbone(query_name: str, rank: str) -> Dict[str, Any]:
@@ -474,10 +498,10 @@ def _call_and_normalize_gbif_backbone(query_name: str, rank: str) -> Dict[str, A
     return {k: v for k, v in norm.items() if v is not None}
 
 
-def _persist_dynamic_synonyms_for_taxon(canonical_packera: str) -> None:
-    """Persist newly discovered live GBIF synonyms for `canonical_packera` into SQLite `taxon_synonyms`."""
+def _persist_dynamic_synonyms_for_taxon(canonical_taxon: str) -> None:
+    """Persist newly discovered live GBIF synonyms for `canonical_taxon` into SQLite `taxon_synonyms`."""
     if (
-        not canonical_packera
+        not canonical_taxon
         or _is_gbif_species_mocked()
         or os.environ.get("PLANTMATICS_DEMO_MODE") == "1"
         or os.environ.get("PACKERA_DEMO_MODE") == "1"
@@ -490,13 +514,13 @@ def _persist_dynamic_synonyms_for_taxon(canonical_packera: str) -> None:
             sub_map = {
                 k: v
                 for k, v in _DYNAMIC_SYNONYM_TO_CANONICAL.items()
-                if v == canonical_packera and k
+                if v == canonical_taxon and k
             }
             if not sub_map:
                 return
             auth_sub = {}
-            if canonical_packera in _DYNAMIC_TAXON_AUTHOR_STRINGS:
-                auth_sub[canonical_packera] = sorted(_DYNAMIC_TAXON_AUTHOR_STRINGS[canonical_packera])
+            if canonical_taxon in _DYNAMIC_TAXON_AUTHOR_STRINGS:
+                auth_sub[canonical_taxon] = sorted(_DYNAMIC_TAXON_AUTHOR_STRINGS[canonical_taxon])
             conn = get_db_connection(db_path=resolved, init_schema=False)
             try:
                 upsert_taxon_synonyms(conn, sub_map, auth_sub or None)
@@ -506,22 +530,31 @@ def _persist_dynamic_synonyms_for_taxon(canonical_packera: str) -> None:
         pass
 
 
-def _get_packera_genus_key_gbif(timeout_seconds: float = 5.0) -> Optional[int]:
+def _gbif_syn_cache_key(query_name: str, eff_genus: str) -> str:
+    q_low = str(query_name or "").strip().lower()
+    return q_low if eff_genus.lower() == "packera" else f"{eff_genus.lower()}::{q_low}"
+
+
+def _get_packera_genus_key_gbif(
+    timeout_seconds: float = 5.0,
+    target_genus: Optional[str] = None,
+) -> Optional[int]:
     """
-    Query pygbif.species.name_backbone(name='Packera', rank='genus', kingdom='Plantae')
-    with a fast 5-second timeout and in-memory cache to obtain the GBIF usageKey for genus Packera.
+    Query pygbif.species.name_backbone(name=<target_genus>, rank='genus', kingdom='Plantae')
+    with a fast 5-second timeout and in-memory cache to obtain the GBIF usageKey.
     """
     global _GBIF_NETWORK_UNAVAILABLE
 
+    eff_genus = _effective_target_genus(target_genus)
     is_mocked = _is_gbif_species_mocked()
-    cache_key = "packera"
+    cache_key = eff_genus.lower()
     if not is_mocked and cache_key in _GBIF_GENUS_KEY_CACHE:
         return _GBIF_GENUS_KEY_CACHE[cache_key]
     if not is_mocked and _GBIF_NETWORK_UNAVAILABLE:
         return None
 
     def _fetch_key() -> Optional[int]:
-        backbone = _call_and_normalize_gbif_backbone("Packera", "genus")
+        backbone = _call_and_normalize_gbif_backbone(eff_genus, "genus")
         if not isinstance(backbone, dict) or not backbone:
             return None
         match_type = str(backbone.get("matchType", "EXACT")).upper()
@@ -554,21 +587,26 @@ def _get_packera_genus_key_gbif(timeout_seconds: float = 5.0) -> Optional[int]:
         executor.shutdown(wait=False, cancel_futures=True)
 
 
-def discover_genus_packera_species_gbif(limit: int = 1000) -> List[str]:
+def discover_genus_packera_species_gbif(
+    limit: int = 1000,
+    target_genus: Optional[str] = None,
+) -> List[str]:
     """
     Dynamically query the GBIF Species Backbone API to collect all accepted
-    `Packera <epithet>` species binomials across the entire genus Packera.
+    `<target_genus> <epithet>` species binomials across the active genus.
     """
     global _GBIF_NETWORK_UNAVAILABLE
 
+    eff_genus = _effective_target_genus(target_genus)
     eff_limit = max(1, int(limit))
+    cache_key: Any = eff_limit if eff_genus.lower() == "packera" else (eff_limit, eff_genus.lower())
     is_mocked = _is_gbif_species_mocked()
-    if not is_mocked and eff_limit in _GBIF_GENUS_SPECIES_CACHE:
-        return list(_GBIF_GENUS_SPECIES_CACHE[eff_limit])
+    if not is_mocked and cache_key in _GBIF_GENUS_SPECIES_CACHE:
+        return list(_GBIF_GENUS_SPECIES_CACHE[cache_key])
     if not is_mocked and _GBIF_NETWORK_UNAVAILABLE:
         return []
 
-    genus_key = _get_packera_genus_key_gbif(timeout_seconds=5.0)
+    genus_key = _get_packera_genus_key_gbif(timeout_seconds=5.0, target_genus=eff_genus)
     if genus_key is None:
         return []
 
@@ -612,6 +650,7 @@ def discover_genus_packera_species_gbif(limit: int = 1000) -> List[str]:
             "DOUBTFUL",
         }
         discovered: Set[str] = set()
+        sp_pat = re.compile(rf"^{re.escape(eff_genus)}\s+(?:[x×]\s*)?[a-z-]+$")
         for item in raw_items:
             if not isinstance(item, dict):
                 continue
@@ -623,13 +662,13 @@ def discover_genus_packera_species_gbif(limit: int = 1000) -> List[str]:
                 continue
             cand = _extract_canonical_binomial(
                 item.get("canonicalName") or item.get("species") or item.get("scientificName"),
-                {"Packera"},
+                {eff_genus},
             )
-            if cand and re.match(r"^Packera\s+(?:[x×]\s*)?[a-z-]+$", cand):
+            if cand and sp_pat.match(cand):
                 discovered.add(cand)
                 sci_full = item.get("scientificName")
                 auth_list = [sci_full.strip()] if isinstance(sci_full, str) and sci_full.strip() else None
-                _register_dynamic_synonyms(cand, [cand], auth_list)
+                _register_dynamic_synonyms(cand, [cand], auth_list, target_genus=eff_genus)
 
         return sorted(discovered)
 
@@ -643,7 +682,7 @@ def discover_genus_packera_species_gbif(limit: int = 1000) -> List[str]:
     try:
         future = executor.submit(_fetch_species)
         res = future.result(timeout=5.0)
-        _GBIF_GENUS_SPECIES_CACHE[eff_limit] = list(res)
+        _GBIF_GENUS_SPECIES_CACHE[cache_key] = list(res)
         return res
     except Exception:
         _GBIF_NETWORK_UNAVAILABLE = True
@@ -652,21 +691,27 @@ def discover_genus_packera_species_gbif(limit: int = 1000) -> List[str]:
         executor.shutdown(wait=False, cancel_futures=True)
 
 
+discover_genus_species_gbif = discover_genus_packera_species_gbif
+
+
 def _query_gbif_backbone_and_synonyms(
     query_name: str,
     timeout_seconds: float = 5.0,
+    target_genus: Optional[str] = None,
 ) -> Tuple[Optional[str], List[str], List[str]]:
     """
     Query `pygbif.species.name_backbone` and `pygbif.species.name_usage(..., data='synonyms')`
     with a hard 5-second timeout and in-memory cache so offline unit tests never fail or hang.
-    Returns `(accepted_packera_binomial, synonym_binomials, raw_scientific_names_with_authors)`
+    Returns `(accepted_binomial, synonym_binomials, raw_scientific_names_with_authors)`
     and records in `_GBIF_BACKBONE_SYNONYM_FLAG` whether `query_name` itself is an exact
     unaccepted synonym in the GBIF Backbone.
     """
     global _GBIF_NETWORK_UNAVAILABLE
 
+    eff_genus = _effective_target_genus(target_genus)
+    eff_syn_genera = _effective_synonym_genera(eff_genus)
     is_mocked = _is_gbif_species_mocked()
-    cache_key = query_name.strip().lower()
+    cache_key = _gbif_syn_cache_key(query_name, eff_genus)
     if not is_mocked and cache_key in _GBIF_SYNONYM_CACHE:
         return _GBIF_SYNONYM_CACHE[cache_key]
     if not is_mocked and _GBIF_NETWORK_UNAVAILABLE:
@@ -689,21 +734,21 @@ def _query_gbif_backbone_and_synonyms(
             if isinstance(val, str) and val.strip():
                 author_SciNames.append(val.strip())
 
-        accepted_packera: Optional[str] = None
+        accepted_taxon: Optional[str] = None
         acc_fields = ("accepted", "species", "canonicalName") if is_exact_synonym else ("species", "accepted", "canonicalName")
         for cand_fld in acc_fields:
-            cand_bin = _extract_canonical_binomial(backbone.get(cand_fld), {"Packera"})
+            cand_bin = _extract_canonical_binomial(backbone.get(cand_fld), {eff_genus})
             if cand_bin:
-                accepted_packera = cand_bin
+                accepted_taxon = cand_bin
                 break
 
         usage_key = backbone.get("usageKey")
         accepted_key = backbone.get("acceptedUsageKey")
-        query_packera_bin = _extract_canonical_binomial(query_name, {"Packera"})
+        query_target_bin = _extract_canonical_binomial(query_name, {eff_genus})
         if (
             accepted_key is not None
             and str(accepted_key) != str(usage_key)
-            and (accepted_packera is None or (query_packera_bin and accepted_packera.lower() == query_packera_bin.lower()))
+            and (accepted_taxon is None or (query_target_bin and accepted_taxon.lower() == query_target_bin.lower()))
             and hasattr(species, "name_usage")
         ):
             try:
@@ -712,10 +757,10 @@ def _query_gbif_backbone_and_synonyms(
                 if isinstance(acc_info, dict) and "results" not in acc_info:
                     acc_bin = _extract_canonical_binomial(
                         acc_info.get("canonicalName") or acc_info.get("species") or acc_info.get("scientificName"),
-                        {"Packera"},
+                        {eff_genus},
                     )
                     if acc_bin:
-                        accepted_packera = acc_bin
+                        accepted_taxon = acc_bin
                     acc_sci = acc_info.get("scientificName")
                     if isinstance(acc_sci, str) and acc_sci.strip():
                         author_SciNames.append(acc_sci.strip())
@@ -724,7 +769,7 @@ def _query_gbif_backbone_and_synonyms(
 
         found_binomials: List[str] = []
         for cand_fld in ("canonicalName", "species", "accepted"):
-            b_val = _extract_canonical_binomial(backbone.get(cand_fld), _SYNONYM_GENERA)
+            b_val = _extract_canonical_binomial(backbone.get(cand_fld), eff_syn_genera)
             if b_val and b_val not in found_binomials:
                 found_binomials.append(b_val)
 
@@ -756,16 +801,16 @@ def _query_gbif_backbone_and_synonyms(
                     author_SciNames.append(sci_full.strip())
                 syn_bin = _extract_canonical_binomial(
                     item.get("canonicalName") or item.get("scientificName") or item.get("species"),
-                    _SYNONYM_GENERA,
+                    eff_syn_genera,
                 )
                 if syn_bin and syn_bin not in found_binomials:
                     found_binomials.append(syn_bin)
-                if accepted_packera is None:
-                    acc_cand = _extract_canonical_binomial(item.get("species") or item.get("accepted"), {"Packera"})
+                if accepted_taxon is None:
+                    acc_cand = _extract_canonical_binomial(item.get("species") or item.get("accepted"), {eff_genus})
                     if acc_cand:
-                        accepted_packera = acc_cand
+                        accepted_taxon = acc_cand
 
-        return accepted_packera, found_binomials, author_SciNames, is_exact_synonym
+        return accepted_taxon, found_binomials, author_SciNames, is_exact_synonym
 
     if is_mocked:
         try:
@@ -794,26 +839,23 @@ def expand_taxon_synonyms_gbif(
     taxon_name: str,
     cfg_synonyms: Optional[Dict[str, List[str]]] = None,
     protected_packera_taxa: Optional[Set[str]] = None,
+    target_genus: Optional[str] = None,
 ) -> List[str]:
     """
-    Dynamically expands a target `Packera` (or historical `Senecio`/`Cineraria`) taxon into its
-    full homotypic and heterotypic synonym query set using:
-      1. Optional configuration synonym mappings (`cfg_synonyms`).
-      2. Live GBIF Species API (`pygbif.species.name_backbone` + `pygbif.species.name_usage`),
-         guarded by a 5-second timeout and in-memory cache for offline reliability.
-    Unaccepted species-rank `Packera` synonyms in the GBIF Backbone (e.g., `Packera tomentosa`
-    under `Packera dubia`) and historical generic combinations (`Senecio`/`Cineraria`) are
-    dynamically unified under the accepted `Packera <epithet>` in `_DYNAMIC_SYNONYM_TO_CANONICAL`
-    and persisted to SQLite `taxon_synonyms`, while protecting distinct accepted `Packera`
-    species in `protected_packera_taxa` from cross-species overwriting.
+    Dynamically expands a target taxon into its full homotypic and heterotypic synonym query set
+    using config synonym mappings and the live GBIF Species API, while protecting distinct
+    accepted species in `protected_packera_taxa` from cross-species overwriting.
     """
     if taxon_name is None:
         return []
     clean_input = str(taxon_name).strip()
     if not clean_input:
         return []
-    if clean_input.lower() == "packera":
-        return ["Packera"]
+    eff_genus = _effective_target_genus(target_genus)
+    eff_syn_genera = _effective_synonym_genera(eff_genus)
+    genus_prefix = f"{eff_genus} "
+    if clean_input.lower() == eff_genus.lower():
+        return [eff_genus]
 
     protected_lower: Set[str] = {str(p).strip().lower() for p in (protected_packera_taxa or set()) if p}
     expanded: List[str] = []
@@ -830,9 +872,11 @@ def expand_taxon_synonyms_gbif(
             seen_lower.add(c_low)
             expanded.append(c_str)
 
-    canonical_packera = _extract_canonical_binomial(clean_input, {"Packera"})
-    if canonical_packera and canonical_packera.lower() in _DYNAMIC_SYNONYM_TO_CANONICAL:
-        canonical_packera = _DYNAMIC_SYNONYM_TO_CANONICAL[canonical_packera.lower()]
+    canonical_taxon = _extract_canonical_binomial(clean_input, {eff_genus})
+    if canonical_taxon and canonical_taxon.lower() in _DYNAMIC_SYNONYM_TO_CANONICAL:
+        mapped_c = _DYNAMIC_SYNONYM_TO_CANONICAL[canonical_taxon.lower()]
+        if mapped_c.startswith(genus_prefix):
+            canonical_taxon = mapped_c
 
     cfg_group_matched: List[str] = []
     if cfg_synonyms:
@@ -841,128 +885,154 @@ def expand_taxon_synonyms_gbif(
             vals_clean = [str(v).strip() for v in (cfg_vals or []) if str(v).strip()]
             all_group = [key_clean] + vals_clean
             all_group_lower = {g.lower() for g in all_group}
-            bin_input = _extract_canonical_binomial(clean_input, _SYNONYM_GENERA)
+            bin_input = _extract_canonical_binomial(clean_input, eff_syn_genera)
             if (
                 clean_input.lower() in all_group_lower
                 or (bin_input and bin_input.lower() in all_group_lower)
-                or (canonical_packera and canonical_packera.lower() == key_clean.lower())
+                or (canonical_taxon and canonical_taxon.lower() == key_clean.lower())
             ):
-                if canonical_packera is None:
-                    canonical_packera = _extract_canonical_binomial(key_clean, {"Packera"})
+                if canonical_taxon is None:
+                    canonical_taxon = _extract_canonical_binomial(key_clean, {eff_genus})
                 for g in all_group:
                     _add_candidate(g)
                     cfg_group_matched.append(g)
 
-    if canonical_packera and canonical_packera.startswith("Packera "):
-        _add_candidate(canonical_packera)
+    if canonical_taxon and canonical_taxon.startswith(genus_prefix):
+        _add_candidate(canonical_taxon)
     _add_candidate(clean_input)
 
     # Query GBIF Species Backbone + Synonyms endpoint (fast 5s timeout + cached)
-    gbif_query_target = canonical_packera if (canonical_packera and canonical_packera.startswith("Packera ")) else clean_input
-    gbif_acc, gbif_syns, gbif_author_names = _query_gbif_backbone_and_synonyms(gbif_query_target)
-    query_is_synonym = _GBIF_BACKBONE_SYNONYM_FLAG.get(gbif_query_target.strip().lower(), False)
-    if gbif_acc and gbif_acc.startswith("Packera "):
-        if not (canonical_packera and canonical_packera.startswith("Packera ")):
-            canonical_packera = gbif_acc
-        elif query_is_synonym and gbif_acc.lower() != canonical_packera.lower():
-            canonical_packera = gbif_acc
+    gbif_query_target = canonical_taxon if (canonical_taxon and canonical_taxon.startswith(genus_prefix)) else clean_input
+    gbif_acc, gbif_syns, gbif_author_names = _query_gbif_backbone_and_synonyms(
+        gbif_query_target, target_genus=eff_genus
+    )
+    query_is_synonym = _GBIF_BACKBONE_SYNONYM_FLAG.get(_gbif_syn_cache_key(gbif_query_target, eff_genus), False)
+    if gbif_acc and gbif_acc.startswith(genus_prefix):
+        if not (canonical_taxon and canonical_taxon.startswith(genus_prefix)):
+            canonical_taxon = gbif_acc
+        elif query_is_synonym and gbif_acc.lower() != canonical_taxon.lower():
+            canonical_taxon = gbif_acc
         _add_candidate(gbif_acc)
     for g_syn in gbif_syns:
         _add_candidate(g_syn)
 
-    if canonical_packera and canonical_packera.startswith("Packera "):
-        canon_low = canonical_packera.lower()
+    if canonical_taxon and canonical_taxon.startswith(genus_prefix):
+        canon_low = canonical_taxon.lower()
         other_protected = protected_lower - {canon_low}
         if cfg_group_matched:
-            _register_dynamic_synonyms(canonical_packera, cfg_group_matched, None, allow_packera_species_remap=True)
+            _register_dynamic_synonyms(
+                canonical_taxon, cfg_group_matched, None, allow_packera_species_remap=True, target_genus=eff_genus
+            )
         safe_expanded = [
             cand
             for cand in expanded
-            if (_extract_canonical_binomial(cand, {"Packera"}) or "").lower() not in other_protected
+            if (_extract_canonical_binomial(cand, {eff_genus}) or "").lower() not in other_protected
         ]
         safe_authors = [
             auth
             for auth in (gbif_author_names or [])
-            if (_extract_canonical_binomial(auth, {"Packera"}) or "").lower() not in other_protected
+            if (_extract_canonical_binomial(auth, {eff_genus}) or "").lower() not in other_protected
         ]
         _register_dynamic_synonyms(
-            canonical_packera,
+            canonical_taxon,
             safe_expanded,
             safe_authors,
             allow_packera_species_remap=True,
+            target_genus=eff_genus,
         )
-        _persist_dynamic_synonyms_for_taxon(canonical_packera)
+        _persist_dynamic_synonyms_for_taxon(canonical_taxon)
 
     return expanded
 
 
-def standardize_packera_taxon(raw_name: Any) -> Optional[str]:
+def standardize_taxon_name(raw_name: Any, target_genus: Optional[str] = None) -> Optional[str]:
     """
-    Dynamically standardizes raw Darwin Core scientific names, varieties, unaccepted `Packera`
-    synonyms, and historical `Senecio`/`Cineraria` basionyms across the genus `Packera`.
-    Uses the runtime/SQLite synonym table populated dynamically by `expand_taxon_synonyms_gbif()`
-    and occurrence ingestion, GBIF `name_backbone` synonym verification, and genus-wide botanical
-    regex matching (`^packera\\s*(?:([x×])\\s*)?([a-z-]+)`).
+    Dynamically standardize raw Darwin Core scientific names, infraspecific ranks,
+    unaccepted synonyms, and historical basionyms for the active `target_genus`.
     """
     if raw_name is None or (isinstance(raw_name, float) and math.isnan(raw_name)):
         return None
     s_orig = str(raw_name).strip()
     if not s_orig:
         return None
+    eff_genus = _effective_target_genus(target_genus)
+    eff_genus_low = eff_genus.lower()
+    genus_prefix = f"{eff_genus} "
+    eff_syn_genera = _effective_synonym_genera(eff_genus)
+
     s_compact = re.sub(r"\s+", " ", s_orig.lower())
-    if s_compact in {"none", "nan", "null", "na", "unknown", "packera"}:
+    if s_compact in {"none", "nan", "null", "na", "unknown", eff_genus_low}:
         return None
 
-    cand_bin = _extract_canonical_binomial(s_orig, _SYNONYM_GENERA)
-    is_non_packera_syn_genus = bool(cand_bin and cand_bin.split(" ", 1)[0] in (_SYNONYM_GENERA - {"Packera"}))
+    cand_bin = _extract_canonical_binomial(s_orig, eff_syn_genera)
+    is_non_target_syn_genus = bool(cand_bin and cand_bin.split(" ", 1)[0] in (eff_syn_genera - {eff_genus}))
 
     # When pygbif.species is mocked in a unit test, allow mocked basionym or exact-synonym
-    # Packera lookups to resolve directly without being shadowed by earlier cache state.
+    # lookups to resolve directly without being shadowed by earlier cache state.
     if cand_bin and _is_gbif_species_mocked():
-        gbif_acc, gbif_syns, gbif_authors = _query_gbif_backbone_and_synonyms(cand_bin)
-        is_exact_syn = _GBIF_BACKBONE_SYNONYM_FLAG.get(cand_bin.lower(), False)
-        if gbif_acc and gbif_acc.startswith("Packera ") and (is_non_packera_syn_genus or is_exact_syn):
+        gbif_acc, gbif_syns, gbif_authors = _query_gbif_backbone_and_synonyms(cand_bin, target_genus=eff_genus)
+        is_exact_syn = _GBIF_BACKBONE_SYNONYM_FLAG.get(_gbif_syn_cache_key(cand_bin, eff_genus), False)
+        if gbif_acc and gbif_acc.startswith(genus_prefix) and (is_non_target_syn_genus or is_exact_syn):
             _register_dynamic_synonyms(
                 gbif_acc,
                 [s_orig, cand_bin, *gbif_syns],
                 gbif_authors,
                 allow_packera_species_remap=is_exact_syn,
+                target_genus=eff_genus,
             )
             return gbif_acc
 
     # 1. Dynamic GBIF Backbone & runtime/SQLite synonym dictionary lookup
     if s_compact in _DYNAMIC_SYNONYM_TO_CANONICAL:
-        return _DYNAMIC_SYNONYM_TO_CANONICAL[s_compact]
+        mapped = _DYNAMIC_SYNONYM_TO_CANONICAL[s_compact]
+        if mapped.startswith(genus_prefix):
+            return mapped
 
     var_m = re.match(r"^([a-z]+\s+[a-z-]+\s+(?:var\.?|subsp\.?|ssp\.?|f\.?)\s+[a-z-]+)", s_compact)
     if var_m:
         var_raw = var_m.group(1)
         if var_raw in _DYNAMIC_SYNONYM_TO_CANONICAL:
-            return _DYNAMIC_SYNONYM_TO_CANONICAL[var_raw]
+            mapped = _DYNAMIC_SYNONYM_TO_CANONICAL[var_raw]
+            if mapped.startswith(genus_prefix):
+                return mapped
         var_dot = re.sub(r"\b(var|subsp|ssp|f)\b\.?", r"\1.", var_raw)
         if var_dot in _DYNAMIC_SYNONYM_TO_CANONICAL:
-            return _DYNAMIC_SYNONYM_TO_CANONICAL[var_dot]
+            mapped = _DYNAMIC_SYNONYM_TO_CANONICAL[var_dot]
+            if mapped.startswith(genus_prefix):
+                return mapped
 
     if cand_bin and cand_bin.lower() in _DYNAMIC_SYNONYM_TO_CANONICAL:
-        return _DYNAMIC_SYNONYM_TO_CANONICAL[cand_bin.lower()]
+        mapped = _DYNAMIC_SYNONYM_TO_CANONICAL[cand_bin.lower()]
+        if mapped.startswith(genus_prefix):
+            return mapped
 
-    # 2. General genus-wide botanical regex for any valid Packera binomial
-    m = re.match(r"^packera(?:\s*×\s*|\s+[x×]\s+|\s+)([a-z][a-z-]*)", s_compact, flags=re.IGNORECASE)
+    # 2. General genus-wide botanical regex for any valid target-genus binomial
+    m = re.match(
+        rf"^{re.escape(eff_genus_low)}(?:\s*×\s*|\s+[x×]\s+|\s+)([a-z][a-z-]*)",
+        s_compact,
+        flags=re.IGNORECASE,
+    )
     if m:
         epithet = m.group(1).lower().strip("-")
         if len(epithet) >= 2 and epithet not in _OPEN_NOMENCLATURE_EPITHETS:
-            return normalize_packera_orthography(f"Packera {epithet}")
+            cand_norm = f"{eff_genus} {epithet}"
+            return normalize_packera_orthography(cand_norm) if eff_genus_low == "packera" else cand_norm
         return None
 
-    # 3. Dynamic GBIF Backbone resolution for historical Senecio / Cineraria synonyms
-    if is_non_packera_syn_genus:
-        gbif_acc, gbif_syns, gbif_authors = _query_gbif_backbone_and_synonyms(cand_bin)
-        if gbif_acc and gbif_acc.startswith("Packera "):
-            _register_dynamic_synonyms(gbif_acc, [s_orig, cand_bin, *gbif_syns], gbif_authors)
+    # 3. Dynamic GBIF Backbone resolution for configured non-target synonym genera
+    if is_non_target_syn_genus:
+        gbif_acc, gbif_syns, gbif_authors = _query_gbif_backbone_and_synonyms(cand_bin, target_genus=eff_genus)
+        if gbif_acc and gbif_acc.startswith(genus_prefix):
+            _register_dynamic_synonyms(gbif_acc, [s_orig, cand_bin, *gbif_syns], gbif_authors, target_genus=eff_genus)
             _persist_dynamic_synonyms_for_taxon(gbif_acc)
             return gbif_acc
 
     return None
+
+
+def standardize_packera_taxon(raw_name: Any, target_genus: Optional[str] = None) -> Optional[str]:
+    """Backward-compatible alias for `standardize_taxon_name()`."""
+    return standardize_taxon_name(raw_name, target_genus=target_genus)
 
 from scripts.core.taxonomy_authority import (
     EXPORT_COLUMNS,
@@ -1291,6 +1361,15 @@ async def download_all_voucher_images(
             pending.append((url, dest))
 
     if not pending:
+        emit_progress(
+            1,
+            "media_download",
+            done=0,
+            total=total_records,
+            unit="images",
+            cached_skipped=stats["skipped"],
+            status="skipped_cached",
+        )
         if logger:
             logger.info(
                 f"All {stats['skipped']} voucher images are already cached locally. "
@@ -1304,12 +1383,34 @@ async def download_all_voucher_images(
             f"[Processed: 0 | Skipped: {stats['skipped']} | Total: {total_records}]"
         )
 
+    tracker = StepETATracker(
+        1,
+        "media_download",
+        total=total_records,
+        cached_skipped=stats["skipped"],
+        unit="images",
+    )
+    tracker.update(0, status="running")
+    n_pending = len(pending)
+    emit_stride = max(1, min(25, (n_pending // 20) or 1))
+    completed_active = 0
+
+    async def _run_tracked(coro: Any) -> Tuple[bool, bool]:
+        nonlocal completed_active
+        res_pair = await coro
+        completed_active += 1
+        if completed_active == n_pending or (completed_active % emit_stride == 0):
+            tracker.update(completed_active, status="running")
+        return res_pair
+
     if aiohttp is not None:
         connector = aiohttp.TCPConnector(limit=concurrency_limit, limit_per_host=5, ssl=False)
         async with aiohttp.ClientSession(headers=headers, connector=connector) as session:
             tasks = [
-                download_single_image(
-                    session, url, dest, semaphore, force=force, webp_quality=webp_quality, logger=logger
+                _run_tracked(
+                    download_single_image(
+                        session, url, dest, semaphore, force=force, webp_quality=webp_quality, logger=logger
+                    )
                 )
                 for url, dest in pending
             ]
@@ -1320,8 +1421,10 @@ async def download_all_voucher_images(
             )
     else:
         tasks = [
-            download_single_image(
-                None, url, dest, semaphore, force=force, webp_quality=webp_quality, logger=logger
+            _run_tracked(
+                download_single_image(
+                    None, url, dest, semaphore, force=force, webp_quality=webp_quality, logger=logger
+                )
             )
             for url, dest in pending
         ]
@@ -1330,6 +1433,8 @@ async def download_all_voucher_images(
             if async_tqdm is not None
             else await asyncio.gather(*tasks)
         )
+
+    tracker.finish(done=n_pending, status="completed")
 
     for success, was_skipped in results:
         if success:
@@ -1655,7 +1760,7 @@ def export_curated_table(
                         db_records = df[sql_cols].to_dict(orient="records")
                         for rec in db_records:
                             if not rec.get("species_standardized"):
-                                rec["species_standardized"] = standardize_packera_taxon(
+                                rec["species_standardized"] = standardize_taxon_name(
                                     rec.get("scientificName") or rec.get("species_raw")
                                 )
                         upsert_vouchers_records(conn, db_records)
@@ -1780,8 +1885,8 @@ def _detect_verbatim_identification_conflict(
     if not isinstance(rec, dict) or not resolved_canonical:
         return False, ""
 
-    target_genus = (resolve_target_genus() or "Packera").strip().capitalize()
-    allowed_genera = {target_genus, "Packera"} | set(_SYNONYM_GENERA)
+    target_genus = _effective_target_genus()
+    allowed_genera = _effective_synonym_genera(target_genus) | {target_genus}
     genus_alt = "|".join(sorted((re.escape(g) for g in allowed_genera), key=len, reverse=True))
     mention_re = re.compile(
         rf"\b({genus_alt})(?:\s*×\s*|\s+[x×]\s+|\s+)([a-z][a-z-]{{1,}})"
@@ -1797,24 +1902,32 @@ def _detect_verbatim_identification_conflict(
             return None
         low = txt.lower()
         if low in _DYNAMIC_SYNONYM_TO_CANONICAL:
-            return _DYNAMIC_SYNONYM_TO_CANONICAL[low]
+            mapped = _DYNAMIC_SYNONYM_TO_CANONICAL[low]
+            if mapped.startswith(f"{target_genus} "):
+                return mapped
         var_m = re.match(r"^([a-z]+\s+[a-z-]+\s+(?:var\.?|subsp\.?|ssp\.?|f\.?)\s+[a-z-]+)", low)
         if var_m:
             v_raw = var_m.group(1)
             v_dot = re.sub(r"\b(var|subsp|ssp|f)\b\.?", r"\1.", v_raw)
             if v_raw in _DYNAMIC_SYNONYM_TO_CANONICAL:
-                return _DYNAMIC_SYNONYM_TO_CANONICAL[v_raw]
+                mapped = _DYNAMIC_SYNONYM_TO_CANONICAL[v_raw]
+                if mapped.startswith(f"{target_genus} "):
+                    return mapped
             if v_dot in _DYNAMIC_SYNONYM_TO_CANONICAL:
-                return _DYNAMIC_SYNONYM_TO_CANONICAL[v_dot]
+                mapped = _DYNAMIC_SYNONYM_TO_CANONICAL[v_dot]
+                if mapped.startswith(f"{target_genus} "):
+                    return mapped
         cand_bin = _extract_canonical_binomial(txt, allowed_genera)
         if not cand_bin:
             return None
         if cand_bin.lower() in _DYNAMIC_SYNONYM_TO_CANONICAL:
-            return _DYNAMIC_SYNONYM_TO_CANONICAL[cand_bin.lower()]
-        if cand_bin.startswith(f"{target_genus} ") or cand_bin.startswith("Packera "):
+            mapped = _DYNAMIC_SYNONYM_TO_CANONICAL[cand_bin.lower()]
+            if mapped.startswith(f"{target_genus} "):
+                return mapped
+        if cand_bin.startswith(f"{target_genus} "):
             return cand_bin
         if _is_gbif_species_mocked():
-            std_m = standardize_packera_taxon(cand_bin)
+            std_m = standardize_taxon_name(cand_bin, target_genus=target_genus)
             if std_m:
                 return std_m
         return None
@@ -1836,7 +1949,7 @@ def _detect_verbatim_identification_conflict(
                 found.append(tx)
         return found
 
-    resolved_norm = _norm_tx(resolved_canonical) or standardize_packera_taxon(resolved_canonical) or ""
+    resolved_norm = _norm_tx(resolved_canonical) or standardize_taxon_name(resolved_canonical, target_genus=target_genus) or ""
     if not resolved_norm:
         return False, ""
 
@@ -1972,7 +2085,9 @@ class VoucherHarvester:
         self.expand_synonyms = bool(expand_synonyms)
         self.cfg_synonyms = cfg_synonyms if cfg_synonyms is not None else dict(_DEFAULT_CONFIG.taxa.synonyms or {})
 
-        explicit_genus_only = len(raw_input_taxa) == 1 and raw_input_taxa[0].lower() == "packera"
+        self.target_genus = _effective_target_genus()
+        self.synonym_genera = _effective_synonym_genera(self.target_genus)
+        explicit_genus_only = len(raw_input_taxa) == 1 and raw_input_taxa[0].lower() == self.target_genus.lower()
         scope, eff_excl_west, eff_countries = resolve_geographic_scope_settings(
             geographic_scope=geographic_scope,
             exclude_western=exclude_western,
@@ -1981,10 +2096,10 @@ class VoucherHarvester:
         )
         if not raw_input_taxa:
             self.is_genus_wide = True
-            self.logger.info("Discovering accepted Packera species across the genus via GBIF Backbone...")
-            discovered_species = discover_genus_packera_species_gbif()
-            base_taxa = discovered_species if discovered_species else ["Packera"]
-            self.logger.info(f"Discovered {len(base_taxa)} accepted Packera base taxa.")
+            self.logger.info(f"Discovering accepted {self.target_genus} species across the genus via GBIF Backbone...")
+            discovered_species = discover_genus_packera_species_gbif(target_genus=self.target_genus)
+            base_taxa = discovered_species if discovered_species else [self.target_genus]
+            self.logger.info(f"Discovered {len(base_taxa)} accepted {self.target_genus} base taxa.")
             if (
                 eff_excl_west
                 and len(base_taxa) > 1
@@ -2005,7 +2120,11 @@ class VoucherHarvester:
                 eastern_residents = []
                 try:
                     import urllib.parse
-                    genus_key_val = _get_packera_genus_key_gbif() or 3109225
+                    genus_key_val = _get_packera_genus_key_gbif(target_genus=self.target_genus)
+                    if genus_key_val is None and self.target_genus.lower() == "packera":
+                        genus_key_val = 3109225
+                    if genus_key_val is None:
+                        raise ValueError(f"Missing GBIF genusKey for {self.target_genus}")
                     cis_key_counts: Dict[int, int] = {}
                     tot_key_counts: Dict[int, int] = {}
                     cis_us_states = sorted(
@@ -2082,7 +2201,7 @@ class VoucherHarvester:
                             if isinstance(u_info, dict):
                                 cand = _extract_canonical_binomial(
                                     u_info.get("canonicalName") or u_info.get("species") or u_info.get("scientificName"),
-                                    {"Packera"},
+                                    {self.target_genus},
                                 )
                             if not cand:
                                 continue
@@ -2102,12 +2221,12 @@ class VoucherHarvester:
                 if eastern_residents:
                     self.logger.info(
                         f"Eastern NA Pre-Screen: Retained {len(eastern_residents)}/{len(base_taxa)} "
-                        f"Eastern NA resident Packera species: {eastern_residents}"
+                        f"Eastern NA resident {self.target_genus} species: {eastern_residents}"
                     )
                     base_taxa = eastern_residents
         elif explicit_genus_only:
             self.is_genus_wide = True
-            base_taxa = ["Packera"]
+            base_taxa = [self.target_genus]
         else:
             self.is_genus_wide = False
             base_taxa = raw_input_taxa
@@ -2116,7 +2235,7 @@ class VoucherHarvester:
             self._protected_packera_taxa: Set[str] = {
                 b.lower()
                 for tx in base_taxa
-                for b in [_extract_canonical_binomial(tx, {"Packera"})]
+                for b in [_extract_canonical_binomial(tx, {self.target_genus})]
                 if b
             }
         else:
@@ -2125,26 +2244,28 @@ class VoucherHarvester:
                 self._protected_packera_taxa = {
                     b.lower()
                     for tx in raw_input_taxa
-                    for b in [_extract_canonical_binomial(tx, {"Packera"})]
+                    for b in [_extract_canonical_binomial(tx, {self.target_genus})]
                     if b
                 }
 
-        if self.expand_synonyms and not (len(base_taxa) == 1 and base_taxa[0].lower() == "packera"):
+        if self.expand_synonyms and not (len(base_taxa) == 1 and base_taxa[0].lower() == self.target_genus.lower()):
             self.logger.info(
-                f"Resolving GBIF Backbone synonyms (unaccepted Packera + Senecio/Cineraria basionyms) "
-                f"across {len(base_taxa)} base taxa..."
+                f"Resolving GBIF Backbone synonyms across {len(base_taxa)} {self.target_genus} base taxa..."
             )
             if len(base_taxa) > 1 and not _is_gbif_species_mocked() and not _GBIF_NETWORK_UNAVAILABLE:
-                uncached_taxa = [tx for tx in base_taxa if tx.strip().lower() not in _GBIF_SYNONYM_CACHE]
+                uncached_taxa = [
+                    tx for tx in base_taxa
+                    if _gbif_syn_cache_key(tx, self.target_genus) not in _GBIF_SYNONYM_CACHE
+                ]
                 if uncached_taxa:
                     with concurrent.futures.ThreadPoolExecutor(max_workers=min(12, len(uncached_taxa))) as syn_pool:
-                        list(syn_pool.map(_query_gbif_backbone_and_synonyms, uncached_taxa))
+                        list(syn_pool.map(lambda t: _query_gbif_backbone_and_synonyms(t, target_genus=self.target_genus), uncached_taxa))
             if not self.is_genus_wide:
-                # Protect explicitly co-requested ACCEPTED Packera species while allowing unaccepted
-                # synonyms (e.g. Packera tomentosa -> Packera dubia) to merge into their accepted species.
+                # Protect explicitly co-requested ACCEPTED species while allowing unaccepted
+                # synonyms to merge into their accepted species.
                 for tx in base_taxa:
-                    b_tx = _extract_canonical_binomial(tx, {"Packera"})
-                    if b_tx and not _GBIF_BACKBONE_SYNONYM_FLAG.get(b_tx.lower(), False):
+                    b_tx = _extract_canonical_binomial(tx, {self.target_genus})
+                    if b_tx and not _GBIF_BACKBONE_SYNONYM_FLAG.get(_gbif_syn_cache_key(b_tx, self.target_genus), False):
                         self._protected_packera_taxa.add(b_tx.lower())
             expanded_taxa: List[str] = []
             seen_t: Set[str] = set()
@@ -2153,6 +2274,7 @@ class VoucherHarvester:
                     tx,
                     cfg_synonyms=self.cfg_synonyms,
                     protected_packera_taxa=self._protected_packera_taxa,
+                    target_genus=self.target_genus,
                 ):
                     low_tx = syn_tx.lower()
                     if low_tx not in seen_t:
@@ -2226,8 +2348,8 @@ class VoucherHarvester:
             us_spatial_graph = {}
 
         for taxon in self.taxa:
-            is_direct_genus_query = taxon.strip().lower() == "packera"
-            genus_key = _get_packera_genus_key_gbif() if is_direct_genus_query else None
+            is_direct_genus_query = taxon.strip().lower() == self.target_genus.lower()
+            genus_key = _get_packera_genus_key_gbif(target_genus=self.target_genus) if is_direct_genus_query else None
             country_desc = ",".join(self.countries) if self.countries else "GLOBAL"
             self.logger.info(
                 f"Querying GBIF API for taxon: '{taxon}' "
@@ -2486,38 +2608,42 @@ class VoucherHarvester:
                 # Dynamically map historical non-Packera genera (Senecio / Cineraria) AND occurrence records
                 # explicitly flagged by GBIF as unaccepted synonyms (e.g. Packera tomentosa -> Packera dubia),
                 # while protecting explicitly requested accepted Packera segregates.
-                raw_packera_bin = _extract_canonical_binomial(raw_sci_val, {"Packera"})
+                raw_target_bin = _extract_canonical_binomial(raw_sci_val, {self.target_genus})
                 rec_tax_status = str(rec.get("taxonomicStatus") or rec.get("status") or "").strip().upper()
                 is_rec_synonym = rec_tax_status in _GBIF_SYNONYM_STATUSES
                 is_protected_raw = bool(
-                    raw_packera_bin
-                    and raw_packera_bin.lower() in self._protected_packera_taxa
+                    raw_target_bin
+                    and raw_target_bin.lower() in self._protected_packera_taxa
                     and not (self.expand_synonyms and is_rec_synonym)
                 )
                 acc_from_rec: Optional[str] = None
-                if raw_packera_bin is None or (is_rec_synonym and not is_protected_raw):
+                if raw_target_bin is None or (is_rec_synonym and not is_protected_raw):
                     for acc_fld in ("acceptedScientificName", "species"):
-                        cand_acc = _extract_canonical_binomial(rec.get(acc_fld), {"Packera"})
+                        cand_acc = _extract_canonical_binomial(rec.get(acc_fld), {self.target_genus})
                         if cand_acc:
                             acc_from_rec = cand_acc
                             break
-                    if acc_from_rec and (raw_packera_bin is None or acc_from_rec.lower() != raw_packera_bin.lower()):
+                    if acc_from_rec and (raw_target_bin is None or acc_from_rec.lower() != raw_target_bin.lower()):
                         if acc_from_rec.lower() not in (self._protected_packera_taxa - {acc_from_rec.lower()}) or not is_protected_raw:
-                            syn_items_to_reg = [raw_sci_val] + ([raw_packera_bin] if raw_packera_bin else [])
+                            syn_items_to_reg = [raw_sci_val] + ([raw_target_bin] if raw_target_bin else [])
                             _register_dynamic_synonyms(
                                 acc_from_rec,
                                 syn_items_to_reg,
                                 [raw_sci_val],
                                 allow_packera_species_remap=is_rec_synonym,
+                                target_genus=self.target_genus,
                             )
 
-                resolved_packera = standardize_packera_taxon(raw_sci_val) or acc_from_rec
+                resolved_taxon = standardize_taxon_name(raw_sci_val, target_genus=self.target_genus) or acc_from_rec
                 if is_direct_genus_query or self.is_genus_wide:
-                    if not resolved_packera or not re.match(r"^Packera\s+(?:[x×]\s*)?[a-z-]+$", resolved_packera):
+                    if not resolved_taxon or not re.match(
+                        rf"^{re.escape(self.target_genus)}\s+(?:[x×]\s*)?[a-z-]+$",
+                        resolved_taxon,
+                    ):
                         seen_catalog_keys.discard(unique_key)
                         return
-                if resolved_packera and not raw_sci_val.lower().startswith(resolved_packera.lower()):
-                    sci_name_val = resolved_packera
+                if resolved_taxon and not raw_sci_val.lower().startswith(resolved_taxon.lower()):
+                    sci_name_val = resolved_taxon
                 else:
                     sci_name_val = raw_sci_val
 
@@ -2548,7 +2674,7 @@ class VoucherHarvester:
 
                 verbatim_conflict, verbatim_gold_taxon = _detect_verbatim_identification_conflict(
                     rec=rec,
-                    resolved_canonical=(resolved_packera or sci_name_val),
+                    resolved_canonical=(resolved_taxon or sci_name_val),
                     determiner_tier=determiner_tier,
                 )
                 is_cent_q, coord_q_reason = evaluate_coordinate_centroid_quarantine(
@@ -2712,17 +2838,18 @@ class VoucherHarvester:
 
         df = pd.DataFrame(all_curated_records)
         if not df.empty:
+            _std_fn = lambda x: standardize_taxon_name(x, target_genus=self.target_genus)
             # Eastern NA Biogeographic Residency Screen + Full US+CA Continental Range Retention for Residents
             is_direct_single_genus_tiny_mock = (
                 len(self.taxa) == 1
-                and self.taxa[0].strip().lower() == "packera"
+                and self.taxa[0].strip().lower() == self.target_genus.lower()
                 and len(df) < self.min_eastern_residency_records
             )
             if self.exclude_western and not is_direct_single_genus_tiny_mock:
                 if self.is_genus_wide and not self.harvest_full_continental_range:
                     keep_res_mask, cis_stats = evaluate_eastern_na_cohort_filter(
                         df,
-                        standardize_packera_taxon,
+                        _std_fn,
                         western_longitude_threshold=self.western_longitude_threshold,
                         cis_longitude_threshold=self.cis_mississippi_longitude_threshold,
                         min_cis_records=self.min_eastern_residency_records,
@@ -2738,7 +2865,7 @@ class VoucherHarvester:
                         )
                 else:
                     canon_series = df["scientificName"].map(
-                        lambda x: standardize_packera_taxon(x) or str(x).strip()
+                        lambda x: _std_fn(x) or str(x).strip()
                     )
                     west_mask = (
                         df["_is_western_rec"].astype(bool)
@@ -2827,7 +2954,7 @@ class VoucherHarvester:
             if (not is_gbif_mocked) or has_local_usda_cache:
                 df, usda_stats = filter_vouchers_by_usda_county_range(
                     df=df,
-                    standardize_taxon_fn=standardize_packera_taxon,
+                    standardize_taxon_fn=_std_fn,
                     synonym_to_canonical=_DYNAMIC_SYNONYM_TO_CANONICAL,
                     county_buffer_km=self.usda_county_buffer_km,
                     exempt_gold=self.usda_exempt_gold,
@@ -2838,6 +2965,7 @@ class VoucherHarvester:
                     allow_network=(not is_gbif_mocked),
                     force_refresh=self.force,
                     drop_out_of_range=False,
+                    target_genus=self.target_genus,
                     logger=self.logger,
                 )
                 self.last_usda_filter_stats = usda_stats
@@ -2859,7 +2987,7 @@ class VoucherHarvester:
                         df = reconcile_cross_taxon_exsiccatae_with_db(
                             df,
                             conn_rec,
-                            standardize_fn=standardize_packera_taxon,
+                            standardize_fn=_std_fn,
                         )
                     finally:
                         conn_rec.close()
@@ -2916,7 +3044,7 @@ class VoucherHarvester:
             )
             if src_col_h is not None:
                 df["species_standardized"] = df[src_col_h].map(
-                    lambda x: (standardize_packera_taxon(str(x)) or str(x).strip() or "Unknown")
+                    lambda x: (_std_fn(str(x)) or str(x).strip() or "Unknown")
                     if not pd.isna(x) else "Unknown"
                 )
             elif "species_standardized" not in df.columns:

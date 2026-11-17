@@ -50,11 +50,14 @@ if str(PROJECT_ROOT) not in sys.path:
 from scripts.core.artifact_manager import ensure_model_weights
 from scripts.core.config import (
     PipelineConfig,
+    _count_csv_rows,
     ensure_run_curated_vouchers_snapshot,
     generate_default_run_id,
     get_active_run_dir,
     initialize_run_directory,
     resolve_canonical_run_id,
+    resolve_python_executable,
+    resolve_target_genus,
     write_run_metadata,
 )
 from scripts.core.db import (
@@ -66,13 +69,24 @@ from scripts.core.db import (
     purge_runs_only,
     purge_segments_and_runs,
 )
-from scripts.core.logger import setup_logging
+from scripts.core.logger import StepETATracker, emit_progress, setup_logging
 
 logger = setup_logging(name="PackeraPipeline")
 
 
 def _apply_explicit_db_arg(args: Optional[argparse.Namespace], run_dir: Optional[Path] = None) -> None:
-    """Export optional `--db`, `--demo`, `--threads`, and `--gpu-batch-size` CLI overrides to environment."""
+    """Export optional `--db`, `--demo`, `--threads`, `--gpu-batch-size`, Python bin, and target genus overrides."""
+    os.environ["PLANTMATICS_PYTHON_BIN"] = resolve_python_executable()
+    explicit_genus = (
+        (getattr(args, "target_genus", None) or getattr(args, "genus", None))
+        if args is not None
+        else None
+    )
+    os.environ["PLANTMATICS_TARGET_GENUS"] = resolve_target_genus(explicit_genus=explicit_genus)
+    if run_dir is not None:
+        resolved_rd = str(Path(run_dir).resolve())
+        os.environ["PLANTMATICS_RUN_DIR"] = resolved_rd
+        os.environ["PACKERA_RUN_DIR"] = resolved_rd
     if args is None:
         return
     threads_arg = getattr(args, "threads", None)
@@ -688,8 +702,18 @@ def run_harvest(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         cmd.append("--verbose")
 
     logger.info(f"Running command: {' '.join(cmd)}")
-    subprocess.run(cmd, check=True)
-    verify_file_exists(output_csv, "harvested vouchers CSV output")
+    t01 = StepETATracker(1, "harvest", total=1, unit="vouchers", run_dir=run_dir)
+    t01.update(0, status="running")
+    try:
+        subprocess.run(cmd, check=True)
+        verify_file_exists(output_csv, "harvested vouchers CSV output")
+    except Exception:
+        emit_progress(1, "harvest", 0, 1, unit="vouchers", status="failed", run_dir=run_dir)
+        raise
+    n_out = max(1, _count_csv_rows(output_csv)) if output_csv.is_file() else 1
+    t01.total = n_out
+    t01.n_active = n_out
+    t01.finish(done=n_out, status="completed")
     if run_dir is not None:
         _sync_run_cohort_in_db(run_dir, args=args, cfg=cfg)
         write_run_metadata(run_dir, start_time=start_ts)
@@ -821,15 +845,23 @@ def run_segment(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         cmd.append("--force")
 
     logger.info(f"Running command: {' '.join(cmd)}")
+    n_v02 = max(1, _count_csv_rows(vouchers_csv)) if vouchers_csv.is_file() else 1
+    t02 = StepETATracker(2, "segment", total=n_v02, unit="vouchers", run_dir=run_dir)
+    t02.update(0, status="running")
     try:
         subprocess.run(cmd, check=True)
     except subprocess.CalledProcessError as exc:
+        emit_progress(2, "segment", 0, n_v02, unit="vouchers", status="failed", run_dir=run_dir)
         logger.error(f"LeafMachine3 segmentation failed with exit code {exc.returncode}")
         sys.exit(exc.returncode)
+    except Exception:
+        emit_progress(2, "segment", 0, n_v02, unit="vouchers", status="failed", run_dir=run_dir)
+        raise
 
     contours_dir = (run_dir / "data" / "contours") if run_dir is not None else Path(cfg["paths"]["contours_dir"])
     if not _db_has_extracted_contours(contours_dir):
         verify_dir_has_files(contours_dir, "*.csv", "extracted leaf contours")
+    t02.finish(done=n_v02, status="completed")
     if run_dir is not None:
         _sync_run_cohort_in_db(run_dir, args=args, cfg=cfg)
         write_run_metadata(run_dir, start_time=start_ts)
@@ -921,8 +953,16 @@ def run_morphometrics(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         "--seed", str(args.seed if getattr(args, "seed", None) is not None else getattr(m_cfg, "random_seed", 42)),
     ]
     logger.info(f"Running EFA: {' '.join(cmd_efa)}")
-    subprocess.run(cmd_efa, check=True)
-    verify_file_exists(efa_out, "EFA harmonics table")
+    n_v03 = max(1, _count_csv_rows(vouchers_csv)) if vouchers_csv.is_file() else 1
+    t03 = StepETATracker(3, "efa", total=n_v03, unit="vouchers", run_dir=run_dir)
+    t03.update(0, status="running")
+    try:
+        subprocess.run(cmd_efa, check=True)
+        verify_file_exists(efa_out, "EFA harmonics table")
+    except Exception:
+        emit_progress(3, "efa", 0, n_v03, unit="vouchers", status="failed", run_dir=run_dir)
+        raise
+    t03.finish(done=n_v03, status="completed")
 
     # Step 3B: GMM & CDA
     gmm_script = PROJECT_ROOT / "scripts" / "morphometrics" / "04_gmm_morphotools.R"
@@ -1005,8 +1045,16 @@ def run_morphometrics(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     if intraspecific_mode:
         cmd_gmm.append("--intraspecific-mode")
     logger.info(f"Running GMM/CDA: {' '.join(cmd_gmm)}")
-    subprocess.run(cmd_gmm, check=True)
-    verify_file_exists(flags_out, "morphometric flags CSV")
+    n_v04 = max(1, _count_csv_rows(efa_out)) if efa_out.is_file() else n_v03
+    t04 = StepETATracker(4, "gmm_cda", total=n_v04, unit="otus", run_dir=run_dir)
+    t04.update(0, status="running")
+    try:
+        subprocess.run(cmd_gmm, check=True)
+        verify_file_exists(flags_out, "morphometric flags CSV")
+    except Exception:
+        emit_progress(4, "gmm_cda", 0, n_v04, unit="otus", status="failed", run_dir=run_dir)
+        raise
+    t04.finish(done=n_v04, status="completed")
     if run_dir is not None:
         write_run_metadata(run_dir, start_time=start_ts)
     logger.info("Phase 3 completed successfully.")
@@ -1173,6 +1221,7 @@ def run_genomics_stream(
     """Execute standalone Step 06 genomic ingestion and phylogenomic integration when data/genomics/ has inputs."""
     env_geno = (os.environ.get("PLANTMATICS_GENOMICS_DIR") or os.environ.get("PACKERA_GENOMICS_DIR") or "").strip()
     if respect_test_mock_guard and not env_geno and getattr(subprocess.run, "__module__", "") != "subprocess":
+        emit_progress(6, "genomics", 0, 0, unit="samples", status="skipped_cached", run_dir=run_dir)
         return None
 
     import importlib
@@ -1183,6 +1232,7 @@ def run_genomics_stream(
     if not discover_genomic_inputs(genomics_dir).has_genetic_payload:
         logger.info("[Step 06/07] No genomic files staged in data/genomics/ - skipping standalone Step 06")
         print("[Step 06/07] No genomic files staged in data/genomics/ - skipping standalone Step 06")
+        emit_progress(6, "genomics", 0, 0, unit="samples", status="skipped_cached", run_dir=run_dir)
         return None
 
     eff_reports_dir = (
@@ -1227,37 +1277,44 @@ def run_genomics_stream(
         cmd_ingest.append("--demo")
 
     logger.info("Detected staged genomic inputs in %s; running standalone Step 06.", genomics_dir)
-    subprocess.run(cmd_ingest, check=True)
+    t06 = StepETATracker(6, "genomics", total=1, unit="samples", run_dir=run_dir)
+    t06.update(0, status="running")
+    try:
+        subprocess.run(cmd_ingest, check=True)
 
-    geno_script = PROJECT_ROOT / "scripts" / "analysis" / "06_genomic_phylogenomics.R"
-    verify_file_exists(geno_script, "Step 06 Genomic Phylogenomics R script")
-    cmd_geno = [
-        rscript_bin,
-        str(geno_script),
-        "--genomics-dir",
-        str(genomics_dir),
-        "--parsed-dir",
-        str(eff_reports_dir),
-        "--out-dir",
-        str(geno_out_dir),
-        "--tables-dir",
-        str(tables_dir),
-        "--figure-a",
-        str(figures_dir / "fig06a_genomic_pcoa_tree_concordance.png"),
-        "--figure-b",
-        str(figures_dir / "fig06b_reticulation_gdi_landscape.png"),
-        "--figure-c",
-        str(figures_dir / "fig06c_cytonuclear_paralog_cytotype_audit.png"),
-        "--run-id",
-        eff_run_id,
-    ]
-    if db_arg and str(db_arg) != ":memory:":
-        cmd_geno.extend(["--db", str(db_arg)])
-    if is_demo:
-        cmd_geno.append("--demo")
+        geno_script = PROJECT_ROOT / "scripts" / "analysis" / "06_genomic_phylogenomics.R"
+        verify_file_exists(geno_script, "Step 06 Genomic Phylogenomics R script")
+        cmd_geno = [
+            rscript_bin,
+            str(geno_script),
+            "--genomics-dir",
+            str(genomics_dir),
+            "--parsed-dir",
+            str(eff_reports_dir),
+            "--out-dir",
+            str(geno_out_dir),
+            "--tables-dir",
+            str(tables_dir),
+            "--figure-a",
+            str(figures_dir / "fig06a_genomic_pcoa_tree_concordance.png"),
+            "--figure-b",
+            str(figures_dir / "fig06b_reticulation_gdi_landscape.png"),
+            "--figure-c",
+            str(figures_dir / "fig06c_cytonuclear_paralog_cytotype_audit.png"),
+            "--run-id",
+            eff_run_id,
+        ]
+        if db_arg and str(db_arg) != ":memory:":
+            cmd_geno.extend(["--db", str(db_arg)])
+        if is_demo:
+            cmd_geno.append("--demo")
 
-    logger.info(f"Running Step 06 Genomic Phylogenomics: {' '.join(cmd_geno)}")
-    subprocess.run(cmd_geno, check=True)
+        logger.info(f"Running Step 06 Genomic Phylogenomics: {' '.join(cmd_geno)}")
+        subprocess.run(cmd_geno, check=True)
+    except Exception:
+        emit_progress(6, "genomics", 0, 1, unit="samples", status="failed", run_dir=run_dir)
+        raise
+    t06.finish(done=1, status="completed")
     return geno_out_dir
 
 
@@ -1488,8 +1545,16 @@ def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         cmd_spatial.append("--demo")
 
     logger.info(f"Running Phase 5 Multimodal Spatial RF: {' '.join(cmd_spatial)}")
-    subprocess.run(cmd_spatial, check=True)
-    verify_file_exists(conflict_flags, "multimodal conflict flags CSV")
+    n_v05 = max(1, _count_csv_rows(vouchers_csv)) if vouchers_csv.is_file() else 1
+    t05 = StepETATracker(5, "spatial_rf", total=n_v05, unit="vouchers", run_dir=run_dir)
+    t05.update(0, status="running")
+    try:
+        subprocess.run(cmd_spatial, check=True)
+        verify_file_exists(conflict_flags, "multimodal conflict flags CSV")
+    except Exception:
+        emit_progress(5, "spatial_rf", 0, n_v05, unit="vouchers", status="failed", run_dir=run_dir)
+        raise
+    t05.finish(done=n_v05, status="completed")
 
     # -------------------------------------------------------------------------
     # Stage 6 (Automatic when data/genomics/ populated): Standalone Step 06 Genomic & Phylogenomic Stream
@@ -1521,7 +1586,7 @@ def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     )
     focal_taxon_raw = focal_taxon or ""
     if focal_taxon_raw:
-        focal_slug = re.sub(r"[^A-Za-z0-9]+", "_", focal_taxon_raw).strip("_") or "Packera"
+        focal_slug = re.sub(r"[^A-Za-z0-9]+", "_", focal_taxon_raw).strip("_") or resolve_target_genus()
         default_fig_name = f"Figure_Integrative_{focal_slug}_Revision.png"
         default_rep_name = f"{focal_slug}_Taxonomic_Revision_Summary.md"
         fallback_fig = str(figures_dir / default_fig_name)
@@ -1580,10 +1645,17 @@ def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     if getattr(args, "demo", False):
         cmd_triage.append("--demo")
     logger.info(f"Running Step 07 Triage Dashboard Synthesis: {' '.join(cmd_triage)}")
-    subprocess.run(cmd_triage, check=True)
-    verify_file_exists(output_queue, "triage queue CSV")
-    verify_file_exists(synthesis_report, "taxonomic revision summary markdown report")
-    verify_file_exists(synthesis_html, "interactive triage HTML dashboard")
+    t07 = StepETATracker(7, "synthesis_triage", total=n_v05, unit="vouchers", run_dir=run_dir)
+    t07.update(0, status="running")
+    try:
+        subprocess.run(cmd_triage, check=True)
+        verify_file_exists(output_queue, "triage queue CSV")
+        verify_file_exists(synthesis_report, "taxonomic revision summary markdown report")
+        verify_file_exists(synthesis_html, "interactive triage HTML dashboard")
+    except Exception:
+        emit_progress(7, "synthesis_triage", 0, n_v05, unit="vouchers", status="failed", run_dir=run_dir)
+        raise
+    t07.finish(done=n_v05, status="completed")
 
     if run_dir is not None:
         write_run_metadata(run_dir, start_time=start_ts)

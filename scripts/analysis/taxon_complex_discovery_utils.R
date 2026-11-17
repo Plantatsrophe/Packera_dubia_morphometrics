@@ -5,6 +5,19 @@ if (grDevices::dev.cur() == 1L) grDevices::pdf(NULL)
 for (.ca_p in c("scripts/analysis/step07_complex_affinity_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "step07_complex_affinity_utils.R"))) {
   if (!is.na(.ca_p) && nzchar(.ca_p) && file.exists(.ca_p)) { source(.ca_p); break }
 }
+.tc_target_genus <- function() {
+  g <- if (exists("resolve_r_target_genus", mode = "function")) resolve_r_target_genus() else "Packera"
+  if (is.null(g) || !nzchar(trimws(g))) "Packera" else trimws(g)
+}
+.tc_is_binomial <- function(x) {
+  if (exists("is_active_genus_binomial", mode = "function")) return(is_active_genus_binomial(x))
+  g_esc <- gsub("([.|()\\^{}+$*?]|\\[|\\])", "\\\\\\1", .tc_target_genus())
+  grepl(paste0("^", g_esc, "[[:space:]]+[a-z][a-z-]+$"), trimws(as.character(x)))
+}
+.tc_abbrev <- function(x) {
+  if (exists("abbreviate_binomial", mode = "function")) return(abbreviate_binomial(x))
+  sub("^([A-Za-z])[A-Za-z-]+[[:space:]]+", "\\1. ", as.character(x))
+}
 # 1. Clean Basal_Rosette Anchor Selection (Excluding Confident Noise, Passive, DNA-Contradicted & Misidentifications)
 select_taxon_anchors <- function(morph_df) {
   morph_df <- as.data.frame(morph_df, stringsAsFactors = FALSE); n <- nrow(morph_df)
@@ -206,7 +219,7 @@ evaluate_hierarchical_complex_delimitation <- function(morph_df, pheno_res = NUL
   morph_disagrees <- !is.na(cda_pred) & nzchar(cda_pred) & (cda_pred != sp_given) & is.finite(cda_prob) & (cda_prob >= 0.50)
   edaph_disagrees <- !is.na(ed_pred) & nzchar(ed_pred) & (ed_pred != sp_given) & is.finite(d_edaph) & (d_edaph < 0.45)
   both_alt_agree <- morph_disagrees & edaph_disagrees & (cda_pred == ed_pred)
-  can_hyb_d <- length(unique(sp_given[!is.na(sp_given) & grepl("^Packera[[:space:]]+[a-z][a-z-]+$", sp_given)])) >= 2L
+  can_hyb_d <- length(unique(sp_given[!is.na(sp_given) & .tc_is_binomial(sp_given)])) >= 2L
   congener_osr_reassign <- is.finite(min_cong_d2) & (min_cong_d2 <= stats::qchisq(0.90, df = p_morph)) & !is.na(min_cong_tx) & nzchar(min_cong_tx) & (min_cong_tx != sp_given) & m_flag
   single_strong_reassign <- (morph_disagrees & is.finite(cda_prob) & cda_prob >= 0.72) | congener_osr_reassign
   is_stage1_misid <- !is_type_spec & (both_alt_agree | single_strong_reassign)
@@ -276,9 +289,10 @@ partition_taxon_complexes <- function(W, taxa, n_vouchers_vec, n_gs_vec, leiden_
   if (leiden_sil_mean > best_sil_mean + 0.02) { consensus_id <- leiden_comm; sil_width_vec <- leiden_sil_vec }
   else { consensus_id <- ward_cluster; sil_width_vec <- best_sil_vec }
   consensus_id <- relabel_clusters_sequential(consensus_id, taxa); complex_labels <- character(n_taxa); deg_vec <- rowSums(W)
+  g_esc_tc <- gsub("([.|()\\^{}+$*?]|\\[|\\])", "\\\\\\1", .tc_target_genus()); g_ab_tc <- paste0(substr(.tc_target_genus(), 1L, 1L), "\\.")
   for (cid in sort(unique(consensus_id))) {
     m_idx <- which(consensus_id == cid); ord <- m_idx[order(-deg_vec[m_idx], -nv_map[m_idx], taxa[m_idx])]
-    top_ep <- gsub("[[:space:]]*\\[K([0-9]+)\\]", "_K\\1", sub("^(?:Packera|P\\.)[[:space:]]+", "", taxa[ord[seq_len(min(2L, length(ord)))]]))
+    top_ep <- gsub("[[:space:]]*\\[K([0-9]+)\\]", "_K\\1", sub(paste0("^(", g_esc_tc, "|", g_ab_tc, ")[[:space:]]+"), "", taxa[ord[seq_len(min(2L, length(ord)))]]))
     complex_labels[m_idx] <- paste0("Complex_", cid, "_", paste(top_ep, collapse = "_"))
   }
   nn1 <- character(n_taxa); na1 <- numeric(n_taxa); nn2 <- character(n_taxa); na2 <- numeric(n_taxa); within_mean_aff <- numeric(n_taxa)
@@ -324,7 +338,7 @@ build_taxon_morphotype_subclusters <- function(morph_df, min_vouchers = 5L) {
     cand_lbl <- ifelse(!is.na(eco_col) & nzchar(eco_col), eco_col, raw_sp)
   } else {
     k_vec <- if (has_gmm) ifelse(is.na(morph_df$gmm_cluster), 1L, as.integer(morph_df$gmm_cluster)) else rep(1L, nrow(morph_df))
-    short_sp <- sub("^Packera[[:space:]]+", "P. ", raw_sp); cand_lbl <- sprintf("%s [K%d]", short_sp, k_vec)
+    short_sp <- .tc_abbrev(raw_sp); cand_lbl <- sprintf("%s [K%d]", short_sp, k_vec)
   }
   tab_c <- table(cand_lbl); valid_c <- names(tab_c)[tab_c >= min_vouchers]
   if (length(valid_c) < 2L) {
@@ -335,7 +349,7 @@ build_taxon_morphotype_subclusters <- function(morph_df, min_vouchers = 5L) {
   morph_df$base_cda_predicted_taxon <- if ("cda_predicted_taxon" %in% names(morph_df)) .std_complex_taxon(morph_df$cda_predicted_taxon) else raw_sp[keep_m]
   morph_df$species_standardized <- cand_lbl[keep_m]
   if ("cda_predicted_taxon" %in% names(morph_df)) {
-    cp <- morph_df$base_cda_predicted_taxon; cp_short <- sub("^Packera[[:space:]]+", "P. ", cp)
+    cp <- morph_df$base_cda_predicted_taxon; cp_short <- .tc_abbrev(cp)
     morph_df$cda_predicted_taxon <- vapply(seq_len(nrow(morph_df)), function(i) {
       if (!is.na(cp[i]) && cp[i] %in% valid_c) return(cp[i])
       if (!is.na(cp[i]) && cp[i] == morph_df$base_species[i]) return(morph_df$species_standardized[i])
@@ -374,8 +388,8 @@ run_step07_complex_discovery <- function(full_df, opts = list()) {
   n_vouchers_vec <- stats::setNames(as.integer(table(morph_df$species_standardized)[taxa]), taxa); anc <- select_taxon_anchors(morph_df)
   kappa_wts <- compute_modality_kappa_weights(morph_df, anc$anchor_mask)
   message(sprintf(
-    "[Step 07 Complex Discovery] Evaluating %d vouchers across %d Packera groups (%d anchors; kappa weights: morph=%.3f, edaphic=%.3f, pheno=%.3f).",
-    nrow(morph_df), n_taxa, nrow(anc$anchor_df), kappa_wts$w_morph, kappa_wts$w_edaphic, kappa_wts$w_pheno
+    "[Step 07 Complex Discovery] Evaluating %d vouchers across %d %s groups (%d anchors; kappa weights: morph=%.3f, edaphic=%.3f, pheno=%.3f).",
+    nrow(morph_df), n_taxa, .tc_target_genus(), nrow(anc$anchor_df), kappa_wts$w_morph, kappa_wts$w_edaphic, kappa_wts$w_pheno
   ))
   morph_res <- compute_morphometric_affinity(morph_df, anc$anchor_df, taxa)
   pheno_res <- compute_hopkins_phenological_affinity(morph_df, taxa, anc$anchor_mask)
@@ -421,7 +435,7 @@ run_step07_complex_discovery <- function(full_df, opts = list()) {
   }
   focal_raw <- if (!is.null(opts$focal_taxon)) trimws(as.character(opts$focal_taxon)) else ""; selected_neighbors <- character(0)
   if (nzchar(focal_raw)) {
-    focal_std <- .std_complex_taxon(focal_raw); focal_short <- sub("^Packera[[:space:]]+", "P. ", focal_std)
+    focal_std <- .std_complex_taxon(focal_raw); focal_short <- .tc_abbrev(focal_std)
     focal_nodes <- taxa[taxa == focal_std | startsWith(taxa, paste0(focal_short, " ["))]
     if (length(focal_nodes) > 0L) {
       cdf_now <- part_res$complexes_df; focal_cids <- unique(cdf_now$consensus_complex_id[cdf_now$species_standardized %in% focal_nodes])

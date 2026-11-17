@@ -340,7 +340,9 @@ if (grDevices::dev.cur() == 1L) grDevices::pdf(NULL)
         mh <- regmatches(raw_sp, regexpr("[x×][[:space:]]+[A-Za-z-]+([[:space:]]+[a-z-]+)?", raw_sp, ignore.case = TRUE))
         if (length(mh) > 0L && nzchar(mh[1L])) {
           rtk <- trimws(sub("^[x×][[:space:]]+", "", mh[1L]))
-          crhs <- if (grepl("^Packera[[:space:]]+", rtk, ignore.case = TRUE)) standardize_packera_taxon(rtk) else standardize_packera_taxon(paste("Packera", rtk))
+          g_act <- if (exists("resolve_r_target_genus", mode = "function")) resolve_r_target_genus() else "Packera"
+          g_esc <- gsub("([.|()\\^{}+$*?]|\\[|\\])", "\\\\\\1", g_act)
+          crhs <- if (grepl(paste0("^", g_esc, "[[:space:]]+"), rtk, ignore.case = TRUE)) standardize_packera_taxon(rtk) else standardize_packera_taxon(paste(g_act, rtk))
           if (!is.na(crhs) && (crhs %in% bg_ctx$cohort_species) && crhs != given_sp) explicit_p2 <- crhs
         }
       }

@@ -16,8 +16,19 @@
 #       with seamless CSV fallback merging.
 # ==============================================================================
 
-PLANTMATICS_SCHEMA_USER_VERSION <- 20261127L
+PLANTMATICS_SCHEMA_USER_VERSION <- 20261128L
 PACKERA_SCHEMA_USER_VERSION <- PLANTMATICS_SCHEMA_USER_VERSION
+
+UNASSIGNED_TAXON_SENTINEL <- "Unassigned_Taxon"
+
+is_unassigned_or_unknown_taxon <- function(x) {
+  if (is.null(x) || length(x) == 0L) {
+    return(logical(0))
+  }
+  s <- trimws(as.character(x))
+  is.na(s) | (s %in% c("", "NA", "Unknown", "Unassigned", "Unassigned_Taxon", "Unassigned_Packera")) |
+    (tolower(s) %in% c("na", "unknown", "unassigned", "unassigned_taxon", "unassigned_packera"))
+}
 
 env_plantmatics_or_packera <- function(p_key, k_key = NULL, unset = "") {
   if (is.null(k_key) || !nzchar(k_key)) {
@@ -34,8 +45,337 @@ env_plantmatics_or_packera <- function(p_key, k_key = NULL, unset = "") {
   unset
 }
 
+resolve_r_python_bin <- function() {
+  env_py <- trimws(env_plantmatics_or_packera("PLANTMATICS_PYTHON_BIN", "PACKERA_PYTHON_BIN"))
+  py_p <- strsplit(Sys.getenv("PYTHONPATH", unset = ""), .Platform$path.sep, fixed = TRUE)[[1L]]
+  pp_root <- if (length(py_p) > 0L && nzchar(trimws(py_p[1L]))) trimws(py_p[1L]) else ""
+  cands <- c(
+    if (nzchar(env_py)) env_py else character(0),
+    ".venv/bin/python",
+    ".venv/Scripts/python.exe",
+    if (nzchar(pp_root)) file.path(pp_root, ".venv", "bin", "python") else character(0),
+    if (nzchar(pp_root)) file.path(pp_root, ".venv", "Scripts", "python.exe") else character(0),
+    unname(Sys.which("python3")),
+    unname(Sys.which("python"))
+  )
+  for (cand in cands) {
+    cand <- trimws(as.character(cand))
+    if (!nzchar(cand)) next
+    if (file.exists(cand)) return(cand)
+    w <- unname(Sys.which(cand))
+    if (nzchar(w) && file.exists(w)) return(w)
+  }
+  "python3"
+}
+
+.read_target_genus_from_yaml_r <- function(cfg_path) {
+  if (is.null(cfg_path) || !nzchar(cfg_path) || !file.exists(cfg_path)) return("")
+  if (requireNamespace("yaml", quietly = TRUE)) {
+    y <- tryCatch(yaml::read_yaml(cfg_path), error = function(e) NULL)
+    if (is.list(y) && is.list(y$taxa) && !is.null(y$taxa$target_genus)) {
+      tg <- trimws(as.character(y$taxa$target_genus)[1L])
+      if (!is.na(tg) && nzchar(tg)) return(tg)
+    }
+  }
+  lines <- tryCatch(readLines(cfg_path, warn = FALSE, encoding = "UTF-8"), error = function(e) character(0))
+  in_taxa <- FALSE
+  for (ln in lines) {
+    if (grepl("^[[:space:]]*(#|$)", ln)) next
+    cln <- sub("[[:space:]]+#.*$", "", ln)
+    if (!grepl("^[[:space:]]*[A-Za-z0-9_]+:", cln)) next
+    ind <- nchar(sub("^([[:space:]]*).*$", "\\1", cln))
+    key <- trimws(sub(":.*$", "", cln))
+    if (ind == 0L) {
+      if (key == "taxa") { in_taxa <- TRUE; next }
+      if (in_taxa) break else next
+    }
+    if (in_taxa && key == "target_genus") {
+      val <- trimws(sub("^[^:]+:", "", cln))
+      val <- gsub("^[\"']|[\"']$", "", val)
+      if (nzchar(val)) return(val)
+    }
+  }
+  ""
+}
+
+.query_target_genus_from_conn_r <- function(db_conn, prefer_current_run_only = FALSE) {
+  if (is.null(db_conn) || !isTRUE(tryCatch(DBI::dbIsValid(db_conn), error = function(e) FALSE))) return("")
+  if (!db_table_exists_safe(db_conn, "pipeline_runs")) return("")
+  flds <- tryCatch(DBI::dbListFields(db_conn, "pipeline_runs"), error = function(e) character(0))
+  if (!("target_genus" %in% flds)) return("")
+  rid <- resolve_packera_run_id()
+  r1 <- tryCatch(DBI::dbGetQuery(
+    db_conn,
+    "SELECT target_genus FROM pipeline_runs WHERE run_id = $1 AND target_genus IS NOT NULL AND TRIM(target_genus) != '' LIMIT 1;",
+    params = list(rid)
+  ), error = function(e) NULL)
+  if (!is.null(r1) && nrow(r1) > 0L) {
+    v <- trimws(as.character(r1$target_genus[1L]))
+    if (!is.na(v) && nzchar(v)) return(v)
+  }
+  if (!isTRUE(prefer_current_run_only)) {
+    r2 <- tryCatch(DBI::dbGetQuery(
+      db_conn,
+      "SELECT target_genus FROM pipeline_runs WHERE target_genus IS NOT NULL AND TRIM(target_genus) != '' ORDER BY start_timestamp DESC LIMIT 1;"
+    ), error = function(e) NULL)
+    if (!is.null(r2) && nrow(r2) > 0L) {
+      v <- trimws(as.character(r2$target_genus[1L]))
+      if (!is.na(v) && nzchar(v)) return(v)
+    }
+  }
+  ""
+}
+
+resolve_r_target_genus <- function(conn = NULL) {
+  env_g <- trimws(env_plantmatics_or_packera("PLANTMATICS_TARGET_GENUS", "PACKERA_TARGET_GENUS"))
+  if (nzchar(env_g)) return(env_g)
+
+  env_cfg <- trimws(env_plantmatics_or_packera("PLANTMATICS_CONFIG_PATH", "PACKERA_CONFIG_PATH"))
+  if (nzchar(env_cfg)) {
+    cfg_g <- .read_target_genus_from_yaml_r(env_cfg)
+    if (nzchar(cfg_g)) return(cfg_g)
+  }
+
+  if (!is.null(conn)) {
+    db_g <- .query_target_genus_from_conn_r(conn, prefer_current_run_only = FALSE)
+    if (nzchar(db_g)) return(db_g)
+  } else if (requireNamespace("DBI", quietly = TRUE) && requireNamespace("RSQLite", quietly = TRUE)) {
+    db_p <- resolve_packera_db_path()
+    if (!identical(db_p, ":memory:") && file.exists(db_p)) {
+      con_ro <- tryCatch(DBI::dbConnect(RSQLite::SQLite(), dbname = db_p, flags = RSQLite::SQLITE_RO), error = function(e) NULL)
+      if (!is.null(con_ro)) {
+        on.exit(tryCatch(DBI::dbDisconnect(con_ro), error = function(e) NULL), add = TRUE)
+        cur_g <- .query_target_genus_from_conn_r(con_ro, prefer_current_run_only = TRUE)
+        if (nzchar(cur_g)) return(cur_g)
+        def_g <- .read_target_genus_from_yaml_r("config/config.yaml")
+        if (nzchar(def_g)) return(def_g)
+        any_g <- .query_target_genus_from_conn_r(con_ro, prefer_current_run_only = FALSE)
+        if (nzchar(any_g)) return(any_g)
+      }
+    }
+  }
+
+  def_g <- .read_target_genus_from_yaml_r("config/config.yaml")
+  if (nzchar(def_g)) return(def_g)
+  "Packera"
+}
+
+is_active_genus_binomial <- function(x, genus = resolve_r_target_genus()) {
+  if (is.null(x) || length(x) == 0L) return(logical(0))
+  g <- trimws(as.character(genus)[1L])
+  if (is.na(g) || !nzchar(g)) g <- "Packera"
+  g_esc <- gsub("([][{}()+*^$|\\\\.?])", "\\\\\\1", g)
+  pat <- paste0("^", g_esc, "[[:space:]]+([x\u00d7][[:space:]]*)?[a-z][a-z-]+$")
+  s <- trimws(as.character(x))
+  out <- rep(FALSE, length(s))
+  ok <- !is.na(s) & nzchar(s)
+  if (any(ok)) {
+    out[ok] <- grepl(pat, s[ok])
+  }
+  out
+}
+
+abbreviate_binomial <- function(x) {
+  if (is.null(x) || length(x) == 0L) return(character(0))
+  s <- as.character(x)
+  out <- rep(NA_character_, length(s))
+  ok <- !is.na(s)
+  if (any(ok)) {
+    out[ok] <- sub("^([A-Z])[a-z-]+[[:space:]]+", "\\1. ", s[ok])
+  }
+  out
+}
+
+.r_progress_state_env <- new.env(parent = emptyenv())
+
+.resolve_progress_run_dir_r <- function() {
+  rdir <- trimws(env_plantmatics_or_packera("PLANTMATICS_RUN_DIR", "PACKERA_RUN_DIR"))
+  if (nzchar(rdir)) return(rdir)
+  lr_json <- file.path("runs", "latest_run.json")
+  if (file.exists(lr_json)) {
+    if (requireNamespace("jsonlite", quietly = TRUE)) {
+      parsed <- tryCatch(jsonlite::fromJSON(lr_json, simplifyVector = TRUE), error = function(e) NULL)
+      if (is.list(parsed)) {
+        if (!is.null(parsed$run_dir) && nzchar(trimws(as.character(parsed$run_dir)[1L]))) {
+          return(trimws(as.character(parsed$run_dir)[1L]))
+        }
+        if (!is.null(parsed$run_id) && nzchar(trimws(as.character(parsed$run_id)[1L]))) {
+          return(file.path("runs", trimws(as.character(parsed$run_id)[1L])))
+        }
+      }
+    }
+    raw_txt <- tryCatch(paste(readLines(lr_json, warn = FALSE, encoding = "UTF-8"), collapse = " "), error = function(e) "")
+    if (grepl('"run_dir"[[:space:]]*:[[:space:]]*"[^"]+"', raw_txt)) {
+      cand <- sub('^.*"run_dir"[[:space:]]*:[[:space:]]*"([^"]+)".*$', "\\1", raw_txt)
+      if (nzchar(trimws(cand))) return(trimws(cand))
+    }
+    if (grepl('"run_id"[[:space:]]*:[[:space:]]*"[^"]+"', raw_txt)) {
+      cand_id <- sub('^.*"run_id"[[:space:]]*:[[:space:]]*"([^"]+)".*$', "\\1", raw_txt)
+      if (nzchar(trimws(cand_id))) return(file.path("runs", trimws(cand_id)))
+    }
+  }
+  lr_sym <- file.path("runs", "latest")
+  if (dir.exists(lr_sym)) return(lr_sym)
+  ""
+}
+
+.json_encode_progress_r <- function(rec) {
+  if (requireNamespace("jsonlite", quietly = TRUE)) {
+    out <- tryCatch(as.character(jsonlite::toJSON(rec, auto_unbox = TRUE, null = "null")), error = function(e) "")
+    if (nzchar(out)) return(out)
+  }
+  esc_str <- function(s) {
+    s <- gsub("\\\\", "\\\\\\\\", s)
+    s <- gsub("\"", "\\\\\"", s)
+    s <- gsub("\n", "\\\\n", s)
+    s <- gsub("\r", "\\\\r", s)
+    s <- gsub("\t", "\\\\t", s)
+    paste0("\"", s, "\"")
+  }
+  parts <- vapply(names(rec), function(k) {
+    v <- rec[[k]]
+    val_j <- if (is.null(v) || length(v) == 0L) {
+      "null"
+    } else if (is.logical(v)) {
+      if (is.na(v[1L])) "null" else if (isTRUE(v[1L])) "true" else "false"
+    } else if (is.integer(v)) {
+      if (is.na(v[1L])) "null" else as.character(v[1L])
+    } else if (is.numeric(v)) {
+      if (!is.finite(v[1L])) "null" else format(v[1L], scientific = FALSE, trim = TRUE)
+    } else {
+      if (is.na(v[1L])) "null" else esc_str(as.character(v[1L]))
+    }
+    paste0(esc_str(k), ":", val_j)
+  }, character(1))
+  paste0("{", paste(parts, collapse = ","), "}")
+}
+
+emit_r_progress <- function(
+  step,
+  substage,
+  done,
+  total,
+  unit = "items",
+  cached_skipped = 0L,
+  substage_weight = 1.0,
+  substage_offset = 0.0,
+  status = "running"
+) {
+  rdir <- .resolve_progress_run_dir_r()
+  if (!nzchar(rdir)) return(invisible(FALSE))
+  step_i <- suppressWarnings(as.integer(step))
+  if (is.na(step_i)) step_i <- 0L
+  done_i <- max(0L, suppressWarnings(as.integer(done)))
+  if (is.na(done_i)) done_i <- 0L
+  tot_i <- max(0L, suppressWarnings(as.integer(total)))
+  if (is.na(tot_i)) tot_i <- 0L
+  skip_i <- max(0L, suppressWarnings(as.integer(cached_skipped)))
+  if (is.na(skip_i)) skip_i <- 0L
+  n_active <- max(0L, tot_i - skip_i)
+  eff_status <- if (is.null(status) || !nzchar(trimws(as.character(status)[1L]))) "running" else trimws(as.character(status)[1L])
+  local_frac <- if (eff_status %in% c("completed", "skipped_cached")) {
+    1.0
+  } else if (n_active > 0L) {
+    min(1.0, max(0.0, as.numeric(done_i) / as.numeric(n_active)))
+  } else if (tot_i > 0L && skip_i >= tot_i) {
+    1.0
+  } else {
+    0.0
+  }
+  w_sub <- if (is.finite(as.numeric(substage_weight))) as.numeric(substage_weight) else 1.0
+  off_sub <- if (is.finite(as.numeric(substage_offset))) as.numeric(substage_offset) else 0.0
+  progress_frac <- round(min(1.0, max(0.0, off_sub + w_sub * local_frac)), 6)
+
+  now_ts <- as.numeric(Sys.time())
+  st_key <- paste0(rdir, "|", step_i, "|", as.character(substage))
+  prev <- if (exists(st_key, envir = .r_progress_state_env, inherits = FALSE)) get(st_key, envir = .r_progress_state_env, inherits = FALSE) else NULL
+  ewma_rate <- if (!is.null(prev) && !is.null(prev$ewma_rate)) prev$ewma_rate else NA_real_
+  t_start <- if (!is.null(prev) && !is.null(prev$t_start)) prev$t_start else now_ts
+
+  if (done_i > 0L && !is.null(prev)) {
+    dt <- now_ts - prev$t_last
+    dd <- done_i - prev$done_last
+    if (dt > 1e-4 && dd > 0L) {
+      inst_rate <- dd / dt
+      ewma_rate <- if (is.finite(ewma_rate)) (0.25 * inst_rate + 0.75 * ewma_rate) else inst_rate
+    }
+  }
+  eta_sec <- NULL
+  eff_rate <- if (is.finite(ewma_rate) && ewma_rate > 0.0) ewma_rate else 0.0
+  if (eff_status %in% c("skipped_cached", "completed") || n_active <= 0L || done_i >= n_active) {
+    eta_sec <- 0.0
+  } else if (eff_rate > 1e-9) {
+    eta_sec <- round((n_active - done_i) / eff_rate, 4)
+  } else if (done_i > 0L && (now_ts - t_start) > 1e-4) {
+    avg_rate <- done_i / (now_ts - t_start)
+    if (is.finite(avg_rate) && avg_rate > 1e-9) {
+      eff_rate <- avg_rate
+      eta_sec <- round((n_active - done_i) / avg_rate, 4)
+    }
+  }
+  assign(st_key, list(t_start = t_start, t_last = now_ts, done_last = done_i, ewma_rate = ewma_rate), envir = .r_progress_state_env)
+
+  rec <- list(
+    timestamp = format(as.POSIXct(Sys.time(), tz = "UTC"), "%Y-%m-%dT%H:%M:%SZ", tz = "UTC"),
+    step = step_i,
+    substage = as.character(substage)[1L],
+    done = done_i,
+    total = tot_i,
+    cached_skipped = skip_i,
+    n_active = n_active,
+    unit = as.character(unit)[1L],
+    substage_weight = w_sub,
+    substage_offset = off_sub,
+    progress_frac = progress_frac,
+    status = eff_status,
+    rate_items_per_sec = round(eff_rate, 4),
+    eta_sec = eta_sec
+  )
+  json_line <- .json_encode_progress_r(rec)
+  ok_write <- tryCatch({
+    logs_dir <- file.path(rdir, "logs")
+    if (!dir.exists(logs_dir)) dir.create(logs_dir, recursive = TRUE, showWarnings = FALSE)
+    con_f <- file(file.path(logs_dir, "progress.jsonl"), open = "ab")
+    on.exit(close(con_f), add = TRUE)
+    writeBin(charToRaw(paste0(json_line, "\n")), con_f)
+    TRUE
+  }, error = function(e) FALSE)
+  invisible(ok_write)
+}
+
+.psock_pool_env <- new.env(parent = emptyenv())
+.psock_pool_env$cl <- NULL
+.psock_pool_env$n_workers <- 0L
+reg.finalizer(.psock_pool_env, function(e) {
+  if (!is.null(e$cl)) {
+    tryCatch(parallel::stopCluster(e$cl), error = function(err) NULL)
+    e$cl <- NULL
+    e$n_workers <- 0L
+  }
+}, onexit = TRUE)
+
+.get_or_create_psock_cluster_r <- function(n_workers) {
+  nw <- max(1L, as.integer(n_workers))
+  cl <- .psock_pool_env$cl
+  if (!is.null(cl) && identical(as.integer(.psock_pool_env$n_workers), nw)) {
+    alive <- isTRUE(tryCatch(identical(parallel::clusterEvalQ(cl[1L], TRUE)[[1L]], TRUE), error = function(e) FALSE))
+    if (alive) return(cl)
+  }
+  if (!is.null(cl)) {
+    tryCatch(parallel::stopCluster(cl), error = function(e) NULL)
+    .psock_pool_env$cl <- NULL
+    .psock_pool_env$n_workers <- 0L
+  }
+  cl_new <- tryCatch(parallel::makePSOCKcluster(nw), error = function(e) NULL)
+  if (!is.null(cl_new)) {
+    .psock_pool_env$cl <- cl_new
+    .psock_pool_env$n_workers <- nw
+  }
+  cl_new
+}
+
 resolve_packera_workers <- function(max_workers = 32L, n_tasks = NULL) {
-  if (!identical(.Platform$OS.type, "unix") || !requireNamespace("parallel", quietly = TRUE)) {
+  if (!requireNamespace("parallel", quietly = TRUE)) {
     return(1L)
   }
   env_w <- suppressWarnings(as.integer(trimws(env_plantmatics_or_packera("PLANTMATICS_MAX_WORKERS", "PACKERA_MAX_WORKERS"))))
@@ -62,7 +402,7 @@ resolve_packera_workers <- function(max_workers = 32L, n_tasks = NULL) {
 packera_mclapply <- function(X, FUN, mc.cores = 1L, mc.preschedule = TRUE) {
   n_x <- length(X)
   eff_cores <- max(1L, min(as.integer(mc.cores), max(1L, n_x)))
-  if (eff_cores <= 1L || n_x <= 1L || !identical(.Platform$OS.type, "unix") || !requireNamespace("parallel", quietly = TRUE)) {
+  if (eff_cores <= 1L || n_x <= 1L || !requireNamespace("parallel", quietly = TRUE)) {
     return(lapply(X, FUN))
   }
   blas_vars <- c("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "VECLIB_MAXIMUM_THREADS")
@@ -86,13 +426,38 @@ packera_mclapply <- function(X, FUN, mc.cores = 1L, mc.preschedule = TRUE) {
     MKL_NUM_THREADS = "1",
     VECLIB_MAXIMUM_THREADS = "1"
   )
-  res <- parallel::mclapply(X, FUN, mc.cores = eff_cores, mc.preschedule = mc.preschedule)
+  if (identical(.Platform$OS.type, "unix")) {
+    res <- parallel::mclapply(X, FUN, mc.cores = eff_cores, mc.preschedule = mc.preschedule)
+  } else {
+    cl <- .get_or_create_psock_cluster_r(eff_cores)
+    if (is.null(cl)) return(lapply(X, FUN))
+    tryCatch({
+      parallel::clusterCall(cl, Sys.setenv, OMP_NUM_THREADS = "1", OPENBLAS_NUM_THREADS = "1", MKL_NUM_THREADS = "1", VECLIB_MAXIMUM_THREADS = "1")
+      pkgs <- setdiff(sub("^package:", "", grep("^package:", search(), value = TRUE)), c("base", "stats", "graphics", "grDevices", "utils", "datasets", "methods"))
+      if (length(pkgs) > 0L) {
+        parallel::clusterCall(cl, function(ps) for (p in ps) suppressPackageStartupMessages(require(p, character.only = TRUE, quietly = TRUE)), pkgs)
+      }
+      g_syms <- ls(envir = .GlobalEnv)
+      if (length(g_syms) > 0L) {
+        g_keep <- g_syms[vapply(g_syms, function(nm) { obj <- get(nm, envir = .GlobalEnv); is.function(obj) || is.atomic(obj) }, logical(1))]
+        if (length(g_keep) > 0L) parallel::clusterExport(cl, varlist = g_keep, envir = .GlobalEnv)
+      }
+      f_env <- environment(FUN)
+      if (!is.null(f_env) && !identical(f_env, .GlobalEnv) && !identical(f_env, emptyenv())) {
+        f_syms <- ls(envir = f_env, all.names = TRUE)
+        if (length(f_syms) > 0L) parallel::clusterExport(cl, varlist = f_syms, envir = f_env)
+      }
+    }, error = function(e) NULL)
+    res <- tryCatch(parallel::parLapply(cl, X, FUN), error = function(e) lapply(X, FUN))
+  }
   bad_idx <- which(vapply(res, function(el) inherits(el, "try-error"), logical(1)))
   if (length(bad_idx) > 0L) {
     res[bad_idx] <- lapply(X[bad_idx], FUN)
   }
   res
 }
+
+plantmatics_par_lapply <- packera_mclapply
 
 .get_sqlite_user_version_r <- function(conn) {
   if (is.null(conn)) {
@@ -538,6 +903,35 @@ PACKERA_DB_WC_BIO_COLS <- c(
   character(0)
 }
 
+.migrate_v20261128_renames_r <- function(conn) {
+  if (is.null(conn)) {
+    return(FALSE)
+  }
+  changed <- FALSE
+  for (rn_tbl in c("taxon_synonyms", "usda_county_ranges")) {
+    if (db_table_exists_safe(conn, rn_tbl)) {
+      rn_cols <- tryCatch(DBI::dbListFields(conn, rn_tbl), error = function(e) character(0))
+      if (("canonical_packera" %in% rn_cols) && !("canonical_taxon" %in% rn_cols)) {
+        ok_rn <- tryCatch(
+          {
+            if (identical(rn_tbl, "usda_county_ranges")) {
+              tryCatch(DBI::dbExecute(conn, "DROP INDEX IF EXISTS idx_usda_county_ranges_taxon;"), error = function(e) NULL)
+            }
+            DBI::dbExecute(conn, sprintf("ALTER TABLE %s RENAME COLUMN canonical_packera TO canonical_taxon;", rn_tbl))
+            if (identical(rn_tbl, "usda_county_ranges")) {
+              tryCatch(DBI::dbExecute(conn, "CREATE INDEX IF NOT EXISTS idx_usda_county_ranges_taxon ON usda_county_ranges(canonical_taxon);"), error = function(e) NULL)
+            }
+            TRUE
+          },
+          error = function(e) FALSE
+        )
+        if (isTRUE(ok_rn)) changed <- TRUE
+      }
+    }
+  }
+  changed
+}
+
 .migrate_dynamic_sqlite_table_r <- function(conn, table_name) {
   if (is.null(conn) || !db_table_exists_safe(conn, table_name)) {
     return(FALSE)
@@ -728,12 +1122,10 @@ is_sqlite_active_for_inputs <- function(input_paths = character(0), demo = FALSE
   if (identical(eff_path, ":memory:")) {
     return(invisible(FALSE))
   }
-  py_p <- strsplit(Sys.getenv("PYTHONPATH", unset = ""), .Platform$path.sep, fixed = TRUE)[[1L]]
-  py_venv_pp <- if (length(py_p) > 0L && nzchar(py_p[1L]) && file.exists(file.path(py_p[1L], ".venv/bin/python"))) file.path(py_p[1L], ".venv/bin/python") else character(0)
   py_cands <- unique(c(
-    if (file.exists(".venv/bin/python")) ".venv/bin/python" else character(0),
-    py_venv_pp,
-    Sys.which("python3")
+    resolve_r_python_bin(),
+    unname(Sys.which("python3")),
+    unname(Sys.which("python"))
   ))
   py_cands <- py_cands[nzchar(py_cands)]
   if (length(py_cands) == 0L) {
@@ -805,9 +1197,13 @@ connect_packera_db <- function(
   cur_ver <- .get_sqlite_user_version_r(conn)
   el_fields_chk <- if (db_table_exists_safe(conn, "extracted_leaves")) tryCatch(DBI::dbListFields(conn, "extracted_leaves"), error = function(e) character(0)) else c("leaf_zone", "ect_path")
   om_fields_chk <- if (db_table_exists_safe(conn, "otu_morphometrics")) tryCatch(DBI::dbListFields(conn, "otu_morphometrics"), error = function(e) character(0)) else c("cauline_leaf_count", "ECT_PC1", "scale_source")
+  syn_fields_chk <- if (db_table_exists_safe(conn, "taxon_synonyms")) tryCatch(DBI::dbListFields(conn, "taxon_synonyms"), error = function(e) character(0)) else c("canonical_taxon")
+  usda_fields_chk <- if (db_table_exists_safe(conn, "usda_county_ranges")) tryCatch(DBI::dbListFields(conn, "usda_county_ranges"), error = function(e) character(0)) else c("canonical_taxon")
   mv_fields_chk <- if (db_table_exists_safe(conn, "v_integrative_triage_master")) tryCatch(DBI::dbListFields(conn, "v_integrative_triage_master"), error = function(e) character(0)) else character(0)
   el_has_zone <- all(c("leaf_zone", "ect_path") %in% el_fields_chk)
   om_has_cauline <- all(c("cauline_leaf_count", "ECT_PC1", "scale_source") %in% om_fields_chk)
+  syn_has_canon <- ("canonical_taxon" %in% syn_fields_chk)
+  usda_has_canon <- ("canonical_taxon" %in% usda_fields_chk)
   mv_has_latest <- identical(eff_path, ":memory:") || all(c(
     "is_passive", "scale_source", "AR_inv_std", "reproductive_trait_status",
     "ecoregion_can1", "ecoregion_can2", "w_geno_kappa",
@@ -826,7 +1222,7 @@ connect_packera_db <- function(
     "is_centroid_or_inst_coord", "coord_quarantine_reason", "env_mahal_d2", "env_mcd_outlier_flag"
   ) %in% mv_fields_chk)
   if (cur_ver >= PLANTMATICS_SCHEMA_USER_VERSION &&
-    el_has_zone && om_has_cauline && mv_has_latest &&
+    el_has_zone && om_has_cauline && syn_has_canon && usda_has_canon && mv_has_latest &&
     (identical(eff_path, ":memory:") || (
       db_table_exists_safe(conn, "v_integrative_triage_master") &&
         db_table_exists_safe(conn, "genomic_samples") &&
@@ -834,20 +1230,25 @@ connect_packera_db <- function(
         db_table_exists_safe(conn, "cytological_records") &&
         db_table_exists_safe(conn, "taxon_cytology_summary") &&
         db_table_exists_safe(conn, "taxon_backbone_profiles") &&
-        db_table_exists_safe(conn, "natureserve_subnational_ranges")
+        db_table_exists_safe(conn, "natureserve_subnational_ranges") &&
+        db_table_exists_safe(conn, "step_telemetry_benchmarks")
     ))) {
     return(conn)
   }
 
   schema_migrated <- .migrate_dynamic_sqlite_schema_r(conn)
-  if (!identical(eff_path, ":memory:")) {
+  if (identical(eff_path, ":memory:")) {
+    .migrate_v20261128_renames_r(conn)
+  } else {
     view_needs_refresh <- schema_migrated || (cur_ver < PLANTMATICS_SCHEMA_USER_VERSION) ||
+      !syn_has_canon || !usda_has_canon ||
       !db_table_exists_safe(conn, "genomic_samples") ||
       !db_table_exists_safe(conn, "genetic_lineage_assignments") ||
       !db_table_exists_safe(conn, "cytological_records") ||
       !db_table_exists_safe(conn, "taxon_cytology_summary") ||
       !db_table_exists_safe(conn, "taxon_backbone_profiles") ||
-      !db_table_exists_safe(conn, "natureserve_subnational_ranges")
+      !db_table_exists_safe(conn, "natureserve_subnational_ranges") ||
+      !db_table_exists_safe(conn, "step_telemetry_benchmarks")
     if (!view_needs_refresh && db_table_exists_safe(conn, "v_integrative_triage_master")) {
       v_cols <- tryCatch(DBI::dbListFields(conn, "v_integrative_triage_master"), error = function(e) character(0))
       req_v_cols <- c(
@@ -885,15 +1286,19 @@ connect_packera_db <- function(
     }
     if (isTRUE(view_needs_refresh)) {
       disconnect_packera_db(conn)
-      .run_python_db_init_schema(eff_path)
+      py_ok <- isTRUE(.run_python_db_init_schema(eff_path))
       conn <- tryCatch(
         DBI::dbConnect(RSQLite::SQLite(), dbname = eff_path),
         error = function(e) NULL
       )
       if (!is.null(conn)) {
         .apply_packera_sqlite_pragmas_r(conn, read_only = FALSE)
+        if (!py_ok || .get_sqlite_user_version_r(conn) >= PLANTMATICS_SCHEMA_USER_VERSION) {
+          .migrate_v20261128_renames_r(conn)
+        }
       }
     } else if (!is.null(conn) && db_table_exists_safe(conn, "v_integrative_triage_master")) {
+      .migrate_v20261128_renames_r(conn)
       tryCatch(
         DBI::dbExecute(conn, sprintf("PRAGMA user_version = %d;", PLANTMATICS_SCHEMA_USER_VERSION)),
         error = function(e) NULL
@@ -920,7 +1325,7 @@ db_table_exists_safe <- function(conn, table_name) {
   isTRUE(tryCatch(DBI::dbExistsTable(conn, table_name), error = function(e) FALSE))
 }
 
-ensure_pipeline_run_r <- function(conn, run_id = resolve_packera_run_id(), focal_taxon = NULL, intraspecific_mode = NULL) {
+ensure_pipeline_run_r <- function(conn, run_id = resolve_packera_run_id(), focal_taxon = NULL, intraspecific_mode = NULL, target_genus = NULL) {
   if (is.null(conn) || !db_table_exists_safe(conn, "pipeline_runs")) {
     return(invisible(FALSE))
   }
@@ -930,22 +1335,44 @@ ensure_pipeline_run_r <- function(conn, run_id = resolve_packera_run_id(), focal
   if (!nzchar(rdir)) rdir <- NA_character_
   ft <- if (!is.null(focal_taxon) && nzchar(trimws(focal_taxon))) trimws(focal_taxon) else NA_character_
   im <- if (is.null(intraspecific_mode) || is.na(intraspecific_mode)) NA_integer_ else if (isTRUE(intraspecific_mode)) 1L else 0L
+  pr_cols <- tryCatch(DBI::dbListFields(conn, "pipeline_runs"), error = function(e) character(0))
+  has_tg <- "target_genus" %in% pr_cols
+  tg <- if (!is.null(target_genus) && nzchar(trimws(target_genus))) trimws(target_genus) else resolve_r_target_genus()
 
-  tryCatch(
-    DBI::dbExecute(
-      conn,
-      paste0(
-        "INSERT INTO pipeline_runs (run_id, run_dir, start_timestamp, focal_taxon, intraspecific_mode) ",
-        "VALUES ($1, $2, $3, $4, COALESCE($5, 0)) ",
-        "ON CONFLICT(run_id) DO UPDATE SET ",
-        "run_dir = COALESCE(excluded.run_dir, pipeline_runs.run_dir), ",
-        "focal_taxon = COALESCE(excluded.focal_taxon, pipeline_runs.focal_taxon), ",
-        "intraspecific_mode = COALESCE($5, pipeline_runs.intraspecific_mode);"
+  if (isTRUE(has_tg)) {
+    tryCatch(
+      DBI::dbExecute(
+        conn,
+        paste0(
+          "INSERT INTO pipeline_runs (run_id, run_dir, start_timestamp, focal_taxon, intraspecific_mode, target_genus) ",
+          "VALUES ($1, $2, $3, $4, COALESCE($5, 0), $6) ",
+          "ON CONFLICT(run_id) DO UPDATE SET ",
+          "run_dir = COALESCE(excluded.run_dir, pipeline_runs.run_dir), ",
+          "focal_taxon = COALESCE(excluded.focal_taxon, pipeline_runs.focal_taxon), ",
+          "intraspecific_mode = COALESCE($5, pipeline_runs.intraspecific_mode), ",
+          "target_genus = COALESCE(excluded.target_genus, pipeline_runs.target_genus);"
+        ),
+        params = list(rid, rdir, now_iso, ft, im, tg)
       ),
-      params = list(rid, rdir, now_iso, ft, im)
-    ),
-    error = function(e) NULL
-  )
+      error = function(e) NULL
+    )
+  } else {
+    tryCatch(
+      DBI::dbExecute(
+        conn,
+        paste0(
+          "INSERT INTO pipeline_runs (run_id, run_dir, start_timestamp, focal_taxon, intraspecific_mode) ",
+          "VALUES ($1, $2, $3, $4, COALESCE($5, 0)) ",
+          "ON CONFLICT(run_id) DO UPDATE SET ",
+          "run_dir = COALESCE(excluded.run_dir, pipeline_runs.run_dir), ",
+          "focal_taxon = COALESCE(excluded.focal_taxon, pipeline_runs.focal_taxon), ",
+          "intraspecific_mode = COALESCE($5, pipeline_runs.intraspecific_mode);"
+        ),
+        params = list(rid, rdir, now_iso, ft, im)
+      ),
+      error = function(e) NULL
+    )
+  }
   invisible(TRUE)
 }
 

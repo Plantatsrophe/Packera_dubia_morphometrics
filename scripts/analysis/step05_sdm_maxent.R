@@ -879,11 +879,19 @@ fit_and_project_maxent_sdm_maps <- function(
   kept_vars = NULL,
   primary_clim_vars = NULL,
   primary_edaph_vars = NULL,
-  focal_taxon = "Packera dubia",
+  focal_taxon = "",
   intraspecific_mode = FALSE,
   demo = FALSE
 ) {
   if (is.null(df) || nrow(df) == 0L) return(invisible(NULL))
+  if (is.null(focal_taxon) || !nzchar(trimws(as.character(focal_taxon)))) {
+    sp_cand <- if ("species_standardized" %in% names(df)) trimws(as.character(df$species_standardized)) else character(0)
+    bad_sp <- if (exists("is_unassigned_or_unknown_taxon", mode = "function")) is_unassigned_or_unknown_taxon(sp_cand) else (!nzchar(sp_cand) | sp_cand %in% c("Unknown", "Unassigned_Taxon"))
+    sp_cand <- sp_cand[!is.na(sp_cand) & !bad_sp]
+    focal_taxon <- if (length(sp_cand) > 0L) names(sort(table(sp_cand), decreasing = TRUE))[1L] else ""
+  } else {
+    focal_taxon <- trimws(as.character(focal_taxon))[1L]
+  }
   if (is.null(out_dir) || !nzchar(out_dir)) out_dir <- "outputs"
   message("=== Fitting MaxEnt (cloglog) & Spatial RF Ensemble SDMs & Projecting Suitability Rasters ===")
 

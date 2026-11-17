@@ -103,9 +103,11 @@ is_extralimital_or_conflicted_non_type <- function(df) {
   if (is.data.frame(df) && ("species_standardized" %in% names(df)) && any(is_nb_type)) {
     sp_std <- tolower(trimws(as.character(df$species_standardized)))
     sp_ep <- sub("^[a-z]+[[:space:]]+([a-z-]+).*$", "\\1", sp_std)
-    has_of_binomial <- grepl("\\bof[[:space:]]+(packera|senecio|cineraria)[[:space:]]+[a-z]{3,}", raw_trim, ignore.case = TRUE)
+    tg_low <- if (exists("resolve_r_target_genus", mode = "function")) tolower(resolve_r_target_genus()) else "packera"
+    gen_alt <- paste(unique(c(tg_low, "packera", "senecio", "cineraria")), collapse = "|")
+    has_of_binomial <- grepl(paste0("\\bof[[:space:]]+(", gen_alt, ")[[:space:]]+[a-z]{3,}"), raw_trim, ignore.case = TRUE)
     if (any(is_nb_type & has_of_binomial)) {
-      of_binom <- tolower(sub("^.*\\bof[[:space:]]+((?:packera|senecio|cineraria)[[:space:]]+[a-z-]+).*$", "\\1", raw_trim))
+      of_binom <- tolower(sub(paste0("^.*\\bof[[:space:]]+((", gen_alt, ")[[:space:]]+[a-z-]+).*$"), "\\1", raw_trim, ignore.case = TRUE))
       of_ep <- sub("^[a-z]+[[:space:]]+([a-z-]+).*$", "\\1", of_binom)
       stem6 <- function(s) substr(gsub("(us|a|um)$", "", s), 1L, 6L)
       dyn_equiv <- rep(FALSE, n)
@@ -159,7 +161,8 @@ is_extralimital_or_conflicted_non_type <- function(df) {
       }
     }
   }
-  if (is.null(chosen_col)) return(rep("Unassigned_Packera", n))
+  u_sent <- if (exists("UNASSIGNED_TAXON_SENTINEL")) UNASSIGNED_TAXON_SENTINEL else "Unassigned_Taxon"
+  if (is.null(chosen_col)) return(rep(u_sent, n))
   tx <- trimws(as.character(df[[chosen_col]]))
   if (chosen_col %in% c("species_standardized", "scientificName", "species_raw") && !any(grepl("^Morphotype_K|^Ecotype_", tx[!is.na(tx)]))) {
     if (exists("standardize_taxon_name", mode = "function")) {
@@ -169,7 +172,8 @@ is_extralimital_or_conflicted_non_type <- function(df) {
       tx <- as.character(standardize_packera_taxon(tx))
     }
   }
-  tx[is.na(tx) | !nzchar(tx) | tolower(tx) == "unknown"] <- "Unassigned_Packera"
+  is_un <- if (exists("is_unassigned_or_unknown_taxon", mode = "function")) is_unassigned_or_unknown_taxon(tx) else (is.na(tx) | !nzchar(tx) | tolower(tx) == "unknown")
+  tx[is_un] <- u_sent
   tx
 }
 
@@ -203,9 +207,17 @@ if (!exists("prune_collinear_dissection_scalars", mode = "function")) {
     if (!is.na(.dl_p) && nzchar(.dl_p) && file.exists(.dl_p)) { source(.dl_p); break }
   }
 }
-if (!exists("packera_mclapply", mode = "function")) {
+if (!exists("resolve_r_target_genus", mode = "function") || !exists("packera_mclapply", mode = "function")) {
   for (.db_p in c("scripts/core/db_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "..", "core", "db_utils.R"))) {
     if (!is.na(.db_p) && nzchar(.db_p) && file.exists(.db_p)) { source(.db_p); break }
+  }
+}
+if (!exists("UNASSIGNED_TAXON_SENTINEL")) UNASSIGNED_TAXON_SENTINEL <- "Unassigned_Taxon"
+if (!exists("is_unassigned_or_unknown_taxon", mode = "function")) {
+  is_unassigned_or_unknown_taxon <- function(x) {
+    if (is.null(x) || length(x) == 0L) return(logical(0))
+    s <- trimws(as.character(x))
+    is.na(s) | (tolower(s) %in% c("", "na", "unknown", "unassigned", "unassigned_taxon", "unassigned_packera"))
   }
 }
 
@@ -215,7 +227,7 @@ if (!exists("packera_mclapply", mode = "function")) {
   if (is.null(colnames(X))) colnames(X) <- paste0("V", seq_len(M))
   if (M <= min_p) return(colnames(X))
   valid_g <- if (!is.null(group_vec)) stats::na.omit(as.character(group_vec)) else character(0)
-  valid_g <- valid_g[nzchar(valid_g) & !(valid_g %in% c("Unassigned_Packera", "Unknown"))]
+  valid_g <- valid_g[!is_unassigned_or_unknown_taxon(valid_g)]
   g_tab <- table(valid_g); g_tab_multi <- g_tab[g_tab >= 2L]
   N_min <- if (length(g_tab_multi) >= 2L) min(as.integer(g_tab_multi)) else N
   P_max <- if (N_min >= 6L) max(min_p, floor(N_min / 3)) else M
@@ -470,7 +482,8 @@ select_morphometric_subspace <- function(X, group_vec = NULL, min_p = 2L, max_p 
 
 .estimate_pooled_within_cov <- function(X_use, taxa_vec, det_tier, valid_pool) {
   p <- ncol(X_use)
-  u_pool_tx <- setdiff(unique(taxa_vec[valid_pool]), "Unassigned_Packera")
+  u_pool_tx <- unique(taxa_vec[valid_pool])
+  u_pool_tx <- u_pool_tx[!is_unassigned_or_unknown_taxon(u_pool_tx)]
   build_resid <- function(tx) {
     idx_gold <- which(valid_pool & (taxa_vec == tx) & (det_tier == "Tier_1_Gold"))
     idx_gs <- which(valid_pool & (taxa_vec == tx) & (det_tier %in% c("Tier_1_Gold", "Tier_2_Silver")))
@@ -807,7 +820,7 @@ select_adaptive_reference_anchors <- function(
     } else {
       n_gs
     }
-    if (tx != "Unassigned_Packera" && n_gs < eff_min_anc) {
+    if (!is_unassigned_or_unknown_taxon(tx) && n_gs < eff_min_anc) {
       idx_br <- which((det_tier == "Tier_3_Bronze") & anchor_pool & (taxa_vec == tx))
       n_needed <- eff_min_anc - n_gs
       if (length(idx_br) > 0L && n_needed > 0L) {
@@ -894,8 +907,7 @@ select_adaptive_reference_anchors <- function(
 
   # Step 3: Confident Learning Out-of-Fold Anchor Pruning (Northcutt et al. 2021)
   is_confident_label_noise <- rep(FALSE, n)
-  bad_cl_tx <- c("", "Unknown", "Unassigned_Packera", "NA")
-  cl_act_idx <- which(active_mask & !is.na(taxa_vec) & !(taxa_vec %in% bad_cl_tx))
+  cl_act_idx <- which(active_mask & !is_unassigned_or_unknown_taxon(taxa_vec))
   taxa_levels <- sort(unique(taxa_vec[cl_act_idx]))
   if (length(taxa_levels) >= 2L && !is.null(X_use) && ncol(X_use) >= 1L) {
     K_cl <- length(taxa_levels)
@@ -1938,7 +1950,7 @@ compute_empirical_bayes_authority_weights <- function(
   pred_sources <- list()
   if ("exsiccatae_gold_taxon" %in% names(df)) {
     p_ex <- safe_std_tx(df$exsiccatae_gold_taxon)
-    valid_ex <- !is.na(p_ex) & nzchar(p_ex) & !(tolower(p_ex) %in% c("na", "none", "unknown", "unassigned_packera"))
+    valid_ex <- !is_unassigned_or_unknown_taxon(p_ex) & !(tolower(trimws(as.character(p_ex))) == "none")
     if (any(valid_ex)) {
       pred_sources[["exsiccatae"]] <- list(taxon = p_ex, conf = rep(0.92, n), valid = valid_ex)
     }
@@ -1965,8 +1977,7 @@ compute_empirical_bayes_authority_weights <- function(
     }
   }
 
-  bad_tx <- c("", "Unknown", "Unassigned_Packera", "NA")
-  valid_taxa <- sort(unique(taxa_vec[eval_mask & !is.na(taxa_vec) & !(taxa_vec %in% bad_tx)]))
+  valid_taxa <- sort(unique(taxa_vec[eval_mask & !is_unassigned_or_unknown_taxon(taxa_vec)]))
   G <- length(valid_taxa)
   exog_cols <- intersect(
     c("exsiccatae_taxonomic_conflict", "exsiccatae_gold_taxon", "vision_predicted_label", "is_label_corrupted", "rf_predicted_taxon", "edaphic_best_fit_taxon"),
@@ -2001,7 +2012,7 @@ compute_empirical_bayes_authority_weights <- function(
       has_exog_disc_i <- (is.finite(eps_err[i]) && eps_err[i] > 0.35)
       if (!has_exog_disc_i && length(pred_sources) > 0L) {
         for (ps_chk in pred_sources) {
-          if (isTRUE(ps_chk$valid[i]) && !is.na(ps_chk$taxon[i]) && !(ps_chk$taxon[i] %in% bad_tx) && (ps_chk$taxon[i] != valid_taxa[yi])) {
+          if (isTRUE(ps_chk$valid[i]) && !is_unassigned_or_unknown_taxon(ps_chk$taxon[i]) && (ps_chk$taxon[i] != valid_taxa[yi])) {
             has_exog_disc_i <- TRUE
             break
           }
@@ -2034,7 +2045,7 @@ compute_empirical_bayes_authority_weights <- function(
         for (ps in pred_sources) {
           if (!isTRUE(ps$valid[i])) next
           ptx <- ps$taxon[i]
-          if (is.na(ptx) || (ptx %in% bad_tx)) next
+          if (is_unassigned_or_unknown_taxon(ptx)) next
           c_m <- ps$conf[i]
           if (ptx == valid_taxa[yi]) {
             lo_m <- log(c_m / max(1.0 - c_m, 1e-4))
@@ -2169,12 +2180,12 @@ compute_empirical_bayes_authority_weights <- function(
     if (length(pred_sources) > 0L) {
       for (i in which(eval_mask & !is.finite(eps_fb) & !extralimital_ds)) {
         tx_i <- taxa_vec[i]
-        if (is.na(tx_i) || (tx_i %in% bad_tx)) next
+        if (is_unassigned_or_unknown_taxon(tx_i)) next
         mism <- numeric(0)
         for (ps in pred_sources) {
           if (!isTRUE(ps$valid[i])) next
           ptx <- ps$taxon[i]
-          if (!is.na(ptx) && !(ptx %in% bad_tx)) {
+          if (!is_unassigned_or_unknown_taxon(ptx)) {
             mism <- c(mism, if (ptx == tx_i) (1.0 - ps$conf[i]) else ps$conf[i])
           }
         }
@@ -2323,8 +2334,7 @@ compute_empirical_bayes_authority_weights <- function(
   }
   if (is.null(act_mask)) act_mask <- rep(TRUE, n)
   if (is.null(is_promoted)) is_promoted <- rep(FALSE, n)
-  bad_tx <- c("", "Unknown", "Unassigned_Packera", "NA")
-  u_tx <- unique(taxa_vec[act_mask & !is.na(taxa_vec) & !(taxa_vec %in% bad_tx)])
+  u_tx <- unique(taxa_vec[act_mask & !is_unassigned_or_unknown_taxon(taxa_vec)])
   ratio_cap <- silver_max_share / max(1e-6, 1.0 - silver_max_share)
   for (tx in u_tx) {
     idx_tx_act <- which(act_mask & (taxa_vec == tx))
@@ -2696,7 +2706,7 @@ compute_type_specimen_morph_control <- function(
   )
 
   taxa_vec <- .resolve_authority_taxon_vec(df, taxon_col = taxon_col)
-  if (all(taxa_vec == "Unassigned_Packera") && !is.null(cda_res) && !is.null(cda_res$grouping_col)) {
+  if (all(is_unassigned_or_unknown_taxon(taxa_vec)) && !is.null(cda_res) && !is.null(cda_res$grouping_col)) {
     taxa_vec <- as.character(cda_res$grouping_col)
   }
   det_tier <- .standardize_determiner_tier_vec(df)
@@ -2711,8 +2721,7 @@ compute_type_specimen_morph_control <- function(
   }
   auth_w[!is.finite(auth_w) | auth_w <= 0.0] <- 1.0
 
-  bad_tx <- c("", "Unknown", "Unassigned_Packera", "NA")
-  active_taxa <- sort(unique(taxa_vec[!is.na(taxa_vec) & !(taxa_vec %in% bad_tx)]))
+  active_taxa <- sort(unique(taxa_vec[!is_unassigned_or_unknown_taxon(taxa_vec)]))
   if (length(active_taxa) == 0L) {
     active_taxa <- sort(unique(stats::na.omit(taxa_vec)))
   }
@@ -3102,8 +3111,16 @@ compute_type_specimen_morph_control <- function(
     return(list(min_congener_mahal_d2 = min_congener_mahal_d2, min_congener_taxon = min_congener_taxon, open_set_novelty_p = open_set_novelty_p, open_set_df = integer(0)))
   }
 
+  is_act_bin <- function(v, g = NULL) {
+    if (exists("is_active_genus_binomial", mode = "function")) {
+      if (is.null(g)) is_active_genus_binomial(v) else is_active_genus_binomial(v, genus = g)
+    } else {
+      tg_fb <- if (!is.null(g)) g else if (exists("resolve_r_target_genus", mode = "function")) resolve_r_target_genus() else "Packera"
+      !is.na(v) & grepl(paste0("^", tg_fb, "[[:space:]]+"), as.character(v))
+    }
+  }
   sp_raw <- if (!is.null(df) && "species_standardized" %in% names(df)) as.character(df$species_standardized) else as.character(taxa_vec)
-  sp_taxa <- active_taxa[grepl("^Packera[[:space:]]+", active_taxa)]
+  sp_taxa <- active_taxa[is_act_bin(active_taxa)]
   if (length(sp_taxa) >= 2L && !is.null(d2_mat) && ncol(d2_mat) >= 2L) {
     sp_cols <- match(sp_taxa, active_taxa)
     d2_sp <- d2_mat[, sp_cols, drop = FALSE]
@@ -3111,7 +3128,7 @@ compute_type_specimen_morph_control <- function(
     min_all[!is.finite(min_all) | min_all < 0.0] <- 0.0
     open_set_novelty_p <- round(1.0 - stats::pchisq(min_all, df = p), 6)
     for (i in seq_len(n)) {
-      yi_sp <- if (!is.na(sp_raw[i]) && grepl("^Packera[[:space:]]+", sp_raw[i])) sp_raw[i] else taxa_vec[i]
+      yi_sp <- if (is_act_bin(sp_raw[i])) sp_raw[i] else taxa_vec[i]
       oth_idx <- which(sp_taxa != yi_sp)
       if (length(oth_idx) >= 1L) {
         d_sub <- d2_sp[i, oth_idx]
@@ -3125,14 +3142,16 @@ compute_type_specimen_morph_control <- function(
     return(list(min_congener_mahal_d2 = min_congener_mahal_d2, min_congener_taxon = min_congener_taxon, open_set_novelty_p = open_set_novelty_p, open_set_df = open_set_df))
   }
 
-  # Single-taxon intraspecific mode: query canonical SQLite for congeneric Packera centroids
+  # Single-taxon intraspecific mode: query canonical SQLite for congeneric centroids
   # in run-invariant standardized harmonic + vestiture + topology space,
   # falling back strictly to same-run_id PC1..3 when harmonics are absent.
-  db_osr <- tryCatch({
+  db_osr <- tryCatch((function() {
     if (!is.null(df) && exists("connect_packera_db", mode = "function") && requireNamespace("DBI", quietly = TRUE)) {
       con <- connect_packera_db(read_only = TRUE)
-      on.exit(tryCatch(DBI::dbDisconnect(con), error = function(e) NULL), add = TRUE)
       if (is.null(con)) return(NULL)
+      on.exit(tryCatch(DBI::dbDisconnect(con), error = function(e) NULL), add = TRUE)
+      tg_db <- if (exists("resolve_r_target_genus", mode = "function")) resolve_r_target_genus(con) else "Packera"
+      tg_like <- paste0(gsub("'", "''", tg_db), " %")
       phot_inv_cands <- c(
         "blade_cie_l_norm", "blade_cie_l_sheet_delta",
         "blade_cie_a_browning_delta", "blade_cie_b_yellowing_delta"
@@ -3160,7 +3179,7 @@ compute_type_specimen_morph_control <- function(
             geo_sel <- if (has_geo_v && "catalogNumber" %in% flds) ", v_geo.decimalLatitude AS _osr_lat, v_geo.decimalLongitude AS _osr_lon" else ""
             geo_join <- if (has_geo_v && "catalogNumber" %in% flds) sprintf(" LEFT JOIN %s v_geo ON o.catalogNumber = v_geo.catalogNumber", v_geo_tbl) else ""
             q_cols <- paste0(paste(c("o.species_standardized", paste0("o.", use_c)), collapse = ", "), geo_sel)
-            where_parts <- c("o.species_standardized LIKE 'Packera %'")
+            where_parts <- c(sprintf("o.species_standardized LIKE '%s'", tg_like))
             if ("authority_weight" %in% flds) where_parts <- c(where_parts, "COALESCE(o.authority_weight, 1.0) > 0")
             if ("morph_tier_source" %in% flds) where_parts <- c(where_parts, "COALESCE(o.morph_tier_source, 'Basal_Rosette') NOT IN ('Cauline_Only_Fallback', 'Transitional_Passive')")
             if (isTRUE(require_same_run) && "run_id" %in% flds) {
@@ -3184,8 +3203,8 @@ compute_type_specimen_morph_control <- function(
             q_cols <- paste0(paste(paste0("h.", use_c), collapse = ", "), geo_sel_h)
             lz_clause <- if ("leaf_zone" %in% flds_h) " AND COALESCE(LOWER(h.leaf_zone), 'basal') != 'cauline'" else ""
             db_df <- DBI::dbGetQuery(con, sprintf(
-              "SELECT v.species_standardized, %s FROM leaf_efa_harmonics h JOIN %s v ON h.catalogNumber = v.catalogNumber WHERE v.species_standardized LIKE 'Packera %%'%s",
-              q_cols, v_tbl, lz_clause
+              "SELECT v.species_standardized, %s FROM leaf_efa_harmonics h JOIN %s v ON h.catalogNumber = v.catalogNumber WHERE v.species_standardized LIKE '%s'%s",
+              q_cols, v_tbl, tg_like, lz_clause
             ))
           }
         }
@@ -3194,8 +3213,8 @@ compute_type_specimen_morph_control <- function(
         if (length(use_c) < 2L) return(NULL)
         for (uc in use_c) db_df[[uc]] <- suppressWarnings(as.numeric(db_df[[uc]]))
         cc <- stats::complete.cases(db_df[, use_c, drop = FALSE])
-        db_df <- db_df[cc & !is.na(db_df$species_standardized) & grepl("^Packera[[:space:]]+", db_df$species_standardized), , drop = FALSE]
-        focal_sp <- unique(sp_raw[!is.na(sp_raw) & grepl("^Packera[[:space:]]+", sp_raw)])
+        db_df <- db_df[cc & is_act_bin(db_df$species_standardized, g = tg_db), , drop = FALSE]
+        focal_sp <- unique(sp_raw[is_act_bin(sp_raw, g = tg_db)])
         if (all(c("_osr_lat", "_osr_lon") %in% names(db_df)) && all(c("decimalLatitude", "decimalLongitude") %in% names(df))) {
           d_lat <- suppressWarnings(as.numeric(df$decimalLatitude)); d_lon <- suppressWarnings(as.numeric(df$decimalLongitude))
           act_g <- is.finite(d_lat) & is.finite(d_lon) & (abs(d_lat) <= 90) & (abs(d_lon) <= 180)
@@ -3285,7 +3304,7 @@ compute_type_specimen_morph_control <- function(
         NULL
       }
     } else NULL
-  }, error = function(e) NULL)
+  })(), error = function(e) NULL)
 
   if (!is.null(db_osr)) return(db_osr)
 

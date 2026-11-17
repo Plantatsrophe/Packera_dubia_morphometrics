@@ -28,6 +28,11 @@ if (!exists("fast_euclidean_permanova_trace", mode = "function")) {
     if (!is.na(.dl_p) && nzchar(.dl_p) && file.exists(.dl_p)) { source(.dl_p); break }
   }
 }
+if (!exists("resolve_r_target_genus", mode = "function")) {
+  for (.db_p in c("scripts/core/db_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "..", "core", "db_utils.R"))) {
+    if (!is.na(.db_p) && nzchar(.db_p) && file.exists(.db_p)) { source(.db_p); break }
+  }
+}
 
 compute_spatial_balance_weights <- function(df, bandwidth_km = 25.0, regional_bandwidth_km = 75.0, active_mask = NULL, recompute = FALSE) {
   if (is.null(df) || nrow(df) == 0L) return(numeric(0))
@@ -218,11 +223,11 @@ format_predictor_labels <- function(var_vec) {
 .expand_synonym_binomial_keys <- function(syn_vec) {
   if (length(syn_vec) == 0L) return(character(0))
   nms <- tolower(gsub("[[:space:]]+", " ", trimws(names(syn_vec))))
-  vals <- gsub("^Packera[[:space:]]+(?:x|×)[[:space:]]+", "Packera ", trimws(as.character(syn_vec)), ignore.case = TRUE)
+  vals <- sub("^([A-Za-z-]+)[[:space:]]+[x\u00d7][[:space:]]+", "\\1 ", trimws(as.character(syn_vec)), ignore.case = TRUE)
   keep <- !is.na(nms) & nzchar(nms) & !is.na(vals) & nzchar(vals)
   if (!any(keep)) return(character(0))
   out <- stats::setNames(vals[keep], nms[keep])
-  bin_pat <- "^([a-z]+[[:space:]]+(?:(?:x|×)[[:space:]]*)?[a-z][a-z-]*)\\b.*$"
+  bin_pat <- "^([a-z]+[[:space:]]+([x\u00d7][[:space:]]*)?[a-z][a-z-]*)\\b.*$"
   is_bin <- grepl(bin_pat, names(out))
   if (any(is_bin)) {
     b_keys <- sub(bin_pat, "\\1", names(out)[is_bin])
@@ -268,11 +273,15 @@ format_predictor_labels <- function(var_vec) {
         con <- DBI::dbConnect(RSQLite::SQLite(), dbname = dbp, flags = RSQLite::SQLITE_RO)
         on.exit(tryCatch(DBI::dbDisconnect(con), error = function(e) NULL), add = TRUE)
         if ("taxon_synonyms" %in% DBI::dbListTables(con)) {
-          DBI::dbGetQuery(con, "SELECT raw_name_lower, canonical_packera FROM taxon_synonyms;")
+          syn_fields <- tryCatch(DBI::dbListFields(con, "taxon_synonyms"), error = function(e) character(0))
+          canon_col <- if ("canonical_taxon" %in% syn_fields) "canonical_taxon" else if ("canonical_packera" %in% syn_fields) "canonical_packera" else ""
+          if (nzchar(canon_col)) {
+            DBI::dbGetQuery(con, sprintf("SELECT raw_name_lower, %s AS canonical_taxon FROM taxon_synonyms;", canon_col))
+          } else NULL
         } else NULL
       }, error = function(e) NULL)
       if (!is.null(res) && nrow(res) > 0L) {
-        cur <- .expand_synonym_binomial_keys(stats::setNames(as.character(res$canonical_packera), as.character(res$raw_name_lower)))
+        cur <- .expand_synonym_binomial_keys(stats::setNames(as.character(res$canonical_taxon), as.character(res$raw_name_lower)))
         add_nms <- setdiff(names(cur), names(merged))
         if (length(add_nms) > 0L) merged <- c(merged, cur[add_nms])
       }
@@ -290,14 +299,21 @@ format_predictor_labels <- function(var_vec) {
   miss <- setdiff(u_q, names(memo))
   if (length(miss) > 0L) {
     ws_root <- if (nzchar(.pub_figures_script_dir)) normalizePath(file.path(.pub_figures_script_dir, "..", ".."), mustWork = FALSE) else normalizePath(".", mustWork = FALSE)
-    py_cands <- c(file.path(ws_root, ".venv", "bin", "python"), file.path(".venv", "bin", "python"), Sys.which("python3"))
+    py_cands <- c(
+      if (exists("resolve_r_python_bin", mode = "function")) resolve_r_python_bin() else character(0),
+      file.path(ws_root, ".venv", "bin", "python"),
+      file.path(ws_root, ".venv", "Scripts", "python.exe")
+    )
     py_bin <- py_cands[nzchar(py_cands) & file.exists(py_cands)][1L]
+    if (is.na(py_bin) || !nzchar(py_bin)) {
+      py_bin <- if (exists("resolve_r_python_bin", mode = "function")) resolve_r_python_bin() else Sys.which("python3")
+    }
     resolved_miss <- stats::setNames(rep(NA_character_, length(miss)), miss)
     if (!is.na(py_bin) && nzchar(py_bin) && file.exists(file.path(ws_root, "scripts", "core", "harvester.py"))) {
       tf_in <- tempfile("packera_tax_in_"); on.exit(unlink(tf_in), add = TRUE)
       writeLines(miss, con = tf_in, useBytes = TRUE)
       py_code <- sprintf(
-        "import sys; sys.path.insert(0, %s); from scripts.core.harvester import standardize_packera_taxon as f\nwith open(%s, 'r', encoding='utf-8') as fh:\n for ln in fh:\n  r = f(ln.rstrip('\\r\\n'))\n  print(r if r else '')",
+        "import sys; sys.path.insert(0, %s); import scripts.core.harvester as h; f = getattr(h, 'standardize_taxon_name', getattr(h, 'standardize_packera_taxon'))\nwith open(%s, 'r', encoding='utf-8') as fh:\n for ln in fh:\n  r = f(ln.rstrip('\\r\\n'))\n  print(r if r else '')",
         shQuote(ws_root), shQuote(tf_in)
       )
       py_out <- tryCatch(suppressWarnings(system2(py_bin, args = c("-c", shQuote(py_code)), stdout = TRUE, stderr = FALSE)), error = function(e) character(0))
@@ -321,7 +337,17 @@ standardize_taxon_name <- function(raw_vec) {
   need_py_idx <- integer(0)
   fb_packera <- rep(NA_character_, length(u_vals))
   open_ep <- c("sp", "spp", "cf", "aff", "indet", "unknown", "na")
-  syn_gen_pat <- "^(packera|p\\.|senecio|s\\.|cineraria|jacobaea|aureolaria)[[:space:]]*(?:(?:cf\\.?|aff\\.?)[[:space:]]+)?(x[[:space:]]+|×[[:space:]]*)?([a-z][a-z-]*).*$"
+  tg <- if (exists("resolve_r_target_genus", mode = "function")) resolve_r_target_genus() else "Packera"
+  tg_cap <- paste0(toupper(substr(tg, 1L, 1L)), tolower(substring(tg, 2L)))
+  tg_low <- tolower(tg_cap)
+  tg_abbr_lit <- paste0(substr(tg_low, 1L, 1L), ".")
+  tg_abbr_re <- paste0(substr(tg_low, 1L, 1L), "\\.")
+  gen_tokens <- if (tg_low == "packera") {
+    c("packera", "p\\.", "senecio", "s\\.", "cineraria", "jacobaea", "aureolaria")
+  } else {
+    unique(c(tg_low, tg_abbr_re, "packera", "p\\.", "senecio", "s\\.", "cineraria", "jacobaea", "aureolaria"))
+  }
+  syn_gen_pat <- paste0("^(", paste(gen_tokens, collapse = "|"), ")[[:space:]]*((cf\\.?|aff\\.?)[[:space:]]+)?(x[[:space:]]+|\u00d7[[:space:]]*)?([a-z][a-z-]*).*$")
 
   std_u <- character(length(u_vals))
   for (i in seq_along(u_vals)) {
@@ -329,7 +355,7 @@ standardize_taxon_name <- function(raw_vec) {
     if (is.na(val)) { std_u[i] <- NA_character_; next }
     s_orig <- trimws(val)
     s <- tolower(gsub("[[:space:]]+", " ", s_orig))
-    if (!nzchar(s_orig) || s %in% c("none", "nan", "null", "na", "unknown", "unassigned", "unassigned_packera", "packera")) {
+    if (!nzchar(s_orig) || s %in% c("none", "nan", "null", "na", "unknown", "unassigned", "unassigned_taxon", "unassigned_packera", tg_low, "packera")) {
       std_u[i] <- NA_character_; next
     }
     if (grepl("^Morphotype_K[0-9]+$|^Ecotype_|^LatTertile_|_Coastal$|_Outcrop$|\\[K[0-9]+\\]$", s_orig, ignore.case = TRUE)) {
@@ -338,24 +364,28 @@ standardize_taxon_name <- function(raw_vec) {
     if (has_syn && (s %in% names(syn_map))) {
       std_u[i] <- unname(syn_map[[s]]); next
     }
-    if (has_syn && grepl("^[a-z]+[[:space:]]+[a-z-]+[[:space:]]+(?:var\\.?|subsp\\.?|ssp\\.?|f\\.?)[[:space:]]+[a-z-]+", s)) {
-      v_raw <- sub("^([a-z]+[[:space:]]+[a-z-]+[[:space:]]+(?:var\\.?|subsp\\.?|ssp\\.?|f\\.?)[[:space:]]+[a-z-]+).*$", "\\1", s)
+    if (has_syn && grepl("^[a-z]+[[:space:]]+[a-z-]+[[:space:]]+(var\\.?|subsp\\.?|ssp\\.?|f\\.?)[[:space:]]+[a-z-]+", s)) {
+      v_raw <- sub("^([a-z]+[[:space:]]+[a-z-]+[[:space:]]+(var\\.?|subsp\\.?|ssp\\.?|f\\.?)[[:space:]]+[a-z-]+).*$", "\\1", s)
       v_dot <- gsub("\\b(var|subsp|ssp|f)\\.?[[:space:]]+", "\\1. ", v_raw)
       if (v_raw %in% names(syn_map)) { std_u[i] <- unname(syn_map[[v_raw]]); next }
       if (v_dot %in% names(syn_map)) { std_u[i] <- unname(syn_map[[v_dot]]); next }
     }
     if (grepl(syn_gen_pat, s)) {
       gen_tok <- sub(syn_gen_pat, "\\1", s)
-      hyb_tok <- trimws(sub(syn_gen_pat, "\\2", s))
-      ep <- sub("^[×-]+|[-]+$", "", sub(syn_gen_pat, "\\3", s))
+      hyb_tok <- trimws(sub(syn_gen_pat, "\\4", s))
+      ep <- sub("^[\u00d7-]+|[-]+$", "", sub(syn_gen_pat, "\\5", s))
       if (!nzchar(ep) || nchar(ep) < 2L || (ep %in% open_ep)) { std_u[i] <- NA_character_; next }
-      gen_full <- if (gen_tok == "p.") "packera" else if (gen_tok == "s.") "senecio" else gen_tok
+      gen_full <- if (gen_tok == tg_abbr_lit) tg_low else if (gen_tok == "p.") "packera" else if (gen_tok == "s.") "senecio" else gen_tok
       is_hyb <- nzchar(hyb_tok)
       b_plain <- paste(gen_full, ep)
-      b_hyb <- if (is_hyb) paste(gen_full, "×", ep) else b_plain
+      b_hyb <- if (is_hyb) paste(gen_full, "\u00d7", ep) else b_plain
       if (has_syn && (b_hyb %in% names(syn_map))) { std_u[i] <- unname(syn_map[[b_hyb]]); next }
       if (has_syn && (b_plain %in% names(syn_map))) { std_u[i] <- unname(syn_map[[b_plain]]); next }
-      if (gen_full == "packera") {
+      if (gen_full == tg_low) {
+        p_can <- paste0(tg_cap, " ", ep)
+        if (has_syn) { std_u[i] <- p_can; next }
+        fb_packera[i] <- p_can
+      } else if (gen_full == "packera") {
         p_can <- paste0("Packera ", ep)
         if (has_syn) { std_u[i] <- p_can; next }
         fb_packera[i] <- p_can
@@ -425,8 +455,9 @@ resolve_plot_group_column <- function(df, cda_res = NULL, gmm_res = NULL) {
   }
   std_sp <- standardize_taxon_name(raw_sp)
   cand_sp <- ifelse(!is.na(std_sp), std_sp, ifelse(!is.na(raw_sp) & nzchar(trimws(raw_sp)), trimws(raw_sp), NA_character_))
-  valid_sp <- cand_sp[!is.na(cand_sp) & nzchar(cand_sp) & !(tolower(cand_sp) %in% c("unknown", "na", "none"))]
-  fallback_sp <- if (length(valid_sp) > 0L) valid_sp[1L] else "Unassigned_Packera"
+  u_sent <- if (exists("UNASSIGNED_TAXON_SENTINEL")) UNASSIGNED_TAXON_SENTINEL else "Unassigned_Taxon"
+  valid_sp <- cand_sp[!is.na(cand_sp) & nzchar(cand_sp) & !(tolower(cand_sp) %in% c("unknown", "na", "none", "unassigned", "unassigned_taxon", "unassigned_packera"))]
+  fallback_sp <- if (length(valid_sp) > 0L) valid_sp[1L] else u_sent
   sp_vec <- ifelse(!is.na(cand_sp) & nzchar(cand_sp), cand_sp, fallback_sp)
   sp_valid <- unique(sp_vec[!is.na(sp_vec) & nzchar(sp_vec) & sp_vec != "Unknown"])
 
@@ -443,7 +474,7 @@ resolve_plot_group_column <- function(df, cda_res = NULL, gmm_res = NULL) {
     if (!has_valid_multi(vc)) return(FALSE)
     vv <- unique(vc[!is.na(vc) & vc != "Unknown"])
     any(grepl("Morphotype_K|\\[K[0-9]+\\]|Ecotype|Subcluster|Region_", vv, ignore.case = TRUE)) ||
-      !all(grepl("^Packera[[:space:]]+", vv))
+      !all(if (exists("is_active_genus_binomial", mode = "function")) is_active_genus_binomial(vv) else grepl("^[A-Z][a-z-]+[[:space:]]+([x\u00d7][[:space:]]*)?[a-z][a-z-]+$", vv))
   }
 
   cand_cda <- if (!is.null(cda_res) && !is.null(cda_res$grouping_col)) clean_cand(cda_res$grouping_col) else NULL

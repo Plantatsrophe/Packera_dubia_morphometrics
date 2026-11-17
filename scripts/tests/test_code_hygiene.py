@@ -322,6 +322,8 @@ class TestCodeHygiene(unittest.TestCase):
             PROJECT_ROOT / "scripts" / "figures" / "step07_figures.R": 420,
             PROJECT_ROOT / "scripts" / "figures" / "step07b_network_figures.R": 320,
             PROJECT_ROOT / "scripts" / "tests" / "test_step07_audit_hygiene.py": 400,
+            PROJECT_ROOT / "scripts" / "core" / "progress_telemetry.py": 350,
+            PROJECT_ROOT / "scripts" / "tests" / "test_v15_taxon_and_telemetry.py": 380,
         }
         bounded_paths = (
             *strict_ceilings.keys(),

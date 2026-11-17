@@ -16,10 +16,15 @@ Description:
 
 from __future__ import annotations
 
-import argparse, gzip, importlib, io, multiprocessing as mp, os, re, shutil, subprocess, sys, tarfile, zipfile
+import argparse, importlib, io, multiprocessing as mp, os, re, sys, tarfile, zipfile
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
+
+try:
+    from isal import igzip as _fast_gzip
+except ImportError:
+    import gzip as _fast_gzip
 
 import pandas as pd
 
@@ -27,7 +32,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from scripts.core.config import resolve_target_genus
 from scripts.core.logger import setup_logging
+try:
+    from scripts.core.progress_telemetry import emit_progress
+except ImportError:
+    def emit_progress(*args: Any, **kwargs: Any) -> None:
+        return None
 from scripts.data_prep.organellar_cytonuclear_utils import (
     _NON_EPITHET_TOKENS, _SEED_SYNONYM_TAXA, _cluster_haplotypes,
     _detect_cytonuclear_discordance, _extract_species_from_seed_key,
@@ -136,27 +147,17 @@ def _iter_fastq_records_stream(fh: io.TextIOBase) -> Iterator[Tuple[str, str]]:
         yield h.strip(), seq.strip().upper()
 
 def _iter_binary_fastq_stream(raw_f: Any, is_gz: bool) -> Iterator[str]:
-    bio: Any = gzip.GzipFile(fileobj=raw_f) if is_gz else raw_f
-    with io.TextIOWrapper(bio, encoding="utf-8", errors="replace") as fh:
-        yield from (seq for _, seq in _iter_fastq_records_stream(fh) if seq)
+    if is_gz:
+        with _fast_gzip.open(raw_f, "rt", encoding="utf-8", errors="replace") as fh:
+            yield from (seq for _, seq in _iter_fastq_records_stream(fh) if seq)
+    else:
+        with io.TextIOWrapper(raw_f, encoding="utf-8", errors="replace") as fh:
+            yield from (seq for _, seq in _iter_fastq_records_stream(fh) if seq)
 
 def _iter_fastq_file_seqs(p: Path) -> Iterator[str]:
     """Stream uppercase FASTQ sequences from a single `.fq`, `.fastq`, or `.gz` file."""
-    is_gz = p.name.lower().endswith(".gz")
-    pigz_bin = shutil.which("pigz") if is_gz else None
-    gzip_bin = None if (not is_gz or pigz_bin) else shutil.which("gzip")
-    if is_gz and (pigz_bin or gzip_bin):
-        cmd = [pigz_bin, "-p", "2", "-dc", str(p)] if pigz_bin else [str(gzip_bin), "-dc", str(p)]
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", bufsize=1 << 20)
-        try:
-            assert proc.stdout is not None
-            yield from (seq for _, seq in _iter_fastq_records_stream(proc.stdout) if seq)
-        finally:
-            if proc.stdout is not None: proc.stdout.close()
-            if proc.poll() is None: proc.terminate()
-            proc.wait()
-        return
-    with (gzip.open if is_gz else open)(p, "rt", encoding="utf-8", errors="replace") as fh:
+    opener = _fast_gzip.open if p.name.lower().endswith(".gz") else open
+    with opener(p, "rt", encoding="utf-8", errors="replace") as fh:
         yield from (seq for _, seq in _iter_fastq_records_stream(fh) if seq)
 
 def _iter_staged_fastq_reads(fastq_source: Path) -> Iterator[Tuple[str, str]]:
@@ -309,6 +310,7 @@ def _discover_empirical_nuclear_taxon_map(genomics_dir: Path, out_dir: Optional[
     for base in (out_dir, genomics_dir, genomics_dir.parent / "outputs" / "genomics", genomics_dir.parent / "outputs" / "tables"):
         if base is not None:
             cands.append(Path(base) / "genomic_assignments.csv")
+    genus_prefix = f"{(resolve_target_genus() or 'Packera').strip().capitalize()} "
     out: Dict[str, str] = {}
     for p in cands:
         if not p.is_file():
@@ -322,7 +324,7 @@ def _discover_empirical_nuclear_taxon_map(genomics_dir: Path, out_dir: Optional[
         for _, row in df.iterrows():
             sid = _clean_sample_id(row.get("genetic_sample_id", ""))
             tx = str(row.get("geno_predicted_taxon", "")).strip()
-            if not sid or not tx.startswith("Packera "):
+            if not sid or not tx.startswith(genus_prefix):
                 continue
             try:
                 admix = int(float(row.get("is_geno_admixed") or 0))
@@ -364,6 +366,7 @@ def run_offtarget_organellar_skim(
                     for src_b, dst_b in ((cp_b, cp_reads[sid]), (its_b, its_reads[sid]), (waxy_b, waxy_reads[sid])):
                         if src_b and len(dst_b) < _MAX_BUCKET_READS: dst_b.extend(src_b[: _MAX_BUCKET_READS - len(dst_b)])
                     logger.info("[skim-organellar] [%d/%d] %s (%s): scanned %d reads (cp=%d, its=%d, waxy=%d)", done_i, len(fq_files), fname, sid, n_reads, len(cp_b), len(its_b), len(waxy_b))
+                    emit_progress(6, "organellar_skim", done_i, len(fq_files), unit="fastq")
         finally: _WORKER_CTX.clear()
     else:
         for sid, seq in _iter_staged_fastq_reads(fastq_source):

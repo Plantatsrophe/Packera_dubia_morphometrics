@@ -175,18 +175,19 @@ def parse_sample_code(sample_id: str) -> Dict[str, Optional[str]]:
     empty = {"taxon_code": None, "taxon_raw": None, "species_standardized": None, "population_id": None, "replicate_pair_id": None, "replicate_suffix": None}
     if not cid:
         return empty
-    if m := re.match(r"^PAC(NAUR|[A-Z]{3,5})\d*-([A-Z0-9]+)(?:-([A-Z0-9-]+))?$", cid, re.I):
-        code, pop = m.group(1).upper(), m.group(2).upper()
-        t_raw, sp_std = PAC_CODE_TO_TAXON.get(code, (None, None))
-        return {"taxon_code": code, "taxon_raw": t_raw, "species_standardized": sp_std, "population_id": pop, "replicate_pair_id": f"PAC{code}{pop}", "replicate_suffix": None}
-    if m := re.match(r"^PAC(NAUR|PLATT|[A-Z]{3})([A-Z0-9]+?)([MP])$", cid, re.I):
-        code, pop, rep = m.group(1).upper(), m.group(2).upper(), m.group(3).upper()
-        t_raw, sp_std = PAC_CODE_TO_TAXON.get(code, (None, None))
-        return {"taxon_code": code, "taxon_raw": t_raw, "species_standardized": sp_std, "population_id": pop, "replicate_pair_id": f"PAC{code}{pop}", "replicate_suffix": rep}
-    if m := re.match(r"^PAC(NAUR|PLATT|[A-Z]{3})([A-Z0-9]+)$", cid, re.I):
-        code, pop = m.group(1).upper(), m.group(2).upper()
-        t_raw, sp_std = PAC_CODE_TO_TAXON.get(code, (None, None))
-        return {"taxon_code": code, "taxon_raw": t_raw, "species_standardized": sp_std, "population_id": pop, "replicate_pair_id": cid, "replicate_suffix": None}
+    if _resolve_target_filter("resolve_target_genus", "TARGET_GENUS", "packera") == "packera":
+        if m := re.match(r"^PAC(NAUR|[A-Z]{3,5})\d*-([A-Z0-9]+)(?:-([A-Z0-9-]+))?$", cid, re.I):
+            code, pop = m.group(1).upper(), m.group(2).upper()
+            t_raw, sp_std = PAC_CODE_TO_TAXON.get(code, (None, None))
+            return {"taxon_code": code, "taxon_raw": t_raw, "species_standardized": sp_std, "population_id": pop, "replicate_pair_id": f"PAC{code}{pop}", "replicate_suffix": None}
+        if m := re.match(r"^PAC(NAUR|PLATT|[A-Z]{3})([A-Z0-9]+?)([MP])$", cid, re.I):
+            code, pop, rep = m.group(1).upper(), m.group(2).upper(), m.group(3).upper()
+            t_raw, sp_std = PAC_CODE_TO_TAXON.get(code, (None, None))
+            return {"taxon_code": code, "taxon_raw": t_raw, "species_standardized": sp_std, "population_id": pop, "replicate_pair_id": f"PAC{code}{pop}", "replicate_suffix": rep}
+        if m := re.match(r"^PAC(NAUR|PLATT|[A-Z]{3})([A-Z0-9]+)$", cid, re.I):
+            code, pop = m.group(1).upper(), m.group(2).upper()
+            t_raw, sp_std = PAC_CODE_TO_TAXON.get(code, (None, None))
+            return {"taxon_code": code, "taxon_raw": t_raw, "species_standardized": sp_std, "population_id": pop, "replicate_pair_id": cid, "replicate_suffix": None}
     m_og_hy = re.match(r"^EREHIE\d*[-_]([A-Z0-9]+?)(?:[-_]?([MP])|[-_]([A-Z0-9]+))?$", cid, re.I)
     m_og_flat = None if m_og_hy else re.match(r"^EREHIE([A-Z0-9]+?)([MP])?$", cid, re.I)
     if m_og_hy or m_og_flat:

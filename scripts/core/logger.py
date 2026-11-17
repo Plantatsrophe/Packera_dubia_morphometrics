@@ -3,6 +3,10 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+from scripts.core.progress_telemetry import StepETATracker, emit_progress
+
+__all__ = ["setup_logging", "emit_progress", "StepETATracker"]
+
 def setup_logging(log_file: Optional[Path] = None, verbose: bool = False, name: str = "PackeraPipeline") -> logging.Logger:
     """
     Configures standard multi-handler logging for the project.

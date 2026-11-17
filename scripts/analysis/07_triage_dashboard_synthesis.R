@@ -21,6 +21,9 @@ suppressPackageStartupMessages({
 }
 
 .step07_load_env <- environment()
+.emit_s07_prog <- function(...) {
+  if (exists("emit_r_progress", mode = "function")) tryCatch(emit_r_progress(7L, ...), error = function(e) NULL)
+}
 .source_step07_dep <- function(repo_rel, rel_to_script, symbol_chk) {
   if (exists(symbol_chk, envir = .step07_load_env, mode = "function")) return(invisible(TRUE))
   for (cand_p in unique(c(repo_rel, file.path(.script_dir_step07, rel_to_script)))) {
@@ -107,6 +110,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
   if (!("morphometric_outlier_flag" %in% names(df))) df$morphometric_outlier_flag <- FALSE
   if (!("misidentification_flag" %in% names(df))) df$misidentification_flag <- FALSE
   is_intra <- isTRUE(intraspecific_mode); n <- nrow(df); if (n == 0L) return(df)
+  .emit_s07_prog("cytology_and_deme_propagation", 0L, 2L, unit = "substeps", substage_weight = 0.25, substage_offset = 0.0)
 
   opts_cyto <- opts
   if (is.null(opts_cyto$db_path)) { dbe <- env_plantmatics_or_packera("PLANTMATICS_DB_PATH", "PACKERA_DB_PATH"); if (nzchar(dbe)) opts_cyto$db_path <- dbe }
@@ -128,6 +132,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
     df <- run_step07_genomic_propagation(df, opts)
   }
   prop_sum_attr <- attr(df, "genomic_propagation_summary")
+  .emit_s07_prog("cytology_and_deme_propagation", 2L, 2L, unit = "substeps", substage_weight = 0.25, substage_offset = 0.0)
   sp_all_vec <- if ("species_standardized" %in% names(df)) as.character(df$species_standardized) else rep("Unknown", n)
   sp_sheet_vec <- ifelse(!is.na(sp_all_vec) & nzchar(sp_all_vec), sp_all_vec, "Unknown")
   cat_sheet_vec <- if ("catalogNumber" %in% names(df)) as.character(df$catalogNumber) else paste0("__ROW_", seq_len(n))
@@ -296,10 +301,12 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
     osr_chisq85_vec = osr_chisq85_vec, osr_chisq90_vec = osr_chisq90_vec, osr_chisq95_vec = osr_chisq95_vec,
     n_sheet_ramets_vec = as.integer(table(cat_sheet_vec)[cat_sheet_vec])
   )
+  .emit_s07_prog("decision_matrix", 0L, 2L, unit = "stages", substage_weight = 0.35, substage_offset = 0.25)
   cl_ctx <- .build_step07_cluster_cohesion_context(df, bg_ctx, mv, gmm_two_delta_bic = gmm_two_delta_bic, is_intra = is_intra)
   st_res <- .evaluate_step07_specimen_stages(df, mv, bg_ctx, cl_ctx, org_sig, .eval_five_gate_hybrid_pair, gmm_two_delta_bic = gmm_two_delta_bic, is_intra = is_intra)
   outside_self_morph_95 <- st_res$outside_self_morph_95; tier_authority_gate_ok <- st_res$tier_authority_gate_ok
   df <- .apply_step07_postprocess_and_guards(df, st_res, mv, bg_ctx, cl_ctx, org_sig, opts)
+  .emit_s07_prog("decision_matrix", 2L, 2L, unit = "stages", substage_weight = 0.35, substage_offset = 0.25)
 
   df$cryptic_non_clinal_pass <- as.logical(df$cryptic_non_clinal_pass)
   df$resurrection_basionym <- as.character(df$resurrection_basionym)
@@ -318,15 +325,19 @@ main <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
   set.seed(42); opts <- parse_args_robust(cli_args)
   message("=== Starting Step 07 Triage Dashboard & Taxonomic Synthesis ===")
   triage_df <- build_triage_queue(opts)
+  .emit_s07_prog("figures_and_reports", 0L, 3L, unit = "artifacts", substage_weight = 0.40, substage_offset = 0.60)
   render_synthesis_figure_png(triage_df, opts$output_plot, cda_summary = opts$cda_summary, focal_taxon = opts$focal_taxon, output_complex_plot = opts$output_complex_plot)
   tryCatch({
     .source_step07_dep("scripts/morphometrics/pub_figures_utils.R", "../morphometrics/pub_figures_utils.R", "generate_step07_pub_figures")
     if (exists("generate_step07_pub_figures", mode = "function")) generate_step07_pub_figures(triage_df, opts$output_plot)
   }, error = function(e) warning("Step 07 publication figures export warning: ", e$message))
+  .emit_s07_prog("figures_and_reports", 1L, 3L, unit = "artifacts", substage_weight = 0.40, substage_offset = 0.60)
   generate_taxonomic_revision_report(triage_df, opts)
+  .emit_s07_prog("figures_and_reports", 2L, 3L, unit = "artifacts", substage_weight = 0.40, substage_offset = 0.60)
   if (!is.null(opts$output_html) && nzchar(trimws(opts$output_html))) {
     generate_interactive_triage_html(triage_df, opts$output_html, focal_taxon = opts$focal_taxon, opts = opts)
   }
+  .emit_s07_prog("figures_and_reports", 3L, 3L, unit = "artifacts", substage_weight = 0.40, substage_offset = 0.60, status = "completed")
   message("=== Taxonomic Synthesis & Triage Dashboard Complete ===")
 }
 

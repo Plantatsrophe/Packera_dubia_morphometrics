@@ -71,6 +71,11 @@ from scripts.core.config import (
     resolve_cpu_threads,
     resolve_gpu_batch_size,
 )
+try:
+    from scripts.core.progress_telemetry import emit_progress
+except ImportError:
+    def emit_progress(*args: Any, **kwargs: Any) -> Dict[str, Any]:
+        return {}
 from scripts.core.db import (
     get_completed_qc_vouchers,
     get_db_connection,
@@ -3165,8 +3170,30 @@ class SegmentAndExtractPipeline:
 
                 # Flush any leading skipped vouchers before spinning up thread pools
                 _drain_ordered_plan()
+                n_cached = sum(1 for kind, _ in ordered_plan if kind == "skip")
+                total_uncached = len(active_tasks)
+
+                if total_uncached == 0:
+                    emit_progress(
+                        2,
+                        "lm3_wave",
+                        0,
+                        0,
+                        unit="vouchers",
+                        cached_skipped=n_cached,
+                        status="skipped_cached",
+                    )
 
                 if active_tasks:
+                    emit_progress(
+                        2,
+                        "lm3_wave",
+                        0,
+                        total_uncached,
+                        unit="vouchers",
+                        cached_skipped=n_cached,
+                    )
+                    wave_done_uncached = 0
                     logger.info(
                         f"3-Stage Wave Engine active: {len(active_tasks)} vouchers queued "
                         f"(wave_size={wave_size}, s2_batch={self.stage2_batch_size}, "
@@ -3187,6 +3214,7 @@ class SegmentAndExtractPipeline:
                     def _retire_wave_batch(
                         oldest_wave: List[Tuple[int, str, Path, concurrent.futures.Future]]
                     ) -> None:
+                        nonlocal wave_done_uncached
                         wave_bundles: List[_VoucherFinalizeBundle] = []
                         for a_idx_w, cat_w, path_w, fut_w in oldest_wave:
                             try:
@@ -3245,6 +3273,16 @@ class SegmentAndExtractPipeline:
                                             )
                             except Exception as wave_db_exc:
                                 logger.warning(f"Wave SQLite WAL commit failed: {wave_db_exc}")
+                        wave_done_uncached += len(oldest_wave)
+                        emit_progress(
+                            2,
+                            "lm3_wave",
+                            wave_done_uncached,
+                            total_uncached,
+                            unit="vouchers",
+                            cached_skipped=n_cached,
+                            status="completed" if wave_done_uncached >= total_uncached else "running",
+                        )
 
                     n_active = len(active_tasks)
                     for w_start in range(0, n_active, wave_size):
@@ -3449,6 +3487,29 @@ class SegmentAndExtractPipeline:
                         retire_futures.pop(0).result()
                 _drain_ordered_plan()
             else:
+                seq_cached = sum(
+                    1 for _, r in voucher_rows if _should_skip_voucher(str(r["catalogNumber"]).strip())
+                )
+                seq_total_uncached = max(0, len(voucher_rows) - seq_cached)
+                if seq_total_uncached == 0:
+                    emit_progress(
+                        2,
+                        "lm3_wave",
+                        0,
+                        0,
+                        unit="vouchers",
+                        cached_skipped=seq_cached,
+                        status="skipped_cached",
+                    )
+                else:
+                    emit_progress(
+                        2,
+                        "lm3_wave",
+                        0,
+                        seq_total_uncached,
+                        unit="vouchers",
+                        cached_skipped=seq_cached,
+                    )
                 for _, row in voucher_rows:
                     cat_num = str(row["catalogNumber"]).strip()
                     raw_img_path = Path(str(row["image_path"]).strip())
@@ -3510,6 +3571,16 @@ class SegmentAndExtractPipeline:
                         logger.info(
                             f"Progress: [Processed: {processed_count} | Skipped: {skipped_count} | Total: {total_vouchers}] "
                             f"({len(all_extracted_records)} leaves extracted, {len(all_failed_records)} failed QC)."
+                        )
+                    if seq_total_uncached > 0:
+                        emit_progress(
+                            2,
+                            "lm3_wave",
+                            min(processed_count, seq_total_uncached),
+                            seq_total_uncached,
+                            unit="vouchers",
+                            cached_skipped=seq_cached,
+                            status="completed" if processed_count >= seq_total_uncached else "running",
                         )
         finally:
             self.stage1_detector._prep_executor = None  # type: ignore[attr-defined]

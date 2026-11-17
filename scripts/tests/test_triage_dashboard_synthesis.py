@@ -2838,7 +2838,7 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
                 ]
                 for sp, sym, st, cnty, st_only in usda_rows:
                     conn.execute(
-                        "INSERT OR IGNORE INTO usda_county_ranges (canonical_packera, usda_symbol, state_norm, county_norm, is_state_only) VALUES (?, ?, ?, ?, ?);",
+                        "INSERT OR IGNORE INTO usda_county_ranges (canonical_taxon, usda_symbol, state_norm, county_norm, is_state_only) VALUES (?, ?, ?, ?, ?);",
                         (sp, sym, st, cnty, st_only),
                     )
                 for sp, sc in [

@@ -193,11 +193,18 @@ def _optimize_log_params(obj_fn: Any, init_vals: Sequence[float], bounds: Sequen
     return [math.exp(z) for z in cur], best_val
 
 
-def select_nucleotide_substitution_model(
-    seqs: Dict[str, str],
-    sample_ids: Sequence[str],
-    alignment_name: str = "packera.phylip",
-) -> Dict[str, Any]:
+def _resolve_iqtree2_bin() -> Optional[str]:
+    if hit := shutil.which("iqtree2") or shutil.which("iqtree2.exe"):
+        return hit
+    fb = Path(os.environ.get("LOCALAPPDATA") or os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share")) / "Plantmatics"
+    try:
+        data_dir = Path(importlib.import_module("platformdirs").user_data_dir("Plantmatics"))
+    except Exception:
+        data_dir = fb
+    return next((str(p) for fn in ("iqtree2", "iqtree2.exe") if (p := data_dir / "bin" / fn).is_file()), None)
+
+
+def select_nucleotide_substitution_model(seqs: Dict[str, str], sample_ids: Sequence[str], alignment_name: str = "packera.phylip") -> Dict[str, Any]:
     """Select best nucleotide substitution model via BIC across 10 CTMC(+G4)(+ASC) models."""
     present, mat, pi_emp = _encode_aln(seqs, sample_ids)
     n_sites = int(mat.shape[1])
@@ -248,16 +255,13 @@ def select_nucleotide_substitution_model(
         r["delta_BIC"], r["bic_weight"] = round(r["BIC"] - min_bic, 4), round(w / w_sum, 4)
     results.sort(key=lambda r: (r["BIC"], r["k_params"]))
     best, iq_model = results[0], None
-    if shutil.which("iqtree2") and os.environ.get("PLANTMATICS_SKIP_IQTREE2") != "1" and n_eff >= 10:
+    if (iq_bin := _resolve_iqtree2_bin()) and os.environ.get("PLANTMATICS_SKIP_IQTREE2") != "1" and n_eff >= 10:
         try:
             with tempfile.TemporaryDirectory() as td:
-                fa = Path(td) / "aln.fasta"
-                fa.write_text("".join(f">{sid}\n{seqs[sid]}\n" for sid in present), encoding="utf-8")
-                res = subprocess.run(["iqtree2", "-s", str(fa), "-m", "MF", "-T", str(min(4, _resolve_max_workers())), "--prefix", str(Path(td) / "iq")], capture_output=True, text=True, timeout=15)
-                m = re.search(r"Best-fit model according to BIC:\s*(\S+)", res.stdout)
-                iq_model = m.group(1).strip() if m else None
-        except Exception:
-            iq_model = None
+                fa = Path(td) / "aln.fasta"; fa.write_text("".join(f">{sid}\n{seqs[sid]}\n" for sid in present), encoding="utf-8")
+                res = subprocess.run([iq_bin, "-s", str(fa), "-m", "MF", "-T", str(min(4, _resolve_max_workers())), "--prefix", str(Path(td) / "iq")], capture_output=True, text=True, timeout=15)
+                m = re.search(r"Best-fit model according to BIC:\s*(\S+)", res.stdout); iq_model = m.group(1).strip() if m else None
+        except Exception: iq_model = None
     rows = [{k: v for k, v in r.items() if not k.startswith("_")} for r in results]
     return {"alignment_name": alignment_name, "best_model": best["model_name"], "base_model": best["base_model"], "has_gamma": best["has_gamma"], "asc_applied": asc_applied, "bic_weight": best["bic_weight"], "ti_tv_kappa": best["ti_tv_kappa"], "kappa_purine": round(best["_kr"], 4), "kappa_pyrimidine": round(best["_ky"], 4), "gamma_alpha": best["gamma_alpha"], "prop_invariant": round(prop_inv, 4), "n_sites": n_sites, "n_var_sites": n_var, "pi_freqs": [round(float(x), 5) for x in pi_emp], "iqtree2_model": iq_model, "table_rows": rows}
 

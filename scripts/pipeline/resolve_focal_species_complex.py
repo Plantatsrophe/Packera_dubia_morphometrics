@@ -35,6 +35,7 @@ import csv
 import math
 import os
 import re
+import shutil
 import sqlite3
 import statistics
 import subprocess
@@ -47,17 +48,32 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from scripts.core import config as _core_config
+from scripts.core.config import resolve_target_genus
 from scripts.core.harvester import standardize_packera_taxon
+
+
+def _resolve_py_exe() -> str:
+    fn = getattr(_core_config, "resolve_python_executable", None)
+    return str(fn()) if callable(fn) else (sys.executable or "python3")
+
+
+def _runner_prefix(run_script: Path) -> List[str]:
+    if run_script.suffix == ".sh" and shutil.which("bash"):
+        return ["bash", str(run_script)]
+    py_exe = _resolve_py_exe()
+    py_cand = run_script if run_script.suffix == ".py" else run_script.with_suffix(".py")
+    return [py_exe, str(py_cand if py_cand.is_file() else (run_script.parent / "main.py"))]
 
 
 def slugify_taxon(taxon_name: str) -> str:
     clean = re.sub(r"[^A-Za-z0-9]+", "_", taxon_name.strip()).strip("_")
-    return clean or "Packera_focal"
+    return clean or f"{resolve_target_genus()}_focal"
 
 
 def default_prefix_for_taxon(taxon_name: str) -> str:
     parts = taxon_name.strip().split()
-    if len(parts) >= 2 and parts[0].lower() == "packera":
+    if len(parts) >= 2 and parts[0].lower() == resolve_target_genus().lower():
         return re.sub(r"[^a-z0-9]+", "_", parts[1].lower()).strip("_")
     return slugify_taxon(taxon_name).lower()
 
@@ -101,12 +117,12 @@ def build_four_stage_commands(
         common_tail.extend(["--threads", str(threads)])
 
     r1, r2, r3, r4 = _stage_run_ids(prefix, discovery_run_id=discovery_run_id)
+    runner_cmd = _runner_prefix(run_script)
 
     stages: List[Tuple[str, str, List[str]]] = []
     if not skip_discovery:
         cmd1 = [
-            "bash",
-            str(run_script),
+            *runner_cmd,
             "--run-id",
             r1,
             *(["--skip-harvest"] if skip_harvest else []),
@@ -119,8 +135,7 @@ def build_four_stage_commands(
         stages.append(("Stage_1_Discovery", r1, cmd1))
 
     cmd2 = [
-        "bash",
-        str(run_script),
+        *runner_cmd,
         "--run-id",
         r2,
         "--skip-harvest",
@@ -139,8 +154,7 @@ def build_four_stage_commands(
     stages.append(("Stage_2_Complex_Triage", r2, cmd2))
 
     cmd3 = [
-        "bash",
-        str(run_script),
+        *runner_cmd,
         "--run-id",
         r3,
         "--skip-harvest",
@@ -158,8 +172,7 @@ def build_four_stage_commands(
     stages.append(("Stage_3_Intraspecific_Clean", r3, cmd3))
 
     cmd4 = [
-        "bash",
-        str(run_script),
+        *runner_cmd,
         "--run-id",
         r4,
         "--start-step",
@@ -701,7 +714,7 @@ def compile_complex_resolution_summary(
                 or focal_std
             )
             md_lines.append(f"* `{cat}` ({inst}): basionym *{bas}* anchored in cluster `{cl}` (`Confirmed_Type_Control`).")
-        if focal_std == "Packera dubia":
+        if resolve_target_genus().lower() == "packera" and focal_std == "Packera dubia":
             md_lines.append(
                 "* Pending primary holotype imagery: André Michaux's original *Senecio tomentosus* Michx. specimen from Flat Rock, "
                 "Kershaw County, South Carolina (`P-MICH`, Muséum national d'Histoire naturelle, Paris) awaits digital imaging under "
@@ -736,13 +749,15 @@ def compile_complex_resolution_summary(
 
 
 def build_parser() -> argparse.ArgumentParser:
+    genus_name = resolve_target_genus()
+    default_focal = "Packera dubia" if genus_name.lower() == "packera" else ""
     parser = argparse.ArgumentParser(
-        description="Execute and synthesize the 4-stage species-complex resolution workflow for Packera dubia or another focal Packera taxon."
+        description=f"Execute and synthesize the 4-stage species-complex resolution workflow for a focal {genus_name} taxon."
     )
     parser.add_argument(
         "--focal-taxon",
-        default="Packera dubia",
-        help="Focal Packera binomial to resolve (default: 'Packera dubia').",
+        default=default_focal,
+        help=f"Focal {genus_name} binomial to resolve (default: '{default_focal or 'required'}').",
     )
     parser.add_argument(
         "--prefix",

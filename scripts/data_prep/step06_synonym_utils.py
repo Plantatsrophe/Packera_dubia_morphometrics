@@ -70,7 +70,19 @@ _CANON_EQUIV_OVERRIDES: Dict[str, str] = {
 }
 
 
-def canonical_taxon_equiv_key(taxon: Any) -> str:
+def _resolve_active_genus(target_genus: Optional[str] = None) -> str:
+    if target_genus and str(target_genus).strip():
+        return str(target_genus).strip().capitalize()
+    try:
+        from scripts.core.config import resolve_target_genus
+        if g := str(resolve_target_genus() or "").strip():
+            return g.capitalize()
+    except Exception:
+        pass
+    return "Packera"
+
+
+def canonical_taxon_equiv_key(taxon: Any, target_genus: Optional[str] = None) -> str:
     """Normalize whitespace, underscores, hybrid signs, and synonyms to a canonical lowercase comparison key."""
     if taxon is None:
         return ""
@@ -79,17 +91,20 @@ def canonical_taxon_equiv_key(taxon: Any) -> str:
     raw = re.sub(r"[\s_]+", " ", str(taxon)).strip().lower().replace("\u00d7", "x")
     if not raw or raw in {"nan", "none", "null"}:
         return ""
-    raw = re.sub(r"\bpackera\s+x\s*memmingeri\b", "packera xmemmingeri", raw)
-    if raw in _CANON_EQUIV_OVERRIDES:
-        return _CANON_EQUIV_OVERRIDES[raw]
-    if raw in CANONICAL_SENECIO_PACKERA_SYNONYMS:
-        canon = CANONICAL_SENECIO_PACKERA_SYNONYMS[raw].lower()
-        return "packera xmemmingeri" if canon == "packera x memmingeri" else canon
+    if _resolve_active_genus(target_genus).lower() == "packera":
+        raw = re.sub(r"\bpackera\s+x\s*memmingeri\b", "packera xmemmingeri", raw)
+        if raw in _CANON_EQUIV_OVERRIDES:
+            return _CANON_EQUIV_OVERRIDES[raw]
+        if raw in CANONICAL_SENECIO_PACKERA_SYNONYMS:
+            canon = CANONICAL_SENECIO_PACKERA_SYNONYMS[raw].lower()
+            return "packera xmemmingeri" if canon == "packera x memmingeri" else canon
     return raw
 
 
-def normalize_step06_taxon_name(raw_taxon: Optional[str]) -> Tuple[Optional[str], Optional[str], bool]:
-    """Return `(taxon_raw, species_standardized, is_novel_or_hybrid)` using canonical Packera synonymy."""
+def normalize_step06_taxon_name(
+    raw_taxon: Optional[str], target_genus: Optional[str] = None,
+) -> Tuple[Optional[str], Optional[str], bool]:
+    """Return `(taxon_raw, species_standardized, is_novel_or_hybrid)` using active genus synonymy."""
     if raw_taxon is None:
         return None, None, False
     t_raw = " ".join(str(raw_taxon).strip().split())
@@ -108,13 +123,22 @@ def normalize_step06_taxon_name(raw_taxon: Optional[str]) -> Tuple[Optional[str]
     if is_query:
         return t_raw, t_raw, True
 
-    if low in CANONICAL_SENECIO_PACKERA_SYNONYMS:
+    active_genus = _resolve_active_genus(target_genus)
+    is_packera = active_genus.lower() == "packera"
+    if is_packera and low in CANONICAL_SENECIO_PACKERA_SYNONYMS:
         return t_raw, CANONICAL_SENECIO_PACKERA_SYNONYMS[low], False
 
     try:
-        from scripts.core.harvester import standardize_packera_taxon
-
-        std = standardize_packera_taxon(t_raw)
+        import scripts.core.harvester as _harv
+        std_fn = getattr(_harv, "standardize_taxon_name", None)
+        if callable(std_fn):
+            std = std_fn(t_raw, target_genus=active_genus)
+        elif is_packera:
+            std = _harv.standardize_packera_taxon(t_raw)
+        elif (m := re.match(rf"^{re.escape(active_genus.lower())}\s+([a-z][a-z-]*)\b", low)) and m.group(1) not in _NON_EPITHET_TOKENS:
+            std = f"{active_genus} {m.group(1)}"
+        else:
+            std = None
         if std:
             return t_raw, std, False
     except Exception:
@@ -122,39 +146,47 @@ def normalize_step06_taxon_name(raw_taxon: Optional[str]) -> Tuple[Optional[str]
     return t_raw, t_raw, False
 
 
-def normalize_public_header_binomial(text: str) -> str:
-    """Normalize a FASTA header or taxon string into `Packera_<epithet>` (or `Packera_sp`)."""
+def normalize_public_header_binomial(text: str, target_genus: Optional[str] = None) -> str:
+    """Normalize a FASTA header or taxon string into `<Genus>_<epithet>` (or `<Genus>_sp`)."""
+    active_genus = _resolve_active_genus(target_genus)
+    g_low = active_genus.lower()
     hay = str(text or "").replace("_", " ").lower()
-    for syn, canon in CANONICAL_SENECIO_PACKERA_SYNONYMS.items():
-        if syn in hay:
-            return "Packera_xmemmingeri" if canon == "Packera x memmingeri" else canon.replace(" ", "_")
-    if m := re.search(r"\bpackera\s+[0-9]*([a-z-]+)\b", hay):
+    if g_low == "packera":
+        for syn, canon in CANONICAL_SENECIO_PACKERA_SYNONYMS.items():
+            if syn in hay:
+                return "Packera_xmemmingeri" if canon == "Packera x memmingeri" else canon.replace(" ", "_")
+    if m := re.search(rf"\b{re.escape(g_low)}\s+[0-9]*([a-z-]+)\b", hay):
         ep = m.group(1).strip("-")
-        if ep == "tomentosa":
-            return "Packera_dubia"
-        if ep == "millefolia":
-            return "Packera_millefolium"
-        if ep in ("memmingeri", "xmemmingeri"):
-            return "Packera_xmemmingeri"
-        return f"Packera_{ep}"
-    return "Packera_sp"
+        if g_low == "packera":
+            if ep == "tomentosa":
+                return "Packera_dubia"
+            if ep == "millefolia":
+                return "Packera_millefolium"
+            if ep in ("memmingeri", "xmemmingeri"):
+                return "Packera_xmemmingeri"
+        return f"{active_genus}_{ep}"
+    return f"{active_genus}_sp"
 
 
-def extract_species_from_seed_key(seed_key: str) -> str:
-    """Extract canonical `Packera <epithet>` from a reference FASTA header without accession hardcoding."""
+def extract_species_from_seed_key(seed_key: str, target_genus: Optional[str] = None) -> str:
+    """Extract canonical `<Genus> <epithet>` from a reference FASTA header without accession hardcoding."""
+    active_genus = _resolve_active_genus(target_genus)
+    g_low = active_genus.lower()
     norm = re.sub(r"[|_/\t]+", " ", str(seed_key or "")).lower()
-    for syn, canon in CANONICAL_SENECIO_PACKERA_SYNONYMS.items():
-        if syn in norm:
-            return canon
-    if m := re.search(r"\bpackera\s+[0-9]*([a-z]+(?:-[a-z]+)?)(?=\s|$|[0-9])", norm):
+    if g_low == "packera":
+        for syn, canon in CANONICAL_SENECIO_PACKERA_SYNONYMS.items():
+            if syn in norm:
+                return canon
+    if m := re.search(rf"\b{re.escape(g_low)}\s+[0-9]*([a-z]+(?:-[a-z]+)?)(?=\s|$|[0-9])", norm):
         ep = m.group(1).strip("-")
         if ep and ep not in _NON_EPITHET_TOKENS:
-            if ep == "tomentosa":
-                return "Packera dubia"
-            if ep == "millefolia":
-                return "Packera millefolium"
-            if ep in ("memmingeri", "xmemmingeri"):
-                return "Packera x memmingeri"
-            return f"Packera {ep}"
+            if g_low == "packera":
+                if ep == "tomentosa":
+                    return "Packera dubia"
+                if ep == "millefolia":
+                    return "Packera millefolium"
+                if ep in ("memmingeri", "xmemmingeri"):
+                    return "Packera x memmingeri"
+            return f"{active_genus} {ep}"
     return ""
 

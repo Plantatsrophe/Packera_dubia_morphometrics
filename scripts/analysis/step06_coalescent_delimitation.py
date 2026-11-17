@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import math
+import os
 import shutil
 import sys
 from collections import defaultdict
@@ -52,6 +53,25 @@ from scripts.analysis.step06_coalescent_models import (
 )
 from scripts.core.config import resolve_genomics_config
 from scripts.core.logger import setup_logging
+
+try:
+    from scripts.core.progress_telemetry import emit_progress
+except ImportError:
+    def emit_progress(*args: Any, **kwargs: Any) -> Dict[str, Any]:
+        return {}
+
+
+def _resolve_coalescent_bin(name: str) -> Optional[str]:
+    if hit := shutil.which(name) or shutil.which(f"{name}.exe"):
+        return hit
+    try:
+        import platformdirs
+        data_dir = Path(platformdirs.user_data_dir("Plantmatics"))
+    except ImportError:
+        base = os.environ.get("LOCALAPPDATA") or os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
+        data_dir = Path(base) / "Plantmatics"
+    bin_dir = data_dir / "bin"
+    return next((str(p) for fn in (name, f"{name}.exe") if (p := bin_dir / fn).is_file()), None)
 
 logger = setup_logging(name="packera.genomics.coalescent")
 
@@ -119,9 +139,10 @@ def compute_coalescent_gdi_delimitation(
     taxon_gdi_map: Dict[str, Dict[str, Any]] = {}
     boot_draws = rng.integers(0, n_blk, size=(max(10, n_boot), n_blk)) if n_blk > 1 else np.zeros((10, 1), dtype=int)
 
-    for tx in taxa:
+    for tx_idx, tx in enumerate(taxa, start=1):
         others = [o for o in taxa if o != tx]
         if not others:
+            emit_progress(6, "coalescent_gdi", tx_idx, len(taxa), unit="taxa", substage_weight=0.25, substage_offset=0.75)
             continue
         sister = min(others, key=lambda o: pair_dxy.get((tx, o), 1.0))
         idx_a, idx_b = by_taxon[tx], by_taxon[sister]
@@ -151,6 +172,7 @@ def compute_coalescent_gdi_delimitation(
         }
         taxon_rows.append(rec)
         taxon_gdi_map[tx] = rec
+        emit_progress(6, "coalescent_gdi", tx_idx, len(taxa), unit="taxa", substage_weight=0.25, substage_offset=0.75)
         adequacy_rows.append({
             "taxon": tx, "nearest_sister_taxon": sister, "substitution_model": substitution_model, "bf_method": bf_info["bf_method"],
             "bic_m0": bf_info["bic_m0"], "bic_m1": bf_info["bic_m1"], "log_bf_10": bf_info["log_bf_10"], "bf_10": bf_info["bf_10"],
@@ -189,6 +211,7 @@ def run_coalescent_delimitation(
     discover_fn = importlib.import_module("scripts.data_prep.06_ingest_genetic_data").discover_genomic_inputs
     assets = discover_fn(genomics_dir)
     if not assets.alignment_files and not (dosage_tsv and dosage_tsv.exists()):
+        emit_progress(6, "coalescent_gdi", 0, 0, unit="taxa", status="skipped_cached")
         return {"status": "skipped_empty", "n_samples": 0}
 
     pass_set, sample_taxon_map, rep_pair_map, hq_reads_map, miss_rate_map = _load_sample_metadata(genomics_dir, parsed_samples_csv)
@@ -209,9 +232,9 @@ def run_coalescent_delimitation(
         eff_blk = eff_block_len if n_sites >= eff_block_len * 2 else max(20, n_sites // 4 or n_sites)
         block_slices = [(st, min(n_sites, st + eff_blk)) for st in range(0, n_sites, eff_blk) if (min(n_sites, st + eff_blk) - st) >= 15]
 
-        if paup_bin := shutil.which("paup"):
+        if paup_bin := _resolve_coalescent_bin("paup"):
             logger.info("Detected external PAUP* binary (%s); running SVDquartets check alongside Python engine.", paup_bin)
-        if bpp_bin := shutil.which("bpp"):
+        if bpp_bin := _resolve_coalescent_bin("bpp"):
             logger.info("Detected external BPP binary (%s); generated control file for MSci.", bpp_bin)
 
         primary_spec = select_nucleotide_substitution_model(dict(zip(sids, seqs)), sids, alignment_name=primary_path.name)
@@ -233,6 +256,7 @@ def run_coalescent_delimitation(
         gdi_df.to_csv(gdi_csv, index=False)
         gdi_s_df.to_csv(gdi_samp_csv, index=False)
         adequacy_df.to_csv(adequacy_csv, index=False)
+        emit_progress(6, "coalescent_gdi", max(1, len(gdi_df)), max(1, len(gdi_df)), unit="taxa", substage_weight=0.25, substage_offset=0.75, status="completed")
         return {
             "status": "completed_alignment", "n_samples": len(sids), "n_blocks": len(block_slices),
             "best_substitution_model": best_model, "gdi_csv": str(gdi_csv), "svdq_csv": str(svdq_csv),
@@ -262,8 +286,10 @@ def run_coalescent_delimitation(
         gdi_s_df = _expand_gdi_samples(gdi_s_df, group_members, orig_sids)
         gdi_df.to_csv(gdi_csv, index=False); gdi_s_df.to_csv(gdi_samp_csv, index=False); adequacy_df.to_csv(adequacy_csv, index=False)
         pd.DataFrame(columns=["quartet_id", "best_split", "svd_score_best", "svd_score_second", "quartet_support", "quartet_boot_support", "quartet_p_value", "n_sites_used"]).to_csv(svdq_csv, index=False)
+        emit_progress(6, "coalescent_gdi", max(1, len(gdi_df)), max(1, len(gdi_df)), unit="taxa", substage_weight=0.25, substage_offset=0.75, status="completed")
         return {"status": "completed_dosage_fallback", "n_samples": n_s, "gdi_csv": str(gdi_csv)}
 
+    emit_progress(6, "coalescent_gdi", 0, 0, unit="taxa", status="skipped_cached")
     return {"status": "skipped_empty", "n_samples": 0}
 
 

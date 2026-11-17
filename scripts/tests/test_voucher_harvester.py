@@ -2791,7 +2791,7 @@ class TestPhase1AuthorityHygieneAndExsiccataeConflict(unittest.TestCase):
             with patch("scripts.core.harvester.species", mock_dubia_sp), \
                  patch("scripts.core.usda_plants_ranges._http_get_text", return_value=raw_csv) as mock_get:
                 r_live = fetch_or_load_usda_taxon_range(
-                    canonical_packera="Packera dubia",
+                    "Packera dubia",
                     cache_dir=cache_dir,
                     db_path=db_file,
                     workspace_dir=tmp_p,
@@ -2806,7 +2806,7 @@ class TestPhase1AuthorityHygieneAndExsiccataeConflict(unittest.TestCase):
             # Delete CSV cache and verify offline reload directly from SQLite usda_county_ranges
             (cache_dir / "distributions" / "PATO4.csv").unlink()
             r_sql = fetch_or_load_usda_taxon_range(
-                canonical_packera="Packera dubia",
+                "Packera dubia",
                 cache_dir=cache_dir,
                 db_path=db_file,
                 workspace_dir=tmp_p,
@@ -2840,7 +2840,7 @@ class TestPhase1AuthorityHygieneAndExsiccataeConflict(unittest.TestCase):
                 return_value=v3_csv,
             ) as m_post:
                 r_v3 = fetch_or_load_usda_taxon_range(
-                    canonical_packera="Packera dubia",
+                    "Packera dubia",
                     cache_dir=cache_v3,
                     db_path=db_v3,
                     workspace_dir=tmp_p,
@@ -3050,7 +3050,7 @@ class TestPhase1AuthorityHygieneAndExsiccataeConflict(unittest.TestCase):
                     ).fetchall()
                 )
                 cnt_ranges = conn.execute(
-                    "SELECT COUNT(*) FROM usda_county_ranges WHERE canonical_packera = 'Packera dubia';"
+                    "SELECT COUNT(*) FROM usda_county_ranges WHERE canonical_taxon = 'Packera dubia';"
                 ).fetchone()[0]
             finally:
                 conn.close()

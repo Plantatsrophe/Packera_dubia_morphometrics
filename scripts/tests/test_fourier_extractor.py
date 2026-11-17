@@ -509,7 +509,7 @@ class TestFourierExtractor(unittest.TestCase):
             init_db_schema(conn)
             with conn:
                 conn.executemany(
-                    "INSERT INTO taxon_synonyms (raw_name_lower, canonical_packera) VALUES (?, ?);",
+                    "INSERT INTO taxon_synonyms (raw_name_lower, canonical_taxon) VALUES (?, ?);",
                     [
                         ("packera synalpha", "Packera canonbeta"),
                         ("packera synalpha c.auth", "Packera canonbeta"),
@@ -1122,7 +1122,7 @@ class TestFourierExtractor(unittest.TestCase):
         dlu_txt = (PROJECT_ROOT / "scripts" / "morphometrics" / "dissected_leaf_utils.R").read_text(encoding="utf-8")
         s03_txt = (PROJECT_ROOT / "scripts" / "morphometrics" / "03_fourier_extractor.R").read_text(encoding="utf-8")
 
-        self.assertIn("PLANTMATICS_SCHEMA_USER_VERSION <- 20261127L", dbu_txt)
+        self.assertIn("PLANTMATICS_SCHEMA_USER_VERSION <- 20261128L", dbu_txt)
         self.assertIn("PACKERA_SCHEMA_USER_VERSION <- PLANTMATICS_SCHEMA_USER_VERSION", dbu_txt)
         for col_name in (
             "detector_class_id",

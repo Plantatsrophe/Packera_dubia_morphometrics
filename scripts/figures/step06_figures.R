@@ -15,11 +15,15 @@
   tx <- ifelse(is.na(taxon_name) | !nzchar(taxon_name), "", as.character(taxon_name))
   sid <- gsub("'", "", as.character(sample_id))
   if (!nzchar(tx)) return(paste0("'", sid, "'"))
-  if (grepl("sp\\.\\s*nov", tx, ignore.case = TRUE)) {
-    rest <- trimws(sub("^Packera\\s+", "", tx))
-    return(sprintf("paste(italic('P.'), ' %s [', '%s', ']')", gsub("'", "", rest), sid))
+  if (grepl("sp\\.[[:space:]]*nov", tx, ignore.case = TRUE)) {
+    if (grepl("^[A-Z][a-z.-]*[[:space:]]+", tx)) {
+      g_abbr <- paste0(substr(tx, 1L, 1L), ".")
+      rest <- trimws(sub("^[A-Z][a-z.-]*[[:space:]]+", "", tx))
+      return(sprintf("paste(italic('%s'), ' %s [', '%s', ']')", gsub("'", "", g_abbr), gsub("'", "", rest), sid))
+    }
+    return(sprintf("'%s [%s]'", gsub("'", "", tx), sid))
   }
-  short_tx <- sub("^Packera\\s+", "P. ", tx)
+  short_tx <- if (exists("abbreviate_binomial", mode = "function")) abbreviate_binomial(tx) else sub("^([A-Z])[a-z-]+[[:space:]]+", "\\1. ", tx)
   sprintf("paste(italic('%s'), ' [', '%s', ']')", gsub("'", "", short_tx), sid)
 }
 

@@ -33,29 +33,30 @@
   if (requireNamespace("readr", quietly = TRUE)) readr::write_csv(df, path) else utils::write.csv(df, path, row.names = FALSE)
 }
 
+.qc_genus_pat <- function() {
+  g <- trimws(as.character(if (exists("resolve_r_target_genus", mode = "function")) resolve_r_target_genus() else "Packera")[1L])
+  if (is.na(g) || !nzchar(g)) g <- "Packera"
+  list(g = g, pk = tolower(g) == "packera", esc = gsub("([.|()\\^{}+$*?]|\\[|\\])", "\\\\\\1", g), ab = paste0(substr(g, 1L, 1L), "\\."))
+}
 .norm_taxon_qc <- function(raw) {
   if (exists(".normalize_public_packera_taxon", mode = "function")) return(.normalize_public_packera_taxon(raw))
   if (is.null(raw) || length(raw) == 0L) return(character(0))
-  sen_map <- c(tomentosus = "dubia", tomentosa = "dubia", aureus = "aurea", anonymus = "anonyma", obovatus = "obovata",
-    pauperculus = "paupercula", schweinitzianus = "schweinitziana", millefolium = "millefolium", millefolia = "millefolium",
-    antennariifolius = "antennariifolia", glabellus = "glabella", plattensis = "plattensis", pseudaureus = "pseudaurea",
-    indecorus = "indecora", canus = "cana", loratifolius = "loratifolia", strepthanthifolius = "streptanthifolia",
-    streptanthifolius = "streptanthifolia", memmingeri = "xmemmingeri", xmemmingeri = "xmemmingeri")
+  gp <- .qc_genus_pat(); gpat <- if (gp$pk) paste0(gp$esc, "|Senecio|", gp$ab) else paste0(gp$esc, "|", gp$ab)
+  sen_map <- c(tomentosus = "dubia", tomentosa = "dubia", aureus = "aurea", anonymus = "anonyma", obovatus = "obovata", pauperculus = "paupercula",
+    schweinitzianus = "schweinitziana", millefolium = "millefolium", millefolia = "millefolium", antennariifolius = "antennariifolia", glabellus = "glabella",
+    plattensis = "plattensis", pseudaureus = "pseudaurea", indecorus = "indecora", canus = "cana", loratifolius = "loratifolia",
+    strepthanthifolius = "streptanthifolia", streptanthifolius = "streptanthifolia", memmingeri = "xmemmingeri", xmemmingeri = "xmemmingeri")
   vapply(as.character(raw), function(x) {
     if (is.na(x) || !nzchar(trimws(x))) return("")
     s <- trimws(gsub("[\"']", "", sub("^>", "", trimws(x))))
-    if (grepl("\\|", s)) {
-      parts <- Filter(nzchar, trimws(strsplit(s, "\\|", fixed = FALSE)[[1L]]))
-      hit <- parts[grepl("^(Packera|Senecio|P\\.)([_[:space:]]|$)", parts, ignore.case = TRUE)]
-      s <- if (length(hit) > 0L) hit[1L] else if (length(parts) >= 2L) parts[2L] else parts[1L]
-    }
+    if (grepl("\\|", s)) { parts <- Filter(nzchar, trimws(strsplit(s, "\\|", fixed = FALSE)[[1L]])); hit <- parts[grepl(paste0("^(", gpat, ")([_[:space:]]|$)"), parts, ignore.case = TRUE)]; s <- if (length(hit) > 0L) hit[1L] else if (length(parts) >= 2L) parts[2L] else parts[1L] }
     s <- trimws(gsub("[[:space:]]+", " ", gsub("_+", " ", s)))
-    s <- sub("^([A-Za-z]+)[[:space:]]+[0-9]+([A-Za-z][A-Za-z-]*)$", "\\1 \\2", sub("^(Packera|P\\.)[[:space:]]+sp\\.?[[:space:]]+(Packera|Senecio|P\\.)", "\\2", s, ignore.case = TRUE))
-    reg <- regmatches(s, regexec("(^|[^A-Za-z])(Packera|Senecio|P\\.)[[:space:]]+[0-9]*([A-Za-z][A-Za-z.-]*)", s, ignore.case = TRUE))[[1L]]
+    s <- sub("^([A-Za-z]+)[[:space:]]+[0-9]+([A-Za-z][A-Za-z-]*)$", "\\1 \\2", sub(paste0("^(", gp$esc, "|", gp$ab, ")[[:space:]]+sp\\.?[[:space:]]+(", gpat, ")"), "\\2", s, ignore.case = TRUE))
+    reg <- regmatches(s, regexec(paste0("(^|[^A-Za-z])(", gpat, ")[[:space:]]+[0-9]*([A-Za-z][A-Za-z.-]*)"), s, ignore.case = TRUE))[[1L]]
     if (length(reg) < 4L) return(s)
     ep <- tolower(sub("[-.].*$", "", reg[4L])); if (ep %in% c("sp", "cf", "aff", "unk", "unknown")) return("")
-    if (tolower(reg[3L]) == "senecio") return(if (ep %in% names(sen_map)) paste("Packera", sen_map[[ep]]) else paste("Senecio", ep))
-    paste("Packera", if (ep %in% names(sen_map)) sen_map[[ep]] else ep)
+    if (gp$pk && tolower(reg[3L]) == "senecio") return(if (ep %in% names(sen_map)) paste("Packera", sen_map[[ep]]) else paste("Senecio", ep))
+    paste(gp$g, if (gp$pk && ep %in% names(sen_map)) sen_map[[ep]] else ep)
   }, character(1L), USE.NAMES = FALSE)
 }
 
@@ -103,8 +104,8 @@ screen_public_tree_rogue_tips <- function(tr, tree_label = "public_tree", mad_z_
   storage.mode(tr$edge) <- "integer"
   if (length(tr$tip.label) < min_ingroup_tips || is.null(tr$edge.length)) return(list(tree = tr, audit_df = .empty_rogue_audit_df()))
   el_sd <- suppressWarnings(stats::sd(tr$edge.length)); if (!is.finite(el_sd) || el_sd < 1e-8) return(list(tree = tr, audit_df = .empty_rogue_audit_df()))
-  orig_tips <- tr$tip.label; norm_tips <- .norm_taxon_qc(orig_tips)
-  is_pk <- grepl("^(Packera|P\\.)([[:space:]_]|$)", norm_tips, ignore.case = TRUE)
+  orig_tips <- tr$tip.label; norm_tips <- .norm_taxon_qc(orig_tips); gp <- .qc_genus_pat()
+  is_pk <- grepl(paste0("^(", gp$esc, "|", gp$ab, ")([[:space:]_]|$)"), norm_tips, ignore.case = TRUE)
   is_out <- .is_designated_outgroup_taxon(norm_tips) | (!is_pk & .is_designated_outgroup_taxon(orig_tips))
   ing_idx <- which(!is_out & is_pk); if (length(ing_idx) < min_ingroup_tips) ing_idx <- which(!is_out)
   if (length(ing_idx) < min_ingroup_tips) return(list(tree = tr, audit_df = .empty_rogue_audit_df()))
@@ -226,7 +227,7 @@ screen_public_fasta_outliers <- function(refs_df, locus_name, kmers_list = NULL,
   miss_tx <- is.na(refs_df$taxon) | !nzchar(trimws(as.character(refs_df$taxon))); if (any(miss_tx)) refs_df$taxon[miss_tx] <- .norm_taxon_qc(refs_df$header[miss_tx])
   if (!("ref_source" %in% names(refs_df))) refs_df$ref_source <- loc_str; refs_df$ref_source[is.na(refs_df$ref_source) | !nzchar(trimws(as.character(refs_df$ref_source)))] <- loc_str
   acc_vec <- sub("\\|.*$", "", sub("[[:space:]].*$", "", sub("^>", "", trimws(as.character(refs_df$header))))); acc_vec[!nzchar(acc_vec)] <- as.character(refs_df$header[!nzchar(acc_vec)])
-  norm_tx <- .norm_taxon_qc(refs_df$taxon); is_pk <- grepl("^(Packera|P\\.)([[:space:]_]|$)", norm_tx, ignore.case = TRUE)
+  gp <- .qc_genus_pat(); norm_tx <- .norm_taxon_qc(refs_df$taxon); is_pk <- grepl(paste0("^(", gp$esc, "|", gp$ab, ")([[:space:]_]|$)"), norm_tx, ignore.case = TRUE)
   is_out <- .is_designated_outgroup_taxon(norm_tx) | (!is_pk & .is_designated_outgroup_taxon(refs_df$header)); if (!any(is_pk)) is_pk <- !is_out
   fwd_km <- if (!is.null(kmers_list) && length(kmers_list) == n) kmers_list else lapply(toupper(gsub("[-._[:space:]]", "", as.character(refs_df$seq))), .kmers_11_qc)
   grp <- paste(refs_df$ref_source, .submarker_qc(refs_df$header), sep = "::"); drop_mask <- rep(FALSE, n); audits <- list()

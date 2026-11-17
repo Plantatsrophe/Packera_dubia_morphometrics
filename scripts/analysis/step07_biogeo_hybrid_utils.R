@@ -200,7 +200,14 @@ if (!exists(".sort_numbered_pc_cols", mode = "function")) {
   trimws(gsub("[^a-z0-9]+", " ", s))
 }
 
-.is_valid_packera_taxon_step07 <- function(s, active_taxa) !is.null(s) && !is.na(s) && nzchar(s) && s != "Unknown" && (s %in% active_taxa || grepl("^(Packera|P\\.)[[:space:]]+", s))
+.is_valid_packera_taxon_step07 <- function(s, active_taxa) {
+  if (is.null(s) || is.na(s) || !nzchar(s) || s == "Unknown") return(FALSE)
+  if (s %in% active_taxa) return(TRUE)
+  if (exists("is_active_genus_binomial", mode = "function") && is_active_genus_binomial(s)) return(TRUE)
+  g <- if (exists("resolve_r_target_genus", mode = "function")) resolve_r_target_genus() else "Packera"
+  g_esc <- gsub("([.|()\\^{}+$*?]|\\[|\\])", "\\\\\\1", g); ab <- paste0(substr(g, 1L, 1L), "\\.")
+  grepl(paste0("^(", g_esc, "|", ab, ")[[:space:]]+"), s)
+}
 
 .eval_taxon_geo_plausibility_ctx <- function(row_i, cand_tx, bg_ctx, is_intra) {
   if (!.is_valid_packera_taxon_step07(cand_tx, bg_ctx$active_taxa)) return(list(plausible = FALSE, weight = 0.0, dist_km = Inf))
@@ -242,7 +249,12 @@ if (!exists(".sort_numbered_pc_cols", mode = "function")) {
   lat_vec_geo <- if ("decimalLatitude" %in% names(df)) suppressWarnings(as.numeric(df$decimalLatitude)) else rep(NA_real_, n)
   lon_vec_geo <- if ("decimalLongitude" %in% names(df)) suppressWarnings(as.numeric(df$decimalLongitude)) else rep(NA_real_, n)
   lat_vec_geo[is_cent_geo] <- NA_real_; lon_vec_geo[is_cent_geo] <- NA_real_
-  cohort_species <- sort(unique(trimws(as.character(sp_all_vec))[!is.na(sp_all_vec) & grepl("^Packera[[:space:]]+[a-z][a-z-]+$", trimws(as.character(sp_all_vec)))]))
+  sp_trim <- trimws(as.character(sp_all_vec))
+  bin_mask <- if (exists("is_active_genus_binomial", mode = "function")) is_active_genus_binomial(sp_trim) else {
+    g <- if (exists("resolve_r_target_genus", mode = "function")) resolve_r_target_genus() else "Packera"
+    grepl(paste0("^", gsub("([.|()\\^{}+$*?]|\\[|\\])", "\\\\\\1", g), "[[:space:]]+[a-z][a-z-]+$"), sp_trim)
+  }
+  cohort_species <- sort(unique(sp_trim[!is.na(sp_all_vec) & bin_mask]))
   can_evaluate_hybrids <- !is_intra && (length(cohort_species) >= 2L)
   has_any_geo <- any(nzchar(state_vec_geo)) || any(is.finite(lat_vec_geo) & is.finite(lon_vec_geo))
   use_ext_db <- nzchar(Sys.getenv("RUN_ID", unset = "")) || nzchar(env_plantmatics_or_packera("PLANTMATICS_DB_PATH", "PACKERA_DB_PATH")) || has_any_geo
@@ -253,10 +265,11 @@ if (!exists(".sort_numbered_pc_cols", mode = "function")) {
       on.exit(tryCatch(if (!is.null(c_geo) && DBI::dbIsValid(c_geo)) DBI::dbDisconnect(c_geo), error = function(e) NULL), add = TRUE)
       if (!is.null(c_geo) && DBI::dbExistsTable(c_geo, "usda_county_ranges")) {
         uf <- tryCatch(DBI::dbListFields(c_geo, "usda_county_ranges"), error = function(e) character(0))
-        u_df <- DBI::dbGetQuery(c_geo, paste0("SELECT DISTINCT canonical_packera, state_norm", if ("county_norm" %in% uf) ", county_norm" else "",
+        tx_col_u <- if ("canonical_taxon" %in% uf) "canonical_taxon" else "canonical_packera"
+        u_df <- DBI::dbGetQuery(c_geo, paste0("SELECT DISTINCT ", tx_col_u, ", state_norm", if ("county_norm" %in% uf) ", county_norm" else "",
           if ("is_state_only" %in% uf) ", is_state_only" else "", if ("usda_symbol" %in% uf) ", usda_symbol" else "", " FROM usda_county_ranges WHERE state_norm IS NOT NULL AND TRIM(state_norm) != '';"))
         if (!is.null(u_df) && nrow(u_df) > 0L) {
-          u_tx <- trimws(as.character(u_df$canonical_packera)); u_st <- .norm_state_step07(u_df$state_norm); ok_u <- !is.na(u_tx) & nzchar(u_tx) & nzchar(u_st)
+          u_tx <- trimws(as.character(u_df[[tx_col_u]])); u_st <- .norm_state_step07(u_df$state_norm); ok_u <- !is.na(u_tx) & nzchar(u_tx) & nzchar(u_st)
           if ("usda_symbol" %in% names(u_df) && any(ok_u)) {
             u_sym <- toupper(trimws(ifelse(is.na(u_df$usda_symbol), "", as.character(u_df$usda_symbol)))); hs <- ok_u & nzchar(u_sym)
             if (any(hs) && length(sh_s <- names(which(tapply(u_tx[hs], u_sym[hs], function(v) length(unique(v))) > 1L))) > 0L) {

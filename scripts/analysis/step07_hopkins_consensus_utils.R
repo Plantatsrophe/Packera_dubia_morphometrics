@@ -248,12 +248,14 @@ compute_hopkins_adjusted_phenology <- function(df) {
   df$sin_doy <- ifelse(has_valid_doy, round(sin(theta_obs), 4), NA_real_); df$cos_doy <- ifelse(has_valid_doy, round(cos(theta_obs), 4), NA_real_)
 
   theta_adj_use <- ifelse(is.finite(df$hopkins_adjusted_doy), 2.0 * pi * (df$hopkins_adjusted_doy / 365.25), theta_adj)
-  circ_resid_days <- numeric(n); sp_vec <- if ("species_standardized" %in% names(df)) as.character(df$species_standardized) else rep("Unassigned_Packera", n)
+  unass_tok <- if (exists("UNASSIGNED_TAXON_SENTINEL", inherits = TRUE)) UNASSIGNED_TAXON_SENTINEL else "Unassigned_Taxon"
+  circ_resid_days <- numeric(n); sp_vec <- if ("species_standardized" %in% names(df)) as.character(df$species_standardized) else rep(unass_tok, n)
   t0_hop <- if (any(.has_step07_geno_row_mask(df))) {
     if (exists("get_tier0_rectified_species_and_evictions", mode = "function")) get_tier0_rectified_species_and_evictions(df)
     else if (exists("resolve_tier0_anchor_overrides", mode = "function")) resolve_tier0_anchor_overrides(df) else NULL
   } else NULL
-  for (tx in unique(sp_vec[!is.na(sp_vec)])) {
+  skip_unass <- if (exists("is_unassigned_or_unknown_taxon", mode = "function")) is_unassigned_or_unknown_taxon(sp_vec) else is.na(sp_vec)
+  for (tx in unique(sp_vec[!is.na(sp_vec) & !skip_unass])) {
       idx_tx <- which(sp_vec == tx)
       if (!is.null(t0_hop)) {
         ev_tx <- t0_hop$evict_from_given_anchor & (!t0_hop$is_tier0_dna_anchor | t0_hop$rectified_taxon != tx)

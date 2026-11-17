@@ -26,7 +26,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.core.config import resolve_genomics_config
+from scripts.core.config import resolve_genomics_config, resolve_target_genus
 from scripts.core.db import get_db_connection, upsert_genomic_samples
 from scripts.core.logger import setup_logging
 from scripts.data_prep.step06_ploidy_hdplot_utils import (
@@ -123,7 +123,7 @@ def _resolve_sample_record(
             sp_std = f_row.get("species_standardized")
             is_query = bool(f_row.get("is_putative_novel_or_hybrid_query"))
     if is_nov_code:
-        raw_t = raw_t or (f_row or {}).get("taxon_raw") or "Packera sp. nov."
+        raw_t = raw_t or (f_row or {}).get("taxon_raw") or f"{resolve_target_genus()} sp. nov."
         sp_std = sp_std or (f_row or {}).get("species_standardized") or raw_t
     if u_meta is not None:
         if u_meta.get("taxon_raw") or u_meta.get("species_standardized"):
@@ -378,7 +378,7 @@ def run_genomic_ingestion(
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     gcfg = resolve_genomics_config()
-    parser = argparse.ArgumentParser(description="Ingest staged genomic data into Packera Tier A SQLite.")
+    parser = argparse.ArgumentParser(description=f"Ingest staged genomic data into {resolve_target_genus()} Tier A SQLite.")
     parser.add_argument("--genomics-dir", type=Path, default=PROJECT_ROOT / "data" / "genomics")
     parser.add_argument("--out-dir", type=Path, default=PROJECT_ROOT / "outputs" / "reports")
     parser.add_argument("--db-path", "--db", dest="db_path", type=Path, default=None)

@@ -61,6 +61,9 @@ if (!exists("render_fig06c_cytonuclear_paralog_cytotype_png", mode = "function")
   }
   default
 }
+.emit_s06_prog <- function(...) {
+  if (exists("emit_r_progress", mode = "function")) tryCatch(emit_r_progress(6L, ...), error = function(e) NULL)
+}
 
 parse_step06_args <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
   parser <- optparse::OptionParser()
@@ -100,6 +103,7 @@ run_step06_genomic_phylogenomics <- function(opts) {
   manifest_json <- file.path(parsed_dir, "genomic_manifest.json")
   if (!file.exists(samples_csv) || !file.exists(dosage_tsv)) {
     message("[Step 06/07] No genomic files staged in ", parsed_dir, " - skipping standalone Step 06")
+    .emit_s06_prog("genomic_phylogenomics", 0L, 0L, unit = "samples", status = "skipped_cached")
     return(invisible(NULL))
   }
 
@@ -107,6 +111,7 @@ run_step06_genomic_phylogenomics <- function(opts) {
   pass_df <- samples_df[!is.na(samples_df$geno_quality_pass) & as.integer(samples_df$geno_quality_pass) == 1L, , drop = FALSE]
   if (nrow(pass_df) < 3L) {
     message("[Step 06/07] Fewer than 3 QC-passing genomic samples - skipping standalone Step 06")
+    .emit_s06_prog("genomic_phylogenomics", 0L, 0L, unit = "samples", status = "skipped_cached")
     return(invisible(NULL))
   }
 
@@ -143,6 +148,7 @@ run_step06_genomic_phylogenomics <- function(opts) {
     best_clus <- if (!is.null(pam_fit)) pam_fit$clustering else max.col(ce_res$Q_opt, ties.method = "first")
   }
   gen_cluster <- sprintf("Geno_Cluster_%d", as.integer(best_clus))
+  .emit_s06_prog("pcoa_admixture_k", 1L, 4L, unit = "stages", substage_weight = 0.25, substage_offset = 0.0)
 
   is_ref_anchor <- (is.na(pass_df$is_putative_novel_or_hybrid_query) | as.integer(pass_df$is_putative_novel_or_hybrid_query) == 0L) &
     !is.na(pass_df$species_standardized) & nzchar(pass_df$species_standardized)
@@ -171,6 +177,7 @@ run_step06_genomic_phylogenomics <- function(opts) {
   loro_acc <- if (any(valid_oof)) mean(oof_pred[valid_oof] == y_ref[valid_oof], na.rm = TRUE) else NA_real_
   loro_kappa <- if (sum(valid_oof) >= 2L) .compute_kappa_r(y_ref[valid_oof], oof_pred[valid_oof]) else NA_real_
   loro_logloss <- if (any(is.finite(oof_logloss))) mean(oof_logloss, na.rm = TRUE) else NA_real_
+  .emit_s06_prog("shrinkage_dapc", 2L, 4L, unit = "stages", substage_weight = 0.25, substage_offset = 0.25)
 
   tree_files <- character(0); q_files <- character(0)
   if (file.exists(manifest_json)) {
@@ -230,8 +237,9 @@ run_step06_genomic_phylogenomics <- function(opts) {
   cf_res <- compute_quartet_concordance_snps2cf(pass_df, dos_mat)
   pub_eval <- evaluate_public_backbone_and_organellar(pass_df, raw_geno_dir, out_dir)
   is_admixed[tri_res$hybrid_class == "Divergent_NonHybrid_Lineage"] <- 0L
+  .emit_s06_prog("reticulation_backbone", 3L, 4L, unit = "stages", substage_weight = 0.25, substage_offset = 0.50)
 
-  py_bin <- if (file.exists(".venv/bin/python")) ".venv/bin/python" else Sys.which("python3")
+  py_bin <- if (exists("resolve_r_python_bin", mode = "function")) resolve_r_python_bin() else if (file.exists(".venv/bin/python")) ".venv/bin/python" else Sys.which("python3")
   coal_script <- "scripts/analysis/step06_coalescent_delimitation.py"
   if (nzchar(py_bin) && file.exists(coal_script)) {
     c_args <- c(shQuote(coal_script), "--genomics-dir", shQuote(raw_geno_dir), "--out-dir", shQuote(out_dir), "--parsed-samples", shQuote(samples_csv), "--dosage-tsv", shQuote(dosage_tsv), "--n-boot", "250")
@@ -348,6 +356,7 @@ run_step06_genomic_phylogenomics <- function(opts) {
   message(sprintf("[Step 06/07] Phylogenomics complete: %d/%d passing | LORO acc=%.3f kappa=%.3f | M/P conc=%.4f | median gdi=%.3f",
                   nrow(pass_df), nrow(samples_df), ifelse(is.finite(loro_acc), loro_acc, NA_real_), ifelse(is.finite(loro_kappa), loro_kappa, NA_real_),
                   ifelse(is.finite(mean(rep_conc, na.rm = TRUE)), mean(rep_conc, na.rm = TRUE), NA_real_), ifelse(any(is.finite(gdi_vec)), stats::median(gdi_vec, na.rm = TRUE), NA_real_)))
+  .emit_s06_prog("phylogenomics_complete", 4L, 4L, unit = "stages", substage_weight = 0.25, substage_offset = 0.75, status = "completed")
   invisible(assign_df)
 }
 

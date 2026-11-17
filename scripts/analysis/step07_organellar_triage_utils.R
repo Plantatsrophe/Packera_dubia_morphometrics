@@ -17,17 +17,17 @@
 }
 
 .canon_packera_key_r <- function(x) {
-  s <- tolower(trimws(gsub("[[:space:]]+", " ", gsub("_+", " ", as.character(x)))))
-  s[is.na(s)] <- ""
+  s <- tolower(trimws(gsub("[[:space:]]+", " ", gsub("_+", " ", as.character(x))))); s[is.na(s)] <- ""
+  g <- tolower(if (exists("resolve_r_target_genus", mode = "function")) resolve_r_target_genus() else "packera"); if (g != "packera") return(s)
   s <- ifelse(s == "packera millefolia", "packera millefolium", s)
   s <- ifelse(s %in% c("packera memmingeri", "packera x memmingeri", "packera xmemmingeri", "packera ×memmingeri", "packera × memmingeri"), "packera x memmingeri", s)
   ifelse(s %in% c("packera tomentosa", "senecio tomentosus", "packera dubia"), "packera dubia", s)
 }
 
 .is_valid_packera_name_r <- function(x) {
-  s <- trimws(as.character(x))
-  k <- .canon_packera_key_r(s)
-  !is.na(s) & grepl("^Packera [[:alpha:]x]", s) & !(k %in% c("", "packera sp", "packera sp.", "packera unknown"))
+  s <- trimws(as.character(x)); k <- .canon_packera_key_r(s)
+  g <- if (exists("resolve_r_target_genus", mode = "function")) resolve_r_target_genus() else "Packera"
+  !is.na(s) & grepl(paste0("^", gsub("([.|()\\^{}+$*?]|\\[|\\])", "\\\\\\1", g), " [[:alpha:]x]"), s) & !(k %in% c("", paste(tolower(g), c("sp", "sp.", "unknown"))))
 }
 
 .resolve_organellar_placement_df <- function(df, opts = list()) {

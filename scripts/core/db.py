@@ -484,10 +484,30 @@ from scripts.core.db_schema import (
     _CANONICAL_PLANT_INDIVIDUALS_COLS,
     _CANONICAL_VOUCHER_REPRO_COLS,
     _DYNAMIC_TABLE_MIGRATION_SPECS,
+    _migrate_canonical_taxon_columns,
     _migrate_dynamic_schema_columns,
     _table_needs_canonical_rebuild,
     init_db_schema,
+    migrate_database_schema,
 )
+
+
+def _resolve_target_genus_safe() -> str:
+    """Resolve active target genus without adding non-stdlib top-level imports to `db.py`."""
+    try:
+        from scripts.core.config import resolve_target_genus
+        val = (resolve_target_genus() or "").strip().capitalize()
+        if val:
+            return val
+    except Exception:
+        pass
+    return (os.environ.get("PLANTMATICS_TARGET_GENUS", "").strip().capitalize() or "Packera")
+
+
+def migrate_20261127_to_20261128(conn: sqlite3.Connection) -> None:
+    """Idempotently upgrade SQLite schema 20261127 -> 20261128 (`canonical_taxon` + telemetry table)."""
+    _migrate_canonical_taxon_columns(conn)
+    migrate_database_schema(conn)
 
 
 # =============================================================================
@@ -595,10 +615,10 @@ def upsert_taxon_synonyms(
         return 0
 
     sql = """
-    INSERT INTO taxon_synonyms (raw_name_lower, canonical_packera, protologue_authors_json, updated_at)
+    INSERT INTO taxon_synonyms (raw_name_lower, canonical_taxon, protologue_authors_json, updated_at)
     VALUES (?, ?, ?, ?)
     ON CONFLICT(raw_name_lower) DO UPDATE SET
-        canonical_packera = excluded.canonical_packera,
+        canonical_taxon = excluded.canonical_taxon,
         protologue_authors_json = COALESCE(excluded.protologue_authors_json, taxon_synonyms.protologue_authors_json),
         updated_at = excluded.updated_at;
     """
@@ -608,12 +628,15 @@ def upsert_taxon_synonyms(
 
 
 def load_taxon_synonyms(conn: sqlite3.Connection) -> Dict[str, str]:
-    """Load persisted `raw_name_lower -> canonical_packera` dictionary from `taxon_synonyms`."""
-    cur = conn.execute("SELECT raw_name_lower, canonical_packera FROM taxon_synonyms;")
+    """Load persisted `raw_name_lower -> canonical_taxon` dictionary from `taxon_synonyms`."""
+    cols = set(get_table_columns(conn, "taxon_synonyms"))
+    canon_col = "canonical_taxon" if "canonical_taxon" in cols else "canonical_packera"
+    cur = conn.execute(f"SELECT raw_name_lower, {canon_col} FROM taxon_synonyms;")
     return {str(r[0]): str(r[1]) for r in cur.fetchall() if r[0] and r[1]}
 
 
 def _infer_species_standardized_fallback(sci_name: Optional[str], sp_raw: Optional[str], syn_map: Mapping[str, str]) -> Optional[str]:
+    target_genus = _resolve_target_genus_safe()
     for cand in (sci_name, sp_raw):
         if not cand:
             continue
@@ -627,8 +650,8 @@ def _infer_species_standardized_fallback(sci_name: Optional[str], sp_raw: Option
             binom_low = f"{genus.lower()} {ep}"
             if binom_low in syn_map:
                 return syn_map[binom_low]
-            if genus == "Packera" and len(ep) >= 2:
-                return f"Packera {ep}"
+            if genus == target_genus and len(ep) >= 2:
+                return f"{target_genus} {ep}"
     return None
 
 
@@ -2961,7 +2984,7 @@ def upsert_taxon_backbone_profiles(
             continue
         item: Dict[str, Any] = {"species_standardized": sp_std}
         if has_any_tg:
-            item["target_genus"] = _to_str(raw.get("target_genus")) or "Packera"
+            item["target_genus"] = _to_str(raw.get("target_genus")) or _resolve_target_genus_safe()
         for col in str_cols:
             if col in raw or not preserve_existing_on_null:
                 item[col] = _to_str(raw.get(col))

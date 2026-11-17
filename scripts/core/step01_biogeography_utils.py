@@ -95,20 +95,31 @@ def _canonical_taxon_equiv_key(name: Any) -> str:
 def resolve_synonym_genera(cfg: Optional[Any] = None) -> Set[str]:
     """Read configured `taxa.synonym_genera`, always including `resolve_target_genus(cfg)`."""
     active_cfg = cfg if cfg is not None else _DEFAULT_CONFIG
+    target_genus = (resolve_target_genus(active_cfg) or "Packera").strip().capitalize()
+    is_packera = target_genus.lower() == "packera"
+    if cfg is None and not is_packera:
+        return {target_genus} if target_genus else set()
     raw_list = getattr(getattr(active_cfg, "taxa", None), "synonym_genera", None) or []
-    genera = {str(g).strip().capitalize() for g in raw_list if str(g).strip()} or set(_DEFAULT_SYNONYM_GENERA)
-    target_genus = (resolve_target_genus(active_cfg) or "").strip().capitalize()
+    genera = {str(g).strip().capitalize() for g in raw_list if str(g).strip()}
+    if not genera and is_packera:
+        genera = set(_DEFAULT_SYNONYM_GENERA)
     if target_genus:
         genera.add(target_genus)
     return genera
 
 
 def resolve_transcontinental_taxa(cfg: Optional[Any] = None) -> Set[str]:
-    """Read configured `taxa.transcontinental_boreal_taxa` with canonical fallback."""
+    """Read configured `taxa.transcontinental_boreal_taxa` with Packera-only fallback."""
     active_cfg = cfg if cfg is not None else _DEFAULT_CONFIG
+    target_genus = (resolve_target_genus(active_cfg) or "Packera").strip().capitalize()
+    is_packera = target_genus.lower() == "packera"
+    if cfg is None and not is_packera:
+        return set()
     raw_list = getattr(getattr(active_cfg, "taxa", None), "transcontinental_boreal_taxa", None) or []
     taxa = {normalize_packera_orthography(t) for t in raw_list if normalize_packera_orthography(t)}
-    return taxa if taxa else set(_DEFAULT_TRANSCONTINENTAL_TAXA)
+    if not taxa and is_packera:
+        return set(_DEFAULT_TRANSCONTINENTAL_TAXA)
+    return taxa
 
 
 def _read_sqlite_eastern_residents(
@@ -185,9 +196,10 @@ def resolve_eastern_resident_whitelist(
     `natureserve_subnational_ranges` (`is_native = 1`), normalizing orthography.
     """
     active_cfg = cfg if cfg is not None else _DEFAULT_CONFIG
+    target_genus = (resolve_target_genus(active_cfg) or "Packera").strip().capitalize()
     taxa_cfg = getattr(active_cfg, "taxa", None)
-    raw_wl = list(getattr(taxa_cfg, "eastern_resident_whitelist", None) or [])
-    if not raw_wl and _DEFAULT_CONFIG is not active_cfg:
+    raw_wl = [] if (cfg is None and target_genus.lower() != "packera") else list(getattr(taxa_cfg, "eastern_resident_whitelist", None) or [])
+    if not raw_wl and cfg is not None and _DEFAULT_CONFIG is not active_cfg and target_genus.lower() == "packera":
         raw_wl = list(getattr(_DEFAULT_CONFIG.taxa, "eastern_resident_whitelist", None) or [])
 
     whitelist: Set[str] = {norm for sp in raw_wl for norm in [normalize_packera_orthography(sp)] if norm}

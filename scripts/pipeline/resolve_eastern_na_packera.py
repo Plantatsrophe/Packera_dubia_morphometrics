@@ -12,14 +12,18 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from scripts.core.config import resolve_target_genus
 from scripts.core.harvester import standardize_packera_taxon
 from scripts.core.taxonomy_authority import evaluate_eastern_na_cohort_filter
 from scripts.pipeline.resolve_focal_species_complex import (
-    _extract_stage_metrics, _fetch_complex_rows_for_run, _read_csv_rows, _stage_run_ids,
+    _extract_stage_metrics, _fetch_complex_rows_for_run, _read_csv_rows, _runner_prefix, _stage_run_ids,
     build_four_stage_commands, compile_complex_resolution_summary, slugify_taxon,
 )
 
-BINOMIAL_RE = re.compile(r"^Packera [a-z][a-z-]+$")
+def _binomial_re() -> re.Pattern[str]:
+    return re.compile(rf"^{re.escape(resolve_target_genus())} [a-z][a-z-]+$")
+
+BINOMIAL_RE = _binomial_re()
 HYBRID_RE = re.compile(r"(?:\s+[x×]\s+|\s*×\s*)")
 NA_TOKENS = {"", "NA", "NAN", "NONE", "NULL"}
 MASTER_SYNTHESIS_COLS: Tuple[str, ...] = (
@@ -96,11 +100,14 @@ def resolve_parent_run_id(
         return clean, _extract_uid_hex6(clean)
     if resume:
         runs_root = (workspace_root / "runs").resolve()
-        latest_link = runs_root / "latest_eastern_na"
-        if not (latest_link.is_symlink() or latest_link.exists()):
+        latest_link, ptr_txt = runs_root / "latest_eastern_na", runs_root / "latest_eastern_na.txt"
+        if latest_link.is_symlink() or latest_link.exists():
+            raw_t = Path(os.readlink(latest_link)) if latest_link.is_symlink() else latest_link
+        elif ptr_txt.is_file() and (txt_id := ptr_txt.read_text(encoding="utf-8").strip()):
+            raw_t = Path(txt_id)
+        else:
             raise ValueError(f"Cannot --resume without --parent-run-id: {latest_link} is missing.")
-        raw_t = Path(os.readlink(latest_link)) if latest_link.is_symlink() else latest_link
-        resolved_dir = (latest_link.parent / raw_t).resolve() if not raw_t.is_absolute() else raw_t.resolve()
+        resolved_dir = (runs_root / raw_t).resolve() if not raw_t.is_absolute() else raw_t.resolve()
         if not resolved_dir.is_dir() or runs_root not in resolved_dir.parents:
             raise ValueError(f"Cannot --resume: {latest_link} target {resolved_dir} is invalid.")
         rel_id = resolved_dir.relative_to(runs_root).as_posix()
@@ -114,12 +121,17 @@ def _update_latest_eastern_na_symlink(workspace_root: Path, parent_run_id: str) 
     tmp_link = runs_dir / f".latest_eastern_na_{os.getpid()}.tmp"
     if tmp_link.exists() or tmp_link.is_symlink():
         tmp_link.unlink()
-    tmp_link.symlink_to(parent_run_id)
-    tmp_link.replace(runs_dir / "latest_eastern_na")
+    try:
+        tmp_link.symlink_to(parent_run_id)
+        tmp_link.replace(runs_dir / "latest_eastern_na")
+    except OSError:
+        if tmp_link.exists() or tmp_link.is_symlink():
+            tmp_link.unlink()
+        _write_atomic_text(runs_dir / "latest_eastern_na.txt", parent_run_id + "\n")
 
 def _clean_binomial(raw: str) -> Optional[str]:
     std = standardize_packera_taxon(raw)
-    return std if (std and BINOMIAL_RE.match(std)) else None
+    return std if (std and _binomial_re().match(std)) else None
 
 def _normalize_taxon_inputs(items: Sequence[Any]) -> Tuple[bool, Set[str]]:
     out: Set[str] = set()
@@ -222,7 +234,8 @@ def discover_qualifying_eastern_species(
             conn.close()
     has_only, only_set = _normalize_taxon_inputs(only_taxa)
     _, excl_set = _normalize_taxon_inputs(exclude_taxa)
-    return sorted((sp, n) for sp, n in counts.items() if BINOMIAL_RE.match(sp) and n >= int(min_vouchers) and (not has_only or sp in only_set) and sp not in excl_set)
+    bin_pat = _binomial_re()
+    return sorted((sp, n) for sp, n in counts.items() if bin_pat.match(sp) and n >= int(min_vouchers) and (not has_only or sp in only_set) and sp not in excl_set)
 
 def _stage_is_complete(ws: Path, run_id: str) -> bool:
     triage_csv = ws / "runs" / run_id / "data" / "tables" / "triage_queue.csv"
@@ -235,11 +248,12 @@ def _stage_is_complete(ws: Path, run_id: str) -> bool:
 def _build_genus_commands(run_script: Path, g1_eff: str, g2: str, g3: str, args: argparse.Namespace) -> List[Tuple[str, str, List[str]]]:
     tail = [*(["--db", str(args.db)] if args.db is not None else []), *(["--threads", str(args.threads)] if args.threads and args.threads > 0 else [])]
     gpu = ["--gpu-batch-size", str(args.gpu_batch_size)] if args.gpu_batch_size and args.gpu_batch_size > 0 else []
+    runner_cmd = _runner_prefix(run_script)
     cmds: List[Tuple[str, str, List[str]]] = []
     if not args.skip_discovery:
-        cmds.append(("Genus_Stage_1_Discovery", g1_eff, ["bash", str(run_script), "--run-id", g1_eff, *(["--skip-harvest"] if args.skip_harvest else []), "--geographic-scope", args.geographic_scope, *tail, *gpu]))
-    cmds.append(("Genus_Stage_2_Purified", g2, ["bash", str(run_script), "--run-id", g2, "--skip-harvest", "--geographic-scope", args.geographic_scope, "--exclude-misidentified", "--triage-source", g1_eff, "--gold-anchors", str(args.gold_anchors), *tail, *gpu]))
-    cmds.append(("Genus_Stage_3_Gold_Thin", g3, ["bash", str(run_script), "--run-id", g3, "--start-step", "3", "--geographic-scope", args.geographic_scope, "--exclude-misidentified", "--triage-source", g1_eff, "--spatial-thin-km", f"{args.spatial_thin_km:g}", "--gold-only", *tail]))
+        cmds.append(("Genus_Stage_1_Discovery", g1_eff, [*runner_cmd, "--run-id", g1_eff, *(["--skip-harvest"] if args.skip_harvest else []), "--geographic-scope", args.geographic_scope, *tail, *gpu]))
+    cmds.append(("Genus_Stage_2_Purified", g2, [*runner_cmd, "--run-id", g2, "--skip-harvest", "--geographic-scope", args.geographic_scope, "--exclude-misidentified", "--triage-source", g1_eff, "--gold-anchors", str(args.gold_anchors), *tail, *gpu]))
+    cmds.append(("Genus_Stage_3_Gold_Thin", g3, [*runner_cmd, "--run-id", g3, "--start-step", "3", "--geographic-scope", args.geographic_scope, "--exclude-misidentified", "--triage-source", g1_eff, "--spatial-thin-km", f"{args.spatial_thin_km:g}", "--gold-only", *tail]))
     return cmds
 
 def _species_commands(run_script: Path, sp: str, sp_prefix: str, g1_eff: str, args: argparse.Namespace) -> List[Tuple[str, str, List[str]]]:
@@ -253,17 +267,18 @@ def _compile_genus_summary(ws: Path, genus_dir: Path, g1_eff: str, g2: str, g3: 
     runs_root = ws / "runs"
     rows = [_extract_stage_metrics(stage_name=st, run_id=rid, focal_std="", runs_root=runs_root, conn=conn)[0]
             for st, rid in (("Genus_Stage_1_Discovery", g1_eff), ("Genus_Stage_2_Purified", g2), ("Genus_Stage_3_Gold_Thin", g3))]
-    csv_out = genus_dir / "Eastern_NA_Packera_Genus_Three_Stage_Comparison.csv"
+    genus_tok = resolve_target_genus()
+    csv_out = genus_dir / f"Eastern_NA_{genus_tok}_Genus_Three_Stage_Comparison.csv"
     _write_atomic_csv(csv_out, list(rows[0].keys()), rows)
     md_lines = [
-        "# Eastern North American *Packera* Genus Baseline Summary (Stages 01 to 03)", "",
+        f"# Eastern North American *{genus_tok}* Genus Baseline Summary (Stages 01 to 03)", "",
         "I ran three genus-wide stages across all qualifying regional sheets before launching per-species sweeps, so misidentified congeners drop out early.", "",
         "| Stage | Run ID | Total OTUs | Taxa Present | Optimal K | Misid. Purged | Hybrids | Min D_edaph |",
         "| :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: |",
         *[f"| {r['stage']} | `{r['run_id']}` | {r['n_total_otus']} | {r['n_taxa_present']} | {r['gmm_optimal_k'] or 'N/A'} | "
           f"{r['n_misidentification_reassign']} | {r['n_hybrid_introgressant']} | {r['min_d_edaph'] or 'N/A'} |" for r in rows],
     ]
-    md_out = genus_dir / "Eastern_NA_Packera_Genus_Summary.md"
+    md_out = genus_dir / f"Eastern_NA_{genus_tok}_Genus_Summary.md"
     _write_atomic_text(md_out, "\n".join(md_lines) + "\n")
     return csv_out, md_out
 
@@ -316,8 +331,9 @@ def _build_master_row(
 def _render_monograph_report(
     parent_run_id: str, args: argparse.Namespace, g1_eff: str, g2: str, g3: str, master_rows: Sequence[Dict[str, Any]]
 ) -> str:
+    genus_tok = resolve_target_genus()
     lines = [
-        "# Eastern North American *Packera* Monograph Synthesis Report", "",
+        f"# Eastern North American *{genus_tok}* Monograph Synthesis Report", "",
         f"I executed a hierarchical genus-to-species delimitation workflow under parent run `{parent_run_id}` across geographic scope `{args.geographic_scope}`. "
         "Phase A purged interspecific misidentifications across the full genus baseline, whereas Phase B isolated each qualifying taxon inside its own dedicated subdirectory across Stages 02 to 04.", "",
         "## 1. Run Configuration and Genus Stage Identifiers", "",
@@ -337,7 +353,7 @@ def _render_monograph_report(
           (f"; cytotypes: {r['reported_cytotypes'] or 'recorded'} ({r['n_cytovouchers_linked']} linked)"
            if (r.get("reported_cytotypes") or int(r.get("n_cytovouchers_linked") or 0) > 0) else "") + ")."
           for r in master_rows]
-         if master_rows else ["* No *Packera* binomials exceeded the minimum voucher threshold in this run."])
+         if master_rows else [f"* No *{genus_tok}* binomials exceeded the minimum voucher threshold in this run."])
     return "\n".join(lines) + "\n"
 
 def build_parser() -> argparse.ArgumentParser:
@@ -425,7 +441,8 @@ def main(argv: Optional[Sequence[str]] = None, workspace_root: Optional[Path] = 
         if conn is not None:
             conn.close()
 
-    artifacts = (parent_dir / "Eastern_NA_Packera_Master_Synthesis.csv", parent_dir / "Eastern_NA_Packera_Monograph_Report.md", parent_dir / "monograph_run_manifest.json")
+    genus_tok = resolve_target_genus()
+    artifacts = (parent_dir / f"Eastern_NA_{genus_tok}_Master_Synthesis.csv", parent_dir / f"Eastern_NA_{genus_tok}_Monograph_Report.md", parent_dir / "monograph_run_manifest.json")
     has_cyto = any(r.get("reported_cytotypes") or int(r.get("n_cytovouchers_linked") or 0) > 0 for r in master_rows)
     csv_cols = MASTER_SYNTHESIS_COLS + (("reported_cytotypes", "n_cytovouchers_linked") if has_cyto else ())
     _write_atomic_csv(artifacts[0], csv_cols, master_rows)

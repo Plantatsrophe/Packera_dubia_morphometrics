@@ -693,13 +693,13 @@ def _build_schema_ddl() -> str:
 
     CREATE TABLE IF NOT EXISTS taxon_synonyms (
         raw_name_lower TEXT PRIMARY KEY,
-        canonical_packera TEXT NOT NULL,
+        canonical_taxon TEXT NOT NULL,
         protologue_authors_json TEXT,
         updated_at TEXT
     );
 
     CREATE TABLE IF NOT EXISTS usda_county_ranges (
-        canonical_packera TEXT NOT NULL,
+        canonical_taxon TEXT NOT NULL,
         usda_symbol TEXT NOT NULL,
         state_norm TEXT NOT NULL,
         county_norm TEXT NOT NULL DEFAULT '',
@@ -707,10 +707,10 @@ def _build_schema_ddl() -> str:
         native_status TEXT,
         is_state_only INTEGER NOT NULL DEFAULT 0,
         updated_at TEXT,
-        PRIMARY KEY (canonical_packera, state_norm, county_norm)
+        PRIMARY KEY (canonical_taxon, state_norm, county_norm)
     );
 
-    CREATE INDEX IF NOT EXISTS idx_usda_county_ranges_taxon ON usda_county_ranges(canonical_packera);
+    CREATE INDEX IF NOT EXISTS idx_usda_county_ranges_taxon ON usda_county_ranges(canonical_taxon);
 
     CREATE TABLE IF NOT EXISTS vouchers (
         catalogNumber TEXT PRIMARY KEY,
@@ -1030,6 +1030,18 @@ def _build_schema_ddl() -> str:
         PRIMARY KEY (species_standardized, country_code, subnation_code)
     );
     CREATE INDEX IF NOT EXISTS idx_ns_ranges_taxon_sub ON natureserve_subnational_ranges(species_standardized, subnation_code);
+
+    -- 11. Hardware-Aware Step Telemetry Benchmarks
+    CREATE TABLE IF NOT EXISTS step_telemetry_benchmarks (
+        step_id INTEGER NOT NULL,
+        substage TEXT NOT NULL DEFAULT 'all',
+        accelerator_provider TEXT NOT NULL,
+        cpu_threads INTEGER NOT NULL,
+        mean_items_per_sec REAL NOT NULL,
+        n_runs INTEGER NOT NULL DEFAULT 1,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (step_id, substage, accelerator_provider, cpu_threads)
+    );
 
     -- =========================================================================
     -- TIER B: RUN-SCOPED ANALYTICAL TABLES & MASTER VIEW
@@ -1723,7 +1735,7 @@ def _migrate_vouchers_schema_columns(conn: sqlite3.Connection) -> None:
             existing_cols.add(col_name)
 
 
-PLANTMATICS_SCHEMA_USER_VERSION: int = 20261127
+PLANTMATICS_SCHEMA_USER_VERSION: int = 20261128
 PACKERA_SCHEMA_USER_VERSION: int = PLANTMATICS_SCHEMA_USER_VERSION
 
 
@@ -2044,6 +2056,28 @@ def _rebuild_tier_a_step02_tables_if_needed(
             conn.execute("PRAGMA foreign_keys = ON;")
 
 
+def _migrate_canonical_taxon_columns(
+    conn: sqlite3.Connection,
+    existing_tables: Optional[Set[str]] = None,
+) -> None:
+    """Idempotently migrate `canonical_packera` -> `canonical_taxon` on `taxon_synonyms` and `usda_county_ranges`."""
+    tables = (
+        existing_tables
+        if existing_tables is not None
+        else {str(r[0]) for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table';").fetchall()}
+    )
+    if "taxon_synonyms" in tables:
+        syn_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(taxon_synonyms);").fetchall()}
+        if "canonical_packera" in syn_cols and "canonical_taxon" not in syn_cols:
+            conn.execute("ALTER TABLE taxon_synonyms RENAME COLUMN canonical_packera TO canonical_taxon;")
+    if "usda_county_ranges" in tables:
+        usda_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(usda_county_ranges);").fetchall()}
+        if "canonical_packera" in usda_cols and "canonical_taxon" not in usda_cols:
+            conn.execute("DROP INDEX IF EXISTS idx_usda_county_ranges_taxon;")
+            conn.execute("ALTER TABLE usda_county_ranges RENAME COLUMN canonical_packera TO canonical_taxon;")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_usda_county_ranges_taxon ON usda_county_ranges(canonical_taxon);")
+
+
 def _migrate_dynamic_schema_columns(
     conn: sqlite3.Connection,
     recreate_view: bool = True,
@@ -2068,6 +2102,7 @@ def _migrate_dynamic_schema_columns(
         return
 
     conn.execute("DROP VIEW IF EXISTS v_integrative_triage_master;")
+    _migrate_canonical_taxon_columns(conn, existing_tables=existing_tables)
 
     for table_name, col_specs in _DYNAMIC_TABLE_MIGRATION_SPECS.items():
         if table_name not in existing_tables:
@@ -2093,6 +2128,7 @@ def _migrate_dynamic_schema_columns(
         or "taxon_cytology_summary" not in existing_tables
         or "taxon_backbone_profiles" not in existing_tables
         or "natureserve_subnational_ranges" not in existing_tables
+        or "step_telemetry_benchmarks" not in existing_tables
     ):
         conn.executescript(SCHEMA_DDL)
         # Ensure master view stays dropped until subsequent table rebuilds finish.
@@ -2105,6 +2141,7 @@ def _migrate_dynamic_schema_columns(
                 "taxon_cytology_summary",
                 "taxon_backbone_profiles",
                 "natureserve_subnational_ranges",
+                "step_telemetry_benchmarks",
             }
         )
 
@@ -2240,12 +2277,15 @@ def init_db_schema(conn: sqlite3.Connection) -> None:
             "taxon_cytology_summary",
             "taxon_backbone_profiles",
             "natureserve_subnational_ranges",
+            "step_telemetry_benchmarks",
             "pipeline_runs",
             "leaf_efa_harmonics",
             "taxon_complexes",
             "v_integrative_triage_master",
         }
         if required_objs.issubset(existing_objs):
+            ts_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(taxon_synonyms);").fetchall()}
+            ucr_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(usda_county_ranges);").fetchall()}
             v_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(vouchers);").fetchall()}
             if (
                 "usda_symbol" not in v_cols
@@ -2260,7 +2300,9 @@ def init_db_schema(conn: sqlite3.Connection) -> None:
             mv_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(v_integrative_triage_master);").fetchall()}
             req_mv_cols = {"is_passive", "scale_source", "AR_inv_std", "log1p_capitulum_count", "blade_cie_l_norm", "blade_cie_l_sheet_delta", "blade_cie_a_delta", "blade_cie_b_delta", "nearest_type_basionym", "reproductive_trait_status", "ecoregion_can1", "ecoregion_can2", "hybrid_zone_cohesion_pass", "hybrid_parent_1", "hybrid_parent_2", "cda_oof_posterior_prob", "self_morph_mahal_d2", "open_set_df", "cryptic_non_clinal_pass", "resurrection_basionym", "w_geno_kappa", "geno_predicted_taxon", "geno_linkage_tier", "is_geno_admixed", "coalescent_gdi", "hybrid_generation_class", "cytonuclear_discordant", "public_plastome_match", "public_its_match", "waxy_lineage_match", "public_backbone_clade", "public_phytop_ils_index", "public_phytop_ih_index", "genomic_propagation_tier", "cluster_propagated_gdi", "cytology_linkage_tier", "voucher_sporophytic_2n", "voucher_ploidy_level", "taxon_reported_cytotypes", "is_multi_cytotype_taxon", "cytotype_reproductive_barrier_pass", "soil_ca_mg_molar_ratio", "soil_ultramafic_ni_cr_index", "soil_carbonate_c_pct", "is_nwi_wetland", "nwi_wetland_system", "nwi_wetland_dist_m", "hydro_edaphic_niche_regime", "wetland_fidelity_concordance", "basionym_synonymy_type", "backbone_basionym_name", "protologue_url", "natureserve_global_rank", "nwpl_indicator_code", "nwpl_wetland_score", "is_centroid_or_inst_coord", "coord_quarantine_reason", "env_mahal_d2", "env_mcd_outlier_flag"}
             if (
-                "leaf_zone" not in el_cols
+                ("canonical_packera" in ts_cols and "canonical_taxon" not in ts_cols)
+                or ("canonical_packera" in ucr_cols and "canonical_taxon" not in ucr_cols)
+                or "leaf_zone" not in el_cols
                 or "area_mm2" not in el_cols
                 or "ect_path" not in el_cols
                 or "mask_is_upright" not in el_cols

@@ -50,7 +50,8 @@ audit_institutional_batch_effects_ancova <- function(df, min_obs = 5L) {
   if (length(resp_cols) == 0L) return(NULL)
   n_all <- nrow(df)
   inst_clean <- trimws(as.character(df$institutionCode))
-  sp_clean <- if ("species_standardized" %in% names(df)) as.character(df$species_standardized) else rep("Unassigned_Packera", n_all)
+  unass_tok <- if (exists("UNASSIGNED_TAXON_SENTINEL", inherits = TRUE)) UNASSIGNED_TAXON_SENTINEL else "Unassigned_Taxon"
+  sp_clean <- if ("species_standardized" %in% names(df)) as.character(df$species_standardized) else rep(unass_tok, n_all)
   noise_m <- if ("is_confident_label_noise" %in% names(df)) (!is.na(df$is_confident_label_noise) & as.logical(df$is_confident_label_noise)) else rep(FALSE, n_all)
   pass_m <- if ("is_passive" %in% names(df)) (!is.na(df$is_passive) & as.logical(df$is_passive)) else rep(FALSE, n_all)
   is_basal_anc <- if ("morph_tier_source" %in% names(df) && any(!is.na(df$morph_tier_source) & nzchar(as.character(df$morph_tier_source)))) {
@@ -60,7 +61,8 @@ audit_institutional_batch_effects_ancova <- function(df, min_obs = 5L) {
   sbw_v <- if ("spatial_balance_weight" %in% names(df)) suppressWarnings(as.numeric(df$spatial_balance_weight)) else rep(1.0, n_all); sbw_v[!is.finite(sbw_v) | sbw_v <= 0.0] <- 1.0
   w_all <- pmax(0.05, aw_v * sbw_v)
 
-  base_raw <- !is.na(inst_clean) & nzchar(inst_clean) & !is.na(sp_clean) & nzchar(sp_clean)
+  is_unass <- if (exists("is_unassigned_or_unknown_taxon", mode = "function")) is_unassigned_or_unknown_taxon(sp_clean) else (is.na(sp_clean) | !nzchar(trimws(sp_clean)) | sp_clean %in% c("Unknown", unass_tok))
+  base_raw <- !is.na(inst_clean) & nzchar(inst_clean) & !is_unass
   base_clean <- base_raw & !noise_m & !pass_m & is_basal_anc
   base_valid <- if (sum(base_clean) >= 6L) base_clean else if (sum(base_raw & is_basal_anc) >= 6L) (base_raw & is_basal_anc) else base_raw
   if (sum(base_valid) < 6L) return(NULL)

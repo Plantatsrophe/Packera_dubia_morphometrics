@@ -51,38 +51,44 @@ if (!exists("compute_tree_guided_fbranch", mode = "function")) {
   list(sample_ids = sids, seqs = seqs, block_len = eff_blk, blocks = sel_b)
 }
 
+.accum_coanc_from_dist <- function(C_mat, d_mat, pos_map, tol) {
+  for (a in seq_len(nrow(d_mat))) {
+    fin_b <- which(is.finite(d_mat[a, ]))
+    if (length(fin_b) > 0L) {
+      min_d <- min(d_mat[a, fin_b])
+      donors <- fin_b[d_mat[a, fin_b] <= (min_d + tol)]
+      C_mat[pos_map[a], pos_map[donors]] <- C_mat[pos_map[a], pos_map[donors]] + (1.0 / length(donors))
+    }
+  }
+  C_mat
+}
+
 compute_microhaplotype_coancestry <- function(pass_ids, dos_mat, raw_genomics_dir) {
   n <- length(pass_ids)
   C_mat <- matrix(0.0, nrow = n, ncol = n, dimnames = list(pass_ids, pass_ids))
-  rad_bin <- Sys.which("RADpainter")
-  if (nzchar(rad_bin)) message("[Step 06 Co-ancestry] Detected external RADpainter binary at: ", rad_bin)
 
   phy <- .read_phylip_blocks_fast(.find_122bp_phylip(raw_genomics_dir))
   used_mode <- "dosage_window_haplotypes"
   if (!is.null(phy) && length(intersect(pass_ids, phy$sample_ids)) >= 4L) {
     used_mode <- "122bp_phylip_microhaplotypes"
     idx_map <- match(pass_ids, phy$sample_ids); valid_pos <- which(!is.na(idx_map)); m <- length(valid_pos)
-    raw_mats <- lapply(phy$seqs[idx_map[valid_pos]], charToRaw)
+    raw_seqs <- phy$seqs[idx_map[valid_pos]]
+    raw_all <- do.call(rbind, lapply(raw_seqs, function(sq) as.integer(charToRaw(sq))))
+    tol_phy <- 1.0 / phy$block_len + 1e-9
     for (b in phy$blocks) {
       st <- (b - 1L) * phy$block_len + 1L; en <- b * phy$block_len
-      sub_list <- lapply(raw_mats, function(r) r[st:en])
-      if (length(unique(vapply(sub_list, rawToChar, character(1)))) < 2L) next
-      d_blk <- matrix(Inf, nrow = m, ncol = m)
-      for (a in seq_len(m)) {
-        ra <- sub_list[[a]]; ok_a <- ra != as.raw(0x4e) & ra != as.raw(0x2d)
-        if (sum(ok_a) < 10L) next
-        for (b2 in seq_len(m)) {
-          if (a == b2) next
-          rb <- sub_list[[b2]]; ok <- ok_a & (rb != as.raw(0x4e)) & (rb != as.raw(0x2d))
-          if (sum(ok) >= 10L) d_blk[a, b2] <- sum(ra[ok] != rb[ok]) / sum(ok)
-        }
-        fin_b <- which(is.finite(d_blk[a, ]))
-        if (length(fin_b) > 0L) {
-          min_d <- min(d_blk[a, fin_b])
-          donors <- fin_b[d_blk[a, fin_b] <= (min_d + 1.0 / phy$block_len + 1e-9)]
-          C_mat[valid_pos[a], valid_pos[donors]] <- C_mat[valid_pos[a], valid_pos[donors]] + (1.0 / length(donors))
-        }
+      if (length(unique(substr(raw_seqs, st, en))) < 2L) next
+      R_blk <- raw_all[, st:en, drop = FALSE]
+      V <- (R_blk != 0x4eL) & (R_blk != 0x2dL)
+      n_sh <- tcrossprod(matrix(as.numeric(V), nrow = m, ncol = ncol(R_blk)))
+      n_same <- matrix(0.0, nrow = m, ncol = m)
+      for (uc in unique(as.integer(R_blk[V]))) {
+        Iu <- matrix(as.numeric(R_blk == uc), nrow = m, ncol = ncol(R_blk))
+        n_same <- n_same + tcrossprod(Iu)
       }
+      d_blk <- (n_sh - n_same) / pmax(1.0, n_sh)
+      d_blk[n_sh < 10.0] <- Inf; diag(d_blk) <- Inf
+      C_mat <- .accum_coanc_from_dist(C_mat, d_blk, valid_pos, tol_phy)
     }
   }
 
@@ -90,18 +96,25 @@ compute_microhaplotype_coancestry <- function(pass_ids, dos_mat, raw_genomics_di
     n_loci <- ncol(dos_mat); step <- max(5L, min(20L, as.integer(floor(n_loci / 25L))))
     for (st in seq(1L, max(1L, n_loci - step + 1L), by = step)) {
       sub_m <- dos_mat[, st:min(n_loci, st + step - 1L), drop = FALSE]
-      for (i in seq_len(n)) {
-        dists <- vapply(seq_len(n), function(j) {
-          if (i == j) return(Inf)
-          ok <- is.finite(sub_m[i, ]) & is.finite(sub_m[j, ])
-          if (sum(ok) < 2L) Inf else mean(abs(sub_m[i, ok] - sub_m[j, ok]))
-        }, numeric(1))
-        fin <- which(is.finite(dists))
-        if (length(fin) > 0L) {
-          donors <- fin[dists[fin] <= min(dists[fin]) + 0.05]
-          C_mat[i, donors] <- C_mat[i, donors] + (1.0 / length(donors))
+      ok_m <- is.finite(sub_m); n_sh <- tcrossprod(matrix(as.numeric(ok_m), nrow = n))
+      fin_vals <- sub_m[ok_m]
+      if (length(fin_vals) > 0L && all(fin_vals %in% c(0.0, 0.5, 1.0))) {
+        I0 <- matrix(as.numeric(ok_m & (sub_m == 0.0)), nrow = n)
+        Ih <- matrix(as.numeric(ok_m & (sub_m == 0.5)), nrow = n)
+        I1 <- matrix(as.numeric(ok_m & (sub_m == 1.0)), nrow = n)
+        abs_sum <- 0.5 * (tcrossprod(I0, Ih) + tcrossprod(Ih, I0) + tcrossprod(Ih, I1) + tcrossprod(I1, Ih)) +
+          (tcrossprod(I0, I1) + tcrossprod(I1, I0))
+        d_win <- abs_sum / pmax(1.0, n_sh)
+      } else {
+        M0 <- ifelse(ok_m, sub_m, 0.0); tM0 <- t(M0); tok <- t(ok_m)
+        d_win <- matrix(Inf, nrow = n, ncol = n)
+        for (i in seq_len(n)) {
+          ok_i <- tok & ok_m[i, ]
+          d_win[i, ] <- colSums(abs(tM0 - M0[i, ]) * ok_i) / pmax(1L, colSums(ok_i))
         }
       }
+      d_win[n_sh < 2.0] <- Inf; diag(d_win) <- Inf
+      C_mat <- .accum_coanc_from_dist(C_mat, d_win, seq_len(n), 0.05)
     }
   }
 

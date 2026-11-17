@@ -1,0 +1,61 @@
+[workspace]
+name = "plantmatics"
+version = "1.5.0"
+description = "Plantmatics Integrative Morphometrics and Phylogenomics Pipeline"
+channels = ["conda-forge"]
+platforms = ["linux-64", "osx-arm64", "osx-64", "win-64"]
+
+[dependencies]
+python = "3.12.*"
+onnxruntime = ">=1.19"
+python-isal = "*"
+numpy = "*"
+scipy = "*"
+pandas = "*"
+polars = "*"
+pyyaml = "*"
+requests = "*"
+aiohttp = "*"
+pillow = "*"
+opencv = "*"
+shapely = "*"
+platformdirs = "*"
+scikit-image = "*"
+matplotlib-base = "*"
+duckdb = "*"
+tqdm = "*"
+r-base = ">=4.3"
+r-dbi = "*"
+r-rsqlite = "*"
+r-rcpp = "*"
+r-mscquartets = "*"
+r-rrpp = "*"
+r-mclust = "*"
+r-clustvarsel = "*"
+r-ranger = "*"
+r-sf = "*"
+r-terra = "*"
+r-ggplot2 = "*"
+r-patchwork = "*"
+r-ragg = "*"
+r-igraph = "*"
+r-vegan = "*"
+r-circular = "*"
+
+[pypi-dependencies]
+pygbif = ">=0.6.6"
+
+[feature.directml.target.win-64.pypi-dependencies]
+onnxruntime-directml = ">=1.19"
+
+[feature.gpu.target.linux-64.pypi-dependencies]
+onnxruntime-gpu = ">=1.19"
+
+[environments]
+default = []
+directml = ["directml"]
+gpu = ["gpu"]
+
+[tasks]
+check-env = "python main.py check-env"
+audit = "python scripts/tests/run_audit.py --fast"

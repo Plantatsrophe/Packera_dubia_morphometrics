@@ -110,22 +110,57 @@ def resolve_canonical_run_id(
     return os.environ.get("RUN_ID", "").strip() or "canonical"
 
 
+def _read_latest_run_pointer(workspace_root: Path = PROJECT_ROOT) -> Optional[Path]:
+    """Read atomic `runs/latest_run.json` fallback pointer when `runs/latest` symlink is absent or broken."""
+    pointer_path = Path(workspace_root) / "runs" / "latest_run.json"
+    if not pointer_path.is_file():
+        return None
+    try:
+        payload = json.loads(pointer_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    raw_dir = str(payload.get("run_dir") or "").strip()
+    raw_id = str(payload.get("run_id") or "").strip()
+    if raw_dir:
+        p = Path(raw_dir)
+        resolved = p.resolve() if p.is_absolute() else (Path(workspace_root) / p).resolve()
+        if resolved.is_dir() or not raw_id:
+            return resolved
+    if raw_id:
+        return (Path(workspace_root) / "runs" / raw_id).resolve()
+    return None
+
+
 def get_active_run_dir(
     run_id: Optional[str] = None,
     workspace_root: Path = PROJECT_ROOT,
+    fallback_to_latest: bool = False,
 ) -> Optional[Path]:
     """
     Return the resolved run directory if `run_id` is supplied or `PLANTMATICS_RUN_DIR`
     (or `PACKERA_RUN_DIR`) is set in the environment; otherwise return None (default legacy/test mode).
+    Falls back to `runs/latest_run.json` whenever `runs/latest` symlink is absent or broken.
     """
+    ws = Path(workspace_root)
+    latest_link = ws / "runs" / "latest"
+
     if run_id is not None and str(run_id).strip():
         clean_id = str(run_id).strip()
+        norm_id = clean_id.replace("\\", "/").strip("/")
+        if norm_id in {"latest", "runs/latest"}:
+            if latest_link.exists() and latest_link.is_dir():
+                return latest_link.resolve()
+            ptr_dir = _read_latest_run_pointer(ws)
+            if ptr_dir is not None:
+                return ptr_dir
         p = Path(clean_id)
         if p.is_absolute():
             return p.resolve()
         if p.parts and p.parts[0] == "runs":
-            return (workspace_root / p).resolve()
-        return (workspace_root / "runs" / clean_id).resolve()
+            return (ws / p).resolve()
+        return (ws / "runs" / clean_id).resolve()
 
     env_run_dir = (
         os.environ.get("PLANTMATICS_RUN_DIR", "").strip()
@@ -133,9 +168,36 @@ def get_active_run_dir(
     )
     if env_run_dir:
         p = Path(env_run_dir)
-        return p.resolve() if p.is_absolute() else (workspace_root / p).resolve()
+        cand = p.resolve() if p.is_absolute() else (ws / p).resolve()
+        if p.name == "latest" and (not cand.exists() or not cand.is_dir()):
+            ptr_dir = _read_latest_run_pointer(ws)
+            if ptr_dir is not None:
+                return ptr_dir
+        return cand
+
+    if fallback_to_latest:
+        if latest_link.exists() and latest_link.is_dir():
+            return latest_link.resolve()
+        return _read_latest_run_pointer(ws)
 
     return None
+
+
+def resolve_python_executable(workspace_root: Path = PROJECT_ROOT) -> str:
+    """
+    Resolve the primary Python interpreter executable via `PLANTMATICS_PYTHON_BIN`,
+    probing POSIX `.venv/bin/python` and Windows `.venv/Scripts/python.exe`, with
+    fallback to `sys.executable`.
+    """
+    env_bin = os.environ.get("PLANTMATICS_PYTHON_BIN", "").strip()
+    if env_bin:
+        return env_bin
+    ws = Path(workspace_root).resolve()
+    for rel in (Path(".venv") / "bin" / "python", Path(".venv") / "Scripts" / "python.exe"):
+        cand = ws / rel
+        if cand.is_file():
+            return str(cand)
+    return sys.executable
 
 
 def initialize_run_directory(
@@ -152,7 +214,7 @@ def initialize_run_directory(
       - data/tables
       - outputs/{figures,reports}
       - logs
-    Also maintains the `runs/latest` symlink pointing to the active run directory.
+    Also maintains the `runs/latest` symlink (with atomic `runs/latest_run.json` fallback).
     """
     run_dir = get_active_run_dir(run_id=run_id, workspace_root=workspace_root)
     if run_dir is None:
@@ -171,12 +233,39 @@ def initialize_run_directory(
     for d in subdirs:
         d.mkdir(parents=True, exist_ok=True)
 
+    canon_run_id = resolve_canonical_run_id(
+        run_dir=run_dir,
+        explicit_run_id=run_id,
+        workspace_root=workspace_root,
+    )
+
     if update_latest_symlink:
         runs_parent = workspace_root / "runs"
         runs_parent.mkdir(parents=True, exist_ok=True)
-        latest_link = runs_parent / "latest"
+        latest_json = runs_parent / "latest_run.json"
+        tmp_json = runs_parent / f".latest_run_{os.getpid()}.json.tmp"
+        pointer_payload = {
+            "run_id": canon_run_id,
+            "run_dir": str(run_dir.resolve()),
+            "updated_at": datetime.now().astimezone().isoformat(),
+        }
         try:
-            tmp_link = runs_parent / f".latest_{os.getpid()}.tmp"
+            with open(tmp_json, "w", encoding="utf-8") as fh:
+                json.dump(pointer_payload, fh, indent=2)
+                fh.write("\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            tmp_json.replace(latest_json)
+        except OSError:
+            if tmp_json.exists():
+                try:
+                    tmp_json.unlink()
+                except OSError:
+                    pass
+
+        latest_link = runs_parent / "latest"
+        tmp_link = runs_parent / f".latest_{os.getpid()}.tmp"
+        try:
             if tmp_link.exists() or tmp_link.is_symlink():
                 tmp_link.unlink()
             rd_resolved = run_dir.resolve()
@@ -189,16 +278,18 @@ def initialize_run_directory(
             tmp_link.symlink_to(target_rel)
             tmp_link.replace(latest_link)
         except OSError:
-            pass
+            if tmp_link.exists() or tmp_link.is_symlink():
+                try:
+                    tmp_link.unlink()
+                except OSError:
+                    pass
 
     if export_env:
         os.environ["PLANTMATICS_RUN_DIR"] = str(run_dir)
         os.environ["PACKERA_RUN_DIR"] = str(run_dir)
-        os.environ["RUN_ID"] = resolve_canonical_run_id(
-            run_dir=run_dir,
-            explicit_run_id=run_id,
-            workspace_root=workspace_root,
-        )
+        os.environ["RUN_ID"] = canon_run_id
+        os.environ["PLANTMATICS_PYTHON_BIN"] = resolve_python_executable(workspace_root=workspace_root)
+        os.environ["PLANTMATICS_TARGET_GENUS"] = resolve_target_genus()
 
     return run_dir
 
@@ -654,7 +745,7 @@ class PipelineConfig:
 
         def _resolve(rel_path: Union[str, Path]) -> Path:
             p = Path(rel_path)
-            return p if p.is_absolute() else (PROJECT_ROOT / p).resolve()
+            return p if p.is_absolute() else Path(os.path.abspath(PROJECT_ROOT / p))
 
         p_kwargs = {
             k: _resolve(v) for k, v in raw_cfg.get("paths", {}).items()
@@ -664,32 +755,38 @@ class PipelineConfig:
 
         taxa_dict = raw_cfg.get("taxa", {}) or {}
         legacy_taxa = (raw_cfg.get("taxonomy") or {}).get("target_taxa", [])
-        target_genus_val = (
-            os.environ.get("PLANTMATICS_TARGET_GENUS", "").strip()
-            or str(taxa_dict.get("target_genus", "") or "").strip()
-            or "Packera"
-        )
+        env_genus = os.environ.get("PLANTMATICS_TARGET_GENUS", "").strip()
+        yaml_genus = str(taxa_dict.get("target_genus", "") or "").strip()
+        target_genus_val = env_genus or yaml_genus or "Packera"
+        is_packera_genus = target_genus_val.lower() == "packera"
+        genus_overridden = bool(env_genus and yaml_genus and env_genus.lower() != yaml_genus.lower())
         target_family_val = (
             os.environ.get("PLANTMATICS_TARGET_FAMILY", "").strip()
             or str(taxa_dict.get("target_family", "") or "").strip()
             or "Asteraceae"
         )
-        raw_syn_gen = [
-            str(g).strip()
-            for g in (taxa_dict.get("synonym_genera") or ("Packera", "Senecio", "Cineraria"))
-            if str(g).strip()
-        ]
+        raw_syn_src = (
+            ()
+            if genus_overridden
+            else (taxa_dict.get("synonym_genera") or (("Packera", "Senecio", "Cineraria") if is_packera_genus else ()))
+        )
+        raw_syn_gen = [str(g).strip() for g in raw_syn_src if str(g).strip()]
         if target_genus_val and target_genus_val not in raw_syn_gen:
             raw_syn_gen.insert(0, target_genus_val)
-        raw_wl = [str(s).strip() for s in (taxa_dict.get("eastern_resident_whitelist") or []) if str(s).strip()]
-        raw_tc = [
-            str(s).strip()
-            for s in (
+        raw_wl = (
+            []
+            if genus_overridden
+            else [str(s).strip() for s in (taxa_dict.get("eastern_resident_whitelist") or []) if str(s).strip()]
+        )
+        raw_tc_src = (
+            ()
+            if genus_overridden
+            else (
                 taxa_dict.get("transcontinental_boreal_taxa")
-                or ("Packera paupercula", "Packera indecora", "Packera pauciflora")
+                or (("Packera paupercula", "Packera indecora", "Packera pauciflora") if is_packera_genus else ())
             )
-            if str(s).strip()
-        ]
+        )
+        raw_tc = [str(s).strip() for s in raw_tc_src if str(s).strip()]
         taxa = TaxaConfig(
             target_species=list(taxa_dict.get("target_species", legacy_taxa) or []),
             synonyms=dict(taxa_dict.get("synonyms", {}) or {}),

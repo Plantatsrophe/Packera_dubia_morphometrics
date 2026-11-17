@@ -14,6 +14,11 @@ if (grDevices::dev.cur() == 1L) {
 }
 
 .clean_tip_id <- function(x) gsub("_sorted$", "", trimws(as.character(x)))
+.s06_target_genus <- function() {
+  g <- if (exists("resolve_r_target_genus", mode = "function")) resolve_r_target_genus() else "Packera"
+  if (is.null(g) || !nzchar(trimws(g))) "Packera" else trimws(g)
+}
+.s06_genus_esc <- function(g = .s06_target_genus()) gsub("([.|()\\^{}+$*?]|\\[|\\])", "\\\\\\1", g)
 
 .json_escape_kv <- function(k, v) sprintf('"%s": %.4f', gsub('["\\\\]', "", as.character(k)), as.numeric(v))
 
@@ -125,7 +130,7 @@ if (grDevices::dev.cur() == 1L) {
   sp_map <- stats::setNames(pass_df$species_standardized, pass_df$genetic_sample_id)
   qry_map <- stats::setNames(as.integer(pass_df$is_putative_novel_or_hybrid_query) == 1L, pass_df$genetic_sample_id)
   present_tips <- intersect(tr$tip.label, pass_df$genetic_sample_id)
-  ref_tips <- present_tips[!is.na(sp_map[present_tips]) & (!qry_map[present_tips] | grepl("^Packera sp\\. nov", sp_map[present_tips]))]
+  ref_tips <- present_tips[!is.na(sp_map[present_tips]) & (!qry_map[present_tips] | grepl(paste0("^", .s06_genus_esc(), " sp\\. nov"), sp_map[present_tips]))]
   taxa_u <- sort(unique(sp_map[ref_tips]))
   if (length(taxa_u) >= 2L) {
     sum_rows <- lapply(taxa_u, function(tx) {
@@ -157,7 +162,12 @@ if (grDevices::dev.cur() == 1L) {
   sp_map <- stats::setNames(pass_df$species_standardized, pass_df$genetic_sample_id)
   rep_map <- stats::setNames(pass_df$replicate_pair_id, pass_df$genetic_sample_id)
   qry_map <- stats::setNames(as.integer(pass_df$is_putative_novel_or_hybrid_query) == 1L, pass_df$genetic_sample_id)
-  dubia_tips <- intersect(rownames(coph), pass_df$genetic_sample_id[!is.na(pass_df$species_standardized) & pass_df$species_standardized == "Packera dubia" & as.integer(pass_df$is_putative_novel_or_hybrid_query) == 0L])
+  ref_ok <- !is.na(pass_df$species_standardized) & nzchar(trimws(pass_df$species_standardized)) & as.integer(pass_df$is_putative_novel_or_hybrid_query) == 0L & (pass_df$genetic_sample_id %in% rownames(coph))
+  ref_sp_v <- pass_df$species_standardized[ref_ok]
+  ref_tx_target <- if (length(ref_sp_v) > 0L) {
+    if (tolower(.s06_target_genus()) == "packera" && any(ref_sp_v == "Packera dubia")) "Packera dubia" else names(sort(table(ref_sp_v), decreasing = TRUE))[1L]
+  } else paste(.s06_target_genus(), "dubia")
+  dubia_tips <- intersect(rownames(coph), pass_df$genetic_sample_id[ref_ok & pass_df$species_standardized == ref_tx_target])
   for (i in seq_len(nrow(pass_df))) {
     sid <- pass_df$genetic_sample_id[i]; if (!(sid %in% rownames(coph))) next
     d_row <- coph[sid, ]
@@ -245,12 +255,16 @@ if (grDevices::dev.cur() == 1L) {
 reconcile_step06_cytonuclear_discordance <- function(full_audit, assign_df = NULL, placement_df = NULL) {
   if (is.null(full_audit) || !is.data.frame(full_audit) || nrow(full_audit) == 0L) return(full_audit)
   n <- nrow(full_audit)
+  g_act <- .s06_target_genus(); g_low <- tolower(g_act)
+  g_esc <- .s06_genus_esc(g_act); g_low_esc <- .s06_genus_esc(g_low)
   canon_tx <- function(x) {
     s <- tolower(trimws(gsub("_", " ", ifelse(is.na(x), "", as.character(x)))))
     s <- gsub("\u00d7", "x", s)
-    s <- gsub("\\bpackera[[:space:]]+x[[:space:]]*memmingeri\\b", "packera xmemmingeri", s)
-    s <- ifelse(s %in% c("packera tomentosa", "senecio tomentosus", "p. tomentosa"), "packera dubia", s)
-    s <- ifelse(s == "packera millefolia", "packera millefolium", ifelse(s == "packera memmingeri", "packera xmemmingeri", s))
+    if (g_low == "packera") {
+      s <- gsub("\\bpackera[[:space:]]+x[[:space:]]*memmingeri\\b", "packera xmemmingeri", s)
+      s <- ifelse(s %in% c("packera tomentosa", "senecio tomentosus", "p. tomentosa"), "packera dubia", s)
+      s <- ifelse(s == "packera millefolia", "packera millefolium", ifelse(s == "packera memmingeri", "packera xmemmingeri", s))
+    }
     s
   }
   sids <- as.character(full_audit$genetic_sample_id)
@@ -267,7 +281,7 @@ reconcile_step06_cytonuclear_discordance <- function(full_audit, assign_df = NUL
   g_tx <- if ("geno_predicted_taxon" %in% names(full_audit)) as.character(full_audit$geno_predicted_taxon) else rep(NA_character_, n)
   g_pr <- if ("geno_posterior_prob" %in% names(full_audit)) suppressWarnings(as.numeric(full_audit$geno_posterior_prob)) else rep(NA_real_, n)
   g_ad <- if ("is_geno_admixed" %in% names(full_audit)) suppressWarnings(as.integer(full_audit$is_geno_admixed)) else rep(0L, n)
-  is_emp_ok <- !is.na(g_tx) & grepl("^Packera[[:space:]_]", trimws(g_tx)) & !is.na(g_pr) & g_pr >= 0.70 & (is.na(g_ad) | g_ad == 0L)
+  is_emp_ok <- !is.na(g_tx) & grepl(paste0("^", g_esc, "[[:space:]_]"), trimws(g_tx)) & !is.na(g_pr) & g_pr >= 0.70 & (is.na(g_ad) | g_ad == 0L)
   sp_raw <- if ("species_standardized" %in% names(full_audit)) as.character(full_audit$species_standardized) else rep(NA_character_, n)
   eff_k <- canon_tx(ifelse(is_emp_ok, g_tx, sp_raw))
 
@@ -284,7 +298,7 @@ reconcile_step06_cytonuclear_discordance <- function(full_audit, assign_df = NUL
     ek <- eff_k[i]; if (!nzchar(ek)) next
     clade_conflict <- FALSE
     if (nzchar(pc_vec[i])) {
-      c_idx <- which(pc_vec == pc_vec[i] & grepl("^packera ", eff_k))
+      c_idx <- which(pc_vec == pc_vec[i] & grepl(paste0("^", g_low_esc, " "), eff_k))
       if (length(c_idx) >= 2L) {
         tb <- sort(table(eff_k[c_idx]), decreasing = TRUE)
         maj_k <- names(tb)[1L]; maj_cnt <- as.integer(tb[1L]); my_cnt <- if (ek %in% names(tb)) as.integer(tb[[ek]]) else 0L
@@ -292,7 +306,7 @@ reconcile_step06_cytonuclear_discordance <- function(full_audit, assign_df = NUL
       }
     }
     cp_tx <- if (!is.na(pub_cp[i])) trimws(pub_cp[i]) else ""
-    hq_cp <- nzchar(cp_tx) && grepl("^Packera[[:space:]_]", cp_tx)
+    hq_cp <- nzchar(cp_tx) && grepl(paste0("^", g_esc, "[[:space:]_]"), cp_tx)
     if (has_pl_df && !is.null(pl_cp)) {
       m_cp <- match(sids[i], as.character(pl_cp$genetic_sample_id))
       if (!is.na(m_cp)) {
@@ -303,7 +317,7 @@ reconcile_step06_cytonuclear_discordance <- function(full_audit, assign_df = NUL
       }
     }
     cp_k <- canon_tx(cp_tx)
-    cp_valid <- hq_cp && grepl("^packera ", cp_k) && !(cp_k %in% c("packera sp", "packera sp.", "packera unknown"))
+    cp_valid <- hq_cp && grepl(paste0("^", g_low_esc, " "), cp_k) && !(cp_k %in% paste(g_low, c("sp", "sp.", "unknown")))
     nuc_matches_cp <- cp_valid && (canon_tx(pub_its[i]) == cp_k || canon_tx(pub_wx[i]) == cp_k)
     cp_conflict <- cp_valid && (cp_k != ek) && !nuc_matches_cp
     disc_v[i] <- if (clade_conflict || cp_conflict) 1L else 0L

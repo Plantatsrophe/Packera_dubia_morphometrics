@@ -1297,7 +1297,7 @@ class TestSQLPipelineHandshake(unittest.TestCase):
             "cluster_propagated_gdi",
         }
 
-        # 1. Python db.py atomic migration + WAL replay + 20261127 schema upgrade
+        # 1. Python db.py atomic migration + WAL replay + 20261128 schema upgrade
         with tempfile.TemporaryDirectory() as td_py:
             ws_py = Path(td_py)
             legacy_db, target_db = _seed_legacy_wal_workspace(
@@ -1314,7 +1314,7 @@ class TestSQLPipelineHandshake(unittest.TestCase):
                     self.assertFalse(Path(f"{legacy_db}-shm").exists())
                     self.assertTrue(target_db.is_file())
                     uv = int(conn.execute("PRAGMA user_version;").fetchone()[0])
-                    self.assertEqual(uv, 20261127)
+                    self.assertEqual(uv, 20261128)
 
                     gs_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(genomic_samples);").fetchall()}
                     gla_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(genetic_lineage_assignments);").fetchall()}
@@ -1350,7 +1350,7 @@ local({{
   on.exit(disconnect_packera_db(conn), add = TRUE)
   stopifnot(!is.null(conn))
   uv <- as.integer(DBI::dbGetQuery(conn, "PRAGMA user_version;")[[1L]][1L])
-  stopifnot(uv == 20261127L)
+  stopifnot(uv == 20261128L)
   gs_cols <- DBI::dbListFields(conn, "genomic_samples")
   gla_cols <- DBI::dbListFields(conn, "genetic_lineage_assignments")
   ct_cols <- DBI::dbListFields(conn, "curation_triage")
@@ -1385,12 +1385,12 @@ local({{
                 self.assertTrue(target_r.is_file())
 
     def test_curation_triage_genomic_propagation_columns_and_migration(self) -> None:
-        """Verify schema 20261127 migrates from previous schema version and exposes the 6 genomic propagation columns."""
+        """Verify schema 20261128 migrates from previous schema version and exposes the 6 genomic propagation columns."""
         from scripts.core.db import ensure_pipeline_run, populate_run_active_cohort
         from scripts.core.db_schema import PACKERA_SCHEMA_USER_VERSION, PLANTMATICS_SCHEMA_USER_VERSION
 
-        self.assertEqual(PLANTMATICS_SCHEMA_USER_VERSION, 20261127)
-        self.assertEqual(PACKERA_SCHEMA_USER_VERSION, 20261127)
+        self.assertEqual(PLANTMATICS_SCHEMA_USER_VERSION, 20261128)
+        self.assertEqual(PACKERA_SCHEMA_USER_VERSION, 20261128)
         prev_ver = PLANTMATICS_SCHEMA_USER_VERSION - 1
         prop_cols = (
             "genomic_propagation_tier",
@@ -1506,7 +1506,7 @@ local({{
                 conn.close()
 
     def test_cytology_schema_migration_and_purge_runs_only_preservation(self) -> None:
-        """Verify schema 20261125 -> 20261127 creates cytology tables/columns and purge_runs_only preserves them."""
+        """Verify schema 20261125 -> 20261128 creates cytology tables/columns and purge_runs_only preserves them."""
         from scripts.core.db import (
             ensure_pipeline_run,
             populate_run_active_cohort,
@@ -1516,7 +1516,7 @@ local({{
         )
         from scripts.core.db_schema import PLANTMATICS_SCHEMA_USER_VERSION
 
-        self.assertEqual(PLANTMATICS_SCHEMA_USER_VERSION, 20261127)
+        self.assertEqual(PLANTMATICS_SCHEMA_USER_VERSION, 20261128)
         cyto_ct_cols = (
             "cytology_linkage_tier",
             "voucher_sporophytic_2n",
@@ -1568,7 +1568,7 @@ local({{
 
             conn = get_db_connection(db_p, init_schema=True)
             try:
-                self.assertEqual(int(conn.execute("PRAGMA user_version;").fetchone()[0]), 20261127)
+                self.assertEqual(int(conn.execute("PRAGMA user_version;").fetchone()[0]), 20261128)
                 tables = {str(r[0]) for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table';").fetchall()}
                 self.assertIn("cytological_records", tables)
                 self.assertIn("taxon_cytology_summary", tables)
@@ -1675,7 +1675,7 @@ local({{
                 conn2.close()
 
     def test_backbone_geochem_wetland_schema_20261127_roundtrip(self) -> None:
-        """Verify 20261126 -> 20261127 migration creates backbone/wetland/geochem tables/cols and master view aliases."""
+        """Verify 20261126 -> 20261128 migration creates backbone/wetland/geochem tables/cols and master view aliases."""
         from scripts.core.db import (
             ensure_pipeline_run,
             get_db_connection,
@@ -1685,7 +1685,7 @@ local({{
         )
         from scripts.core.db_schema import PLANTMATICS_SCHEMA_USER_VERSION
 
-        self.assertEqual(PLANTMATICS_SCHEMA_USER_VERSION, 20261127)
+        self.assertEqual(PLANTMATICS_SCHEMA_USER_VERSION, 20261128)
         expected_backbone_cols = {
             "species_standardized",
             "target_genus",
@@ -1778,7 +1778,7 @@ local({{
 
             conn = get_db_connection(db_p, init_schema=True)
             try:
-                self.assertEqual(int(conn.execute("PRAGMA user_version;").fetchone()[0]), 20261127)
+                self.assertEqual(int(conn.execute("PRAGMA user_version;").fetchone()[0]), 20261128)
                 tbp_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(taxon_backbone_profiles);").fetchall()}
                 ns_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(natureserve_subnational_ranges);").fetchall()}
                 env_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(environmental_cache);").fetchall()}
@@ -1926,6 +1926,74 @@ local({{
                         "Heterotypic",
                     ),
                 )
+            finally:
+                conn.close()
+
+    def test_schema_20261127_to_20261128_canonical_taxon_and_telemetry_migration(self) -> None:
+        """Verify 20261127 -> 20261128 migration renames canonical_packera to canonical_taxon and adds step_telemetry_benchmarks."""
+        from scripts.core.db import get_db_connection
+        from scripts.core.db_schema import PLANTMATICS_SCHEMA_USER_VERSION
+
+        self.assertEqual(PLANTMATICS_SCHEMA_USER_VERSION, 20261128)
+        with tempfile.TemporaryDirectory() as tmp:
+            db_p = Path(tmp) / "legacy_20261127.sqlite"
+            raw_conn = sqlite3.connect(db_p)
+            raw_conn.executescript(
+                """
+                PRAGMA user_version = 20261127;
+                CREATE TABLE taxon_synonyms (
+                    raw_name_lower TEXT PRIMARY KEY,
+                    canonical_packera TEXT NOT NULL,
+                    protologue_authors_json TEXT,
+                    updated_at TEXT
+                );
+                INSERT INTO taxon_synonyms VALUES (
+                    'senecio tomentosus', 'Packera dubia', '["Michx."]', '2026-11-14T00:00:00Z'
+                );
+                CREATE TABLE usda_county_ranges (
+                    canonical_packera TEXT NOT NULL,
+                    usda_symbol TEXT NOT NULL,
+                    state_norm TEXT NOT NULL,
+                    county_norm TEXT NOT NULL DEFAULT '',
+                    fips_code TEXT,
+                    native_status TEXT,
+                    is_state_only INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT,
+                    PRIMARY KEY (canonical_packera, state_norm, county_norm)
+                );
+                CREATE INDEX idx_usda_county_ranges_taxon ON usda_county_ranges(canonical_packera);
+                INSERT INTO usda_county_ranges VALUES (
+                    'Packera dubia', 'PATO4', 'north carolina', 'orange', '37135', 'L48 (N)', 0, '2026-11-14T00:00:00Z'
+                );
+                """
+            )
+            raw_conn.commit()
+            raw_conn.close()
+
+            conn = get_db_connection(db_p, init_schema=True)
+            try:
+                self.assertEqual(int(conn.execute("PRAGMA user_version;").fetchone()[0]), 20261128)
+                syn_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(taxon_synonyms);").fetchall()}
+                usda_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(usda_county_ranges);").fetchall()}
+                self.assertIn("canonical_taxon", syn_cols)
+                self.assertNotIn("canonical_packera", syn_cols)
+                self.assertIn("canonical_taxon", usda_cols)
+                self.assertNotIn("canonical_packera", usda_cols)
+
+                syn_rows = conn.execute("SELECT raw_name_lower, canonical_taxon FROM taxon_synonyms;").fetchall()
+                self.assertEqual([(str(a), str(b)) for a, b in syn_rows], [("senecio tomentosus", "Packera dubia")])
+                usda_rows = conn.execute(
+                    "SELECT canonical_taxon, usda_symbol, state_norm, county_norm, is_state_only FROM usda_county_ranges;"
+                ).fetchall()
+                self.assertEqual(
+                    [(str(a), str(b), str(c), str(d), int(e)) for a, b, c, d, e in usda_rows],
+                    [("Packera dubia", "PATO4", "north carolina", "orange", 0)],
+                )
+
+                tbls = {str(r[0]) for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table';").fetchall()}
+                self.assertIn("step_telemetry_benchmarks", tbls)
+                bm_cols = [str(r[1]) for r in conn.execute("PRAGMA table_info(step_telemetry_benchmarks);").fetchall()]
+                self.assertGreaterEqual(len(bm_cols), 3)
             finally:
                 conn.close()
 

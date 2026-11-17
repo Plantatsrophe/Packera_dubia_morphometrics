@@ -18,6 +18,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
+from scripts.core.config import resolve_target_genus
 from scripts.data_prep.step06_synonym_utils import (
     CANONICAL_SENECIO_PACKERA_SYNONYMS as _SEED_SYNONYM_TAXA,
     _NON_EPITHET_TOKENS,
@@ -36,9 +37,11 @@ def _canon_packera_taxon_key(taxon: str) -> str:
 
 def _is_valid_packera_binomial(taxon: str) -> bool:
     t = str(taxon or "").strip()
-    if not t.startswith("Packera ") or len(t.split()) < 2:
+    genus = (resolve_target_genus() or "Packera").strip().capitalize()
+    if not t.startswith(f"{genus} ") or len(t.split()) < 2:
         return False
-    return _canon_packera_taxon_key(t) not in ("packera sp", "packera sp.", "packera unknown")
+    g_low = genus.lower()
+    return _canon_packera_taxon_key(t) not in (f"{g_low} sp", f"{g_low} sp.", f"{g_low} unknown")
 
 
 def _cluster_haplotypes(
@@ -163,10 +166,11 @@ def _detect_cytonuclear_discordance(
     for sid, ilbl in its_ribotypes.items():
         if ilbl: its_clusters[ilbl].append(sid)
 
+    genus_prefix = f"{(resolve_target_genus() or 'Packera').strip().capitalize()} "
     taxon_of: Dict[str, str] = {}
     for sid in samples:
         raw_sp = raw_sp_of[sid]
-        if not raw_sp.startswith("Packera ") and raw_sp != "Unknown":
+        if not raw_sp.startswith(genus_prefix) and raw_sp != "Unknown":
             taxon_of[sid] = raw_sp; continue
         emp_tx = str((nuclear_taxon_map or {}).get(sid) or "").strip()
         pub_its, pub_wx = (public_its_matches or {}).get(sid, ""), (waxy_lineage_matches or {}).get(sid, "")
@@ -185,15 +189,15 @@ def _detect_cytonuclear_discordance(
 
     by_clade: Dict[str, Counter[str]] = defaultdict(Counter)
     for sid, pc in plastid_clades.items():
-        if taxon_of.get(sid, "").startswith("Packera "): by_clade[pc][taxon_of[sid]] += 1
+        if taxon_of.get(sid, "").startswith(genus_prefix): by_clade[pc][taxon_of[sid]] += 1
     clade_maj_taxon: Dict[str, str] = {pc: cnt.most_common(1)[0][0] for pc, cnt in by_clade.items()}
 
     rows: List[Dict[str, Any]] = []
     for sid in samples:
         pc, sp = plastid_clades.get(sid), taxon_of[sid]
         pub_cp, pub_its, pub_wx = (public_plastome_matches or {}).get(sid, ""), (public_its_matches or {}).get(sid, ""), (waxy_lineage_matches or {}).get(sid, "")
-        discordant = 1 if (pc and sp.startswith("Packera ") and pc in clade_maj_taxon and clade_maj_taxon[pc] != sp and by_clade[pc][sp] < by_clade[pc][clade_maj_taxon[pc]]) else 0
-        if discordant == 0 and sp.startswith("Packera ") and _is_valid_packera_binomial(pub_cp):
+        discordant = 1 if (pc and sp.startswith(genus_prefix) and pc in clade_maj_taxon and clade_maj_taxon[pc] != sp and by_clade[pc][sp] < by_clade[pc][clade_maj_taxon[pc]]) else 0
+        if discordant == 0 and sp.startswith(genus_prefix) and _is_valid_packera_binomial(pub_cp):
             cp_key, sp_key = _canon_packera_taxon_key(pub_cp), _canon_packera_taxon_key(sp)
             metrics = (plastome_match_metrics or {}).get(sid)
             hq_cp = metrics is not None and float(metrics[0]) >= 0.80 and int(metrics[1]) >= 80

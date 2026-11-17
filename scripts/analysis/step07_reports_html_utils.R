@@ -57,13 +57,14 @@ generate_taxonomic_revision_report <- function(df, opts) {
   sp_col_rep <- if ("species_standardized" %in% names(df)) as.character(df$species_standardized) else character(0)
   active_taxa <- sort(unique(sp_col_rep[!is.na(sp_col_rep) & nzchar(sp_col_rep) & sp_col_rep != "Unknown"]))
   f_info <- .resolve_focal_taxon_slug(opts$focal_taxon)
+  g_rep <- if (exists("resolve_r_target_genus", mode = "function")) resolve_r_target_genus() else "Packera"
   header_focal <- if (nzchar(f_info$taxon)) f_info$taxon else if (length(active_taxa) == 1L) active_taxa[1L] else ""
   report_title <- if (nzchar(header_focal)) {
     sprintf("# Taxonomic Revision and Integrative Species Delimitation in the *%s* Complex (Asteraceae: Senecioneae)", header_focal)
-  } else sprintf("# Taxonomic Revision and Integrative Species Delimitation Across *Packera* Species Complexes (N = %d Taxa; Asteraceae: Senecioneae)", length(active_taxa))
+  } else sprintf("# Taxonomic Revision and Integrative Species Delimitation Across *%s* Species Complexes (N = %d Taxa; Asteraceae: Senecioneae)", g_rep, length(active_taxa))
   scope_phrase <- if (nzchar(header_focal)) sprintf("the ***%s*** complex", header_focal)
-  else if (length(active_taxa) > 0L) sprintf("**%d analyzed *Packera* taxa** (%s)", length(active_taxa), paste0("*", active_taxa, "*", collapse = ", "))
-  else "the analyzed *Packera* herbarium dataset"
+  else if (length(active_taxa) > 0L) sprintf("**%d analyzed *%s* taxa** (%s)", length(active_taxa), g_rep, paste0("*", active_taxa, "*", collapse = ", "))
+  else sprintf("the analyzed *%s* herbarium dataset", g_rep)
 
   gmm_stats <- resolve_gmm_bic_stats(opts)
   bic_str <- if (is.finite(gmm_stats$two_delta_bic)) format(round(gmm_stats$two_delta_bic, 1), big.mark = ",") else "N/A"
@@ -134,7 +135,7 @@ generate_taxonomic_revision_report <- function(df, opts) {
       hyb_line
     )
   }
-  if (length(treatment_lines) == 0L) treatment_lines <- "- No standardized *Packera* vouchers present in active triage queue (Hopkins 1918; Pewsey et al. 2013)."
+  if (length(treatment_lines) == 0L) treatment_lines <- sprintf("- No standardized *%s* vouchers present in active triage queue (Hopkins 1918; Pewsey et al. 2013).", g_rep)
 
   is_single_or_intra <- isTRUE(opts$intraspecific_mode) || identical(attr(df, "can_evaluate_hybrids"), FALSE)
   stg2_line <- if (is_single_or_intra) "- **Stage 2 (Conservative Contact-Zone Hybrid Swarms):** 0 introgressants (0.0%; interspecific hybrid evaluation disabled in single-taxon intraspecific mode)."
@@ -156,7 +157,7 @@ generate_taxonomic_revision_report <- function(df, opts) {
   comp_att <- attr(df, "complex_discovery")
   cdf_rep <- if (!is.null(comp_att) && !is.null(comp_att$complexes_df)) comp_att$complexes_df else if (!is.null(opts$output_complexes) && nzchar(opts$output_complexes) && file.exists(opts$output_complexes)) tryCatch(utils::read.csv(opts$output_complexes, stringsAsFactors = FALSE), error = function(e) NULL) else NULL
   sec3_lines <- if (!is.null(cdf_rep) && nrow(cdf_rep) >= 2L) {
-    fmt_it <- function(s) ifelse(grepl("^Packera[[:space:]]+|^P\\.[[:space:]]+", s), paste0("*", s, "*"), s)
+    fmt_it <- function(s) ifelse(grepl("^[A-Z][a-z-]+[[:space:]]+([x×][[:space:]]*)?[a-z][a-z-]+|^[A-Z]\\.[[:space:]]+[a-z-]+", s), paste0("*", s, "*"), s)
     c_rows <- vapply(seq_len(nrow(cdf_rep)), function(ri) sprintf("| %s | `%s` | %s (%.3f) | %.3f | %s |", fmt_it(as.character(cdf_rep$species_standardized[ri])), as.character(cdf_rep$complex_label[ri]), fmt_it(as.character(cdf_rep$nearest_neighbor_taxon[ri])), suppressWarnings(as.numeric(cdf_rep$nearest_neighbor_affinity[ri])), suppressWarnings(as.numeric(cdf_rep$silhouette_width[ri])), ifelse(isTRUE(as.logical(cdf_rep$integrative_congruence[ri])), "Yes", "No")), character(1))
     c("## 3. Empirical Taxon-Complex Delimitation", "| Taxon / Subcluster | Complex | Nearest Neighbor ($W_{ij}$) | Silhouette | Congruent |", "| :--- | :--- | :--- | :--- | :--- |", c_rows, "", "## 4. Herbarium Triage Queue Audit Summary")
   } else "## 3. Herbarium Triage Queue Audit Summary"
@@ -220,7 +221,8 @@ generate_interactive_triage_html <- function(df, html_path, focal_taxon = "", op
   f_info <- .resolve_focal_taxon_slug(focal_taxon); sp_vec <- get_c("species_standardized", "Unknown")
   active_taxa <- sort(unique(sp_vec[nzchar(sp_vec) & sp_vec != "Unknown"]))
   hdr_taxon <- if (nzchar(f_info$taxon)) f_info$taxon else if (length(active_taxa) == 1L) active_taxa[1L] else ""
-  title_html <- if (nzchar(hdr_taxon)) sprintf("NCU Herbarium Integrative Triage Dashboard: <em>%s</em>", .html_escape_vec(hdr_taxon)) else sprintf("NCU Herbarium Integrative Triage Dashboard: <em>Packera</em> (%d Taxa)", length(active_taxa))
+  g_html <- if (exists("resolve_r_target_genus", mode = "function")) resolve_r_target_genus() else "Packera"
+  title_html <- if (nzchar(hdr_taxon)) sprintf("NCU Herbarium Integrative Triage Dashboard: <em>%s</em>", .html_escape_vec(hdr_taxon)) else sprintf("NCU Herbarium Integrative Triage Dashboard: <em>%s</em> (%d Taxa)", .html_escape_vec(g_html), length(active_taxa))
   fmt_w <- function(cn) if (cn %in% names(df) && any(is.finite(as.numeric(df[[cn]])))) sprintf("%.3f", stats::median(as.numeric(df[[cn]]), na.rm = TRUE)) else "NA"
   w_m <- fmt_w("w_morph_kappa"); w_e <- fmt_w("w_edaphic_kappa"); w_p <- fmt_w("w_pheno_kappa")
 
@@ -299,7 +301,7 @@ generate_interactive_triage_html <- function(df, html_path, focal_taxon = "", op
   fig_sec <- if (length(fig_links) > 0L) paste0("<section style=\"background:#fff;border:1px solid #cbd5e1;border-radius:8px;padding:8px 14px;margin-bottom:12px;\"><span style=\"font-size:0.75rem;text-transform:uppercase;letter-spacing:0.04em;color:#475569;margin-right:10px;\">300-DPI PNG Plates:</span>", paste(fig_links, collapse = ""), "</section>") else ""
 
   html_doc <- c(
-    "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Packera Integrative Triage Dashboard (NCU Herbarium)</title><style>",
+    sprintf("<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>%s Integrative Triage Dashboard (NCU Herbarium)</title><style>", .html_escape_vec(g_html)),
     ":root{--bg:#f8fafc;--card:#ffffff;--ink:#0f172a;--muted:#475569;--border:#cbd5e1;--accent:#0072B2;}",
     "*{box-sizing:border-box;}body{margin:0;padding:20px 24px;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--ink);line-height:1.45;}",
     "header{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:16px 20px;margin-bottom:16px;}h1{margin:0 0 6px 0;font-size:1.28rem;}.meta{font-size:0.86rem;color:var(--muted);display:flex;flex-wrap:wrap;gap:16px;}",
@@ -327,7 +329,7 @@ generate_interactive_triage_html <- function(df, html_path, focal_taxon = "", op
     "<script>", paste0("const ROWS = [\n", json_rows, "\n];"),
     "const PRIO_RANK = {CRITICAL:1,HIGH:2,MEDIUM:3,LOW:4,RESOLVED:5}; let sortCol = 7, sortAsc = true, filtered = ROWS.slice(), modalCat = '', modalRaw = false;",
     "function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\"/g,'&quot;');}",
-    "function fmtSci(s){const t=esc(s);return t.toLowerCase().startsWith('packera ')?'<span class=\"sci\">'+t+'</span>':t;}",
+    "function fmtSci(s){const t=esc(s);return /^[A-Z][a-z-]+[ \t]+(?:[x×][ \t]*)?[a-z][a-z-]+/.test(t)?'<span class=\"sci\">'+t+'</span>':t;}",
     "function loadModalImg(){const img=document.getElementById('modalImg'),msg=document.getElementById('modalMsg'),btn=document.getElementById('btnToggleScan');msg.style.display='none';img.style.display='inline-block';const ov='../figures/lm3_sheet_overlays/'+encodeURIComponent(modalCat)+'.png',rw='../../../data/raw_vouchers/'+encodeURIComponent(modalCat)+'.webp';btn.textContent=modalRaw?'Show LM3 Overlay':'Show Raw Scan';img.onerror=function(){if(!modalRaw){modalRaw=true;btn.textContent='Show LM3 Overlay';img.onerror=function(){img.style.display='none';msg.textContent='Sheet preview image not found locally for '+modalCat;msg.style.display='block';};img.src=rw;}else{img.style.display='none';msg.textContent='Raw voucher scan not found locally for '+modalCat;msg.style.display='block';}};img.src=modalRaw?rw:ov;}",
     "function openModal(cat){modalCat=cat;modalRaw=false;document.getElementById('modalTitle').textContent='Herbarium Voucher: '+cat;document.getElementById('sheetModal').classList.add('open');loadModalImg();}",
     "document.getElementById('btnToggleScan').addEventListener('click',()=>{modalRaw=!modalRaw;loadModalImg();});document.getElementById('btnCloseModal').addEventListener('click',()=>document.getElementById('sheetModal').classList.remove('open'));document.getElementById('sheetModal').addEventListener('click',e=>{if(e.target.id==='sheetModal')document.getElementById('sheetModal').classList.remove('open');});document.addEventListener('keydown',e=>{if(e.key==='Escape')document.getElementById('sheetModal').classList.remove('open');});",

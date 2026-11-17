@@ -130,8 +130,9 @@ residualize_ontogenetic_phenophase_plasticity <- function(
 
   if (length(cov_list) == 0L && !has_log_cs) return(df)
 
-  sp_raw <- if ("species_standardized" %in% names(df)) as.character(df$species_standardized) else rep("Packera_sp", n)
-  sp_raw[is.na(sp_raw) | !nzchar(trimws(sp_raw))] <- "Packera_sp"
+  fb_sp <- paste0(if (exists("resolve_r_target_genus", mode = "function")) resolve_r_target_genus() else "Packera", "_sp")
+  sp_raw <- if ("species_standardized" %in% names(df)) as.character(df$species_standardized) else rep(fb_sp, n)
+  sp_raw[is.na(sp_raw) | !nzchar(trimws(sp_raw))] <- fb_sp
 
   for (col_nm in target_cols) {
     yv <- suppressWarnings(as.numeric(df[[col_nm]]))

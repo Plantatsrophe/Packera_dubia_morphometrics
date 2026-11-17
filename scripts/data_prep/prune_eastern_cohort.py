@@ -117,9 +117,13 @@ def prune_workspace_cohort(
         sys.path.insert(0, str(workspace_root))
     _ = transcontinental_longitude_threshold
 
+    from scripts.core.config import resolve_target_genus
     from scripts.core.db import load_taxon_synonyms, resolve_db_path
-    from scripts.core.harvester import _DYNAMIC_SYNONYM_TO_CANONICAL, standardize_packera_taxon
+    from scripts.core import harvester as _harv
     from scripts.core.taxonomy_authority import evaluate_eastern_na_cohort_filter
+    _DYNAMIC_SYNONYM_TO_CANONICAL = _harv._DYNAMIC_SYNONYM_TO_CANONICAL
+    standardize_taxon_name = getattr(_harv, "standardize_taxon_name", _harv.standardize_packera_taxon)
+    target_genus = (resolve_target_genus() or "Packera").strip().capitalize()
 
     if db_path is not None:
         eff_db = Path(db_path).resolve()
@@ -159,7 +163,7 @@ def prune_workspace_cohort(
 
     keep_mask, stats = evaluate_eastern_na_cohort_filter(
         v_df,
-        standardize_packera_taxon,
+        standardize_taxon_name,
         western_longitude_threshold=western_longitude_threshold,
         cis_longitude_threshold=cis_longitude_threshold,
         min_cis_records=min_cis_records,
@@ -175,7 +179,7 @@ def prune_workspace_cohort(
     ) if "catalogNumber" in v_df.columns else set()
 
     print("=" * 86)
-    print("CIS-MISSISSIPPI EASTERN PACKERA + ECOREGION-BOUNDED COHORT PRUNER")
+    print(f"CIS-MISSISSIPPI EASTERN {target_genus.upper()} + ECOREGION-BOUNDED COHORT PRUNER")
     print(f"  Workspace Root        : {workspace_root}")
     print(f"  SQLite Database       : {eff_db} ({'FOUND' if has_db else 'MISSING'})")
     print(f"  Disjunct West Ceiling : {western_longitude_threshold:.2f} deg W (Eastern taxa)")
@@ -394,10 +398,11 @@ def prune_workspace_cohort(
 
 
 def build_cli_parser() -> argparse.ArgumentParser:
+    from scripts.core.config import resolve_target_genus
     p = argparse.ArgumentParser(
         description=(
-            "Prune SQLite database and CSV manifests in place to Cis-Mississippi Eastern "
-            "Packera species plus ecoregion-bounded transcontinental boreal extensions."
+            f"Prune SQLite database and CSV manifests in place to Cis-Mississippi Eastern "
+            f"{resolve_target_genus()} species plus ecoregion-bounded transcontinental boreal extensions."
         )
     )
     p.add_argument("--workspace-root", type=str, default=None, help="Repository root directory.")

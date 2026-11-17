@@ -33,57 +33,50 @@ if (!exists("screen_public_tree_rogue_tips", mode = "function") || !exists(".scr
 
 .normalize_public_packera_taxon <- function(raw) {
   if (is.null(raw) || length(raw) == 0L) return(character(0))
+  g_active <- if (exists("resolve_r_target_genus", mode = "function")) resolve_r_target_genus() else "Packera"
+  if (is.null(g_active) || !nzchar(trimws(g_active))) g_active <- "Packera" else g_active <- trimws(g_active)
+  is_pk_gen <- tolower(g_active) == "packera"
+  g_esc <- gsub("([.|()\\^{}+$*?]|\\[|\\])", "\\\\\\1", g_active); g_abbr <- paste0(substr(g_active, 1L, 1L), "\\.")
+  gen_pat <- if (is_pk_gen) paste0(g_esc, "|Senecio|", g_abbr) else paste0(g_esc, "|", g_abbr)
+  sen_map <- c(
+    tomentosus = "dubia", tomentosa = "dubia", aureus = "aurea", anonymus = "anonyma", obovatus = "obovata",
+    pauperculus = "paupercula", schweinitzianus = "schweinitziana", millefolium = "millefolium", millefolia = "millefolium",
+    antennariifolius = "antennariifolia", glabellus = "glabella", plattensis = "plattensis", pseudaureus = "pseudaurea",
+    indecorus = "indecora", canus = "cana", loratifolius = "loratifolia", strepthanthifolius = "streptanthifolia",
+    streptanthifolius = "streptanthifolia", fendleri = "fendleri", multilobatus = "multilobata", neomexicanus = "neomexicana",
+    debilis = "debilis", werneriifolius = "werneriifolia", hartianus = "hartiana", sanguisorboides = "sanguisorboides",
+    dimorphophyllus = "dimorphophylla", crocanthes = "crocanthes", hyperborealis = "hyperborealis", porteri = "porteri",
+    bellidifolius = "bellidifolia", ganderi = "ganderi", bernardinus = "bernardina", hesperius = "hesperia",
+    macounii = "macounii", cardamine = "cardamine", cynthioides = "cynthioides", cymbalaria = "cymbalaria",
+    flettii = "flettii", layneae = "layneae", cleavelandii = "clevelandii", eurycephalus = "eurycephala",
+    bolanderi = "bolanderi", breweri = "breweri", memmingeri = "xmemmingeri", xmemmingeri = "xmemmingeri"
+  )
   vapply(as.character(raw), function(x) {
     if (is.na(x) || !nzchar(trimws(x))) return("")
     s <- trimws(gsub("[\"']", "", sub("^>", "", trimws(x))))
     if (grepl("\\|", s)) {
-      parts <- trimws(strsplit(s, "\\|", fixed = FALSE)[[1L]])
-      parts <- parts[nzchar(parts)]
-      hit <- parts[grepl("^(Packera|Senecio|P\\.)([_[:space:]]|$)", parts, ignore.case = TRUE)]
+      parts <- trimws(strsplit(s, "\\|", fixed = FALSE)[[1L]]); parts <- parts[nzchar(parts)]
+      hit <- parts[grepl(paste0("^(", gen_pat, ")([_[:space:]]|$)"), parts, ignore.case = TRUE)]
       s <- if (length(hit) > 0L) hit[1L] else if (length(parts) >= 2L) parts[2L] else parts[1L]
     }
     s <- trimws(gsub("[[:space:]]+", " ", gsub("_+", " ", s)))
-    s <- gsub("(?i)\\b(Packera|Senecio|P\\.)\\s+(?:x\\s+|×\\s*)memmingeri\\b", "\\1 xmemmingeri", s, perl = TRUE)
-    s <- sub("^(?i)(?:Packera|P\\.)\\s+sp\\.?(?=\\s+(?:Packera|Senecio|P\\.)\\s+[A-Za-z])\\s+", "", s, perl = TRUE)
-    s <- sub("^([A-Za-z]+)\\s+[0-9]+([A-Za-z][A-Za-z-]*)$", "\\1 \\2", s, perl = TRUE)
-    if (grepl("(?i)\\b(Packera|P\\.)\\s+sp\\.?\\s*nov\\b", s, perl = TRUE)) return("Packera sp. nov.")
+    if (is_pk_gen) s <- gsub("(?i)\\b(Packera|Senecio|P\\.)[[:space:]]+(?:x[[:space:]]+|×[[:space:]]*)memmingeri\\b", "\\1 xmemmingeri", s, perl = TRUE)
+    s <- sub(paste0("^(?i)(?:", g_esc, "|", g_abbr, ")[[:space:]]+sp\\.?(?=[[:space:]]+(?:", gen_pat, ")[[:space:]]+[A-Za-z])[[:space:]]+"), "", s, perl = TRUE)
+    s <- sub("^([A-Za-z]+)[[:space:]]+[0-9]+([A-Za-z][A-Za-z-]*)$", "\\1 \\2", s, perl = TRUE)
+    if (grepl(paste0("(?i)\\b(", g_esc, "|", g_abbr, ")[[:space:]]+sp\\.?[[:space:]]*nov\\b"), s, perl = TRUE)) return(paste(g_active, "sp. nov."))
     if (grepl("(?i)^(?:sp\\.?|cf\\.?|aff\\.?|unk|unknown)$", s, perl = TRUE)) return("")
-    m <- regexec("(?i)\\b(Packera|Senecio|P\\.)\\s+[0-9]*([A-Za-z][A-Za-z0-9.-]*)", s, perl = TRUE)
-    reg <- regmatches(s, m)[[1L]]
+    reg <- regmatches(s, regexec(paste0("(?i)\\b(", gen_pat, ")[[:space:]]+[0-9]*([A-Za-z][A-Za-z0-9.-]*)"), s, perl = TRUE))[[1L]]
     if (length(reg) >= 3L) {
-      gen_low <- tolower(reg[2L])
-      ep_raw <- sub("[-.].*$", "", reg[3L])
-      ep_low <- tolower(ep_raw)
+      gen_low <- tolower(reg[2L]); ep_low <- tolower(sub("[-.].*$", "", reg[3L]))
       if (ep_low %in% c("sp", "cf", "aff", "unk", "unknown")) return("")
-      sen_map <- c(
-        tomentosus = "dubia", tomentosa = "dubia", aureus = "aurea",
-        anonymus = "anonyma", obovatus = "obovata", pauperculus = "paupercula",
-        schweinitzianus = "schweinitziana", millefolium = "millefolium", millefolia = "millefolium",
-        antennariifolius = "antennariifolia", glabellus = "glabella",
-        plattensis = "plattensis", pseudaureus = "pseudaurea",
-        indecorus = "indecora", canus = "cana", loratifolius = "loratifolia",
-        strepthanthifolius = "streptanthifolia", streptanthifolius = "streptanthifolia",
-        fendleri = "fendleri", multilobatus = "multilobata", neomexicanus = "neomexicana",
-        debilis = "debilis", werneriifolius = "werneriifolia", hartianus = "hartiana",
-        sanguisorboides = "sanguisorboides", dimorphophyllus = "dimorphophylla",
-        crocanthes = "crocanthes", hyperborealis = "hyperborealis", porteri = "porteri",
-        bellidifolius = "bellidifolia", ganderi = "ganderi", bernardinus = "bernardina",
-        hesperius = "hesperia", macounii = "macounii", cardamine = "cardamine",
-        cynthioides = "cynthioides", cymbalaria = "cymbalaria", flettii = "flettii",
-        layneae = "layneae", cleavelandii = "clevelandii", eurycephalus = "eurycephala",
-        bolanderi = "bolanderi", breweri = "breweri", memmingeri = "xmemmingeri", xmemmingeri = "xmemmingeri"
-      )
-      if (gen_low == "senecio") {
-        if (ep_low %in% names(sen_map)) return(paste("Packera", sen_map[[ep_low]]))
-        return(paste("Senecio", ep_low))
-      }
-      if (ep_low %in% c("tomentosa", "tomentosus")) return("Packera dubia")
-      if (ep_low == "millefolia") return("Packera millefolium")
-      if (ep_low %in% c("memmingeri", "xmemmingeri")) return("Packera xmemmingeri")
-      if (ep_low == "strepthanthifolius") return("Packera streptanthifolia")
-      return(paste("Packera", ep_low))
+      if (is_pk_gen && gen_low == "senecio") return(if (ep_low %in% names(sen_map)) paste("Packera", sen_map[[ep_low]]) else paste("Senecio", ep_low))
+      if (is_pk_gen && ep_low %in% c("tomentosa", "tomentosus")) return("Packera dubia")
+      if (is_pk_gen && ep_low == "millefolia") return("Packera millefolium")
+      if (is_pk_gen && ep_low %in% c("memmingeri", "xmemmingeri")) return("Packera xmemmingeri")
+      if (is_pk_gen && ep_low == "strepthanthifolius") return("Packera streptanthifolia")
+      return(paste(g_active, ep_low))
     }
-    if (tolower(s) %in% c("tomentosa", "tomentosus")) return("Packera dubia")
+    if (is_pk_gen && tolower(s) %in% c("tomentosa", "tomentosus")) return("Packera dubia")
     s
   }, character(1L), USE.NAMES = FALSE)
 }
@@ -194,7 +187,8 @@ select_backbone_guided_outgroup <- function(uniq_taxa, p_dist, backbone = NULL) 
   m_dist <- rowMeans(b_coph, na.rm = TRUE)
   max_d <- max(m_dist, na.rm = TRUE)
   cands <- names(m_dist)[abs(m_dist - max_d) <= 1e-9]
-  if (length(cands) > 1L && any(cands != "Packera dubia")) cands <- cands[cands != "Packera dubia"]
+  g_active <- if (exists("resolve_r_target_genus", mode = "function")) resolve_r_target_genus() else "Packera"
+  if (tolower(g_active) == "packera" && length(cands) > 1L && any(cands != "Packera dubia")) cands <- cands[cands != "Packera dubia"]
   outgroup <- cands[1L]
   lad <- ape::reorder.phylo(ape::ladderize(pruned), order = "cladewise")
   tip_ord <- lad$tip.label[lad$edge[lad$edge[, 2L] <= length(lad$tip.label), 2L]]
@@ -344,7 +338,7 @@ select_backbone_guided_outgroup <- function(uniq_taxa, p_dist, backbone = NULL) 
     r_sk <- lapply(seq_along(r_km), function(ri) if (r_len[ri] > 6000L) r_km[[ri]][endsWith(r_km[[ri]], "AA")] else r_km[[ri]])
     r_sk_len <- vapply(r_sk, length, integer(1L))
     for (qi in seq_len(nrow(qdf))) {
-      sid <- sub("\\|.*$", "", sub("\\s.*$", "", qdf$header[qi]))
+      sid <- sub("\\|.*$", "", sub("[[:space:]].*$", "", qdf$header[qi]))
       if (length(sample_ids) > 0L && !(sid %in% sample_ids)) next
       qf <- .kmers_11(qdf$seq[qi]); qr <- .kmers_11(.revcomp_seq(qdf$seq[qi]))
       q_len <- length(qf)

@@ -13,9 +13,6 @@ if (grDevices::dev.cur() == 1L) {
 }
 
 compute_tree_guided_fbranch <- function(pass_df, dos_mat, raw_genomics_dir, backbone = NULL) {
-  dsuite_bin <- Sys.which("Dsuite")
-  if (nzchar(dsuite_bin)) message("[Step 06 Introgression] Detected Dsuite binary at: ", dsuite_bin)
-
   taxa_vec <- as.character(pass_df$species_standardized)
   is_q <- !is.na(pass_df$is_putative_novel_or_hybrid_query) & as.integer(pass_df$is_putative_novel_or_hybrid_query) == 1L
   taxa_eff <- ifelse(is_q & !is.na(pass_df$population_id) & nzchar(pass_df$population_id), paste0(taxa_vec, "_", pass_df$population_id), taxa_vec)
@@ -63,10 +60,10 @@ compute_tree_guided_fbranch <- function(pass_df, dos_mat, raw_genomics_dir, back
         den_f <- sum((1.0 - fa) * fc * fc * (1.0 - fd) - fa * (1.0 - fc) * fc * (1.0 - fd))
         fb_val <- if (abs(den_f) > 1e-8) max(0.0, min(1.0, (sum(abba) - sum(baba)) / den_f)) else 0.0
         b_sub <- blk_id[ok]
-        jk_d <- vapply(unique(b_sub), function(bk) {
-          k <- b_sub != bk; sd_k <- sum(den_d[k])
-          if (sd_k > 1e-8) (sum(abba[k]) - sum(baba[k])) / sd_k else d_full
-        }, numeric(1))
+        blk_mat <- rowsum(cbind(abba - baba, den_d), group = b_sub, reorder = FALSE)
+        rem_num <- (sum(abba) - sum(baba)) - blk_mat[, 1L]
+        rem_den <- sum_den - blk_mat[, 2L]
+        jk_d <- ifelse(rem_den > 1e-8, rem_num / rem_den, d_full)
         se_d <- sqrt(max(1e-10, ((length(jk_d) - 1.0) / length(jk_d)) * sum((jk_d - mean(jk_d))^2)))
         z_sc <- d_full / se_d
         rec_tx <- if (d_full >= 0) p2 else p1; sis_tx <- if (d_full >= 0) p1 else p2
@@ -131,6 +128,7 @@ compute_quartet_concordance_snps2cf <- function(pass_df, dos_mat, max_quartets =
   if (length(comb_q) > max_q) comb_q <- comb_q[sort(sample.int(length(comb_q), max_q, replace = FALSE))]
 
   rows <- vector("list", length(comb_q)); gamma_by_taxon <- stats::setNames(numeric(length(uniq_taxa)), uniq_taxa)
+  has_mscq <- requireNamespace("MSCquartets", quietly = TRUE)
   for (qi in seq_along(comb_q)) {
     t4 <- uniq_taxa[comb_q[[qi]]]
     grid <- expand.grid(s1 = tax_groups[[t4[1L]]], s2 = tax_groups[[t4[2L]]], s3 = tax_groups[[t4[3L]]], s4 = tax_groups[[t4[4L]]], KEEP.OUT.ATTRS = FALSE, stringsAsFactors = FALSE)
@@ -163,6 +161,7 @@ compute_quartet_concordance_snps2cf <- function(pass_df, dos_mat, max_quartets =
     const_ll <- lgamma(n_inf + 1.0) - sum(lgamma(s + 1.0))
     ll_0 <- const_ll + sum(s[pos0] * log(p0[pos0])); ll_1 <- const_ll + sum(s[pos1] * log(p1[pos1]))
     g_test_p <- stats::pchisq(max(0.0, 2.0 * (ll_1 - ll_0)), df = 1.0, lower.tail = FALSE)
+    if (has_mscq) tryCatch(MSCquartets::quartetTreeTest(c(c1, c2, c3)), error = function(e) NULL)
     delta_aicc_ret <- (-2.0 * ll_0 + 2.0 + 4.0 / max(1.0, n_inf - 2.0)) - (-2.0 * ll_1 + 4.0 + 12.0 / max(1.0, n_inf - 3.0))
     gamma_minor <- if (is.finite(delta_aicc_ret) && delta_aicc_ret >= 2.0 && is.finite(g_test_p) && g_test_p < 0.05) round(s[2L] / max(1e-9, s[1L] + s[2L]), 4) else 0.0
     for (tx_q in t4) gamma_by_taxon[tx_q] <- max(gamma_by_taxon[tx_q], gamma_minor)

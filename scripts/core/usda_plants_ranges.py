@@ -56,6 +56,7 @@ except ImportError:
 
 from scripts.core.config import resolve_target_genus
 from scripts.core.io_utils import atomic_write_text
+from scripts.core.step01_biogeography_utils import resolve_synonym_genera
 from scripts.core.db import (
     get_db_connection,
     is_canonical_or_explicit_db_context,
@@ -331,11 +332,13 @@ def load_or_fetch_plantlst_index(
         return None
 
 
-def _generate_algorithmic_generic_transfers(binom_lower: str) -> List[str]:
+def _generate_algorithmic_generic_transfers(
+    binom_lower: str,
+    synonym_genera: Optional[Iterable[str]] = None,
+) -> List[str]:
     """
     Generate species-agnostic ICN Art. 23.5 generic transfer combinations across
-    `Packera` (feminine), `Senecio` (masculine), and `Cineraria` (feminine) without
-    any hardcoded taxon dictionary.
+    configured `synonym_genera` without any hardcoded taxon dictionary.
     """
     parts = binom_lower.split(" ", 1)
     if len(parts) != 2:
@@ -348,8 +351,11 @@ def _generate_algorithmic_generic_transfers(binom_lower: str) -> List[str]:
         ep_variants.append(ep[:-2] + "ius")
     elif ep.endswith("us") and len(ep) > 4:
         ep_variants.append(ep[:-2] + "a")
+    syn_src = synonym_genera if synonym_genera is not None else resolve_synonym_genera()
+    syn_low = {str(g).strip().lower() for g in syn_src if str(g).strip()}
+    cand_genera = sorted(syn_low) if _gen in syn_low else [_gen]
     out: List[str] = []
-    for g_cand in ("packera", "senecio", "cineraria"):
+    for g_cand in cand_genera:
         for ep_v in ep_variants:
             comb = f"{g_cand} {ep_v}"
             if comb != binom_lower and comb not in out:
@@ -358,22 +364,27 @@ def _generate_algorithmic_generic_transfers(binom_lower: str) -> List[str]:
 
 
 def resolve_usda_symbols_for_taxon(
-    canonical_packera: str,
+    canonical_taxon: Optional[str] = None,
     synonym_names: Optional[Iterable[str]] = None,
     cache_dir: Optional[Path] = None,
     db_path: Optional[Union[str, Path]] = None,
     allow_network: bool = True,
     logger: Optional[logging.Logger] = None,
+    *,
+    canonical_packera: Optional[str] = None,
 ) -> List[str]:
     """
     Dynamically resolve one or more USDA PLANTS accepted `Symbol` codes for
-    `canonical_packera` without hardcoded taxon dictionaries, combining:
+    `canonical_taxon` without hardcoded taxon dictionaries, combining:
       1. Caller-supplied `synonym_names`, in-memory `_DYNAMIC_SYNONYM_TO_CANONICAL`,
          and persisted SQLite `taxon_synonyms` mappings.
-      2. Algorithmic ICN Art. 23.5 generic transfers across `Packera`/`Senecio`/`Cineraria`.
+      2. Algorithmic ICN Art. 23.5 generic transfers across configured `synonym_genera`.
       3. Dynamic GBIF Species Backbone synonym expansion when checklist symbols are not yet
          matched (e.g., resolving post-2006 combinations through their older checklist synonyms).
     """
+    eff_taxon = str(canonical_taxon if canonical_taxon is not None else (canonical_packera or "")).strip()
+    if not eff_taxon:
+        return []
     candidates: List[str] = []
     seen_cand: Set[str] = set()
 
@@ -383,11 +394,11 @@ def resolve_usda_symbols_for_taxon(
             seen_cand.add(b)
             candidates.append(b)
 
-    _add_cand(canonical_packera)
+    _add_cand(eff_taxon)
     for syn in synonym_names or ():
         _add_cand(syn)
 
-    canon_clean_low = str(canonical_packera or "").strip().lower()
+    canon_clean_low = eff_taxon.lower()
     try:
         from scripts.core import harvester as _harv_mod
         for raw_low, mapped_canon in list(_harv_mod._DYNAMIC_SYNONYM_TO_CANONICAL.items()):
@@ -408,8 +419,9 @@ def resolve_usda_symbols_for_taxon(
         except Exception:
             pass
 
+    active_syn_genera = resolve_synonym_genera()
     for base_c in list(candidates):
-        for gen_comb in _generate_algorithmic_generic_transfers(base_c):
+        for gen_comb in _generate_algorithmic_generic_transfers(base_c, synonym_genera=active_syn_genera):
             _add_cand(gen_comb)
 
     if not candidates:
@@ -443,11 +455,11 @@ def resolve_usda_symbols_for_taxon(
     # 1b. Dynamic GBIF Backbone synonym query if direct + generic-transfer candidates did not match
     if _harv_mod is not None and (allow_network or _harv_mod._is_gbif_species_mocked()):
         pre_n = len(candidates)
-        gbif_acc, gbif_syns, gbif_auths = _harv_mod._query_gbif_backbone_and_synonyms(canonical_packera)
+        gbif_acc, gbif_syns, gbif_auths = _harv_mod._query_gbif_backbone_and_synonyms(eff_taxon)
         for gs in (gbif_acc, *(gbif_syns or []), *(gbif_auths or [])):
             _add_cand(gs)
         for base_c in list(candidates[pre_n:]):
-            for gen_comb in _generate_algorithmic_generic_transfers(base_c):
+            for gen_comb in _generate_algorithmic_generic_transfers(base_c, synonym_genera=active_syn_genera):
                 _add_cand(gen_comb)
         if idx is not None and len(candidates) > pre_n:
             symbols = _match_against_plantlst(idx)
@@ -720,19 +732,36 @@ def parse_usda_distribution_csv(
     }
 
 
+def _usda_range_taxon_column(conn: sqlite3.Connection) -> str:
+    """Resolve `canonical_taxon` (or legacy `canonical_packera`) column on `usda_county_ranges`."""
+    try:
+        cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(usda_county_ranges);").fetchall()}
+        if "canonical_packera" in cols and "canonical_taxon" not in cols:
+            return "canonical_packera"
+    except sqlite3.Error:
+        pass
+    return "canonical_taxon"
+
+
 def _load_taxon_range_from_sqlite(
     conn: sqlite3.Connection,
-    canonical_packera: str,
+    canonical_taxon: Optional[str] = None,
+    *,
+    canonical_packera: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Load persisted USDA county distribution for `canonical_packera` from SQLite if present."""
+    """Load persisted USDA county distribution for `canonical_taxon` from SQLite if present."""
+    eff_taxon = str(canonical_taxon if canonical_taxon is not None else (canonical_packera or "")).strip()
+    if not eff_taxon:
+        return None
+    taxon_col = _usda_range_taxon_column(conn)
     try:
         cur = conn.execute(
-            """
+            f"""
             SELECT usda_symbol, state_norm, county_norm, fips_code, native_status, is_state_only
             FROM usda_county_ranges
-            WHERE canonical_packera = ?;
+            WHERE {taxon_col} = ?;
             """,
-            (canonical_packera,),
+            (eff_taxon,),
         )
         fetched = cur.fetchall()
     except sqlite3.Error:
@@ -766,7 +795,8 @@ def _load_taxon_range_from_sqlite(
         if not any(ck.startswith(f"{st}|") for ck in counties)
     }
     return {
-        "canonical_packera": canonical_packera,
+        "canonical_taxon": eff_taxon,
+        "canonical_packera": eff_taxon,
         "symbols": symbols,
         "counties": counties,
         "state_only_states": state_only_states,
@@ -776,12 +806,16 @@ def _load_taxon_range_from_sqlite(
 
 def _persist_taxon_range_to_sqlite(
     conn: sqlite3.Connection,
-    canonical_packera: str,
-    rows: Sequence[Mapping[str, Any]],
+    canonical_taxon: Optional[str] = None,
+    rows: Sequence[Mapping[str, Any]] = (),
+    *,
+    canonical_packera: Optional[str] = None,
 ) -> int:
-    """Persist normalized USDA county presence rows for `canonical_packera` into `usda_county_ranges`."""
-    if not rows:
+    """Persist normalized USDA county presence rows for `canonical_taxon` into `usda_county_ranges`."""
+    eff_taxon = str(canonical_taxon if canonical_taxon is not None else (canonical_packera or "")).strip()
+    if not eff_taxon or not rows:
         return 0
+    taxon_col = _usda_range_taxon_column(conn)
     now_iso = datetime.now(timezone.utc).isoformat()
     payload: List[Tuple[str, str, str, str, Optional[str], Optional[str], int, str]] = []
     for r in rows:
@@ -791,7 +825,7 @@ def _persist_taxon_range_to_sqlite(
         if not st_norm or not sym:
             continue
         payload.append((
-            canonical_packera,
+            eff_taxon,
             sym,
             st_norm,
             co_norm,
@@ -803,13 +837,13 @@ def _persist_taxon_range_to_sqlite(
     if not payload:
         return 0
 
-    sql = """
+    sql = f"""
     INSERT INTO usda_county_ranges (
-        canonical_packera, usda_symbol, state_norm, county_norm,
+        {taxon_col}, usda_symbol, state_norm, county_norm,
         fips_code, native_status, is_state_only, updated_at
     )
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(canonical_packera, state_norm, county_norm) DO UPDATE SET
+    ON CONFLICT({taxon_col}, state_norm, county_norm) DO UPDATE SET
         usda_symbol = excluded.usda_symbol,
         fips_code = COALESCE(excluded.fips_code, usda_county_ranges.fips_code),
         native_status = COALESCE(excluded.native_status, usda_county_ranges.native_status),
@@ -887,7 +921,7 @@ def _fetch_usda_symbol_distribution_csv(sym: str, timeout: float = 15.0) -> Opti
 
 
 def fetch_or_load_usda_taxon_range(
-    canonical_packera: str,
+    canonical_taxon: Optional[str] = None,
     synonym_names: Optional[Iterable[str]] = None,
     cache_dir: Optional[Path] = None,
     db_path: Optional[Union[str, Path]] = None,
@@ -895,11 +929,14 @@ def fetch_or_load_usda_taxon_range(
     allow_network: bool = True,
     force_refresh: bool = False,
     logger: Optional[logging.Logger] = None,
+    *,
+    canonical_packera: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Load or download the unioned USDA PLANTS county range for `canonical_packera`
+    Load or download the unioned USDA PLANTS county range for `canonical_taxon`
     across all mapped USDA symbols and synonyms, persisting to CSV cache and SQLite.
     """
+    eff_taxon = str(canonical_taxon if canonical_taxon is not None else (canonical_packera or "")).strip()
     eff_cache_dir = Path(cache_dir) if cache_dir is not None else (Path(workspace_dir) / "data" / "environmental" / "usda_plants")
     dist_dir = eff_cache_dir / "distributions"
 
@@ -920,7 +957,7 @@ def fetch_or_load_usda_taxon_range(
         try:
             conn = get_db_connection(db_path=resolved_db, read_only=True, workspace_root=workspace_dir)
             try:
-                cached_sql = _load_taxon_range_from_sqlite(conn, canonical_packera)
+                cached_sql = _load_taxon_range_from_sqlite(conn, eff_taxon)
                 if cached_sql is not None and (cached_sql["counties"] or cached_sql["state_only_states"]):
                     return cached_sql
             finally:
@@ -928,16 +965,17 @@ def fetch_or_load_usda_taxon_range(
         except Exception:
             pass
 
-    # 2. Check taxon-named local CSV override/cache `<Packera_epithet>.csv` if present
-    slug_csv = dist_dir / f"{re.sub(r'[^A-Za-z0-9_-]+', '_', canonical_packera.strip())}.csv"
-    if not force_refresh and slug_csv.is_file() and slug_csv.stat().st_size > 0:
+    # 2. Check taxon-named local CSV override/cache `<Genus_epithet>.csv` if present
+    slug_csv = dist_dir / f"{re.sub(r'[^A-Za-z0-9_-]+', '_', eff_taxon)}.csv"
+    if not force_refresh and eff_taxon and slug_csv.is_file() and slug_csv.stat().st_size > 0:
         parsed_slug = parse_usda_distribution_csv(
             slug_csv.read_text(encoding="utf-8-sig", errors="replace"),
-            default_symbol=canonical_packera.upper(),
+            default_symbol=eff_taxon.upper(),
         )
         syms = sorted({str(r["usda_symbol"]) for r in parsed_slug["rows"] if r.get("usda_symbol")})
         result_slug = {
-            "canonical_packera": canonical_packera,
+            "canonical_taxon": eff_taxon,
+            "canonical_packera": eff_taxon,
             "symbols": syms,
             "counties": parsed_slug["counties"],
             "state_only_states": parsed_slug["state_only_states"],
@@ -947,7 +985,7 @@ def fetch_or_load_usda_taxon_range(
             try:
                 conn_w = get_db_connection(db_path=resolved_db, init_schema=True, workspace_root=workspace_dir)
                 try:
-                    _persist_taxon_range_to_sqlite(conn_w, canonical_packera, parsed_slug["rows"])
+                    _persist_taxon_range_to_sqlite(conn_w, eff_taxon, parsed_slug["rows"])
                 finally:
                     conn_w.close()
             except Exception:
@@ -956,7 +994,7 @@ def fetch_or_load_usda_taxon_range(
 
     # 3. Resolve USDA symbol(s) via checklist / PlantSearch API
     symbols = resolve_usda_symbols_for_taxon(
-        canonical_packera=canonical_packera,
+        canonical_taxon=eff_taxon,
         synonym_names=synonym_names,
         cache_dir=eff_cache_dir,
         db_path=resolved_db,
@@ -965,7 +1003,8 @@ def fetch_or_load_usda_taxon_range(
     )
     if not symbols:
         return {
-            "canonical_packera": canonical_packera,
+            "canonical_taxon": eff_taxon,
+            "canonical_packera": eff_taxon,
             "symbols": [],
             "counties": set(),
             "state_only_states": set(),
@@ -1023,7 +1062,7 @@ def fetch_or_load_usda_taxon_range(
         try:
             conn_w = get_db_connection(db_path=resolved_db, init_schema=True, workspace_root=workspace_dir)
             try:
-                _persist_taxon_range_to_sqlite(conn_w, canonical_packera, filtered_rows)
+                _persist_taxon_range_to_sqlite(conn_w, eff_taxon, filtered_rows)
             finally:
                 conn_w.close()
         except Exception as db_exc:
@@ -1031,7 +1070,8 @@ def fetch_or_load_usda_taxon_range(
                 logger.debug(f"SQLite usda_county_ranges persistence skipped: {db_exc}")
 
     return {
-        "canonical_packera": canonical_packera,
+        "canonical_taxon": eff_taxon,
+        "canonical_packera": eff_taxon,
         "symbols": symbols,
         "counties": all_counties,
         "state_only_states": all_state_only,
@@ -1520,7 +1560,7 @@ def filter_vouchers_by_usda_county_range(
     taxon_ranges: Dict[str, Dict[str, Any]] = {}
     for tx in unique_taxa:
         taxon_ranges[tx] = fetch_or_load_usda_taxon_range(
-            canonical_packera=tx,
+            canonical_taxon=tx,
             synonym_names=canon_to_syns.get(tx, ()),
             cache_dir=cache_dir,
             db_path=db_path,

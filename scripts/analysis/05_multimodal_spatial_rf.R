@@ -71,6 +71,30 @@ for (.cg_p in c("scripts/analysis/step05_config_geo_utils.R", file.path(dirname(
   if (!exists("load_step05_macroecology_config", mode = "function") && !is.na(.cg_p) && nzchar(.cg_p) && file.exists(.cg_p)) { source(.cg_p); break }
 }
 
+.emit_s05_prog <- function(...) {
+  if (exists("emit_r_progress", mode = "function")) tryCatch(emit_r_progress(5L, ...), error = function(e) NULL)
+}
+.s05_target_genus <- function() {
+  g <- if (exists("resolve_r_target_genus", mode = "function")) resolve_r_target_genus() else "Packera"
+  if (is.null(g) || !nzchar(trimws(g))) "Packera" else trimws(g)
+}
+.s05_is_binomial <- function(x) {
+  if (exists("is_active_genus_binomial", mode = "function")) return(is_active_genus_binomial(x))
+  g_esc <- gsub("([.|()\\^{}+$*?]|\\[|\\])", "\\\\\\1", .s05_target_genus())
+  grepl(paste0("^", g_esc, "[[:space:]]+(?:[x×][[:space:]]*)?[a-z][a-z-]+$"), trimws(as.character(x)))
+}
+.s05_abbrev <- function(x) {
+  if (exists("abbreviate_binomial", mode = "function")) return(abbreviate_binomial(x))
+  sub("^([A-Za-z])[A-Za-z-]+[[:space:]]+", "\\1. ", as.character(x))
+}
+.s05_modal_species <- function(sp_vec) {
+  v <- trimws(as.character(stats::na.omit(sp_vec)))
+  bad <- if (exists("is_unassigned_or_unknown_taxon", mode = "function")) is_unassigned_or_unknown_taxon(v) else (!nzchar(v) | v %in% c("Unknown", "Unassigned_Taxon"))
+  v <- v[!bad]
+  if (length(v) > 0L) return(names(sort(table(v), decreasing = TRUE))[1L])
+  paste(.s05_target_genus(), "sp.")
+}
+
 WC_BIO_LOOKUP <- c(
   "1"  = "bio1_temp_mean",
   "2"  = "bio2_mean_diurnal_range",
@@ -212,11 +236,11 @@ parse_args_robust <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
 
 get_active_packera_taxa <- function(species_vec) {
   u_sp <- sort(unique(as.character(stats::na.omit(species_vec))))
-  u_sp <- u_sp[nzchar(u_sp) & u_sp != "Unknown" & grepl("^Packera\\s+", u_sp)]
-  if (length(u_sp) > 0) return(u_sp)
-  u_any <- sort(unique(as.character(stats::na.omit(species_vec))))
-  u_any <- u_any[nzchar(u_any) & u_any != "Unknown"]
-  return(u_any)
+  bad <- if (exists("is_unassigned_or_unknown_taxon", mode = "function")) is_unassigned_or_unknown_taxon(u_sp) else (!nzchar(trimws(u_sp)) | u_sp == "Unknown")
+  u_sp <- u_sp[!bad]
+  u_bin <- u_sp[.s05_is_binomial(u_sp)]
+  if (length(u_bin) > 0L) return(u_bin)
+  return(u_sp)
 }
 
 is_canonical_prod_path <- function(p) {
@@ -653,6 +677,7 @@ extract_environmental_layers <- function(df, env_dir, demo = FALSE) {
   req_wc_sg_cols <- c(unname(WC_BIO_LOOKUP), "soil_ph", "soil_cec", "soil_sand", "soil_clay", "soil_silt", "soil_cfvo", "soil_bulk_density")
   full_df_ref <- NULL
   uncached_env_idx <- seq_len(nrow(df))
+  n_env_cached <- 0L
   is_canon_env <- !isTRUE(demo) && nrow(df) > 0L && is_canonical_prod_path(env_dir) &&
                   exists("query_environmental_cache_sqlite", mode = "function")
   if (is_canon_env) {
@@ -692,10 +717,12 @@ extract_environmental_layers <- function(df, env_dir, demo = FALSE) {
         uncached_mask <- valid_ll & (rowSums(!fin_mat) > 0L)
         if (!any(uncached_mask) && any(valid_ll)) {
           message(sprintf("Hydrated all %d WorldClim v2.1 (bio1..bio19) & SoilGrids 250m records directly from SQLite environmental_cache (0 uncached rasters to extract).", sum(valid_ll)))
+          .emit_s05_prog("raster_extract", 0L, 0L, unit = "vouchers", cached_skipped = as.integer(sum(valid_ll)), substage_weight = 0.15, substage_offset = 0.0, status = "skipped_cached")
           return(df)
         }
         if (sum(uncached_mask) < nrow(df) && sum(uncached_mask) > 0L) {
-          message(sprintf("SQLite environmental_cache hit for %d / %d records; extracting rasters for %d uncached coordinates...", nrow(df) - sum(uncached_mask), nrow(df), sum(uncached_mask)))
+          n_env_cached <- as.integer(nrow(df) - sum(uncached_mask))
+          message(sprintf("SQLite environmental_cache hit for %d / %d records; extracting rasters for %d uncached coordinates...", n_env_cached, nrow(df), sum(uncached_mask)))
           full_df_ref <- df
           uncached_env_idx <- which(uncached_mask)
           df <- df[uncached_env_idx, , drop = FALSE]
@@ -703,7 +730,9 @@ extract_environmental_layers <- function(df, env_dir, demo = FALSE) {
       }
     }
   }
+  .emit_s05_prog("raster_extract", 0L, as.integer(nrow(df)), unit = "vouchers", cached_skipped = n_env_cached, substage_weight = 0.15, substage_offset = 0.0)
   .finalize_env_extract <- function(extracted_sub) {
+    .emit_s05_prog("raster_extract", as.integer(nrow(extracted_sub)), as.integer(nrow(extracted_sub)), unit = "vouchers", cached_skipped = n_env_cached, substage_weight = 0.15, substage_offset = 0.0)
     if (!is.null(full_df_ref)) {
       out_full <- full_df_ref
       for (cl in setdiff(names(extracted_sub), c("catalogNumber", "latitude", "longitude"))) {
@@ -1419,6 +1448,7 @@ query_ssurgo_sda <- function(df, cache_dir = "data/environmental/ssurgo_cache", 
   merged_df <- tryCatch({
     batch_results <- list()
     rem_conus <- conus_df
+    n_ss_cached <- 0L
 
     # Single-batch SQLite environmental_cache pre-hydration across all CONUS points
     if (!isTRUE(demo) && exists("query_environmental_cache_sqlite", mode = "function")) {
@@ -1449,24 +1479,33 @@ query_ssurgo_sda <- function(df, cache_dir = "data/environmental/ssurgo_cache", 
             hit_rows$longitude <- conus_df$longitude[hit_idx]
             batch_results[[1L]] <- normalize_ssurgo_cols(hit_rows)
             rem_conus <- conus_df[-hit_idx, , drop = FALSE]
+            n_ss_cached <- as.integer(length(hit_idx))
             message(sprintf("Pre-hydrated %d / %d CONUS SSURGO records directly from SQLite environmental_cache.", length(hit_idx), n_conus))
           }
         }
       }
     }
 
-    if (nrow(rem_conus) > 0L) {
+    if (nrow(rem_conus) == 0L) {
+      .emit_s05_prog("ssurgo_soil", 0L, 0L, unit = "vouchers", cached_skipped = n_ss_cached, substage_weight = 0.20, substage_offset = 0.15, status = "skipped_cached")
+    } else {
+      .emit_s05_prog("ssurgo_soil", 0L, as.integer(nrow(rem_conus)), unit = "vouchers", cached_skipped = n_ss_cached, substage_weight = 0.20, substage_offset = 0.15)
       batch_indices <- split(seq_len(nrow(rem_conus)), ceiling(seq_len(nrow(rem_conus)) / batch_size))
       run_one_ss_batch <- function(b_idx) {
         idx <- batch_indices[[b_idx]]
         sub_df <- rem_conus[idx, , drop = FALSE]
         query_ssurgo_sda_batch(sub_df, cache_dir, b_idx, demo = demo, batch_size = batch_size)
       }
-      rem_batches <- if (!isTRUE(demo) && length(batch_indices) >= 2L && exists("packera_mclapply", mode = "function")) {
-        packera_mclapply(seq_along(batch_indices), run_one_ss_batch, mc.cores = min(4L, length(batch_indices)), mc.preschedule = FALSE)
+      if (!isTRUE(demo) && length(batch_indices) >= 2L && exists("packera_mclapply", mode = "function")) {
+        rem_batches <- packera_mclapply(seq_along(batch_indices), run_one_ss_batch, mc.cores = min(4L, length(batch_indices)), mc.preschedule = FALSE)
       } else {
-        lapply(seq_along(batch_indices), run_one_ss_batch)
+        rem_batches <- lapply(seq_along(batch_indices), function(bi) {
+          res_b <- run_one_ss_batch(bi)
+          .emit_s05_prog("ssurgo_soil", as.integer(sum(lengths(batch_indices[seq_len(bi)]))), as.integer(nrow(rem_conus)), unit = "vouchers", cached_skipped = n_ss_cached, substage_weight = 0.20, substage_offset = 0.15)
+          res_b
+        })
       }
+      .emit_s05_prog("ssurgo_soil", as.integer(nrow(rem_conus)), as.integer(nrow(rem_conus)), unit = "vouchers", cached_skipped = n_ss_cached, substage_weight = 0.20, substage_offset = 0.15)
       batch_results <- c(batch_results, rem_batches)
     }
 
@@ -2019,7 +2058,7 @@ execute_crossmodal_consensus <- function(
 
   # Conservative hybrid-zone screen in Step 05: disabled in intraspecific/single-taxon mode
   # and gated on local two-parent anchor co-occurrence (<= 25 km) + genuine morphological intermediacy.
-  can_eval_hybrids_s05 <- !is_intra && (K_tx >= 2L) && (sum(grepl("^Packera\\s+[a-z][a-z-]+$", active_taxa)) >= 2L)
+  can_eval_hybrids_s05 <- !is_intra && (K_tx >= 2L) && (sum(.s05_is_binomial(active_taxa)) >= 2L)
   s05_lat_v <- if ("decimalLatitude" %in% names(df)) suppressWarnings(as.numeric(df$decimalLatitude)) else rep(NA_real_, n)
   s05_lon_v <- if ("decimalLongitude" %in% names(df)) suppressWarnings(as.numeric(df$decimalLongitude)) else rep(NA_real_, n)
   s05_cat_v <- if ("catalogNumber" %in% names(df)) as.character(df$catalogNumber) else as.character(seq_len(n))
@@ -2679,8 +2718,8 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
 
   # K = 1 Single-Lineage Mode: Fit Non-Circular Presence vs Accessible Background (M) Spatial Block-CV RF + Continuous IBE
   if (length(levels(y_anchor)) < 2L) {
-    single_tx <- if (length(levels(y_anchor)) == 1L) levels(y_anchor)[1L] else as.character(stats::na.omit(df$species_standardized))[1L]
-    if (is.na(single_tx) || !nzchar(single_tx)) single_tx <- "Packera dubia"
+    single_tx <- if (length(levels(y_anchor)) == 1L) levels(y_anchor)[1L] else .s05_modal_species(df$species_standardized)
+    if (is.na(single_tx) || !nzchar(single_tx)) single_tx <- .s05_modal_species(df$species_standardized)
     message(sprintf("[Single-Lineage K=1 ENM + IBE] Fitting Presence vs Accessible Background (M) Spatial RF & IBE for '%s' (%d anchors)...", single_tx, length(anchor_idx)))
 
     n_bg_use <- min(600L, max(120L, 2L * length(anchor_idx)))
@@ -2774,7 +2813,9 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
     }
     X_env_pb_cand_raw <- rbind(X_env_cov_ok[anchor_idx, cand_pb_vars, drop = FALSE], X_bg_cand[, cand_pb_vars, drop = FALSE])
 
-    for (k_f in sort(unique(fold_pb))) {
+    u_pb_f <- sort(unique(fold_pb))
+    for (fi_pb in seq_along(u_pb_f)) {
+      k_f <- u_pb_f[fi_pb]
       tr_i <- which(fold_pb != k_f); te_i <- which(fold_pb == k_f)
       if (length(tr_i) >= 8L && length(te_i) >= 1L && length(unique(pb_occ[tr_i])) == 2L) {
         fold_scr_pb <- screen_predictors_within_cv_fold(
@@ -2805,6 +2846,7 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
           if (is.matrix(pr_b) && "Presence" %in% colnames(pr_b)) oof_pb_pres[te_i] <- pr_b[, "Presence"]
         }
       }
+      .emit_s05_prog("spatial_block_cv", fi_pb, length(u_pb_f), unit = "folds", substage_weight = 0.35, substage_offset = 0.45)
     }
     heldout_pb <- is.finite(oof_pb_pres)
     miss_pb <- which(!heldout_pb)
@@ -2987,7 +3029,8 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
 
   X_cand_anc <- as.data.frame(X_env_cov_ok[anchor_idx, cv_cand_vars, drop = FALSE], stringsAsFactors = FALSE, check.names = FALSE)
   unique_folds <- sort(unique(stats::na.omit(fold_ids_anc)))
-  for (f_id in unique_folds) {
+  for (fi_anc in seq_along(unique_folds)) {
+    f_id <- unique_folds[fi_anc]
     tr_sub <- which(fold_ids_anc != f_id)
     te_sub <- which(fold_ids_anc == f_id)
     if (length(tr_sub) >= 4 && length(te_sub) >= 1 && length(unique(y_anchor[tr_sub])) >= 2) {
@@ -3037,6 +3080,7 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
         oof_preds_anc[te_sub] <- as.character(stats::predict(fit_cv, newdata = X_te_f))
       }
     }
+    .emit_s05_prog("spatial_block_cv", fi_anc, length(unique_folds), unit = "folds", substage_weight = 0.35, substage_offset = 0.45)
   }
 
   # Fill any unassigned OOF rows (e.g. if a tiny fold had only 1 class) from OOB predictions of rf_prob_anchor
@@ -3632,7 +3676,7 @@ compute_edaphic_schoener_d <- function(
   for (pr in pairs) {
     sp1 <- pr[1]; sp2 <- pr[2]
     if (sum(grp_col == sp1, na.rm = TRUE) < 5L || sum(grp_col == sp2, na.rm = TRUE) < 5L) next
-    pair_name <- paste0(gsub("Packera ", "P.", sp1), " vs ", gsub("Packera ", "P.", sp2))
+    pair_name <- paste0(.s05_abbrev(sp1), " vs ", .s05_abbrev(sp2))
     ed_jobs[[length(ed_jobs) + 1L]] <- list(bg_mat = X_ed, sp1 = sp1, sp2 = sp2, rf_var_weights = rf_var_weights, prep = prep_ed)
     ed_meta[[length(ed_meta) + 1L]] <- list(pair_name = pair_name, sp1 = sp1, sp2 = sp2)
   }
@@ -3756,7 +3800,7 @@ run_warren_niche_identity_tests <- function(
     tx_one <- cand_groups[1L]
     n_one <- sum(grp_col == tx_one, na.rm = TRUE)
     single_sum <- data.frame(
-      Pair = sprintf("%s (Single Lineage K=1)", gsub("Packera ", "P.", tx_one)),
+      Pair = sprintf("%s (Single Lineage K=1)", .s05_abbrev(tx_one)),
       Taxon1 = tx_one, Taxon2 = tx_one, N1 = n_one, N2 = n_one,
       D_clim = 1.0, I_clim = 1.0, p_equiv_D_clim = 1.0, p_bg_D_clim = 1.0,
       D_edaph = 1.0, I_edaph = 1.0, p_equiv_D_edaph = 1.0, p_bg_D_edaph = 1.0,
@@ -3772,7 +3816,7 @@ run_warren_niche_identity_tests <- function(
   valid_pair_meta <- list()
   part_jobs <- list()
   for (pr in pairs) {
-    sp1 <- pr[1]; sp2 <- pr[2]; pair_name <- paste0(gsub("Packera ", "P.", sp1), " vs ", gsub("Packera ", "P.", sp2))
+    sp1 <- pr[1]; sp2 <- pr[2]; pair_name <- paste0(.s05_abbrev(sp1), " vs ", .s05_abbrev(sp2))
     n1 <- sum(grp_col == sp1, na.rm = TRUE)
     n2 <- sum(grp_col == sp2, na.rm = TRUE)
     if (n1 < 5 || n2 < 5) next
@@ -4141,12 +4185,14 @@ main <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
   }
 
   # Stage 1c: Cohort-Adaptive Latitudinal Baseline & Circular Anthesis Phenology Engine (independent organismal trait)
+  .emit_s05_prog("phenology", 0L, 1L, unit = "stage", substage_weight = 0.10, substage_offset = 0.35)
   pheno_res <- compute_phenological_anomalies(
     vouchers_df,
     output_csv = opts$pheno_anomalies,
     summary_csv = opts$pheno_summary,
     demo = demo_mode
   )
+  .emit_s05_prog("phenology", 1L, 1L, unit = "stage", substage_weight = 0.10, substage_offset = 0.35)
   vouchers_df <- pheno_res$df
   if (!identical(trimws(env_plantmatics_or_packera("PLANTMATICS_SKIP_FIGURES", "PACKERA_SKIP_FIGURES")), "1")) {
     export_phenological_latitudinal_figures(vouchers_df, pheno_res$baseline, opts$pheno_plot)
@@ -4399,8 +4445,9 @@ main <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
   focal_tx_use <- if (!is.null(opts$focal_taxon) && nzchar(trimws(opts$focal_taxon))) {
     standardize_packera_taxon(opts$focal_taxon)
   } else {
-    "Packera dubia"
+    .s05_modal_species(geo_vouchers_df$species_standardized)
   }
+  .emit_s05_prog("maxent_sdm", 0L, 1L, unit = "stage", substage_weight = 0.20, substage_offset = 0.80)
   if (!identical(trimws(env_plantmatics_or_packera("PLANTMATICS_SKIP_FIGURES", "PACKERA_SKIP_FIGURES")), "1")) tryCatch(
     fit_and_project_maxent_sdm_maps(
       df = geo_vouchers_df,
@@ -4416,6 +4463,7 @@ main <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
     ),
     error = function(e) warning("Step 05 MaxEnt/Ensemble SDM projection warning: ", e$message)
   )
+  .emit_s05_prog("maxent_sdm", 1L, 1L, unit = "stage", substage_weight = 0.20, substage_offset = 0.80, status = "completed")
 
   message("=== Multimodal Spatial RF & Niche Modeling Analysis Complete ===")
 }

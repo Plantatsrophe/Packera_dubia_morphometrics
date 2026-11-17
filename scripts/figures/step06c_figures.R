@@ -15,7 +15,7 @@ if (!exists("save_packera_png_300", mode = "function")) {
 
 .clean_str_06c <- function(v) {
   x <- trimws(as.character(v))
-  x[is.na(x) | !nzchar(x) | tolower(x) %in% c("na", "nan", "null", "none", "unknown", "unassigned")] <- NA_character_
+  x[is.na(x) | !nzchar(x) | tolower(x) %in% c("na", "nan", "null", "none", "unknown", "unassigned", "unassigned_taxon", "unassigned_packera")] <- NA_character_
   x
 }
 
@@ -174,7 +174,7 @@ if (!exists("save_packera_png_300", mode = "function")) {
   if (!any(has_loc)) {
     return(.empty_panel_06c(t_b, "No skimmed plastome, nrITS, or nuclear waxy placements detected", "Stage skimmed FASTA references or cytonuclear_discordance.csv in cohort"))
   }
-  disc[disc == 0L & !is.na(cp) & !is.na(nuc) & grepl("^Packera ", cp) & cp != nuc] <- 1L
+  disc[disc == 0L & !is.na(cp) & !is.na(nuc) & grepl("^[A-Z][a-z-]+[[:space:]]+([x\u00d7][[:space:]]*)?[a-z][a-z-]+", cp) & cp != nuc] <- 1L
 
   keep_idx <- which(has_loc)
   if (length(keep_idx) > 26L) keep_idx <- keep_idx[order(-disc[keep_idx], sids[keep_idx])[seq_len(26L)]]
@@ -252,7 +252,7 @@ if (!exists("save_packera_png_300", mode = "function")) {
   tx_d <- if ("species_standardized" %in% names(df)) .clean_str_06c(df$species_standardized) else rep(NA_character_, nrow(df))
   tx_g <- if ("geno_predicted_taxon" %in% names(df)) .clean_str_06c(df$geno_predicted_taxon) else rep(NA_character_, nrow(df))
   tx_d[is.na(tx_d)] <- tx_g[is.na(tx_d)]
-  tx_d[is.na(tx_d)] <- "Unassigned"
+  tx_d[is.na(tx_d)] <- if (exists("UNASSIGNED_TAXON_SENTINEL")) UNASSIGNED_TAXON_SENTINEL else "Unassigned_Taxon"
   pl_col <- if ("geno_ploidy_level" %in% names(df)) df$geno_ploidy_level else if ("ploidy_level" %in% names(df)) df$ploidy_level else rep(NA_real_, nrow(df))
   pl_num <- suppressWarnings(as.integer(sub("x$", "", tolower(trimws(as.character(pl_col))))))
   cy_raw <- if ("inferred_cytotype" %in% names(df)) .clean_str_06c(df$inferred_cytotype) else rep(NA_character_, nrow(df))

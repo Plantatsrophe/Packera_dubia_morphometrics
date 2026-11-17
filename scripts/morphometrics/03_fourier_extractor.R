@@ -262,7 +262,7 @@ load_contour_file <- function(filepath) {
     for (dc in dyn_cols) rec[[dc]] <- mn(dc)
     list(shape_name = meta$shape_id, coo = coo, rec = rec)
   }
-  ing_l <- if (.Platform$OS.type == "unix" && length(cfiles) >= 100 && exists("packera_mclapply", mode = "function")) packera_mclapply(cfiles, ingest_one, mc.cores = resolve_packera_workers(32L, length(cfiles))) else lapply(cfiles, ingest_one)
+  ing_l <- if (length(cfiles) >= 100 && exists("packera_mclapply", mode = "function")) packera_mclapply(cfiles, ingest_one, mc.cores = resolve_packera_workers(32L, length(cfiles))) else lapply(cfiles, ingest_one)
   valid <- Filter(Negate(is.null), ing_l); if (length(valid) == 0) stop("Failed to extract valid QC-passing coordinate contours.")
   list(fac_df = do.call(rbind, lapply(valid, `[[`, "rec")), coo_list = lapply(valid, `[[`, "coo"), shape_names = vapply(valid, `[[`, character(1), "shape_name"))
 }
@@ -300,6 +300,7 @@ run_fourier_extraction <- function(opts) {
   if (exists("filter_basal_lamina_contours", mode = "function")) { bg <- filter_basal_lamina_contours(fac_df, coo_list, retain_cauline_tagged = TRUE); fac_df <- bg$fac_df; coo_list <- bg$coo_list }
   if (exists("align_contour_horizontal_xax", mode = "function")) coo_list <- Map(align_contour_horizontal_xax, coo_list, if ("mask_is_upright" %in% names(fac_df)) as.logical(fac_df$mask_is_upright) else rep(NA, length(coo_list)))
   message(sprintf("Assembled %d valid QC-passing contours for Elliptic Fourier Analysis & ECT.", length(coo_list)))
+  if (exists("emit_r_progress", mode = "function")) emit_r_progress(3L, "contour_load", length(coo_list), length(coo_list), unit = "contours", substage_weight = 0.25, substage_offset = 0.0, status = "completed")
 
   # 3. Dynamic Harmonic Power Calibration & Homologized EFA
   eff_min_h <- if (isTRUE(f_cfg$cohort_adaptive_mode)) f_cfg$min_harmonics else f_cfg$harmonics; eff_max_h <- if (isTRUE(f_cfg$cohort_adaptive_mode)) f_cfg$max_harmonics else f_cfg$harmonics
@@ -328,6 +329,7 @@ run_fourier_extraction <- function(opts) {
     harm_mat <- do.call(rbind, h_l); colnames(harm_mat) <- harmonic_names
   }
   if (all(harmonic_names %in% colnames(harm_mat))) harm_mat <- harm_mat[, harmonic_names, drop = FALSE] else if (ncol(harm_mat) == length(harmonic_names)) colnames(harm_mat) <- harmonic_names
+  if (exists("emit_r_progress", mode = "function")) emit_r_progress(3L, "efa_compute", nrow(harm_mat), nrow(harm_mat), unit = "contours", substage_weight = 0.50, substage_offset = 0.25, status = "completed")
 
   non_jordan_mask <- rep(FALSE, nrow(fac_df))
   if ("n_lamina_components" %in% names(fac_df)) non_jordan_mask <- non_jordan_mask | (!is.na(fac_df$n_lamina_components) & as.integer(fac_df$n_lamina_components) > 1L)
@@ -448,6 +450,7 @@ run_fourier_extraction <- function(opts) {
   }
   write_step03_csv_fast(specimen_df, opts$output); message("Specimen-aggregated EFA harmonics table exported: ", opts$output, " (Rows: ", nrow(specimen_df), ")")
   if (exists("persist_step03_to_sqlite", mode = "function")) tryCatch(persist_step03_to_sqlite(efa_df, specimen_df, opts$vouchers), error = function(e) warning("SQLite Step 03 persistence note: ", e$message))
+  if (exists("emit_r_progress", mode = "function")) emit_r_progress(3L, "export", nrow(specimen_df), nrow(specimen_df), unit = "otus", substage_weight = 0.25, substage_offset = 0.75, status = "completed")
   tryCatch({ if (!exists("generate_step03_pub_figures", mode = "function") && file.exists("scripts/morphometrics/pub_figures_utils.R")) source("scripts/morphometrics/pub_figures_utils.R"); if (exists("generate_step03_pub_figures", mode = "function")) generate_step03_pub_figures(efa_df, specimen_df, harm_mat, pca_fit, opts$figures_dir, opts$output, pca_fit) }, error = function(e) warning("Step 03 publication figures warning: ", e$message))
   invisible(efa_df)
 }

@@ -1,13 +1,13 @@
-# Relational Schema and Output Data Dictionary (`PLANTMATICS_SCHEMA_USER_VERSION = 20261127`)
+# Relational Schema and Output Data Dictionary (`PLANTMATICS_SCHEMA_USER_VERSION = 20261128`)
 
 **Standard Operating Procedure:** [`docs/TAXONOMIC_SOP.md`](TAXONOMIC_SOP.md) (`UNC-BOT-SOP-2026-04-REV5`)
 **Authoritative Schema Definitions:** `scripts/core/db_schema.py` and `scripts/core/db_utils.R`
 
 ## 1. Architectural Conventions and Key Invariants
 
-Herbarium sheets frequently carry multiple pressed plants (`ramets`) mounted under a single barcode, whereas repeated exploratory runs over different species subsets or authority filters must never overwrite raw computer vision extractions. I therefore split pipeline storage across two transactional tiers inside `data/plantmatics.sqlite` (Write-Ahead Logging mode, `PRAGMA user_version = 20261127`, supporting automatic zero-loss atomic rename migration from legacy `data/packera_pipeline.sqlite` with `-wal` and `-shm` sidecars) paired with atomic CSV snapshots on disk. Environment overrides use `PLANTMATICS_DB_PATH`, `PLANTMATICS_RUN_DIR`, `PLANTMATICS_GENOMICS_DIR`, `PLANTMATICS_CYTOLOGY_DIR`, and `PLANTMATICS_TAXONOMY_DIR` while preserving `PACKERA_*` fallbacks.
+Herbarium sheets frequently carry multiple pressed plants (`ramets`) mounted under a single barcode, whereas repeated exploratory runs over different species subsets or authority filters must never overwrite raw computer vision extractions. I therefore split pipeline storage across two transactional tiers inside `data/plantmatics.sqlite` (Write-Ahead Logging mode, `PRAGMA user_version = 20261128`, supporting automatic zero-loss atomic rename migration from legacy `data/packera_pipeline.sqlite` with `-wal` and `-shm` sidecars alongside idempotent `20261127` to `20261128` column upgrades) paired with atomic CSV snapshots on disk. Environment overrides use `PLANTMATICS_DB_PATH`, `PLANTMATICS_RUN_DIR`, `PLANTMATICS_GENOMICS_DIR`, `PLANTMATICS_CYTOLOGY_DIR`, `PLANTMATICS_TAXONOMY_DIR`, `PLANTMATICS_TARGET_GENUS`, and `PLANTMATICS_PYTHON_BIN` while preserving `PACKERA_*` fallbacks.
 
-Tier A (`data/`) stores invariant specimen metadata, full-sheet WebP scans, segmented leaf masks, 120-vertex contours, $32 \times 360$ Euler Characteristic Transform (ECT) matrices, spatially cached environmental plus USGS `DS-801` geochemical and USFWS NWI wetland extractions, flat `data/taxonomy/` CoL WCVP `2232` alongside BHL API v3 and NatureServe Explorer taxonomic backbones (`taxon_backbone_profiles` and `natureserve_subnational_ranges`), staged genomic sample metadata paired with `HDplot`/`Compositae-ParaLoss-1272` locus weights and inferred cytotype records (`genomic_samples`), plus curated public and voucher-linked cytological registries (`cytological_records` and `taxon_cytology_summary`). Tier B (`runs/<RUN_ID>/` and `runs/latest`) isolates run-specific cohort memberships, Elliptic Fourier harmonics, canonical Gaussian Mixture Models, Ledoit-Wolf shrinkage discriminant scores, Spatial Random Forest posteriors, Step 06 phylogenomic and coalescent delimitation metrics (`genetic_lineage_assignments`), and five-stage curatorial triage calls.
+Tier A (`data/`) stores invariant specimen metadata, full-sheet WebP scans, segmented leaf masks, 120-vertex contours, $32 \times 360$ Euler Characteristic Transform (ECT) matrices, spatially cached environmental plus USGS `DS-801` geochemical and USFWS NWI wetland extractions, `usda_county_ranges`, `step_telemetry_benchmarks`, flat `data/taxonomy/` CoL WCVP `2232` alongside BHL API v3 and NatureServe Explorer taxonomic backbones (`taxon_backbone_profiles` and `natureserve_subnational_ranges`), staged genomic sample metadata paired with `HDplot`/`Compositae-ParaLoss-1272` locus weights and inferred cytotype records (`genomic_samples`), plus curated public and voucher-linked cytological registries (`cytological_records` and `taxon_cytology_summary`). Tier B (`runs/<RUN_ID>/`, `runs/latest`, and `runs/latest_run.json`) isolates run-specific cohort memberships, per-step `logs/progress.jsonl` telemetry records, Elliptic Fourier harmonics, canonical Gaussian Mixture Models, Ledoit-Wolf shrinkage discriminant scores, Spatial Random Forest posteriors, Step 06 phylogenomic and coalescent delimitation metrics (`genetic_lineage_assignments`), and five-stage curatorial triage calls.
 
 Three cross-language invariants govern every column documented below:
 
@@ -24,17 +24,17 @@ Three cross-language invariants govern every column documented below:
 | Column | SQLite Type | Units / Domain | Description |
 | :--- | :---: | :--- | :--- |
 | `raw_name_lower` | `TEXT` | Lowercase binomial/trinomial | Normalized raw taxon string queried from GBIF, iDigBio, or historical *Senecio* and *Cineraria* labels. |
-| `canonical_packera` | `TEXT` | *Packera* taxon string | Accepted *Packera* binomial or infraspecific taxon (`subsp.` / `var.`) resolved via GBIF Backbone and Weakley (2026). |
+| `canonical_taxon` | `TEXT` | Standardized taxon string | Accepted binomial or infraspecific taxon (`subsp.` / `var.`) in the active `target_genus` resolved via GBIF Backbone and CoL WCVP `2232` (renamed from legacy `canonical_packera`). |
 | `protologue_authors_json` | `TEXT` | JSON string array | Optional legacy metadata array retained for schema compatibility; Step 01 never promotes non-type sheets from author-string matches. |
 | `updated_at` | `TEXT` | ISO-8601 UTC timestamp | Timestamp of the most recent taxonomic backbone verification. |
 
 ### 2.2 `usda_county_ranges` (Step 01 County Distribution Cache)
 
-**Primary Key:** `(canonical_packera, state_norm, county_norm)` | **Populated By:** `scripts/core/usda_plants_ranges.py`
+**Primary Key:** `(canonical_taxon, state_norm, county_norm)` | **Populated By:** `scripts/core/usda_plants_ranges.py`
 
 | Column | SQLite Type | Units / Domain | Description |
 | :--- | :---: | :--- | :--- |
-| `canonical_packera` | `TEXT` | *Packera* taxon string | Standardized *Packera* species or variety name. |
+| `canonical_taxon` | `TEXT` | Standardized taxon string | Standardized species or variety name in the active `target_genus` (renamed from legacy `canonical_packera`). |
 | `usda_symbol` | `TEXT` | USDA PLANTS code | Accepted USDA PLANTS symbol (for example `PADU` for *Packera dubia*). |
 | `state_norm` | `TEXT` | 2-letter postal code | Standardized US state or Canadian province abbreviation. |
 | `county_norm` | `TEXT` | Normalized county name | Lowercase county or parish name stripped of administrative suffixes (`""` when `is_state_only = 1`). |
@@ -265,12 +265,26 @@ Three cross-language invariants govern every column documented below:
 | `s_rank` | `TEXT` | NatureServe `S`-rank | Subnational conservation rank (`S1` through `S5`, `SNA`, `SH`, `SX`, or `SNR`). |
 | `is_native`, `is_exotic`, `is_historical_or_extirpated` | `INTEGER` | `{0, 1}` | Subnational native residency flag paired with introduced/waif flag (`natureserve_exotic_or_waif`) and historical/extirpated flag queried by `filter_vouchers_by_usda_county_range()`. |
 
+### 2.13 `step_telemetry_benchmarks` (Tier A Per-Step Throughput Benchmark Registry)
+
+**Primary Key:** `(step_id, substage, accelerator_provider, cpu_threads)` | **Populated By:** `scripts/core/progress_telemetry.py`
+
+| Column | SQLite Type | Units / Domain | Description |
+| :--- | :---: | :--- | :--- |
+| `step_id` | `INTEGER` | `1..7` | Pipeline step index (`1` through `7`) indexed in composite PK. |
+| `substage` | `TEXT` | Substage identifier | Pipeline substage key (`"all"` default when tracking whole-step throughput). |
+| `accelerator_provider` | `TEXT` | ONNX provider string | Active execution provider detected by `detect_accelerator_provider()` (such as `CUDAExecutionProvider`, `DmlExecutionProvider`, `CoreMLExecutionProvider`, or `CPUExecutionProvider`). |
+| `cpu_threads` | `INTEGER` | Count $\ge 1$ | Resolved CPU worker count active during the benchmarked run. |
+| `mean_items_per_sec` | `REAL` | Rate $> 0$ | Running arithmetic mean throughput across `n_runs` completed runs used to seed cold-start and unstarted downstream step ETAs. |
+| `n_runs` | `INTEGER` | Count $\ge 1$ | Number of completed benchmark runs aggregated into `mean_items_per_sec`. |
+| `updated_at` | `TEXT` | ISO-8601 UTC timestamp | Timestamp of the most recent benchmark upsert. |
+
 ## 3. Tier B Run-Scoped SQLite Tables (`runs/<RUN_ID>/` & SQLite)
 
 ### 3.1 `pipeline_runs` and `run_active_cohort` (Preflight Cohort Isolation)
 
-* **`pipeline_runs` (PK `run_id`):** Tracks the 8 run provenance columns (`run_id`, `run_dir`, `start_timestamp`, `end_timestamp`, `git_commit_sha`, `cli_arguments_json`, `focal_taxon`, and `intraspecific_mode`).
-* **`run_active_cohort` (PK `(run_id, catalogNumber, plant_individual_id)`):** Snapshots every individual included in `<RUN_ID>` along with its preflight-refreshed `species_standardized`, `determiner_tier`, `type_status`, `is_type_specimen`, `is_promoted_bronze`, `authority_weight` (`3.0` Type, `2.0` Gold, `0.75` Silver, `0.50` `Promoted_Bronze`, `0.0` unverified or unpromoted Bronze), and `spatial_balance_weight`.
+* **`pipeline_runs` (PK `run_id`):** Tracks the 8 core run provenance columns (`run_id`, `run_dir`, `start_timestamp`, `end_timestamp`, `git_commit_sha`, `cli_arguments_json`, `focal_taxon`, and `intraspecific_mode`), alongside optional `target_genus` lookup support in `scripts/core/db_utils.R` (`resolve_r_target_genus()`, defaulting to `"Packera"`).
+* **`run_active_cohort` (PK `(run_id, catalogNumber, plant_individual_id)`):** Snapshots every individual included in `<RUN_ID>` along with its preflight-refreshed `species_standardized` (using `"Unassigned_Taxon"` via `UNASSIGNED_TAXON_SENTINEL` for unresolved labels while preserving `"Unassigned_Packera"` read compatibility), `determiner_tier`, `type_status`, `is_type_specimen`, `is_promoted_bronze`, `authority_weight` (`3.0` Type, `2.0` Gold, `0.75` Silver, `0.50` `Promoted_Bronze`, `0.0` unverified or unpromoted Bronze), and `spatial_balance_weight`.
 
 ### 3.2 `leaf_efa_harmonics` (Step 03 Individual-Leaf EFA & ECT Table)
 
@@ -448,3 +462,4 @@ Three explicit precedence rules prevent stale values during partial re-runs (`--
 * **`runs/<RUN_ID>/data/tables/triage_queue.csv`:** Full wide-table export written atomically by `build_triage_queue()` in `scripts/analysis/07_triage_dashboard_synthesis.R`, sorted by `synthesis_triage_priority` (`CRITICAL -> HIGH -> MEDIUM -> LOW -> RESOLVED`) and descending `coordinateUncertainty`. `build_triage_queue()` also hydrates 11-mer organellar placement metrics (`plastid_kmer_containment`, `plastid_shared_11mers`, `its_kmer_containment`, `its_shared_11mers`, `waxy_kmer_containment`, `waxy_shared_11mers`) from `public_organellar_placement.csv` via `step07_organellar_triage_utils.R`. When `--focal-taxon` is supplied, SQLite `curation_triage` and `taxon_complexes` persist the complete multi-taxon reference cohort first, whereas `triage_queue.csv` filters to specimens originally filed under or reassigned into `--focal-taxon`.
 * **`runs/<RUN_ID>/data/tables/genomic_field_triage.csv`:** Stage 0 DNA-plate and unvouchered field-sample triage table exported by Step 07 (`scripts/analysis/genomic_triage_utils.R`) whenever Step 06 genomic predictions are staged, summarizing G1 to G4 voucher linkage, cytotype, hybrid class, $\widehat{gdi}$, and prioritized herbarium loan requests for `G3`/`G4` unvouchered genetic tips. Four-tier unsequenced genomic propagation counts (`n_g1_exsiccatae`, `n_g2_deme_hull`, `n_tier0_anchors`, `n_tier0_evicted`, `n_tier0_calibrated`, `n_tier0_abstained`, `n_cluster_gdi`, and `lopo_cv_kappa`) attach via `attr(df, "genomic_propagation_summary")` (`scripts/analysis/step07_genomic_propagation.R`) and render into `Packera_Taxonomic_Revision_Summary.md` via `build_genomic_markdown_summary()`. When propagation is active, `build_triage_queue()` also writes the per-taxon propagation summary table to `runs/<RUN_ID>/outputs/reports/unsequenced_genomic_propagation_summary.csv`. Whenever multi-cytotype specimens exist across Step 07 cohorts, `run_step07_cytology_integration()` (`scripts/analysis/step07_cytology_integration.R`) writes the post-hoc Gigas trait audit across `area_mm2` alongside `petiole_width_mm` and `log1p_capitulum_count` to `runs/<RUN_ID>/outputs/reports/cytotype_concordance_summary.csv` without circular feedback into morphometrics or consensus training weights.
 * **`triage_queue_filtered.csv` (Browser Export from `Triage_Dashboard_Interactive.html`):** Exports the active curatorial bench columns (`catalogNumber`, `plant_individual_id`, `institutionCode`, `recordedBy`, `determiner_tier`, `species_standardized`, `recommended_determination`, `synthesis_triage_priority`, `taxonomic_treatment_subtype`, `cda_predicted_taxon`, `cda_posterior_prob`, `edaphic_best_fit_taxon`, `edaphic_z_score`, `delta_doy_resid`, `probabilistic_consensus_score`, `synthesis_triage_action`, `synthesis_rationale`) matching the active search, priority, treatment, and taxon filters in the offline HTML viewer.
+* **`runs/<RUN_ID>/logs/progress.jsonl` (Per-Step Progress & ETA Stream):** Written atomically line by line across Python (`emit_progress()` / `StepETATracker` in `scripts/core/progress_telemetry.py`) and R (`emit_r_progress()` in `scripts/core/db_utils.R`). Each event records 16 telemetry fields: `timestamp`, `step`, `substage`, `done`, `total`, `cached_skipped`, `n_active` (`max(0, total - cached_skipped)`), `unit`, `substage_weight`, `substage_offset`, `progress_frac` (`[0.0, 1.0]`), `status` (`"started"`, `"running"`, `"completed"`, `"skipped_cached"`), `rate_items_per_sec` (EWMA with `alpha = 0.25` after 3 positive-interval updates, or benchmark fallback from `step_telemetry_benchmarks`), `eta_sec` (`0.0` when `status == "skipped_cached"`, `n_active == 0`, or `done >= n_active`), `accelerator_provider`, and `cpu_threads`.

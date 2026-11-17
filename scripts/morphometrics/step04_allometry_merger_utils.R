@@ -277,7 +277,10 @@ audit_institutional_batch_effects <- function(morpho_df, output_csv = "outputs/r
   inst_counts <- table(valid_df$institutionCode); rep_insts <- names(inst_counts[inst_counts >= min_obs])
   audit_subset <- if (length(rep_insts) >= 2L) valid_df[valid_df$institutionCode %in% rep_insts, , drop = FALSE] else valid_df
   audit_subset$institutionCode <- droplevels(factor(audit_subset$institutionCode))
-  if (!("species_standardized" %in% names(audit_subset))) audit_subset$species_standardized <- if ("scientificName" %in% names(audit_subset)) audit_subset$scientificName else "Unassigned_Packera"
+  u_sent <- if (exists("UNASSIGNED_TAXON_SENTINEL")) UNASSIGNED_TAXON_SENTINEL else "Unassigned_Taxon"
+  if (!("species_standardized" %in% names(audit_subset))) audit_subset$species_standardized <- if ("scientificName" %in% names(audit_subset)) audit_subset$scientificName else u_sent
+  is_un_sp <- if (exists("is_unassigned_or_unknown_taxon", mode = "function")) is_unassigned_or_unknown_taxon(audit_subset$species_standardized) else is.na(audit_subset$species_standardized)
+  audit_subset$species_standardized[is_un_sp] <- u_sent
   audit_subset$species_standardized <- droplevels(factor(audit_subset$species_standardized))
   if (nlevels(audit_subset$institutionCode) < 2L) return(NULL)
   fits <- list(); rows_out <- list(); raw_ps <- numeric(0); pre_eb_map <- attr(morpho_df, "pre_eb_batch_partial_eta_sq")

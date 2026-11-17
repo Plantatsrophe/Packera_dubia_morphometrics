@@ -2,7 +2,7 @@
 """Stage public Packera cytological, C-value, and label chromosome records flat into `data/cytology/`."""
 from __future__ import annotations
 
-import argparse, csv, hashlib, html, io, json, logging, os, re, sqlite3, sys, tempfile, time, zipfile
+import argparse, csv, hashlib, html, io, json, logging, math, os, re, sqlite3, sys, tempfile, time, zipfile
 import urllib.error, urllib.parse, urllib.request
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
@@ -10,14 +10,16 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+if str(PROJECT_ROOT) not in sys.path: sys.path.insert(0, str(PROJECT_ROOT))
 
+from scripts.core import config as _cfg, harvester as _harv
 from scripts.core.db import get_db_connection, resolve_db_path, upsert_cytological_records, upsert_taxon_cytology_summary
-from scripts.core.harvester import _DYNAMIC_SYNONYM_TO_CANONICAL, standardize_packera_taxon
 from scripts.core.io_utils import atomic_write_bytes, atomic_write_csv_rows, ensure_flat_filename
+from scripts.core.step01_biogeography_utils import resolve_synonym_genera
 from scripts.core.taxonomy_authority import generate_exsiccatae_key, normalize_collector, normalize_record_number
+from scripts.data_prep.step06_synonym_utils import CANONICAL_SENECIO_PACKERA_SYNONYMS
 
+_DYNAMIC_SYNONYM_TO_CANONICAL = _harv._DYNAMIC_SYNONYM_TO_CANONICAL
 logger = logging.getLogger("plantmatics.download_public_cytology")
 _UA = "Plantmatics-UNC-NCU/2026.11 (+https://herbarium.unc.edu/)"
 RECORD_COLUMNS: Tuple[str, ...] = ("cytology_id", "source_db", "source_record_id", "original_taxon_name", "basionym_name", "species_standardized", "catalogNumber", "exsiccatae_key", "cytology_linkage_tier", "raw_count_str", "gametophytic_n", "sporophytic_2n", "base_x", "ploidy_level", "cytotype_label", "b_chromosomes", "is_aneuploid_or_odd_ploid", "is_approximate", "c_value_1c_pg", "c_value_2c_pg", "breeding_system", "genbank_accession", "collector_surname", "record_number_clean", "institution_code", "voucher_citation", "locality_text", "reference_citation")
@@ -30,15 +32,22 @@ _MEIOTIC_RE, _MULT_MAP = re.compile(r"(\d+)\s*(IV|III|II|I)s?\b"), {"IV": 4, "II
 _SPLIT_RE = re.compile(r"\s*[;]\s*|\s+\bor\b\s+|\s*,\s*(?![+\s]*(?:\d+\s*[-–]\s*)?\d+\s*[Bb]\b)", re.I)
 
 
+def _target_genus() -> str: return (_cfg.resolve_target_genus() or "Packera").strip().capitalize()
+def _syn_genera(genus: str) -> set[str]:
+    s = {g.lower() for g in resolve_synonym_genera()}
+    return s if genus.lower() == "packera" else ((s - {"packera", "senecio", "cineraria"}) | {genus.lower()})
+def _std_taxon(name: str, genus: str) -> Optional[str]:
+    fn = getattr(_harv, "standardize_taxon_name", None)
+    return fn(name, target_genus=genus) if callable(fn) else (_harv.standardize_packera_taxon(name) if genus.lower() == "packera" else None)
+
 def _default_db_synonyms() -> Dict[str, str]:
-    dbp = resolve_db_path(workspace_root=PROJECT_ROOT)
-    ck = f"{os.environ.get('PLANTMATICS_DB_PATH', '')}|{os.environ.get('PACKERA_DB_PATH', '')}|{dbp}"
+    dbp, genus = resolve_db_path(workspace_root=PROJECT_ROOT), _target_genus()
+    ck = f"{os.environ.get('PLANTMATICS_DB_PATH', '')}|{os.environ.get('PACKERA_DB_PATH', '')}|{dbp}|{genus}"
     if ck not in _DB_SYN_CACHE:
         _DB_SYN_CACHE[ck] = {}
         if Path(dbp).exists():
             try:
-                with sqlite3.connect(str(dbp)) as conn:
-                    _DB_SYN_CACHE[ck] = {str(k).strip().lower(): str(v).strip() for k, v in conn.execute("SELECT raw_name_lower, canonical_packera FROM taxon_synonyms WHERE canonical_packera LIKE 'Packera %'") if k and v}
+                with sqlite3.connect(str(dbp)) as conn: _DB_SYN_CACHE[ck] = {str(k).strip().lower(): str(v).strip() for k, v in conn.execute("SELECT raw_name_lower, canonical_taxon FROM taxon_synonyms WHERE canonical_taxon LIKE ?", (f"{genus} %",)) if k and v}
             except Exception: pass
     return _DB_SYN_CACHE[ck]
 _NON_CNT = r"(?!\s*(?:mm|cm|dm|m|km|in|ft|plants?|specimens?|sheets?|samples?|individuals?|vouchers?|stems?|leaves|heads?|flowers?|collections?|sites?|populations?|plots?|reps?|years?|branched?)\b)"
@@ -58,10 +67,8 @@ class _CrossHostAuthStripRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 
 def _ensure_flat_filename(root: Path, filename: str) -> Path:
-    root_res = root.resolve()
-    dest = (root_res / ensure_flat_filename(filename)).resolve()
-    if dest.parent != root_res:
-        raise ValueError(f"Path escapes {root_res}: {dest}")
+    root_res = root.resolve(); dest = (root_res / ensure_flat_filename(filename)).resolve()
+    if dest.parent != root_res: raise ValueError(f"Path escapes {root_res}: {dest}")
     return dest
 
 
@@ -77,8 +84,18 @@ def _http_request(url: str, timeout: int = 25, retries: int = 3) -> bytes:
     raise last_err if last_err else RuntimeError(url)
 
 
-def _classify_cytotype(n_val: Optional[int], sp_2n: int, b_chr: int, approx: int, raw_str: str, force_odd: bool = False) -> Dict[str, Any]:
-    bx, pl = (22, _X22[sp_2n]) if sp_2n in _X22 else ((23, _X23[sp_2n]) if sp_2n in _X23 else (None, None))
+def _infer_modal_base_x(sp2n_vals: Sequence[Optional[int]]) -> Optional[int]:
+    evens = [int(v) for v in sp2n_vals if v is not None and int(v) >= 8 and int(v) % 2 == 0]
+    if not evens: return None
+    uniq = sorted(set(evens))
+    cands = Counter(g for i, a in enumerate(uniq) for b in uniq[i + 1 :] if (g := math.gcd(a // 2, b // 2)) >= 4)
+    return max(cands, key=lambda g: (sum(v % (2 * g) == 0 for v in evens), cands[g], -g)) if cands else min(Counter(v // 2 for v in evens).items(), key=lambda kv: (-kv[1], kv[0]))[0]
+
+
+def _classify_cytotype(n_val: Optional[int], sp_2n: int, b_chr: int, approx: int, raw_str: str, force_odd: bool = False, base_x_hint: Optional[int] = None) -> Dict[str, Any]:
+    if base_x_hint and base_x_hint > 0: bx, pl = (base_x_hint, sp_2n // base_x_hint) if (sp_2n % base_x_hint == 0 and sp_2n // base_x_hint >= 2) else (None, None)
+    elif _target_genus().lower() == "packera": bx, pl = (22, _X22[sp_2n]) if sp_2n in _X22 else ((23, _X23[sp_2n]) if sp_2n in _X23 else (None, None))
+    else: bx, pl = (sp_2n // 2, 2) if (sp_2n >= 8 and sp_2n % 2 == 0) else (None, None)
     is_odd = int(force_odd or pl is None or pl in (3, 5, 7) or sp_2n % 2 == 1)
     n_eff = None if (force_odd or sp_2n % 2 == 1) else (sp_2n // 2 if (pl is not None and n_val is None) else n_val)
     return {"raw_count_str": raw_str, "gametophytic_n": n_eff, "sporophytic_2n": sp_2n, "base_x": bx, "ploidy_level": pl, "cytotype_label": f"{pl}x" if pl is not None else "aneuploid", "b_chromosomes": b_chr, "is_aneuploid_or_odd_ploid": is_odd, "is_approximate": approx}
@@ -113,58 +130,40 @@ def _parse_single_text(text: str, default_mode: Optional[str] = None) -> List[Di
 
 def parse_packera_chromosome_record(raw_count: Any, gametophytic_raw: Any = None, sporophytic_raw: Any = None) -> List[Dict[str, Any]]:
     raw_s, g_s, s_s = (" ".join(str(x or "").split()) for x in (raw_count, gametophytic_raw, sporophytic_raw))
-    if raw_s:
-        parsed = _parse_single_text(raw_s)
-        if parsed: return parsed
+    if raw_s and (parsed := _parse_single_text(raw_s)): return parsed
     g_p, s_p = (_parse_single_text(g_s, "n") if g_s else []), (_parse_single_text(s_s, "2n") if s_s else [])
     raw_fb = raw_s or "; ".join(p for p, v in ((f"n={g_s}", g_p), (f"2n={s_s}", s_p)) if v)
-    if len(g_p) == 1 and len(s_p) == 1 and g_p[0]["sporophytic_2n"] == s_p[0]["sporophytic_2n"]:
-        return [dict(s_p[0], gametophytic_n=g_p[0]["gametophytic_n"], raw_count_str=raw_fb)]
+    if len(g_p) == 1 and len(s_p) == 1 and g_p[0]["sporophytic_2n"] == s_p[0]["sporophytic_2n"]: return [dict(s_p[0], gametophytic_n=g_p[0]["gametophytic_n"], raw_count_str=raw_fb)]
     seen, uniq = set(), []
     for rec in s_p + g_p:
         k = (rec["sporophytic_2n"], rec["b_chromosomes"])
         if k not in seen: seen.add(k); rec["raw_count_str"] = raw_fb; uniq.append(rec)
     return uniq
 
-
 def _strip_authors(name: str) -> str:
     s = re.split(r"\s+\bas\b\s+", re.sub(r"\s*\[[^\]]*\]", " ", str(name or "")), maxsplit=1, flags=re.I)[0]
-    for _ in range(4):
-        s = re.sub(r"\([^()]*\)", " ", s)
-    toks = [t for t in s.replace("×", " ").split() if t]
-    out, i = toks[:2], 2
-    while i < len(toks) - 1 and toks[i].lower() in ("var.", "subsp.", "ssp.", "f."):
-        out.extend([toks[i].lower(), toks[i + 1]]); i += 2
+    for _ in range(4): s = re.sub(r"\([^()]*\)", " ", s)
+    toks = [t for t in s.replace("×", " ").split() if t]; out, i = toks[:2], 2
+    while i < len(toks) - 1 and toks[i].lower() in ("var.", "subsp.", "ssp.", "f."): out.extend([toks[i].lower(), toks[i + 1]]); i += 2
     return " ".join(out)
 
-
-def resolve_packera_cytology_taxon(
-    raw_name: Any, synonym_map: Optional[Mapping[str, str]] = None,
-    sporophytic_2n: Optional[int] = None, allow_standardize_fallback: bool = True,
-) -> Optional[Dict[str, Optional[str]]]:
-    orig = " ".join(str(raw_name or "").split())
-    clean = _strip_authors(orig)
-    words = clean.split()
-    if len(words) < 2:
-        return None
+def resolve_packera_cytology_taxon(raw_name: Any, synonym_map: Optional[Mapping[str, str]] = None, sporophytic_2n: Optional[int] = None, allow_standardize_fallback: bool = True) -> Optional[Dict[str, Optional[str]]]:
+    orig = " ".join(str(raw_name or "").split()); clean = _strip_authors(orig); words = clean.split()
+    if len(words) < 2: return None
+    genus = _target_genus(); g_low, g_pref = genus.lower(), f"{genus} "
     smap = dict(_default_db_synonyms())
-    for src in (_DYNAMIC_SYNONYM_TO_CANONICAL, synonym_map or {}):
-        smap.update({str(k).strip().lower(): v for k, v in src.items() if isinstance(v, str) and v.startswith("Packera ")})
-    binom, is_sen = f"{words[0].lower()} {words[1].lower()}", words[0].lower() in ("senecio", "cineraria")
-    if re.search(r"\bledeb\.?\b", orig, re.I) or ((is_sen or "tomentos" in orig.lower()) and sporophytic_2n is not None and int(sporophytic_2n) in _OLD_WORLD_2N):
-        return None
-    if clean.lower().startswith("senecio aureus var. pauperculus"):
-        return {"original_taxon_name": orig, "basionym_name": clean, "species_standardized": "Packera paupercula"}
+    for src in (_DYNAMIC_SYNONYM_TO_CANONICAL, synonym_map or {}): smap.update({str(k).strip().lower(): v for k, v in src.items() if isinstance(v, str) and v.startswith(g_pref)})
+    binom, is_sen = f"{words[0].lower()} {words[1].lower()}", g_low == "packera" and words[0].lower() in ("senecio", "cineraria")
+    if g_low == "packera" and (re.search(r"\bledeb\.?\b", orig, re.I) or ((is_sen or "tomentos" in orig.lower()) and sporophytic_2n is not None and int(sporophytic_2n) in _OLD_WORLD_2N)): return None
+    if g_low == "packera" and clean.lower().startswith("senecio aureus var. pauperculus"): return {"original_taxon_name": orig, "basionym_name": clean, "species_standardized": "Packera paupercula"}
     for cand in (orig.lower(), clean.lower(), binom):
-        if cand in smap:
-            return {"original_taxon_name": orig, "basionym_name": clean if is_sen else None, "species_standardized": smap[cand]}
-    if words[0].lower() == "packera":
-        std = standardize_packera_taxon(clean) or f"Packera {words[1].lower()}"
-        return {"original_taxon_name": orig, "basionym_name": None, "species_standardized": std} if std.startswith("Packera ") else None
-    if is_sen and allow_standardize_fallback and not (sporophytic_2n is not None and int(sporophytic_2n) in _OLD_WORLD_2N):
-        std = standardize_packera_taxon(clean)
-        if std and std.startswith("Packera "):
-            return {"original_taxon_name": orig, "basionym_name": clean, "species_standardized": std}
+        if cand in smap: return {"original_taxon_name": orig, "basionym_name": clean if is_sen else None, "species_standardized": smap[cand]}
+    if words[0].lower() == g_low:
+        std = _std_taxon(clean, genus) or f"{genus} {words[1].lower()}"
+        return {"original_taxon_name": orig, "basionym_name": None, "species_standardized": std} if std.startswith(g_pref) else None
+    if (is_sen or words[0].lower() in _syn_genera(genus)) and allow_standardize_fallback and not (g_low == "packera" and sporophytic_2n is not None and int(sporophytic_2n) in _OLD_WORLD_2N):
+        std = _std_taxon(clean, genus) or (CANONICAL_SENECIO_PACKERA_SYNONYMS.get(binom) if g_low == "packera" else None)
+        if std and std.startswith(g_pref): return {"original_taxon_name": orig, "basionym_name": clean, "species_standardized": std}
     return None
 
 
@@ -180,21 +179,21 @@ def extract_label_cytology_mentions(text: Any) -> List[str]:
 
 
 def _load_sqlite_context(db_path: Optional[Path]) -> Tuple[Dict[str, str], Dict[str, Any]]:
-    smap, ctx = {}, {"by_cat": {}, "by_exsic": defaultdict(list), "by_cn": defaultdict(list), "gb_to_cat": {}, "vouchers": []}
-    if not db_path or not db_path.exists():
-        return smap, ctx
+    smap, ctx, genus = {}, {"by_cat": {}, "by_exsic": defaultdict(list), "by_cn": defaultdict(list), "gb_to_cat": {}, "vouchers": []}, _target_genus()
+    g_pref = f"{genus} "
+    if not db_path or not db_path.exists(): return smap, ctx
     conn = sqlite3.connect(str(db_path)); conn.row_factory = sqlite3.Row
     try:
         tbls = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         if "taxon_synonyms" in tbls:
-            smap.update({str(r[0]).strip().lower(): str(r[1]).strip() for r in conn.execute("SELECT raw_name_lower, canonical_packera FROM taxon_synonyms WHERE canonical_packera LIKE 'Packera %'")})
+            smap.update({str(r[0]).strip().lower(): str(r[1]).strip() for r in conn.execute("SELECT raw_name_lower, canonical_taxon FROM taxon_synonyms WHERE canonical_taxon LIKE ?", (f"{g_pref}%",))})
         if "vouchers" in tbls:
             vcols = {r[1] for r in conn.execute("PRAGMA table_info(vouchers)")}
             sel = [c for c in ("catalogNumber", "species_standardized", "scientificName", "recordedBy", "recordNumber", "institutionCode", "exsiccatae_key", "eventDate", "year", "month", "day", "locality", "occurrenceRemarks", "dynamicProperties", "identificationRemarks") if c in vcols]
             for r in conn.execute(f"SELECT {', '.join(sel)} FROM vouchers"):
                 d = {k: r[k] for k in sel}
                 cat, sp, sci = str(d.get("catalogNumber") or "").strip(), str(d.get("species_standardized") or "").strip(), str(d.get("scientificName") or "").strip()
-                if sci and sp.startswith("Packera "): smap.setdefault(sci.lower(), sp)
+                if sci and sp.startswith(g_pref): smap.setdefault(sci.lower(), sp)
                 if not cat: continue
                 ex = str(d.get("exsiccatae_key") or "").strip() or generate_exsiccatae_key(d.get("recordedBy"), d.get("recordNumber"), d.get("eventDate"), d.get("year"), d.get("month"), d.get("day"))
                 d["_ex"] = ex; ctx["vouchers"].append(d); ctx["by_cat"][cat.lower()] = d
@@ -232,12 +231,13 @@ def _row_to_records(low: Dict[str, str], smap: Dict[str, str], default_src: str,
     if not sp_raw and low.get("genus"):
         gw, sub = re.sub(r"[^A-Za-z]", "", low["genus"].split()[0]).capitalize(), low.get("species / subspecies", "")
         if re.search(r"\s+\bas\b\s+", sub, re.I):
+            genus = _target_genus(); g_pref = f"{genus} "
             acc_p, bas_p = re.split(r"\s+\bas\b\s+", sub, maxsplit=1, flags=re.I)
-            bas_p = re.sub(r"^s\.\s+", "Senecio ", bas_p.strip(), flags=re.I)
+            bas_p = re.sub(r"^s\.\s+", "Senecio ", bas_p.strip(), flags=re.I) if genus.lower() == "packera" else bas_p.strip()
             acc_c, bas_c = _strip_authors(f"{gw} {acc_p}"), _strip_authors(bas_p)
-            std_a = standardize_packera_taxon(acc_c) or acc_c if gw == "Packera" else ""
-            is_bas = bas_c.lower().startswith(("senecio ", "cineraria "))
-            if std_a.startswith("Packera ") and is_bas: smap.setdefault(bas_c.lower(), std_a)
+            std_a = (_std_taxon(acc_c, genus) or acc_c) if gw.lower() == genus.lower() else ""
+            is_bas = bas_c.lower().startswith(("senecio ", "cineraria ")) if genus.lower() == "packera" else any(bas_c.lower().startswith(f"{sg} ") for sg in _syn_genera(genus) if sg != genus.lower())
+            if std_a.startswith(g_pref) and is_bas: smap.setdefault(bas_c.lower(), std_a)
             sp_raw = bas_p if is_bas else f"{gw} {acc_p}".strip()
         else: sp_raw = f"{gw} {sub}".strip()
     var_v = pick("variety")
@@ -255,7 +255,8 @@ def _row_to_records(low: Dict[str, str], smap: Dict[str, str], default_src: str,
 
 def _fetch_ccdb(smap: Dict[str, str]) -> List[Dict[str, Any]]:
     raw_items: List[Dict[str, Any]] = []
-    for u in ("http://ccdb.tau.ac.il/services/countsFull/?genus=Packera&format=json", "https://taux.evolseq.net/CCDB_web/services/countsFull/?genus=Packera&format=json"):
+    genus = _target_genus(); g_q = urllib.parse.quote(genus); g_pref = f"{genus} "
+    for u in (f"http://ccdb.tau.ac.il/services/countsFull/?genus={g_q}&format=json", f"https://taux.evolseq.net/CCDB_web/services/countsFull/?genus={g_q}&format=json"):
         try:
             p = json.loads(_http_request(u, 20, 2).decode("utf-8", errors="replace"))
             raw_items = p if isinstance(p, list) else (p.get("results") or p.get("data") or [])
@@ -265,7 +266,7 @@ def _fetch_ccdb(smap: Dict[str, str]) -> List[Dict[str, Any]]:
     for r in (x for x in raw_items if isinstance(x, dict)):
         orig = str(r.get("original_name") or r.get("matched_name") or r.get("resolved_name") or "").strip()
         res_n = str(r.get("resolved_name") or r.get("matched_name") or "").strip()
-        if res_n.startswith("Packera ") and orig.lower().startswith(("senecio ", "cineraria ")):
+        if res_n.startswith(g_pref) and any(orig.lower().startswith(f"{sg} ") for sg in _syn_genera(genus) if sg != genus.lower()):
             smap[_strip_authors(orig).lower()] = _strip_authors(res_n)
         cts = parse_packera_chromosome_record("", r.get("gametophytic"), r.get("sporophytic")) or (parse_packera_chromosome_record("", r.get("parsed_n"), "") if r.get("parsed_n") else [])
         for idx, c in enumerate(cts):
@@ -275,7 +276,7 @@ def _fetch_ccdb(smap: Dict[str, str]) -> List[Dict[str, Any]]:
 
 
 def _fetch_icna(smap: Dict[str, str]) -> List[Dict[str, Any]]:
-    out: List[Dict[str, Any]] = []
+    out, allowed_g = [], _syn_genera(_target_genus())
     try: zbytes = _http_request("https://dbarchive.biosciencedbc.jp/data/asteraceae-chr-index/LATEST/index_chromosome_number_asteraceae.zip", 30, 2)
     except Exception as exc: logger.warning("ICNA archive unavailable: %s", exc); return out
     with tempfile.TemporaryDirectory() as tmp:
@@ -289,12 +290,13 @@ def _fetch_icna(smap: Dict[str, str]) -> List[Dict[str, Any]]:
             with open(fp, "r", encoding="utf-8", errors="replace", newline="") as fh:
                 for i, r in enumerate(csv.DictReader(fh, delimiter="\t" if fp.suffix.lower() in (".tsv", ".txt") else ",")):
                     low = {str(k or "").strip().lower().replace("\uff08", "(").replace("\uff06", "&"): (v or "").strip() for k, v in r.items()}
-                    if "genus" in low and re.sub(r"[^a-z]", "", (low["genus"].split()[:1] or [""])[0].lower()) not in ("packera", "senecio", "cineraria"): continue
+                    if "genus" in low and re.sub(r"[^a-z]", "", (low["genus"].split()[:1] or [""])[0].lower()) not in allowed_g: continue
                     out.extend(_row_to_records(low, smap, "ICNA", f"icna_{i}", False))
     return out
 
 
 def _fetch_fna(smap: Dict[str, str]) -> List[Dict[str, Any]]:
+    if _target_genus().lower() != "packera": return []
     out: List[Dict[str, Any]] = []
     try: idx_html = _http_request("http://www.efloras.org/florataxon.aspx?flora_id=1&taxon_id=123645", 15, 1).decode("utf-8", errors="replace")
     except Exception as exc: logger.warning("FNA fetch unavailable: %s", exc); return out
@@ -378,9 +380,16 @@ def _cross_link_and_summarize(records: List[Dict[str, Any]], ctx: Mapping[str, A
             if er["cytology_id"] not in seen_ids: seen_ids.add(er["cytology_id"]); linked.append(er)
     by_sp: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for r in linked: by_sp[r["species_standardized"]].append(r)
+    is_packera = _target_genus().lower() == "packera"
+    genus_bx = None if is_packera else _infer_modal_base_x([r.get("sporophytic_2n") for r in linked])
     summaries: List[Dict[str, Any]] = []
     for sp, grp in sorted(by_sp.items()):
         bio = [g for g in grp if g.get("_bio", True)]
+        sp_ev = {int(g["sporophytic_2n"]) for g in bio if g.get("sporophytic_2n") is not None and int(g["sporophytic_2n"]) % 2 == 0}
+        eff_bx = None if is_packera else (_infer_modal_base_x([g.get("sporophytic_2n") for g in bio]) if len(sp_ev) >= 2 else genus_bx)
+        if not is_packera and eff_bx:
+            for g in grp:
+                if (s2n := g.get("sporophytic_2n")) is not None: g.update(_classify_cytotype(g.get("gametophytic_n"), int(s2n), int(g.get("b_chromosomes") or 0), int(g.get("is_approximate") or 0), str(g.get("raw_count_str") or ""), force_odd=(g.get("gametophytic_n") is None and int(s2n) % 2 == 0), base_x_hint=eff_bx))
         sp2n = [int(g["sporophytic_2n"]) for g in bio if g.get("sporophytic_2n") is not None]
         modal_2n = min(Counter(sp2n).items(), key=lambda kv: (-kv[1], kv[0]))[0] if sp2n else None
         pl_set, bx_set = sorted({int(g["ploidy_level"]) for g in bio if g.get("ploidy_level") is not None}), sorted({int(g["base_x"]) for g in bio if g.get("base_x") is not None})
@@ -389,14 +398,9 @@ def _cross_link_and_summarize(records: List[Dict[str, Any]], ctx: Mapping[str, A
         c2_vals, bs_vals = [float(g["c_value_2c_pg"]) for g in bio if g.get("c_value_2c_pg") is not None], sorted({str(g["breeding_system"]).strip() for g in bio if g.get("breeding_system")})
         for g in grp:
             if g.get("cytology_linkage_tier") == "UNLINKED": g["cytology_linkage_tier"] = "C4_Taxon_MultiCytotype" if is_multi else "C3_Taxon_Monomorphic"
-        summaries.append({
-            "species_standardized": sp, "n_cytology_records": len(bio), "n_direct_cytovouchers": len({g["catalogNumber"] for g in grp if g.get("cytology_linkage_tier") == "C1_Direct_Cytovoucher" and g.get("catalogNumber")}),
-            "modal_sporophytic_2n": modal_2n, "modal_base_x": (22 if modal_2n in _X22 else (23 if modal_2n in _X23 else None)) if modal_2n else None,
-            "modal_ploidy_level": (_X22.get(modal_2n) or _X23.get(modal_2n)) if modal_2n else None, "reported_cytotypes": ", ".join(labels) if labels else None,
-            "is_multi_cytotype_taxon": is_multi, "has_dysploid_series": int(len(bx_set) >= 2 or any(g.get("cytotype_label") == "aneuploid" for g in bio)),
-            "has_odd_polyploid_or_apomixis": int(any(g.get("is_aneuploid_or_odd_ploid") == 1 or "apom" in str(g.get("breeding_system") or "").lower() for g in bio)),
-            "mean_2c_pg": round(sum(c2_vals) / len(c2_vals), 4) if c2_vals else None, "breeding_system_summary": "; ".join(bs_vals) if bs_vals else None,
-        })
+        m_bx = (22 if modal_2n in _X22 else (23 if modal_2n in _X23 else None)) if (modal_2n and is_packera) else (eff_bx if (modal_2n and eff_bx and modal_2n % eff_bx == 0) else None)
+        m_pl = (_X22.get(modal_2n) or _X23.get(modal_2n)) if (modal_2n and is_packera) else (modal_2n // m_bx if (modal_2n and m_bx) else None)
+        summaries.append({"species_standardized": sp, "n_cytology_records": len(bio), "n_direct_cytovouchers": len({g["catalogNumber"] for g in grp if g.get("cytology_linkage_tier") == "C1_Direct_Cytovoucher" and g.get("catalogNumber")}), "modal_sporophytic_2n": modal_2n, "modal_base_x": m_bx, "modal_ploidy_level": m_pl, "reported_cytotypes": ", ".join(labels) if labels else None, "is_multi_cytotype_taxon": is_multi, "has_dysploid_series": int(len(bx_set) >= 2 or any(g.get("cytotype_label") == "aneuploid" for g in bio)), "has_odd_polyploid_or_apomixis": int(any(g.get("is_aneuploid_or_odd_ploid") == 1 or "apom" in str(g.get("breeding_system") or "").lower() for g in bio)), "mean_2c_pg": round(sum(c2_vals) / len(c2_vals), 4) if c2_vals else None, "breeding_system_summary": "; ".join(bs_vals) if bs_vals else None})
     for r in linked: r.pop("_bio", None)
     return linked, summaries
 

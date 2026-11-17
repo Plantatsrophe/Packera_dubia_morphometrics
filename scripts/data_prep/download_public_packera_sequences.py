@@ -372,7 +372,8 @@ def _fetch_dryad(genomics_dir: Path, tmpd: Path, dryad_zip_dir: Optional[Path], 
     return status, n_extracted
 
 
-def _format_bold_fasta(raw_text: str) -> Tuple[str, int]:
+def _format_bold_fasta(raw_text: str, target_genus: Optional[str] = None) -> Tuple[str, int]:
+    genus = str(target_genus or _resolve_target_meta("resolve_target_genus", "TARGET_GENUS", "Packera")).strip() or "Packera"
     if raw_text.lstrip().startswith(">"):
         out = []
         for hdr, seq in _parse_fasta_text(raw_text):
@@ -390,25 +391,26 @@ def _format_bold_fasta(raw_text: str) -> Tuple[str, int]:
     for rec in objs:
         if isinstance(rec, dict) and (seq_c := str(rec.get("nuc") or "").replace("-", "").strip().upper()):
             rid = str(rec.get("record_id") or rec.get("processid") or rec.get("id") or "BOLD").strip()
-            tax = _normalize_taxon_binomial(str(rec.get("species") or rec.get("identification") or "Packera_sp"))
+            tax = _normalize_taxon_binomial(str(rec.get("species") or rec.get("identification") or f"{genus}_sp"))
             mk = re.sub(r"\s+", "_", str(rec.get("marker_code") or rec.get("markercode") or "UNK").strip() or "UNK")
             out_lines.append(f">{rid}|{tax}|{mk}\n{seq_c}\n")
     return "".join(out_lines), len(out_lines)
 
 
-def _fetch_bold(genomics_dir: Path, force: bool) -> int:
+def _fetch_bold(genomics_dir: Path, force: bool, target_genus: Optional[str] = None) -> int:
+    genus = str(target_genus or _resolve_target_meta("resolve_target_genus", "TARGET_GENUS", "Packera")).strip() or "Packera"
     try:
-        q_raw = _http_request("https://portal.boldsystems.org/api/query?query=tax%3Agenus%3APackera&extent=full", timeout=60).decode("utf-8", errors="replace")
+        q_raw = _http_request(f"https://portal.boldsystems.org/api/query?query=tax%3Agenus%3A{urllib.parse.quote(genus)}&extent=full", timeout=60).decode("utf-8", errors="replace")
         if q_raw.lstrip().startswith(">"):
-            fasta_txt, n_rec = _format_bold_fasta(q_raw)
+            fasta_txt, n_rec = _format_bold_fasta(q_raw, target_genus=genus)
         else:
             if not (qid := str(json.loads(q_raw).get("query_id") or "").strip()):
                 raise ValueError("Missing query_id from BOLD v5 response")
-            fasta_txt, n_rec = _format_bold_fasta(_http_request(f"https://portal.boldsystems.org/api/documents/{urllib.parse.quote(qid, safe='')}?length=2000", timeout=90).decode("utf-8", errors="replace"))
+            fasta_txt, n_rec = _format_bold_fasta(_http_request(f"https://portal.boldsystems.org/api/documents/{urllib.parse.quote(qid, safe='')}?length=2000", timeout=90).decode("utf-8", errors="replace"), target_genus=genus)
     except Exception as exc:
         print(f"[WARN] BOLD v5 query failed ({exc}); trying legacy BOLD API.", file=sys.stderr)
         try:
-            fasta_txt, n_rec = _format_bold_fasta(_http_request("http://www.boldsystems.org/index.php/API_Public/sequence?taxon=Packera", timeout=60).decode("utf-8", errors="replace"))
+            fasta_txt, n_rec = _format_bold_fasta(_http_request(f"http://www.boldsystems.org/index.php/API_Public/sequence?taxon={urllib.parse.quote(genus)}", timeout=60).decode("utf-8", errors="replace"), target_genus=genus)
         except Exception as exc2:
             print(f"[WARN] BOLD barcode retrieval unavailable: {exc2}", file=sys.stderr)
             return 0
@@ -461,7 +463,7 @@ def download_public_packera_sequences(
         if "dryad" in src_list:
             dryad_status, counts["dryad_files"] = _fetch_dryad(genomics_dir, tmpd, dryad_zip_dir=dryad_zip_dir, force=force)
         if "bold" in src_list:
-            counts["bold_records"] = _fetch_bold(genomics_dir, force=force)
+            counts["bold_records"] = _fetch_bold(genomics_dir, force=force, target_genus=genus)
     files_meta = {p.relative_to(genomics_dir).as_posix(): {"size_bytes": p.stat().st_size} for p in sorted(genomics_dir.rglob("public_packera_*")) if p.is_file() and p.name != "public_packera_sources_manifest.json"}
     summary: Dict[str, Any] = {"timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "genomics_dir": str(genomics_dir), "target_genus": genus, "target_family": family, "sources_run": list(dict.fromkeys([*prev_sources, *src_list])), "dryad_status": dryad_status, "counts": counts, "files": files_meta}
     _atomic_save(genomics_dir, "public_packera_sources_manifest.json", json.dumps(summary, indent=2).encode("utf-8"), force=True)
@@ -473,7 +475,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--genomics-dir", type=Path, default=Path(__file__).resolve().parents[2] / "data" / "genomics")
     parser.add_argument("--sources", nargs="+", default=["ncbi", "dryad", "bold"], help="Sources to query (ncbi, dryad, bold, paraloss)")
     parser.add_argument("--genus", default=_resolve_target_meta("resolve_target_genus", "TARGET_GENUS", "Packera"), help="Target genus for dynamic ENA taxon-tree SRA discovery")
-    parser.add_argument("--family", default="Asteraceae", help="Target botanical family for Compositae-ParaLoss-1272 locus weighting")
+    parser.add_argument("--family", default=_resolve_target_meta("resolve_target_family", "TARGET_FAMILY", "Asteraceae"), help="Target botanical family for Compositae-ParaLoss-1272 locus weighting")
     parser.add_argument("--dryad-zip-dir", type=Path, default=None, help="Directory with manually downloaded Dryad .zip archives")
     parser.add_argument("--skim-sra-accessions", nargs="+", default=None, help="SRA/ENA run accessions to stream-skim via skim_offtarget_organellar")
     parser.add_argument("--force", action="store_true", default=False, help="Overwrite existing non-empty public_packera_* files")

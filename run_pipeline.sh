@@ -652,9 +652,9 @@ mkdir -p \
   "${RUN_DIR}/outputs/reports" \
   "${RUN_DIR}/logs"
 
-# Maintain runs/latest symlink pointing to the most recent RUN_DIR
+# Maintain runs/latest symlink (and runs/latest_run.json pointer fallback) pointing to the most recent RUN_DIR
 mkdir -p "runs"
-ln -sfn "${RUN_ID}" "runs/latest"
+ln -sfn "${RUN_ID}" "runs/latest" 2>/dev/null || true
 
 export PYTHONUNBUFFERED=1
 LOG_FILE="${RUN_DIR}/logs/pipeline.log"
@@ -675,9 +675,24 @@ echo "==========================================================================
 # Resolve Python interpreters (.venv for primary orchestration, LeafMachine3/.venv or .venv_LM3 for LeafMachine3)
 if [[ -x "${PROJECT_ROOT}/.venv/bin/python" ]]; then
   PYTHON_MAIN="${PROJECT_ROOT}/.venv/bin/python"
+elif [[ -x "${PROJECT_ROOT}/.venv/Scripts/python.exe" ]]; then
+  PYTHON_MAIN="${PROJECT_ROOT}/.venv/Scripts/python.exe"
 else
   PYTHON_MAIN="python3"
 fi
+export PLANTMATICS_PYTHON_BIN="${PLANTMATICS_PYTHON_BIN:-${PYTHON_MAIN}}"
+export PLANTMATICS_TARGET_GENUS="${PLANTMATICS_TARGET_GENUS:-Packera}"
+
+"${PYTHON_MAIN}" -c "
+import json, os
+from pathlib import Path
+runs_p = Path('${PROJECT_ROOT}') / 'runs'
+runs_p.mkdir(parents=True, exist_ok=True)
+ptr = runs_p / 'latest_run.json'
+tmp = runs_p / f'.latest_run_{os.getpid()}.json.tmp'
+tmp.write_text(json.dumps({'run_id': '${RUN_ID}', 'run_dir': str((Path('${PROJECT_ROOT}') / '${RUN_DIR}').resolve()), 'updated_at': '${START_TIME}'}, indent=2) + '\n', encoding='utf-8')
+tmp.replace(ptr)
+" 2>/dev/null || true
 
 if [[ -x "${PROJECT_ROOT}/LeafMachine3/.venv/bin/python" ]]; then
   PYTHON_LM3="${PROJECT_ROOT}/LeafMachine3/.venv/bin/python"
@@ -1345,6 +1360,8 @@ if non_demo_pf and Path(target_db_path).is_file() and not df.empty:
     except Exception:
         pass
 
+_target_genus_prefix = (os.environ.get('PLANTMATICS_TARGET_GENUS', 'Packera').strip() or 'Packera') + ' '
+
 if focal_raw:
     focal_taxon = standardize_packera_taxon(focal_raw)
     focal_df = df[df['species_standardized'] == focal_taxon].copy()
@@ -1352,7 +1369,7 @@ if focal_raw:
         subset_df = focal_df
         print(f'[Strategy 2: Pure Intraspecific] Retained {len(subset_df)} {focal_taxon} vouchers (0 outgroup anchors).')
     else:
-        present_taxa = sorted([t for t in df['species_standardized'].dropna().unique().tolist() if str(t).startswith('Packera ')])
+        present_taxa = sorted([t for t in df['species_standardized'].dropna().unique().tolist() if str(t).startswith(_target_genus_prefix)])
         base_outgroups = present_taxa
         outgroup_taxa = [t for t in base_outgroups if t != focal_taxon and t not in exclude_taxa]
 
@@ -1418,7 +1435,7 @@ if focal_raw:
                         f_cid = focal_rows['consensus_complex_id'].iloc[0]
                         same_c = [
                             col_std for col_std in cdf[(cdf['consensus_complex_id'] == f_cid) & (cdf['taxon_std'] != focal_taxon)]['taxon_std'].tolist()
-                            if isinstance(col_std, str) and col_std.startswith('Packera ') and col_std != focal_taxon
+                            if isinstance(col_std, str) and col_std.startswith(_target_genus_prefix) and col_std != focal_taxon
                         ]
                         discovered_neighbors.extend(same_c)
             if aff_file is not None:
@@ -1432,7 +1449,7 @@ if focal_raw:
                             if col in ('species_standardized', 'taxon', 'taxon_std'):
                                 continue
                             col_std = standardize_packera_taxon(col)
-                            if isinstance(col_std, str) and col_std.startswith('Packera ') and col_std != focal_taxon:
+                            if isinstance(col_std, str) and col_std.startswith(_target_genus_prefix) and col_std != focal_taxon:
                                 try:
                                     val = float(frow[col].iloc[0])
                                     if val >= min_affinity_val:
@@ -1447,10 +1464,10 @@ if focal_raw:
                         for line in nf.read_text(encoding='utf-8').splitlines()
                         if line.strip()
                         for col_std in (standardize_packera_taxon(line.strip()),)
-                        if isinstance(col_std, str) and col_std.startswith('Packera ') and col_std != focal_taxon
+                        if isinstance(col_std, str) and col_std.startswith(_target_genus_prefix) and col_std != focal_taxon
                     ]
             if discovered_neighbors:
-                disc_set = {t for t in discovered_neighbors if isinstance(t, str) and t.startswith('Packera ')} - exclude_taxa - {focal_taxon}
+                disc_set = {t for t in discovered_neighbors if isinstance(t, str) and t.startswith(_target_genus_prefix)} - exclude_taxa - {focal_taxon}
                 if disc_set:
                     outgroup_taxa = [t for t in outgroup_taxa if t in disc_set] or sorted(disc_set)
                     print(f'[Auto-Neighbors] Empirical complex & affinity neighbors for {focal_taxon}: {outgroup_taxa}')

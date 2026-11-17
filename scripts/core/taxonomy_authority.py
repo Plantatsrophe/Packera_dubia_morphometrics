@@ -273,8 +273,11 @@ def get_image_resolution_score(image_path_str: Optional[str], workspace_dir: Opt
 
 
 def _resolve_row_standardized_packera(row: Mapping[str, Any]) -> str:
-    """Resolve standardized canonical 'Packera <epithet>' binomial from a voucher row."""
-    from scripts.core.harvester import _extract_canonical_binomial, standardize_packera_taxon
+    """Resolve standardized canonical `<target_genus> <epithet>` binomial from a voucher row."""
+    from scripts.core.config import resolve_target_genus
+    from scripts.core.harvester import _extract_canonical_binomial, standardize_taxon_name
+
+    eff_genus = (resolve_target_genus() or "Packera").strip().capitalize()
     for col in ("species_standardized", "scientificName", "species_raw"):
         if col not in row:
             continue
@@ -284,11 +287,11 @@ def _resolve_row_standardized_packera(row: Mapping[str, Any]) -> str:
         s_txt = str(raw_val).strip()
         if not s_txt:
             continue
-        std = standardize_packera_taxon(s_txt)
+        std = standardize_taxon_name(s_txt, target_genus=eff_genus)
         if std:
             return std
-        if s_txt.startswith("Packera "):
-            fb = _extract_canonical_binomial(s_txt, {"Packera"})
+        if s_txt.startswith(f"{eff_genus} "):
+            fb = _extract_canonical_binomial(s_txt, {eff_genus})
             if fb:
                 return fb
     return ""
@@ -859,7 +862,7 @@ def spatially_balance_and_thin_vouchers(
         out_empty["spatial_balance_weight"] = pd.Series(dtype=float)
         return out_empty
 
-    from scripts.core.harvester import standardize_packera_taxon
+    from scripts.core.harvester import standardize_taxon_name
 
     out_df = df.copy()
 
@@ -870,7 +873,7 @@ def spatially_balance_and_thin_vouchers(
         )
         if src_col is not None:
             out_df["species_standardized"] = out_df[src_col].map(
-                lambda x: standardize_packera_taxon(str(x)) or str(x).strip() or "Unknown"
+                lambda x: standardize_taxon_name(str(x)) or str(x).strip() or "Unknown"
                 if not pd.isna(x) else "Unknown"
             )
         else:
@@ -886,7 +889,7 @@ def spatially_balance_and_thin_vouchers(
             if src_col is not None:
                 raw_v = row.get(src_col)
                 if raw_v is not None and not pd.isna(raw_v) and str(raw_v).strip():
-                    return standardize_packera_taxon(str(raw_v)) or str(raw_v).strip()
+                    return standardize_taxon_name(str(raw_v)) or str(raw_v).strip()
             return "Unknown"
         out_df["species_standardized"] = out_df.apply(_fill_sp, axis=1)
 
@@ -1691,18 +1694,21 @@ def discover_corpus_authorities(
     inst_taxon_totals: Dict[Tuple[str, str], int] = {}
     inst_taxon_attributed: Dict[Tuple[str, str], int] = {}
 
-    from scripts.core.harvester import _extract_canonical_binomial, standardize_packera_taxon
+    from scripts.core.config import resolve_target_genus
+    from scripts.core.harvester import _extract_canonical_binomial, standardize_taxon_name
+
+    eff_genus = (resolve_target_genus() or "Packera").strip().capitalize()
 
     # Track duplicate groups for cross-duplicate disagreement auditing (<= 15% threshold)
     group_entries: Dict[str, List[Tuple[str, List[str], bool]]] = {}
 
     for _, row in df.iterrows():
         raw_sp = row.get(sp_col) if sp_col else None
-        std_sp = standardize_packera_taxon(raw_sp)
+        std_sp = standardize_taxon_name(raw_sp, target_genus=eff_genus)
         if not std_sp and raw_sp is not None and not pd.isna(raw_sp):
             s_tmp = str(raw_sp).strip()
-            if s_tmp.startswith("Packera "):
-                std_sp = _extract_canonical_binomial(s_tmp, {"Packera"})
+            if s_tmp.startswith(f"{eff_genus} "):
+                std_sp = _extract_canonical_binomial(s_tmp, {eff_genus})
         if not std_sp:
             std_sp = _resolve_row_standardized_packera(row)
 
@@ -2018,7 +2024,7 @@ def apply_corpus_authority_tiers(
         eff_specs = set(dynamic_specialists)
         eff_herbs = set(dynamic_herbaria)
 
-    from scripts.core.harvester import standardize_packera_taxon
+    from scripts.core.harvester import standardize_taxon_name
 
     # Tally (institutionCode, identifiedBy) batch statistics to detect undated institutional batch transfers
     batch_voucher_counts: Dict[Tuple[str, str], int] = {}
@@ -2035,7 +2041,7 @@ def apply_corpus_authority_tiers(
         ]
         std_sp = None
         for rn in raw_names_row:
-            std_sp = standardize_packera_taxon(rn)
+            std_sp = standardize_taxon_name(rn)
             if std_sp:
                 break
         if not std_sp:
@@ -2132,7 +2138,7 @@ def apply_corpus_authority_tiers(
         hab_raw = row.get("_raw_habitat") if "_raw_habitat" in out.columns else row.get("habitat")
 
         raw_sci = row.get("scientificName") or row.get("species_raw")
-        std_sp = standardize_packera_taxon(raw_sci) or _resolve_row_standardized_packera(row)
+        std_sp = standardize_taxon_name(raw_sci) or _resolve_row_standardized_packera(row)
 
         tier_eval, type_clean, _ = parse_determiner_tier(
             type_status_raw=t_raw,
