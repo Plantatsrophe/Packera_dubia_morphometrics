@@ -5,7 +5,17 @@
   out <- trimws(as.character(x)); out[is.na(out)] <- ""; out
 }
 
-.norm_exsiccatae_cyto <- function(x) tolower(gsub("\\s+", " ", .norm_cyto_str(x)))
+.norm_exsiccatae_cyto <- function(x) tolower(gsub("[[:space:]]+", " ", .norm_cyto_str(x)))
+
+.is_step07_calibrated_mm <- function(df) {
+  n <- nrow(df); if (n == 0L) return(logical(0))
+  has_cal <- "is_calibrated_mm" %in% names(df); has_src <- "scale_source" %in% names(df)
+  if (!has_cal && !has_src) return(rep(TRUE, n))
+  cal_ok <- if (has_cal) .safe_bool_cyto(df$is_calibrated_mm) else rep(TRUE, n)
+  src_v <- if (has_src) tolower(trimws(as.character(df$scale_source))) else rep("", n)
+  src_v[is.na(src_v)] <- ""
+  cal_ok & !(src_v %in% c("tick_lattice_unboxed", "uncalibrated", "none"))
+}
 
 .parse_ploidy_int <- function(x) {
   s <- tolower(trimws(as.character(x)))
@@ -82,7 +92,7 @@
   if (length(fin_cl) == 0L) return(NA_integer_)
   t_stat <- tolower(.pick_col_chr(df, c("type_status"), "")[sp_rows])
   a_tier <- tolower(.pick_col_chr(df, c("authority_tier"), "")[sp_rows])
-  is_t <- grepl("\\b(holo|iso|lecto|neo|syn)type\\b", t_stat) | (a_tier == "tier_0_type")
+  is_t <- grepl("(^|[^a-z])(holo|iso|lecto|neo|syn)type($|[^a-z])", t_stat) | (a_tier == "tier_0_type")
   type_cls <- cl_vec[sp_rows][is_t & !is.na(cl_vec[sp_rows])]
   if (length(type_cls) > 0L) {
     tb <- sort(table(type_cls), decreasing = TRUE)
@@ -108,6 +118,7 @@
     effect_ratio = numeric(0), wilcox_p = numeric(0), stringsAsFactors = FALSE
   )
   if (length(traits) == 0L || nrow(df) == 0L) return(empty_df)
+  cal_ok <- .is_step07_calibrated_mm(df)
   rows_out <- list()
   for (sp in unique(sp_vec[nzchar(sp_vec) & sp_vec != "Unknown" & !is.na(v_pl)])) {
     sp_idx <- which(sp_vec == sp & !is.na(v_pl)); pls <- sort(unique(v_pl[sp_idx])); if (length(pls) < 2L) next
@@ -115,8 +126,11 @@
     for (p_hi in pls[-1L]) {
       i_lo <- sp_idx[v_pl[sp_idx] == p_lo]; i_hi <- sp_idx[v_pl[sp_idx] == p_hi]
       for (tr in traits) {
-        x_lo <- suppressWarnings(as.numeric(df[[tr]][i_lo])); x_lo <- x_lo[is.finite(x_lo)]
-        x_hi <- suppressWarnings(as.numeric(df[[tr]][i_hi])); x_hi <- x_hi[is.finite(x_hi)]
+        is_mm_tr <- tr %in% c("area_mm2", "petiole_width_mm")
+        i_lo_use <- if (is_mm_tr) i_lo[cal_ok[i_lo]] else i_lo
+        i_hi_use <- if (is_mm_tr) i_hi[cal_ok[i_hi]] else i_hi
+        x_lo <- suppressWarnings(as.numeric(df[[tr]][i_lo_use])); x_lo <- x_lo[is.finite(x_lo)]
+        x_hi <- suppressWarnings(as.numeric(df[[tr]][i_hi_use])); x_hi <- x_hi[is.finite(x_hi)]
         if (length(x_lo) == 0L || length(x_hi) == 0L) next
         m_lo <- stats::median(x_lo); m_hi <- stats::median(x_hi)
         eff <- if (tr == "log1p_capitulum_count") (m_hi - m_lo) else if (abs(m_lo) > 1e-9) (m_hi / m_lo) else NA_real_
@@ -151,7 +165,7 @@ run_step07_cytology_integration <- function(df, conn = NULL, cytology_dir = "dat
   nq_dl <- if (is.null(nq_dl_raw)) rep(NA_real_, n) else suppressWarnings(as.numeric(as.character(nq_dl_raw)))
   g_tier <- .pick_col_chr(df, c("geno_linkage_tier", "linkage_tier"), "")
   g_qc <- if (any(c("geno_quality_pass", "qc_pass") %in% names(df))) .safe_bool_cyto(.pick_col_raw(df, c("geno_quality_pass", "qc_pass"))) else rep(TRUE, n)
-  q12_raw <- .pick_col_raw(df, c("interclass_het_Q12", "interspecific_ancestry_q12"))
+  q12_raw <- .pick_col_raw(df, c("interspecific_ancestry_q12"))
   q12_v <- if (is.null(q12_raw)) rep(NA_real_, n) else suppressWarnings(as.numeric(as.character(q12_raw)))
   g_adm_recent <- if ("is_geno_admixed" %in% names(df)) (.safe_bool_cyto(df$is_geno_admixed) & (is.na(q12_v) | q12_v >= 0.35)) else rep(FALSE, n)
   hq_nq_mask <- (g_tier %in% c("G1_Direct_Voucher", "G1_Exsiccatae_Isoduplicate")) &

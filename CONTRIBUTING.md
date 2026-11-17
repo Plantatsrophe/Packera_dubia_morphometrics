@@ -24,7 +24,8 @@ Core R analytical entrypoints and public genomics modules enforce hard line-coun
 | :--- | :---: | :--- |
 | `scripts/morphometrics/03_fourier_extractor.R` | `< 500` lines | `step03_config_scale_utils.R` (`< 240`), `dissected_leaf_utils.R`, `fourier_parallel_utils.R` (`< 500`), `scripts/figures/step03_figures.R` (`< 385`) |
 | `scripts/morphometrics/04_gmm_morphotools.R` | `<= 650` lines | `authority_weighting_utils.R`, `plasticity_mitigation_utils.R` (`< 470`), `pub_ecoregion_manova_utils.R`, `scripts/figures/step04_figures.R` |
-| `scripts/analysis/taxon_complex_discovery_utils.R` | `<= 800` lines | `07_triage_dashboard_synthesis.R`, `genomic_triage_utils.R`, `scripts/figures/step07_figures.R` |
+| `scripts/analysis/07_triage_dashboard_synthesis.R` | `< 500` lines | `step07_ancova_merge_utils.R` (`< 490`), `step07_hopkins_consensus_utils.R` (`< 480`), `step07_biogeo_hybrid_utils.R` (`< 490`), `step07_cluster_cohesion_utils.R` (`< 460`), `step07_decision_stages_utils.R` (`< 490`), `step07_postprocess_guards_utils.R` (`< 460`), `step07_reports_html_utils.R` (`< 490`), `step07_cytology_integration.R` (`< 380`), `step07_genomic_propagation.R` (`< 400`), `step07_deme_propagation_utils.R` (`< 260`), `step07_organellar_triage_utils.R` (`< 260`), `genomic_triage_utils.R` (`< 500`) |
+| `scripts/analysis/taxon_complex_discovery_utils.R` | `< 480` lines | `step07_complex_affinity_utils.R` (`< 450`), `scripts/figures/step07_figures.R` (`< 420`), `scripts/figures/step07b_network_figures.R` (`< 320`) |
 | `scripts/data_prep/download_public_packera_sequences.py` | `< 500` lines | `06_ingest_genetic_data.py`, `skim_offtarget_organellar.py` |
 | `scripts/data_prep/skim_offtarget_organellar.py` | `< 500` lines | `06_ingest_genetic_data.py`, `download_public_packera_sequences.py` |
 | `scripts/analysis/step06_public_backbone.R` | `< 500` lines | `06_genomic_phylogenomics.R`, `step06_reticulation_coancestry.R` |
@@ -68,7 +69,7 @@ Before opening a pull request or generating a patch, run the full verification g
 grep -rnP "[\x{2013}\x{2014}]" README.md AGENTS.md CONTRIBUTING.md CHANGELOG.md CITATION.cff docs/*.md && exit 1 || echo "PASS: Zero em/en dashes"
 
 # 3. Verify R script line-count budgets
-wc -l scripts/morphometrics/03_fourier_extractor.R scripts/morphometrics/04_gmm_morphotools.R scripts/analysis/taxon_complex_discovery_utils.R
+wc -l scripts/morphometrics/03_fourier_extractor.R scripts/morphometrics/04_gmm_morphotools.R scripts/analysis/07_triage_dashboard_synthesis.R scripts/analysis/taxon_complex_discovery_utils.R
 
 # 4. Verify git whitespace cleanliness
 git diff --check

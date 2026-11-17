@@ -41,12 +41,12 @@ propagate_exsiccatae_isoduplicates <- function(df, ga_df = NULL) {
   is_multi <- (as.integer(table(cat_vec)[cat_vec]) > 1L) | (!is.na(n_pl) & n_pl > 1L); is_mo <- .pick_bool_prop(df, c("morphometric_outlier_flag", "is_morph_outlier"), FALSE)
   pool <- .compute_morph_pool_prop(df)
   copy_cols <- intersect(c(
-    "genetic_sample_id", "geno_predicted_taxon", "geno_posterior_prob", "geno_second_taxon", "geno_margin", "geno_admixture_qmax", "q_max", "q_admixture_json",
-    "genetic_cluster", "geno_sNMF_entropy", "is_geno_admixed", "is_putative_novel_or_hybrid_query", "geno_quality_pass", "geno_parent_1", "geno_parent_2",
+    "genetic_sample_id", "geno_predicted_taxon", "geno_posterior_prob", "geno_margin", "q_max", "q_admixture_json",
+    "genetic_cluster", "is_geno_admixed", "is_putative_novel_or_hybrid_query", "geno_quality_pass", "geno_parent_1", "geno_parent_2",
     "nearest_tree_sister_taxon", "patristic_dist_to_dubia", "replicate_pair_concordance", "hdplot_retained_loci", "inferred_cytotype", "nquire_delta_logl",
-    "plastid_clade", "its_ribotype", "cytonuclear_discordant", "hybrid_index_h", "interclass_het_Q12", "interspecific_ancestry_q12", "hybrid_generation_class",
-    "coancestry_cluster_id", "coancestry_cluster", "fbranch_introgression_flag", "f_branch_max", "f_branch_donor_taxon", "snaq_gamma_minor", "coalescent_gdi",
-    "bpp_introgression_bf", "mmrr_beta_ibd", "mmrr_beta_ibe", "mmrr_p_ibe", "bisse_net_div_rate", "public_backbone_clade", "public_phytop_ils_index",
+    "plastid_clade", "its_ribotype", "cytonuclear_discordant", "hybrid_index_h", "interspecific_ancestry_q12", "hybrid_generation_class",
+    "coancestry_cluster", "f_branch_max", "f_branch_donor_taxon", "snaq_gamma_minor", "coalescent_gdi",
+    "bpp_introgression_bf", "mmrr_beta_ibd", "mmrr_beta_ibe", "mmrr_p_ibe", "public_backbone_clade", "public_phytop_ils_index",
     "public_phytop_ih_index", "public_plastome_match", "public_its_match", "waxy_lineage_match"
   ), names(df))
 
@@ -79,11 +79,11 @@ resolve_tier0_anchor_overrides <- function(df) {
   nov <- .pick_bool_prop(df, "is_putative_novel_or_hybrid_query", FALSE); pred <- trimws(.pick_chr_prop(df, "geno_predicted_taxon", ""))
   sp <- trimws(.pick_chr_prop(df, "species_standardized", "")); prob <- .pick_num_prop(df, "geno_posterior_prob")
   margin <- if ("geno_margin" %in% names(df)) suppressWarnings(as.numeric(df$geno_margin)) else rep(NA_real_, n)
-  q12 <- .pick_num_prop(df, c("interclass_het_Q12", "interspecific_ancestry_q12"))
+  q12 <- .pick_num_prop(df, "interspecific_ancestry_q12")
   is_t0 <- !is_type & (tier %in% c("G1_Direct_Voucher", "G1_Exsiccatae_Isoduplicate")) & qc & !adm & !nov &
     is.finite(prob) & (prob >= 0.85) & (is.na(margin) | margin >= 0.40) & nzchar(pred) & (pred != "Unknown")
   evict <- !is_type & (tier %in% c("G1_Direct_Voucher", "G1_Exsiccatae_Isoduplicate")) & qc &
-    ((nzchar(pred) & (pred != "Unknown") & (pred != sp) & is.finite(prob) & (prob >= 0.85)) | (is.finite(q12) & (q12 >= 0.35)))
+    ((nzchar(pred) & (pred != "Unknown") & (pred != sp) & is.finite(prob) & (prob >= 0.85)) | (is.finite(q12) & (q12 >= 0.35)) | (adm & !is.finite(q12)))
   list(is_tier0_dna_anchor = is_t0, evict_from_given_anchor = evict, rectified_taxon = ifelse(is_t0, pred, sp), tier0_weight = ifelse(is_t0, 4.0, NA_real_))
 }
 
@@ -125,14 +125,15 @@ propagate_conditional_deme_priors <- function(df, ga_df = NULL, morph_X = NULL, 
     if (length(p_idx) >= 2L) ph_ref[[tx]] <- c(mean(ph[p_idx]), max(stats::sd(ph[p_idx]), 0.4))
   }
 
-  cands <- which(!(tier %in% c("G1_Direct_Voucher", "G1_Exsiccatae_Isoduplicate", "G2_Population_Voucher_Proxy")) & !.is_type_prop(df) & is.finite(lat) & is.finite(lon))
+  is_cent_raw <- .pick_bool_prop(df, "is_centroid_or_inst_coord", FALSE)
+  cands <- which(!(tier %in% c("G1_Direct_Voucher", "G1_Exsiccatae_Isoduplicate", "G2_Population_Voucher_Proxy")) & !.is_type_prop(df) & !is_cent_raw & is.finite(lat) & is.finite(lon))
   df_geo_verified <- .resolve_verified_sympatry_rows_prop(df, t0, lat, lon, pure_ev); crit_d2 <- stats::qchisq(0.95, df = p)
   qc_num <- is.numeric(df$geno_quality_pass) || is.integer(df$geno_quality_pass); adm_num <- is.numeric(df$is_geno_admixed) || is.integer(df$is_geno_admixed)
   rec_ploidy <- .extract_known_ploidy_vec(df); is_multi_tx <- .pick_num_prop(df, "is_multi_cytotype_taxon")
   multi_sp_set <- unique(sp[!is.na(is_multi_tx) & is_multi_tx == 1L & nzchar(sp)]); row_typed_pl <- rec_ploidy
   has_dr <- !is.na(anc_df$df_row) & !is.na(anc_df$ploidy)
   if (any(has_dr)) { dr <- anc_df$df_row[has_dr]; m <- is.na(row_typed_pl[dr]); if (any(m)) row_typed_pl[dr[m]] <- anc_df$ploidy[has_dr][m] }
-  df_typed_ll <- which(!is.na(row_typed_pl) & is.finite(lat) & is.finite(lon))
+  df_typed_ll <- which(!is.na(row_typed_pl) & !is_cent_raw & is.finite(lat) & is.finite(lon))
 
   for (i in cands) {
     dists <- .haversine_km_vec(lat[i], lon[i], anc_df$lat, anc_df$lon); in_2km <- which(dists <= 2.0)
@@ -205,7 +206,7 @@ fit_tier0_calibrated_projection <- function(df, opts = list()) {
   classes <- sort(names(cls_tab[cls_tab >= 2L])); train_idx <- which(t0$is_tier0_dna_anchor & is_basal & row_fin & (y_all %in% classes))
   if (length(classes) < 2L || length(train_idx) < 4L) { attr(df, "tier0_projection_summary") <- empty_sum; return(df) }
 
-  pop_col <- .pick_chr_prop(df, c("population_deme_id", "coancestry_cluster", "coancestry_cluster_id"), "")
+  pop_col <- .pick_chr_prop(df, c("population_deme_id", "coancestry_cluster"), "")
   lat <- .pick_num_prop(df, "decimalLatitude"); lon <- .pick_num_prop(df, "decimalLongitude")
   pop_vec <- ifelse(nzchar(pop_col), pop_col, ifelse(is.finite(lat) & is.finite(lon), sprintf("%.1f_%.1f", round(lat, 1), round(lon, 1)), as.character(seq_len(n))))
   oof_logits <- matrix(NA_real_, nrow = length(train_idx), ncol = length(classes))
@@ -261,7 +262,7 @@ propagate_cluster_gdi_governance <- function(df, gdi_df = NULL, morph_X = NULL, 
   tx_gdi <- list(); cl_gdi <- list(); cl_anchor_pl <- list(); cl_conflict <- list(); tx_anchor_pls <- list()
   tier <- .pick_chr_prop(df, c("geno_linkage_tier", "linkage_tier"), ""); qc <- .pick_bool_prop(df, "geno_quality_pass", FALSE)
   adm <- .pick_bool_prop(df, "is_geno_admixed", FALSE); pred <- trimws(.pick_chr_prop(df, "geno_predicted_taxon", ""))
-  g_col <- .pick_num_prop(df, "coalescent_gdi"); cl_col <- trimws(.pick_chr_prop(df, c("coancestry_cluster_id", "coancestry_cluster"), ""))
+  g_col <- .pick_num_prop(df, "coalescent_gdi"); cl_col <- trimws(.pick_chr_prop(df, c("coancestry_cluster"), ""))
   gmm_v <- .pick_num_prop(df, "gmm_cluster"); eco_v <- trimws(.pick_chr_prop(df, "ecotype_regime", ""))
   sp <- trimws(.pick_chr_prop(df, "species_standardized", "")); rec_ploidy <- .extract_known_ploidy_vec(df)
   lat <- .pick_num_prop(df, "decimalLatitude"); lon <- .pick_num_prop(df, "decimalLongitude")
@@ -278,7 +279,7 @@ propagate_cluster_gdi_governance <- function(df, gdi_df = NULL, morph_X = NULL, 
   }
   if (!is.null(gdi_df) && is.data.frame(gdi_df) && nrow(gdi_df) > 0L) {
     gt <- trimws(.pick_chr_prop(gdi_df, c("taxon", "species_standardized", "lineage"), "")); gv <- .pick_num_prop(gdi_df, c("coalescent_gdi", "gdi"))
-    gcl <- trimws(.pick_chr_prop(gdi_df, c("coancestry_cluster_id", "coancestry_cluster"), ""))
+    gcl <- trimws(.pick_chr_prop(gdi_df, c("coancestry_cluster"), ""))
     for (r in which(is.finite(gv))) {
       if (nzchar(gt[r])) tx_gdi[[gt[r]]] <- c(tx_gdi[[gt[r]]], gv[r])
       if (nzchar(gcl[r]) && !isTRUE(cl_conflict[[gcl[r]]])) cl_gdi[[gcl[r]]] <- c(cl_gdi[[gcl[r]]], gv[r])
@@ -294,16 +295,17 @@ propagate_cluster_gdi_governance <- function(df, gdi_df = NULL, morph_X = NULL, 
   mu_taxon <- if (!is.null(morph_X)) .build_taxon_centroids(df, morph_X, is_basal, t0) else list()
   crit_d2 <- if (!is.null(morph_X)) stats::qchisq(0.95, df = ncol(morph_X)) else NA_real_
   cal_tx <- trimws(.pick_chr_prop(df, "tier0_calibrated_taxon", "")); abst <- df$tier0_abstention_flag
-  pure_ev <- t0$evict_from_given_anchor & !t0$is_tier0_dna_anchor; typed_ll <- which(!is.na(rec_ploidy) & is.finite(lat) & is.finite(lon))
+  is_cent_raw <- .pick_bool_prop(df, "is_centroid_or_inst_coord", FALSE)
+  pure_ev <- t0$evict_from_given_anchor & !t0$is_tier0_dna_anchor; typed_ll <- which(!is.na(rec_ploidy) & !is_cent_raw & is.finite(lat) & is.finite(lon))
   for (i in seq_len(n)) {
     if (adm[i] || pure_ev[i] || (!is.na(abst[i]) && abst[i] == 1L)) next
     if (nzchar(cl_col[i]) && isTRUE(cl_conflict[[cl_col[i]]])) next
     if (nzchar(cl_col[i]) && !is.na(rec_ploidy[i]) && !is.null(cl_anchor_pl[[cl_col[i]]]) && rec_ploidy[i] != cl_anchor_pl[[cl_col[i]]]) next
-    if (is.finite(lat[i]) && is.finite(lon[i]) && length(typed_ll) > 0L) {
+    if (!is_cent_raw[i] && is.finite(lat[i]) && is.finite(lon[i]) && length(typed_ll) > 0L) {
       deme_pls <- unique(rec_ploidy[typed_ll[.haversine_km_vec(lat[i], lon[i], lat[typed_ll], lon[typed_ll]) <= 2.0]])
       if (length(deme_pls) > 1L || (length(deme_pls) == 1L && !is.na(rec_ploidy[i]) && rec_ploidy[i] != deme_pls[1L])) next
     }
-    mcl_res <- .eval_mcl_cluster_gdi_prop(i, mcl_col[i], mcl_col, src_ok, g_col, pred, rec_ploidy, lat, lon)
+    mcl_res <- .eval_mcl_cluster_gdi_prop(i, mcl_col[i], mcl_col, src_ok, g_col, pred, rec_ploidy, lat, lon, is_cent = is_cent_raw)
     if (mcl_res$conflict) next
     cl_ok <- nzchar(cl_col[i]) && !is.null(cl_med[[cl_col[i]]])
     gval <- if (cl_ok) cl_med[[cl_col[i]]] else if (is.finite(mcl_res$gdi)) mcl_res$gdi else {

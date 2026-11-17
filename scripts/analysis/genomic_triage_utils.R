@@ -416,7 +416,7 @@ build_genomic_markdown_summary <- function(opts, df) {
     lines <- c(lines, paste0("- **Post-Hoc Multi-Modal Congruence:** ", paste(c_strs, collapse = "; "), "."))
   }
   tc_src <- if (!is.null(tc_df) && nrow(tc_df) > 0L) tc_df else df
-  cx_col <- intersect(c("species_complex_id", "taxon_complex_id", "complex_id", "complex_label", "species_complex", "leiden_complex"), names(tc_src))[1L]
+  cx_col <- intersect(c("consensus_complex_id", "complex_id", "complex_label", "species_complex"), names(tc_src))[1L]
   cx_str <- ""
   if (!is.na(cx_col)) {
     cx_vals <- as.character(tc_src[[cx_col]])

@@ -367,7 +367,7 @@ Three cross-language invariants govern every column documented below:
 
 ### 3.6 `curation_triage` (Step 07 Five-Stage Integrative Synthesis)
 
-**Primary Key:** `(run_id, catalogNumber, plant_individual_id)` | **Populated By:** `scripts/analysis/07_triage_dashboard_synthesis.R`, `scripts/analysis/step07_genomic_propagation.R`, and `scripts/analysis/edaphic_geochem_wetland_utils.R`
+**Primary Key:** `(run_id, catalogNumber, plant_individual_id)` | **Populated By:** `scripts/analysis/07_triage_dashboard_synthesis.R` (`step07_ancova_merge_utils.R` paired with `step07_hopkins_consensus_utils.R`, `step07_biogeo_hybrid_utils.R` alongside `step07_cluster_cohesion_utils.R`, `step07_decision_stages_utils.R` paired with `step07_postprocess_guards_utils.R`, `step07_cytology_integration.R`, `step07_genomic_propagation.R`, `step07_deme_propagation_utils.R`, `step07_organellar_triage_utils.R`), `genomic_triage_utils.R`, plus `edaphic_geochem_wetland_utils.R`
 
 | Column | SQLite Type | Units / Domain | Description |
 | :--- | :---: | :--- | :--- |
@@ -408,7 +408,7 @@ Three cross-language invariants govern every column documented below:
 
 ### 3.7 `taxon_complexes` (Step 07 Unsupervised Species-Complex Delimitation)
 
-**Primary Key:** `(run_id, species_standardized)` | **Populated By:** `scripts/analysis/taxon_complex_discovery_utils.R`
+**Primary Key:** `(run_id, species_standardized)` | **Populated By:** `scripts/analysis/taxon_complex_discovery_utils.R` paired with `scripts/analysis/step07_complex_affinity_utils.R`
 **Companion CSV:** `runs/<RUN_ID>/outputs/reports/empirical_taxon_complexes.csv` (exact 23-column twin-free schema excluding `run_id`)
 
 | Column | SQLite Type | Units / Domain | Description |

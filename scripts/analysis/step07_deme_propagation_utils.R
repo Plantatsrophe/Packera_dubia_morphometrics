@@ -11,6 +11,14 @@
     (grepl("type", ts, ignore.case = TRUE) & !grepl("non[- ]?type|not a type", ts, ignore.case = TRUE))
 }
 
+if (!exists(".is_step07_centroid_coord", mode = "function")) {
+  .is_step07_centroid_coord <- function(df) {
+    n <- nrow(df); if (n == 0L) return(logical(0))
+    if (!("is_centroid_or_inst_coord" %in% names(df))) return(rep(FALSE, n))
+    .safe_bool_prop(df$is_centroid_or_inst_coord) & !.is_type_prop(df)
+  }
+}
+
 .init_propagation_cols <- function(df, reset = FALSE) {
   n <- nrow(df)
   for (c in c("genomic_propagation_tier", "tier0_calibrated_taxon")) df[[c]] <- if (reset || !(c %in% names(df))) rep(NA_character_, n) else as.character(df[[c]])
@@ -137,7 +145,8 @@
     pr <- .pick_num_prop(tbl, "geno_posterior_prob"); hg <- trimws(.pick_chr_prop(tbl, "hybrid_generation_class", ""))
     pd <- trimws(.pick_chr_prop(tbl, "geno_predicted_taxon", "")); spv <- trimws(.pick_chr_prop(tbl, "species_standardized", ""))
     ok <- (tr %in% c("G1_Direct_Voucher", "G2_Population_Voucher_Proxy", if (allow_g3) "G3_Georeferenced_Unvouchered")) &
-      qcf & is.finite(la) & is.finite(lo) & !ad & ((is.finite(pr) & pr >= 0.80) | (hg == "Divergent_NonHybrid_Lineage"))
+      qcf & !.pick_bool_prop(tbl, "is_centroid_or_inst_coord", FALSE) & is.finite(la) & is.finite(lo) & !ad &
+      ((is.finite(pr) & pr >= 0.80) | (hg == "Divergent_NonHybrid_Lineage"))
     tx <- ifelse(nzchar(pd) & pd != "Unknown", pd, ifelse(hg == "Divergent_NonHybrid_Lineage", spv, ""))
     ok <- ok & nzchar(tx) & (tx != "Unknown")
     doy_v <- .pick_num_prop(tbl, "hopkins_adjusted_doy")
@@ -169,7 +178,7 @@
     !.pick_bool_prop(df, "is_confident_label_noise", FALSE) &
     !.pick_bool_prop(df, c("morphometric_outlier_flag", "is_morph_outlier"), FALSE) & !pure_ev
   verified <- is_type | t0$is_tier0_dna_anchor | is_gold
-  which(verified & is.finite(lat) & is.finite(lon) & nzchar(t0$rectified_taxon) & (t0$rectified_taxon != "Unknown") & !pure_ev)
+  which(verified & !.is_step07_centroid_coord(df) & is.finite(lat) & is.finite(lon) & nzchar(t0$rectified_taxon) & (t0$rectified_taxon != "Unknown") & !pure_ev)
 }
 
 .eval_deme_edaphic_gate_prop <- function(cand_sp, sp_i, ed_z_i, ph_i, ph_donor, ph_ref_cand) {
@@ -198,11 +207,11 @@
   list(pass = TRUE, mult = 1.0)
 }
 
-.eval_mcl_cluster_gdi_prop <- function(i, mcl_key, mcl_col, src_ok, g_col, pred, rec_ploidy, lat, lon) {
+.eval_mcl_cluster_gdi_prop <- function(i, mcl_key, mcl_col, src_ok, g_col, pred, rec_ploidy, lat, lon, is_cent = rep(FALSE, length(lat))) {
   if (!nzchar(mcl_key)) return(list(conflict = FALSE, gdi = NA_real_, pl = NULL))
   m_rows <- which(mcl_col == mcl_key)
-  if (is.finite(lat[i]) && is.finite(lon[i])) {
-    has_c <- is.finite(lat[m_rows]) & is.finite(lon[m_rows])
+  if (!is_cent[i] && is.finite(lat[i]) && is.finite(lon[i])) {
+    has_c <- is.finite(lat[m_rows]) & is.finite(lon[m_rows]) & !is_cent[m_rows]
     keep <- rep(TRUE, length(m_rows))
     if (any(has_c)) keep[has_c] <- .haversine_km_vec(lat[i], lon[i], lat[m_rows[has_c]], lon[m_rows[has_c]]) <= 250.0
     m_rows <- m_rows[keep]
