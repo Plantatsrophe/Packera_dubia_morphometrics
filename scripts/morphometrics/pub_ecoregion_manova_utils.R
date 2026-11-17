@@ -64,7 +64,7 @@ standardize_epa_l3_label_r <- function(raw_vec) {
     if (is.na(s)) return(NA_character_)
     s_ascii <- iconv(s, from = "", to = "ASCII//TRANSLIT")
     if (is.na(s_ascii)) s_ascii <- s
-    s_clean <- gsub("\\.$", "", gsub("\\s+", " ", tolower(trimws(s_ascii))))
+    s_clean <- gsub("\\.$", "", gsub("[[:space:]]+", " ", tolower(trimws(s_ascii))))
     if (!nzchar(s_clean) || s_clean %in% c("na", "nan", "none", "unknown")) return(NA_character_)
     if (s_clean %in% names(abbr_map)) unname(abbr_map[[s_clean]]) else s_clean
   }, character(1), USE.NAMES = FALSE)
@@ -90,12 +90,12 @@ standardize_epa_l3_label_r <- function(raw_vec) {
     }
     if (grepl(" or |/|\\?", c_str)) return(NA_character_)
     c_str <- gsub("\\[|\\]|\\(|\\)", "", c_str)
-    was_explicit_city <- grepl("^city\\s+of\\s+|\\b(independent\\s+city|city)$", c_str) && !grepl("\\bcounty\\b", c_str)
-    c_str <- gsub("^(regional\\s+municipality\\s+of|united\\s+counties\\s+of|county\\s+of|city\\s+of|mrc\\s+de|mrc\\s+d'|municipalite\\s+regionale\\s+de\\s+comte\\s+de)\\s+", "", c_str)
-    c_str <- gsub("\\s+(regional\\s+municipality|united\\s+counties|county\\s+municipality|census\\s+division|census\\s+area|city\\s+and\\s+borough|independent\\s+city|independent|municipality|county|parish|par\\.?|borough|district|mrc|co\\.?)$", "", c_str)
-    c_str <- gsub("\\s+city$", "", c_str)
-    c_str <- gsub("^(st\\.|saint)\\s+", "st ", c_str)
-    c_str <- gsub("^ste\\.\\s*", "ste ", c_str)
+    was_explicit_city <- grepl("^city[[:space:]]+of[[:space:]]+|\\b(independent[[:space:]]+city|city)$", c_str) && !grepl("\\bcounty\\b", c_str)
+    c_str <- gsub("^(regional[[:space:]]+municipality[[:space:]]+of|united[[:space:]]+counties[[:space:]]+of|county[[:space:]]+of|city[[:space:]]+of|mrc[[:space:]]+de|mrc[[:space:]]+d'|municipalite[[:space:]]+regionale[[:space:]]+de[[:space:]]+comte[[:space:]]+de)[[:space:]]+", "", c_str)
+    c_str <- gsub("[[:space:]]+(regional[[:space:]]+municipality|united[[:space:]]+counties|county[[:space:]]+municipality|census[[:space:]]+division|census[[:space:]]+area|city[[:space:]]+and[[:space:]]+borough|independent[[:space:]]+city|independent|municipality|county|parish|par\\.?|borough|district|mrc|co\\.?)$", "", c_str)
+    c_str <- gsub("[[:space:]]+city$", "", c_str)
+    c_str <- gsub("^(st\\.|saint)[[:space:]]+", "st ", c_str)
+    c_str <- gsub("^ste\\.[[:space:]]*", "ste ", c_str)
     c_str <- trimws(gsub("[^a-z0-9]+", " ", c_str))
     if (!nzchar(c_str)) return(NA_character_)
     st_i <- as.character(st_norm_vec[i])

@@ -22,8 +22,8 @@ Core R analytical entrypoints and public genomics modules enforce hard line-coun
 
 | Script Path | Maximum Line Budget | Companion Helper / Figure Modules |
 | :--- | :---: | :--- |
-| `scripts/morphometrics/03_fourier_extractor.R` | `<= 800` lines | `dissected_leaf_utils.R`, `fourier_parallel_utils.R`, `scripts/figures/step03_figures.R` |
-| `scripts/morphometrics/04_gmm_morphotools.R` | `<= 650` lines | `authority_weighting_utils.R`, `plasticity_mitigation_utils.R`, `pub_ecoregion_manova_utils.R`, `scripts/figures/step04_figures.R` |
+| `scripts/morphometrics/03_fourier_extractor.R` | `< 500` lines | `step03_config_scale_utils.R` (`< 240`), `dissected_leaf_utils.R`, `fourier_parallel_utils.R` (`< 500`), `scripts/figures/step03_figures.R` (`< 385`) |
+| `scripts/morphometrics/04_gmm_morphotools.R` | `<= 650` lines | `authority_weighting_utils.R`, `plasticity_mitigation_utils.R` (`< 470`), `pub_ecoregion_manova_utils.R`, `scripts/figures/step04_figures.R` |
 | `scripts/analysis/taxon_complex_discovery_utils.R` | `<= 800` lines | `07_triage_dashboard_synthesis.R`, `genomic_triage_utils.R`, `scripts/figures/step07_figures.R` |
 | `scripts/data_prep/download_public_packera_sequences.py` | `< 500` lines | `06_ingest_genetic_data.py`, `skim_offtarget_organellar.py` |
 | `scripts/data_prep/skim_offtarget_organellar.py` | `< 500` lines | `06_ingest_genetic_data.py`, `download_public_packera_sequences.py` |

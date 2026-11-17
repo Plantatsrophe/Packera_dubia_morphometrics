@@ -614,7 +614,7 @@ run_gmm_morphotools_pipeline <- function(opts) {
     kept_dis <- prune_collinear_dissection_scalars(closed_df, base_cols = feature_cols, cand_scalars = dis_cands, active_mask = (closed_df$authority_weight > 0), group_vec = NULL, max_r = 0.75)
     if (length(kept_dis) > 0L) feature_cols <- unique(c(feature_cols, kept_dis))
   }
-  cand_taxa <- sort(unique(closed_df$species_standardized[!is.na(closed_df$species_standardized) & grepl("^Packera\\s+", closed_df$species_standardized)]))
+  cand_taxa <- sort(unique(closed_df$species_standardized[!is.na(closed_df$species_standardized) & grepl("^Packera[[:space:]]+", closed_df$species_standardized)]))
   tx_n <- table(factor(closed_df$species_standardized, levels = cand_taxa)); target_taxa <- if (sum(tx_n >= 2L) >= 2L) names(tx_n[tx_n >= 2L]) else if (length(cand_taxa) > 0L) cand_taxa else sort(unique(stats::na.omit(closed_df$species_standardized)))
   is_intra_mode <- isTRUE(opts$intraspecific_mode) || (length(target_taxa) < 2L)
   if (exists("merge_voucher_phenophase_covariates", mode = "function")) closed_df <- merge_voucher_phenophase_covariates(closed_df, opts$harmonics, opts$vouchers)

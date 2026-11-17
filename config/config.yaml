@@ -202,7 +202,6 @@ plant_component_detector:
 morphometrics:
   cohort_adaptive_mode: true
   min_anchor_n_for_empirical: 5
-  nb_harmonics: 12
   symmetrize_efa_harmonics: true
   correct_allometry: "auto"
   allometry_r2_threshold: 0.10
@@ -211,17 +210,13 @@ morphometrics:
   max_k: 8
   random_seed: 42
   fourier:
-    cohort_adaptive_mode: true
-    min_anchor_n_for_empirical: 5
     min_harmonics: 6
     max_harmonics: 24
     target_harmonic_power: 0.99
     target_pca_variance: 0.95
     min_export_pcs: 5
     max_export_pcs: 15
-  gmm:
-    cohort_adaptive_mode: true
-    min_anchor_n_for_empirical: 5
+  gmm: {}
   # Step 03 achieves scale, rotation, and start-point homology via LeafMachine3's
   # landmark-anchored `lamina_base -> lamina_tip` frame (`coo_center() %>% coo_scale()`
   # + `Momocs::efourier(..., norm = FALSE, start = FALSE)`), NOT via first-harmonic

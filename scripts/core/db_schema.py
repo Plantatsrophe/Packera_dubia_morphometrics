@@ -297,6 +297,9 @@ def _build_master_view_ddl() -> str:
         om.area_mm2 AS area_mm2,
         om.blade_cie_l_norm AS blade_cie_l_norm,
         om.blade_cie_l_sd AS blade_cie_l_sd,
+        om.blade_cie_l_sheet_delta AS blade_cie_l_sheet_delta,
+        om.blade_cie_a_delta AS blade_cie_a_delta,
+        om.blade_cie_b_delta AS blade_cie_b_delta,
         om.is_dissected AS is_dissected,
         om.centroid_size AS centroid_size,
         om.log_centsize AS log_centsize,
@@ -830,6 +833,9 @@ def _build_schema_ddl() -> str:
         qc_flag_reason TEXT DEFAULT 'PASS',
         blade_cie_l_norm REAL,
         blade_cie_l_sd REAL,
+        blade_cie_l_sheet_delta REAL,
+        blade_cie_a_delta REAL,
+        blade_cie_b_delta REAL,
         PRIMARY KEY (catalogNumber, plant_individual_id, leaf_id),
         FOREIGN KEY (catalogNumber, plant_individual_id)
             REFERENCES plant_individuals(catalogNumber, plant_individual_id) ON DELETE CASCADE
@@ -1071,6 +1077,9 @@ def _build_schema_ddl() -> str:
         area_mm2 REAL,
         blade_cie_l_norm REAL,
         blade_cie_l_sd REAL,
+        blade_cie_l_sheet_delta REAL,
+        blade_cie_a_delta REAL,
+        blade_cie_b_delta REAL,
         is_dissected INTEGER,
         pixels_per_mm REAL,
         is_calibrated_mm INTEGER,
@@ -1161,6 +1170,9 @@ def _build_schema_ddl() -> str:
         log_centsize REAL,
         blade_cie_l_norm REAL,
         blade_cie_l_sd REAL,
+        blade_cie_l_sheet_delta REAL,
+        blade_cie_a_delta REAL,
+        blade_cie_b_delta REAL,
         AR_inv REAL,
         AR_inv_std REAL,
         log1p_capitulum_count REAL,
@@ -1431,6 +1443,9 @@ _DYNAMIC_TABLE_MIGRATION_SPECS: Dict[str, Tuple[Tuple[str, str], ...]] = {
         ("qc_flag_reason", "TEXT DEFAULT 'PASS'"),
         ("blade_cie_l_norm", "REAL"),
         ("blade_cie_l_sd", "REAL"),
+        ("blade_cie_l_sheet_delta", "REAL"),
+        ("blade_cie_a_delta", "REAL"),
+        ("blade_cie_b_delta", "REAL"),
     ),
     "run_active_cohort": (
         ("type_status", "TEXT"),
@@ -1465,6 +1480,9 @@ _DYNAMIC_TABLE_MIGRATION_SPECS: Dict[str, Tuple[Tuple[str, str], ...]] = {
             ("spatial_balance_weight", "REAL"),
             ("blade_cie_l_norm", "REAL"),
             ("blade_cie_l_sd", "REAL"),
+            ("blade_cie_l_sheet_delta", "REAL"),
+            ("blade_cie_a_delta", "REAL"),
+            ("blade_cie_b_delta", "REAL"),
         ]
     ),
     "otu_morphometrics": tuple(
@@ -1523,6 +1541,9 @@ _DYNAMIC_TABLE_MIGRATION_SPECS: Dict[str, Tuple[Tuple[str, str], ...]] = {
             ("within_rosette_efa_dispersion", "REAL"),
             ("blade_cie_l_norm", "REAL"),
             ("blade_cie_l_sd", "REAL"),
+            ("blade_cie_l_sheet_delta", "REAL"),
+            ("blade_cie_a_delta", "REAL"),
+            ("blade_cie_b_delta", "REAL"),
             ("log1p_capitulum_count", "REAL"),
             ("log1p_capitulum_count_std", "REAL"),
             ("nearest_type_basionym", "TEXT"),
@@ -1778,6 +1799,9 @@ _CANONICAL_EXTRACTED_LEAVES_COLS: Tuple[str, ...] = (
     "qc_flag_reason",
     "blade_cie_l_norm",
     "blade_cie_l_sd",
+    "blade_cie_l_sheet_delta",
+    "blade_cie_a_delta",
+    "blade_cie_b_delta",
 )
 
 _CANONICAL_VOUCHER_REPRO_COLS: Tuple[str, ...] = (
@@ -1923,6 +1947,9 @@ def _rebuild_tier_a_step02_tables_if_needed(
                 qc_flag_reason TEXT DEFAULT 'PASS',
                 blade_cie_l_norm REAL,
                 blade_cie_l_sd REAL,
+                blade_cie_l_sheet_delta REAL,
+                blade_cie_a_delta REAL,
+                blade_cie_b_delta REAL,
                 PRIMARY KEY (catalogNumber, plant_individual_id, leaf_id),
                 FOREIGN KEY (catalogNumber, plant_individual_id)
                     REFERENCES plant_individuals(catalogNumber, plant_individual_id) ON DELETE CASCADE
@@ -2231,7 +2258,7 @@ def init_db_schema(conn: sqlite3.Connection) -> None:
             om_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(otu_morphometrics);").fetchall()}
             srf_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(spatial_rf_predictions);").fetchall()}
             mv_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(v_integrative_triage_master);").fetchall()}
-            req_mv_cols = {"is_passive", "scale_source", "AR_inv_std", "log1p_capitulum_count", "blade_cie_l_norm", "nearest_type_basionym", "reproductive_trait_status", "ecoregion_can1", "ecoregion_can2", "hybrid_zone_cohesion_pass", "hybrid_parent_1", "hybrid_parent_2", "cda_oof_posterior_prob", "self_morph_mahal_d2", "open_set_df", "cryptic_non_clinal_pass", "resurrection_basionym", "w_geno_kappa", "geno_predicted_taxon", "geno_linkage_tier", "is_geno_admixed", "coalescent_gdi", "hybrid_generation_class", "cytonuclear_discordant", "public_plastome_match", "public_its_match", "waxy_lineage_match", "public_backbone_clade", "public_phytop_ils_index", "public_phytop_ih_index", "genomic_propagation_tier", "cluster_propagated_gdi", "cytology_linkage_tier", "voucher_sporophytic_2n", "voucher_ploidy_level", "taxon_reported_cytotypes", "is_multi_cytotype_taxon", "cytotype_reproductive_barrier_pass", "soil_ca_mg_molar_ratio", "soil_ultramafic_ni_cr_index", "soil_carbonate_c_pct", "is_nwi_wetland", "nwi_wetland_system", "nwi_wetland_dist_m", "hydro_edaphic_niche_regime", "wetland_fidelity_concordance", "basionym_synonymy_type", "backbone_basionym_name", "protologue_url", "natureserve_global_rank", "nwpl_indicator_code", "nwpl_wetland_score", "is_centroid_or_inst_coord", "coord_quarantine_reason", "env_mahal_d2", "env_mcd_outlier_flag"}
+            req_mv_cols = {"is_passive", "scale_source", "AR_inv_std", "log1p_capitulum_count", "blade_cie_l_norm", "blade_cie_l_sheet_delta", "blade_cie_a_delta", "blade_cie_b_delta", "nearest_type_basionym", "reproductive_trait_status", "ecoregion_can1", "ecoregion_can2", "hybrid_zone_cohesion_pass", "hybrid_parent_1", "hybrid_parent_2", "cda_oof_posterior_prob", "self_morph_mahal_d2", "open_set_df", "cryptic_non_clinal_pass", "resurrection_basionym", "w_geno_kappa", "geno_predicted_taxon", "geno_linkage_tier", "is_geno_admixed", "coalescent_gdi", "hybrid_generation_class", "cytonuclear_discordant", "public_plastome_match", "public_its_match", "waxy_lineage_match", "public_backbone_clade", "public_phytop_ils_index", "public_phytop_ih_index", "genomic_propagation_tier", "cluster_propagated_gdi", "cytology_linkage_tier", "voucher_sporophytic_2n", "voucher_ploidy_level", "taxon_reported_cytotypes", "is_multi_cytotype_taxon", "cytotype_reproductive_barrier_pass", "soil_ca_mg_molar_ratio", "soil_ultramafic_ni_cr_index", "soil_carbonate_c_pct", "is_nwi_wetland", "nwi_wetland_system", "nwi_wetland_dist_m", "hydro_edaphic_niche_regime", "wetland_fidelity_concordance", "basionym_synonymy_type", "backbone_basionym_name", "protologue_url", "natureserve_global_rank", "nwpl_indicator_code", "nwpl_wetland_score", "is_centroid_or_inst_coord", "coord_quarantine_reason", "env_mahal_d2", "env_mcd_outlier_flag"}
             if (
                 "leaf_zone" not in el_cols
                 or "area_mm2" not in el_cols

@@ -217,12 +217,12 @@ format_predictor_labels <- function(var_vec) {
 
 .expand_synonym_binomial_keys <- function(syn_vec) {
   if (length(syn_vec) == 0L) return(character(0))
-  nms <- tolower(gsub("\\s+", " ", trimws(names(syn_vec))))
-  vals <- gsub("^Packera\\s+(?:x|×)\\s+", "Packera ", trimws(as.character(syn_vec)), ignore.case = TRUE)
+  nms <- tolower(gsub("[[:space:]]+", " ", trimws(names(syn_vec))))
+  vals <- gsub("^Packera[[:space:]]+(?:x|×)[[:space:]]+", "Packera ", trimws(as.character(syn_vec)), ignore.case = TRUE)
   keep <- !is.na(nms) & nzchar(nms) & !is.na(vals) & nzchar(vals)
   if (!any(keep)) return(character(0))
   out <- stats::setNames(vals[keep], nms[keep])
-  bin_pat <- "^([a-z]+\\s+(?:(?:x|×)\\s*)?[a-z][a-z-]*)\\b.*$"
+  bin_pat <- "^([a-z]+[[:space:]]+(?:(?:x|×)[[:space:]]*)?[a-z][a-z-]*)\\b.*$"
   is_bin <- grepl(bin_pat, names(out))
   if (any(is_bin)) {
     b_keys <- sub(bin_pat, "\\1", names(out)[is_bin])
@@ -321,14 +321,14 @@ standardize_taxon_name <- function(raw_vec) {
   need_py_idx <- integer(0)
   fb_packera <- rep(NA_character_, length(u_vals))
   open_ep <- c("sp", "spp", "cf", "aff", "indet", "unknown", "na")
-  syn_gen_pat <- "^(packera|p\\.|senecio|s\\.|cineraria|jacobaea|aureolaria)\\s*(?:(?:cf\\.?|aff\\.?)\\s+)?(x\\s+|×\\s*)?([a-z][a-z-]*).*$"
+  syn_gen_pat <- "^(packera|p\\.|senecio|s\\.|cineraria|jacobaea|aureolaria)[[:space:]]*(?:(?:cf\\.?|aff\\.?)[[:space:]]+)?(x[[:space:]]+|×[[:space:]]*)?([a-z][a-z-]*).*$"
 
   std_u <- character(length(u_vals))
   for (i in seq_along(u_vals)) {
     val <- u_vals[i]
     if (is.na(val)) { std_u[i] <- NA_character_; next }
     s_orig <- trimws(val)
-    s <- tolower(gsub("\\s+", " ", s_orig))
+    s <- tolower(gsub("[[:space:]]+", " ", s_orig))
     if (!nzchar(s_orig) || s %in% c("none", "nan", "null", "na", "unknown", "unassigned", "unassigned_packera", "packera")) {
       std_u[i] <- NA_character_; next
     }
@@ -338,9 +338,9 @@ standardize_taxon_name <- function(raw_vec) {
     if (has_syn && (s %in% names(syn_map))) {
       std_u[i] <- unname(syn_map[[s]]); next
     }
-    if (has_syn && grepl("^[a-z]+\\s+[a-z-]+\\s+(?:var\\.?|subsp\\.?|ssp\\.?|f\\.?)\\s+[a-z-]+", s)) {
-      v_raw <- sub("^([a-z]+\\s+[a-z-]+\\s+(?:var\\.?|subsp\\.?|ssp\\.?|f\\.?)\\s+[a-z-]+).*$", "\\1", s)
-      v_dot <- gsub("\\b(var|subsp|ssp|f)\\.?\\s+", "\\1. ", v_raw)
+    if (has_syn && grepl("^[a-z]+[[:space:]]+[a-z-]+[[:space:]]+(?:var\\.?|subsp\\.?|ssp\\.?|f\\.?)[[:space:]]+[a-z-]+", s)) {
+      v_raw <- sub("^([a-z]+[[:space:]]+[a-z-]+[[:space:]]+(?:var\\.?|subsp\\.?|ssp\\.?|f\\.?)[[:space:]]+[a-z-]+).*$", "\\1", s)
+      v_dot <- gsub("\\b(var|subsp|ssp|f)\\.?[[:space:]]+", "\\1. ", v_raw)
       if (v_raw %in% names(syn_map)) { std_u[i] <- unname(syn_map[[v_raw]]); next }
       if (v_dot %in% names(syn_map)) { std_u[i] <- unname(syn_map[[v_dot]]); next }
     }
@@ -443,7 +443,7 @@ resolve_plot_group_column <- function(df, cda_res = NULL, gmm_res = NULL) {
     if (!has_valid_multi(vc)) return(FALSE)
     vv <- unique(vc[!is.na(vc) & vc != "Unknown"])
     any(grepl("Morphotype_K|\\[K[0-9]+\\]|Ecotype|Subcluster|Region_", vv, ignore.case = TRUE)) ||
-      !all(grepl("^Packera\\s+", vv))
+      !all(grepl("^Packera[[:space:]]+", vv))
   }
 
   cand_cda <- if (!is.null(cda_res) && !is.null(cda_res$grouping_col)) clean_cand(cda_res$grouping_col) else NULL
@@ -580,50 +580,6 @@ reconstruct_efa_outline <- function(harm_vec, nb_pts = 120L) {
     y_centered <- -y_centered
   }
   cbind(x = x_centered, y = y_centered)
-}
-
-export_step03_fourier_pc_tables <- function(specimen_df, efa_df, output_csv_path) {
-  tables_dir <- dirname(as.character(output_csv_path))
-  if (!dir.exists(tables_dir)) {
-    dir.create(tables_dir, recursive = TRUE, showWarnings = FALSE)
-  }
-
-  .write_pub_csv <- function(d_obj, tmp_p) {
-    if (requireNamespace("data.table", quietly = TRUE)) {
-      data.table::fwrite(d_obj, file = tmp_p, na = "", quote = "auto", logical01 = FALSE)
-    } else {
-      utils::write.csv(d_obj, file = tmp_p, row.names = FALSE)
-    }
-  }
-
-  # 1. fourier_pcs.csv
-  fourier_pcs_path <- file.path(tables_dir, "fourier_pcs.csv")
-  fourier_tmp <- paste0(fourier_pcs_path, ".", Sys.getpid(), ".tmp")
-  .write_pub_csv(specimen_df, fourier_tmp)
-  file.rename(fourier_tmp, fourier_pcs_path)
-
-  # 2. symmetric_fourier_pcs.csv
-  sym_cols <- intersect(
-    c(
-      "catalogNumber", "plant_individual_id", "taxon", "species_standardized", "scientificName",
-      "determiner_tier", "is_type_specimen", "is_promoted_bronze", "authority_weight", "is_passive",
-      "leaf_count", "basal_leaf_count", "cauline_leaf_count", "morph_tier_source",
-      "leaf_quality_weight", "pct_asymmetry", "sym_var", "asym_var",
-      "harmonic_roughness", "is_contour_outlier", "area_mm2",
-      "petiole_length_mm", "petiole_width_mm", "blade_length_mm", "blade_width_mm",
-      "petiole_to_blade_ratio", "is_dissected",
-      "ECT_PC1", "ECT_PC2", "ECT_PC3", "ect_lobe_complexity",
-      paste0("PC", 1:15)
-    ),
-    colnames(specimen_df)
-  )
-  sym_df <- if (length(sym_cols) > 0) specimen_df[, sym_cols, drop = FALSE] else specimen_df
-  sym_pcs_path <- file.path(tables_dir, "symmetric_fourier_pcs.csv")
-  sym_tmp <- paste0(sym_pcs_path, ".", Sys.getpid(), ".tmp")
-  .write_pub_csv(sym_df, sym_tmp)
-  file.rename(sym_tmp, sym_pcs_path)
-
-  invisible(list(fourier_pcs = fourier_pcs_path, symmetric_fourier_pcs = sym_pcs_path))
 }
 
 format_cda_loading_labels <- function(raw_vars) {

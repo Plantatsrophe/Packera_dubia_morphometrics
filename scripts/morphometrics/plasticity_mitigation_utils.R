@@ -345,7 +345,7 @@ merge_plastic_gmm_components_ridgeline <- function(
 }
 
 # Empirical Bayes institutional location-offset shrinkage accounting for biological taxon structure
-apply_eb_institution_batch_centering <- function(df, target_cols, min_inst_n = 10L) {
+apply_eb_institution_batch_centering <- function(df, target_cols, min_inst_n = 10L, allow_shape_centering = FALSE) {
   if (!is.data.frame(df) || nrow(df) < 10L || !("institutionCode" %in% names(df))) return(df)
   cand_cols <- intersect(unique(as.character(target_cols)), names(df))
   if (length(cand_cols) == 0L) return(df)
@@ -357,6 +357,25 @@ apply_eb_institution_batch_centering <- function(df, target_cols, min_inst_n = 1
   if ("morph_tier_source" %in% names(df)) ref_mask <- ref_mask & (is.na(df$morph_tier_source) | !(df$morph_tier_source %in% c("Cauline_Only_Fallback", "Transitional_Passive")))
   if (sum(ref_mask, na.rm = TRUE) < 10L || length(unique(inst_all[ref_mask])) < 2L) ref_mask <- !is.na(inst_all)
   if (sum(ref_mask, na.rm = TRUE) < 10L || length(unique(inst_all[ref_mask])) < 2L) return(df)
+
+  is_regionally_confounded <- FALSE
+  inst_ref <- inst_all[ref_mask]
+  for (g_col in intersect(c("regional_group", "epa_ecoregion_l3", "stateProvince"), names(df))) {
+    reg_raw <- trimws(as.character(df[[g_col]][ref_mask]))
+    ok_rg <- !is.na(inst_ref) & !is.na(df[[g_col]][ref_mask]) & nzchar(reg_raw)
+    if (length(unique(reg_raw[ok_rg])) >= 2L) {
+      tab_rg <- table(inst_ref[ok_rg], reg_raw[ok_rg])
+      tab_rg <- tab_rg[rowSums(tab_rg) >= 2L, , drop = FALSE]
+      tab_rg <- tab_rg[, colSums(tab_rg) >= 1L, drop = FALSE]
+      if (nrow(tab_rg) >= 2L && ncol(tab_rg) >= 2L) {
+        chi_v <- suppressWarnings(stats::chisq.test(tab_rg, simulate.p.value = FALSE)$statistic)
+        cramers_v <- sqrt(as.numeric(chi_v) / max(1.0, sum(tab_rg) * (min(nrow(tab_rg), ncol(tab_rg)) - 1L)))
+        dom_share <- stats::weighted.mean(apply(tab_rg, 1L, max) / pmax(rowSums(tab_rg), 1), w = rowSums(tab_rg))
+        is_regionally_confounded <- (is.finite(cramers_v) && cramers_v > 0.45) || (is.finite(dom_share) && dom_share >= 0.75)
+      }
+      break
+    }
+  }
 
   sp_all <- if ("species_standardized" %in% names(df)) as.character(df$species_standardized) else if ("scientificName" %in% names(df)) as.character(df$scientificName) else rep("Unassigned", nrow(df))
   sp_all[is.na(sp_all) | !nzchar(trimws(sp_all))] <- "Unassigned"
@@ -385,6 +404,7 @@ apply_eb_institution_batch_centering <- function(df, target_cols, min_inst_n = 1
       ii <- which(rownames(fit_pre) == "inst")[1L]; ri <- which(rownames(fit_pre) == "Residuals")[1L]
       pre_eta[[col]] <- as.numeric(fit_pre$`Sum Sq`[ii] / max(fit_pre$`Sum Sq`[ii] + fit_pre$`Sum Sq`[ri], 1e-12))
     }
+    if (!((isTRUE(allow_shape_centering) || grepl("^blade_(cie_|.*browning)", col)) && !isTRUE(is_regionally_confounded))) next
 
     # Estimate marginal species means and zero-mean institutional location shifts iteratively
     d_raw <- stats::setNames(rep(0.0, length(u_inst)), u_inst)

@@ -76,9 +76,6 @@ classify_and_partition_leaf_zones <- function(
   d_crown <- if ("dist_from_crown_norm" %in% names(fac_df)) suppressWarnings(as.numeric(fac_df$dist_from_crown_norm)) else rep(NA_real_, n)
   cy_p <- if ("cy_rel_plant_bbox" %in% names(fac_df)) suppressWarnings(as.numeric(fac_df$cy_rel_plant_bbox)) else rep(NA_real_, n)
   cy_s <- if ("cy_rel_sheet" %in% names(fac_df)) suppressWarnings(as.numeric(fac_df$cy_rel_sheet)) else rep(NA_real_, n)
-  pbr <- if ("petiole_to_blade_ratio" %in% names(fac_df)) suppressWarnings(as.numeric(fac_df$petiole_to_blade_ratio)) else rep(NA_real_, n)
-  area_px <- if ("area_px" %in% names(fac_df)) suppressWarnings(as.numeric(fac_df$area_px)) else rep(NA_real_, n)
-  area_mm2 <- if ("area_mm2" %in% names(fac_df)) suppressWarnings(as.numeric(fac_df$area_mm2)) else rep(NA_real_, n)
 
   leaf_zone <- raw_zone
   is_fallback_vec <- rep(FALSE, n)
@@ -91,26 +88,20 @@ classify_and_partition_leaf_zones <- function(
     if (length(lam_ok) == 0L) next
     all_explicit_cauline <- all(!is.na(raw_zone[lam_ok]) & raw_zone[lam_ok] == "cauline")
 
-    use_px_pool <- any(is.finite(area_px[lam_ok]) & area_px[lam_ok] > 0.0)
-    a_pool <- if (use_px_pool) {
-      ifelse(is.finite(area_px[lam_ok]) & area_px[lam_ok] > 0.0, area_px[lam_ok], NA_real_)
-    } else {
-      ifelse(is.finite(area_mm2[lam_ok]) & area_mm2[lam_ok] > 0.0, area_mm2[lam_ok], NA_real_)
-    }
-    max_pid_a <- if (any(is.finite(a_pool))) max(a_pool, na.rm = TRUE) else 1.0
-
     for (ii in g_idx) {
       if (!is.na(leaf_zone[ii])) {
         if (!is.finite(zone_conf[ii])) zone_conf[ii] <- 0.90
         next
       }
-      pos_ii <- match(ii, lam_ok)
-      rel_a <- if (!is.na(pos_ii) && is.finite(a_pool[pos_ii]) && max_pid_a > 0.0) a_pool[pos_ii] / max_pid_a else 1.0
       if (is.finite(d_crown[ii])) {
-        s_b <- if (d_crown[ii] <= 0.18) 0.78 else if (d_crown[ii] > 0.24) 0.20 else 0.50
-        if (is.finite(cy_p[ii])) s_b <- s_b + (if (cy_p[ii] >= min_cy_plant) 0.10 else -0.12)
-        if (is.finite(pbr[ii])) s_b <- s_b + (if (pbr[ii] >= 0.22 && d_crown[ii] <= 0.24) 0.14 else if (pbr[ii] < 0.10 && d_crown[ii] > 0.18) -0.16 else 0.0)
-        if (is.finite(rel_a)) s_b <- s_b + (if (rel_a < 0.45 && d_crown[ii] > 0.18) -0.12 else if (rel_a >= 0.65 && d_crown[ii] <= 0.24) 0.08 else 0.0)
+        s_b <- if (d_crown[ii] <= 0.18) 0.82 else if (d_crown[ii] > 0.24) 0.20 else 0.50
+        if (d_crown[ii] > 0.18 && d_crown[ii] <= 0.24) {
+          if (is.finite(cy_p[ii])) {
+            s_b <- s_b + (if (cy_p[ii] >= min_cy_plant) 0.16 else -0.16)
+          } else if (is.finite(cy_s[ii])) {
+            s_b <- s_b + (if (cy_s[ii] >= min_cy_sheet) 0.16 else -0.16)
+          }
+        }
         p_b <- min(1.0, max(0.0, s_b))
         leaf_zone[ii] <- if (p_b >= 0.50) "basal" else "cauline"
         zone_conf[ii] <- round(max(0.55, abs(p_b - 0.50) * 2.0), 4)
@@ -119,8 +110,7 @@ classify_and_partition_leaf_zones <- function(
         leaf_zone[ii] <- if (isTRUE(in_prim)) "basal" else "cauline"
         zone_conf[ii] <- if (is.finite(zone_conf[ii])) zone_conf[ii] else 0.80
       } else {
-        is_caul_heur <- is.finite(pbr[ii]) && (pbr[ii] < 0.06) && is.finite(rel_a) && (rel_a < 0.40) && (length(lam_ok) >= 2L)
-        leaf_zone[ii] <- if (is_caul_heur) "cauline" else "basal"
+        leaf_zone[ii] <- "basal"
         zone_conf[ii] <- if (is.finite(zone_conf[ii])) zone_conf[ii] else 0.75
       }
     }
@@ -145,7 +135,7 @@ classify_and_partition_leaf_zones <- function(
           d_min <- min(d_crown[lam_ok[has_dc]], na.rm = TRUE)
           fb_hit <- has_dc & (d_crown[lam_ok] <= (d_min + fallback_band))
         } else {
-          fb_hit <- seq_along(lam_ok) == which.max(ifelse(is.finite(a_pool), a_pool, 0.0))
+          fb_hit <- seq_along(lam_ok) == 1L
         }
         if (any(fb_hit)) {
           leaf_zone[lam_ok[fb_hit]] <- "basal"
@@ -267,18 +257,41 @@ filter_basal_lamina_contours <- function(
   )
 }
 
-consolidate_fragmented_sheet_individuals <- function(efa_df) {
+consolidate_fragmented_sheet_individuals <- function(efa_df, max_dist_mm = 35.0, max_rel_span = 0.12) {
   if (is.null(efa_df) || !is.data.frame(efa_df) || nrow(efa_df) < 2L) return(efa_df)
   if (!all(c("catalogNumber", "plant_individual_id") %in% names(efa_df))) return(efa_df)
+  n_r <- nrow(efa_df)
   cat_s03 <- as.character(efa_df$catalogNumber)
   pid_s03 <- ifelse(is.na(efa_df$plant_individual_id), 0L, suppressWarnings(as.integer(efa_df$plant_individual_id)))
   pid_s03[is.na(pid_s03)] <- 0L
-  lz_s03 <- if ("leaf_zone" %in% names(efa_df)) tolower(trimws(as.character(efa_df$leaf_zone))) else rep("basal", nrow(efa_df))
+  lz_s03 <- if ("leaf_zone" %in% names(efa_df)) tolower(trimws(as.character(efa_df$leaf_zone))) else rep("basal", n_r)
   lz_s03[is.na(lz_s03) | !(lz_s03 %in% c("basal", "cauline"))] <- "basal"
-  cy_s03 <- if ("cy_rel_plant_bbox" %in% names(efa_df)) suppressWarnings(as.numeric(efa_df$cy_rel_plant_bbox)) else rep(NA_real_, nrow(efa_df))
-  dc_s03 <- if ("dist_from_crown_norm" %in% names(efa_df)) suppressWarnings(as.numeric(efa_df$dist_from_crown_norm)) else rep(NA_real_, nrow(efa_df))
-  pbr_s03 <- if ("petiole_to_blade_ratio" %in% names(efa_df)) suppressWarnings(as.numeric(efa_df$petiole_to_blade_ratio)) else rep(NA_real_, nrow(efa_df))
-  by_cat_s03 <- split(seq_len(nrow(efa_df)), cat_s03)
+  cy_s03 <- if ("cy_rel_plant_bbox" %in% names(efa_df)) suppressWarnings(as.numeric(efa_df$cy_rel_plant_bbox)) else rep(NA_real_, n_r)
+  dc_s03 <- if ("dist_from_crown_norm" %in% names(efa_df)) suppressWarnings(as.numeric(efa_df$dist_from_crown_norm)) else rep(NA_real_, n_r)
+  cx_px <- if ("cx_px" %in% names(efa_df)) suppressWarnings(as.numeric(efa_df$cx_px)) else if ("leaf_cx_px" %in% names(efa_df)) suppressWarnings(as.numeric(efa_df$leaf_cx_px)) else rep(NA_real_, n_r)
+  if (("cx_px" %in% names(efa_df)) && ("leaf_cx_px" %in% names(efa_df))) {
+    alt_cx <- suppressWarnings(as.numeric(efa_df$leaf_cx_px))
+    cx_px[!is.finite(cx_px)] <- alt_cx[!is.finite(cx_px)]
+  }
+  cy_px <- if ("cy_px" %in% names(efa_df)) suppressWarnings(as.numeric(efa_df$cy_px)) else if ("leaf_cy_px" %in% names(efa_df)) suppressWarnings(as.numeric(efa_df$leaf_cy_px)) else rep(NA_real_, n_r)
+  if (("cy_px" %in% names(efa_df)) && ("leaf_cy_px" %in% names(efa_df))) {
+    alt_cy <- suppressWarnings(as.numeric(efa_df$leaf_cy_px))
+    cy_px[!is.finite(cy_px)] <- alt_cy[!is.finite(cy_px)]
+  }
+  ppm <- if ("pixels_per_mm" %in% names(efa_df)) suppressWarnings(as.numeric(efa_df$pixels_per_mm)) else rep(NA_real_, n_r)
+  ss_s03 <- if ("scale_source" %in% names(efa_df)) tolower(trimws(as.character(efa_df$scale_source))) else rep("", n_r)
+  ss_s03[is.na(ss_s03)] <- ""
+  cal_flag <- if ("is_calibrated_mm" %in% names(efa_df)) {
+    v_c <- efa_df$is_calibrated_mm
+    if (is.character(v_c) || is.factor(v_c)) (!is.na(v_c) & (toupper(trimws(as.character(v_c))) %in% c("1", "TRUE", "T", "YES"))) else (!is.na(v_c) & as.logical(v_c))
+  } else {
+    rep(TRUE, n_r)
+  }
+  is_cal <- cal_flag & !(ss_s03 %in% c("mp_estimated", "predicted_from_megapixels", "tick_lattice_unboxed", "uncalibrated"))
+  cx_sh <- if ("cx_rel_sheet" %in% names(efa_df)) suppressWarnings(as.numeric(efa_df$cx_rel_sheet)) else rep(NA_real_, n_r)
+  cy_sh <- if ("cy_rel_sheet" %in% names(efa_df)) suppressWarnings(as.numeric(efa_df$cy_rel_sheet)) else rep(NA_real_, n_r)
+
+  by_cat_s03 <- split(seq_len(n_r), cat_s03)
   reassigned_s03 <- 0L
   rezoned_strays_s03 <- 0L
   for (c_idx_vec in by_cat_s03) {
@@ -289,22 +302,54 @@ consolidate_fragmented_sheet_individuals <- function(efa_df) {
     hub_mask <- bas_counts >= 2L
     kept_pids <- if (any(hub_mask)) u_pids[hub_mask] else u_pids[which.max(bas_counts * 1000L + tot_counts)]
     primary_pid <- kept_pids[which.max(bas_counts[match(kept_pids, u_pids)] * 1000L + tot_counts[match(kept_pids, u_pids)])]
+    prim_rows <- c_idx_vec[pid_s03[c_idx_vec] == primary_pid]
     prim_bas_rows <- c_idx_vec[pid_s03[c_idx_vec] == primary_pid & lz_s03[c_idx_vec] == "basal"]
     prim_cy_fin <- cy_s03[prim_bas_rows][is.finite(cy_s03[prim_bas_rows])]
     min_prim_bas_cy <- if (length(prim_cy_fin) > 0L) min(prim_cy_fin) else NA_real_
     med_prim_bas_cy <- if (length(prim_cy_fin) > 0L) stats::median(prim_cy_fin) else NA_real_
+    has_sheet_cal <- any(is_cal[c_idx_vec]) && any(is.finite(ppm[c_idx_vec]) & ppm[c_idx_vec] > 0)
+    cal_ppm_v <- ppm[c_idx_vec][is_cal[c_idx_vec] & is.finite(ppm[c_idx_vec]) & ppm[c_idx_vec] > 0]
+    ppm_sheet <- if (length(cal_ppm_v) > 0L) stats::median(cal_ppm_v) else if (has_sheet_cal) stats::median(ppm[c_idx_vec][is.finite(ppm[c_idx_vec]) & ppm[c_idx_vec] > 0]) else NA_real_
     for (k_p in seq_along(u_pids)) {
       p_cur <- u_pids[k_p]
       if (p_cur %in% kept_pids) next
       if (bas_counts[k_p] == 0L || tot_counts[k_p] <= 1L) {
         hit_rows <- c_idx_vec[pid_s03[c_idx_vec] == p_cur]
+        h_px_ok <- hit_rows[is.finite(cx_px[hit_rows]) & is.finite(cy_px[hit_rows])]
+        p_px_ok <- prim_rows[is.finite(cx_px[prim_rows]) & is.finite(cy_px[prim_rows])]
+        h_sh_ok <- hit_rows[is.finite(cx_sh[hit_rows]) & is.finite(cy_sh[hit_rows])]
+        p_sh_ok <- prim_rows[is.finite(cx_sh[prim_rows]) & is.finite(cy_sh[prim_rows])]
+        h_cy_ok <- hit_rows[is.finite(cy_sh[hit_rows])]
+        p_cy_ok <- prim_rows[is.finite(cy_sh[prim_rows])]
+        can_merge <- if (length(h_px_ok) > 0L && length(p_px_ok) > 0L && has_sheet_cal && is.finite(ppm_sheet) && ppm_sheet > 0) {
+          dx <- outer(cx_px[h_px_ok], cx_px[p_px_ok], "-")
+          dy <- outer(cy_px[h_px_ok], cy_px[p_px_ok], "-")
+          min_d_mm <- min(sqrt(dx^2 + dy^2) / ppm_sheet)
+          is.finite(min_d_mm) && (min_d_mm <= max_dist_mm)
+        } else if (length(h_sh_ok) > 0L && length(p_sh_ok) > 0L) {
+          dx <- outer(cx_sh[h_sh_ok], cx_sh[p_sh_ok], "-")
+          dy <- outer(cy_sh[h_sh_ok], cy_sh[p_sh_ok], "-")
+          min_d_rel <- min(sqrt(dx^2 + dy^2))
+          is.finite(min_d_rel) && (min_d_rel <= max_rel_span)
+        } else if (length(h_px_ok) > 0L && length(p_px_ok) > 0L) {
+          norm_span <- max(diff(range(cx_px[c_idx_vec], na.rm = TRUE)), diff(range(cy_px[c_idx_vec], na.rm = TRUE)), 1000.0)
+          dx <- outer(cx_px[h_px_ok], cx_px[p_px_ok], "-")
+          dy <- outer(cy_px[h_px_ok], cy_px[p_px_ok], "-")
+          min_d_rel <- min(sqrt(dx^2 + dy^2)) / norm_span
+          is.finite(min_d_rel) && (min_d_rel <= max_rel_span)
+        } else if (length(h_cy_ok) > 0L && length(p_cy_ok) > 0L) {
+          min_d_cy <- min(abs(outer(cy_sh[h_cy_ok], cy_sh[p_cy_ok], "-")))
+          is.finite(min_d_cy) && (min_d_cy <= max(max_rel_span, 0.25))
+        } else {
+          TRUE
+        }
+        if (!isTRUE(can_merge)) next
         pid_s03[hit_rows] <- primary_pid
         reassigned_s03 <- reassigned_s03 + length(hit_rows)
         for (hr in hit_rows) {
           if (lz_s03[hr] == "basal" && length(prim_bas_rows) >= 2L) {
             is_upper_stray <- (is.finite(dc_s03[hr]) && dc_s03[hr] > 0.24) ||
-              (is.finite(cy_s03[hr]) && is.finite(min_prim_bas_cy) && (cy_s03[hr] < (min_prim_bas_cy - 0.12) || (med_prim_bas_cy >= 0.60 && cy_s03[hr] < 0.45))) ||
-              (is.finite(pbr_s03[hr]) && pbr_s03[hr] < 0.08 && (!is.finite(cy_s03[hr]) || (is.finite(med_prim_bas_cy) && cy_s03[hr] < (med_prim_bas_cy - 0.08))))
+              (is.finite(cy_s03[hr]) && is.finite(min_prim_bas_cy) && (cy_s03[hr] < (min_prim_bas_cy - 0.12) || (med_prim_bas_cy >= 0.60 && cy_s03[hr] < 0.45)))
             if (isTRUE(is_upper_stray)) {
               lz_s03[hr] <- "cauline"
               rezoned_strays_s03 <- rezoned_strays_s03 + 1L
@@ -346,7 +391,7 @@ apply_otu_confidence_routing_tier <- function(specimen_df, closed_leaf_df) {
   specimen_df
 }
 
-.extract_harmonic_opt_from_cal <- function(cal_res, min_h = 6L, max_h = 24L) {
+.extract_harmonic_opt_from_cal <- function(cal_res, min_h = 6L, max_h = 24L, target_power = 0.99) {
   if (is.null(cal_res) || is.null(cal_res$q) || length(cal_res$q) == 0L) return(NULL)
   q_mat <- as.matrix(cal_res$q)
   q_vec <- if ("50%" %in% rownames(q_mat)) as.numeric(q_mat["50%", ]) else apply(q_mat, 2, stats::median, na.rm = TRUE)
@@ -354,7 +399,9 @@ apply_otu_confidence_routing_tier <- function(specimen_df, closed_leaf_df) {
   if (max(q_vec, na.rm = TRUE) <= 1.05) q_vec <- q_vec * 100.0
   h_nums <- suppressWarnings(as.integer(gsub("[^0-9]", "", colnames(q_mat))))
   if (length(h_nums) != length(q_vec) || any(is.na(h_nums))) h_nums <- seq_along(q_vec)
-  hit_idx <- which(is.finite(q_vec) & q_vec >= 99.0)
+  tp <- if (is.null(target_power) || length(target_power) == 0L) 0.99 else suppressWarnings(as.numeric(target_power[1L]))
+  thr_pct <- if (is.finite(tp) && tp <= 1.0) tp * 100.0 else if (is.finite(tp)) tp else 99.0
+  hit_idx <- which(is.finite(q_vec) & q_vec >= thr_pct)
   pick_i <- if (length(hit_idx) > 0L) hit_idx[1L] else which.max(h_nums)
   h_val <- max(as.integer(min_h), min(as.integer(max_h), as.integer(h_nums[pick_i])))
   col_m <- match(h_val, h_nums)
@@ -368,7 +415,8 @@ calibrate_dissection_aware_harmonics <- function(
   solidity_vec = NULL,
   nb_h = 12L,
   min_h = 6L,
-  max_h = 24L
+  max_h = 24L,
+  target_power = 0.99
 ) {
   fb_h <- max(as.integer(min_h), min(as.integer(max_h), as.integer(if (is.null(nb_h) || is.na(nb_h)) 12L else nb_h)))
   h_opt <- fb_h
@@ -402,13 +450,13 @@ calibrate_dissection_aware_harmonics <- function(
       sub_all <- if (length(strat_idx) < n_tot) Momocs::slice(out_obj, strat_idx) else out_obj
       Momocs::calibrate_harmonicpower_efourier(sub_all, nb.h = as.integer(max_h), plot = FALSE)
     }, error = function(e) NULL)
-    parsed_all <- .extract_harmonic_opt_from_cal(cal_all, min_h = min_h, max_h = max_h)
+    parsed_all <- .extract_harmonic_opt_from_cal(cal_all, min_h = min_h, max_h = max_h, target_power = target_power)
     if (!is.null(parsed_all)) {
       h_opt <- parsed_all$h_opt
       cum_pct <- parsed_all$cum_pct
     }
 
-    # Ensure dissected / lowest-solidity quartile also achieves >= 99% cumulative harmonic power
+    # Ensure dissected / lowest-solidity quartile also achieves target cumulative harmonic power
     dis_idx <- which(is.finite(sol) & sol < 0.72)
     if (length(dis_idx) >= 5L) {
       if (length(dis_idx) > 80L) {
@@ -419,7 +467,7 @@ calibrate_dissection_aware_harmonics <- function(
         sub_dis <- Momocs::slice(out_obj, dis_idx)
         Momocs::calibrate_harmonicpower_efourier(sub_dis, nb.h = as.integer(max_h), plot = FALSE)
       }, error = function(e) NULL)
-      parsed_dis <- .extract_harmonic_opt_from_cal(cal_dis, min_h = min_h, max_h = max_h)
+      parsed_dis <- .extract_harmonic_opt_from_cal(cal_dis, min_h = min_h, max_h = max_h, target_power = target_power)
       if (!is.null(parsed_dis) && parsed_dis$h_opt > h_opt) {
         h_opt <- parsed_dis$h_opt
         cum_pct <- min(c(cum_pct, parsed_dis$cum_pct), na.rm = TRUE)
@@ -665,11 +713,11 @@ read_numpy_ect_r <- function(npy_path, num_thresh = NULL, num_dirs = NULL) {
   if (data_start >= length(raw_b)) return(NULL)
   hdr_str <- rawToChar(raw_b[seq.int(if (ver_maj == 1L) 11L else 13L, data_start)])
   is_f8 <- grepl("<f8|float64", hdr_str)
-  is_fortran <- grepl("'fortran_order':\\s*True", hdr_str)
+  is_fortran <- grepl("'fortran_order':[[:space:]]*True", hdr_str)
   elem_sz <- if (is_f8) 8L else 4L
   nr_use <- if (!is.null(num_thresh) && is.finite(num_thresh)) as.integer(num_thresh) else 32L
   nc_use <- if (!is.null(num_dirs) && is.finite(num_dirs)) as.integer(num_dirs) else 360L
-  sh_m <- regmatches(hdr_str, regexec("'shape'\\s*:\\s*\\(\\s*([0-9]+)\\s*,\\s*([0-9]+)\\s*\\)", hdr_str))[[1L]]
+  sh_m <- regmatches(hdr_str, regexec("'shape'[[:space:]]*:[[:space:]]*\\([[:space:]]*([0-9]+)[[:space:]]*,[[:space:]]*([0-9]+)[[:space:]]*\\)", hdr_str))[[1L]]
   if (length(sh_m) >= 3L) {
     nr_hdr <- suppressWarnings(as.integer(sh_m[2L]))
     nc_hdr <- suppressWarnings(as.integer(sh_m[3L]))
@@ -965,11 +1013,27 @@ compute_separate_cauline_otu_track <- function(efa_df, specimen_df, sym_names = 
     idx_by_spec <- split(seq_len(nrow(efa_df)), leaf_keys)
 
     med_col <- function(df_sub, cn, digits = 4L, pos_only = FALSE) {
-      if (!(cn %in% names(df_sub))) return(NA_real_)
+      if (is.null(df_sub) || nrow(df_sub) == 0L || !(cn %in% names(df_sub))) return(NA_real_)
       v <- suppressWarnings(as.numeric(df_sub[[cn]]))
       v <- if (pos_only) v[is.finite(v) & v > 0.0] else v[is.finite(v)]
       if (length(v) == 0L) NA_real_ else round(stats::median(v), digits)
     }
+    row_cal_mask <- function(df_sub) {
+      if (is.null(df_sub) || nrow(df_sub) == 0L) return(logical(0))
+      ok <- if ("is_calibrated_mm" %in% names(df_sub)) {
+        v_c <- df_sub$is_calibrated_mm
+        if (is.character(v_c) || is.factor(v_c)) (!is.na(v_c) & (toupper(trimws(as.character(v_c))) %in% c("1", "TRUE", "T", "YES"))) else (!is.na(v_c) & as.logical(v_c))
+      } else {
+        rep(TRUE, nrow(df_sub))
+      }
+      if ("scale_source" %in% names(df_sub)) {
+        ss_v <- tolower(trimws(as.character(df_sub$scale_source)))
+        ss_v[is.na(ss_v)] <- ""
+        ok <- ok & !(ss_v %in% c("mp_estimated", "predicted_from_megapixels", "tick_lattice_unboxed", "uncalibrated"))
+      }
+      ok
+    }
+    spec_cal_ok <- row_cal_mask(specimen_df)
 
     caul_harm_list <- vector("list", n_spec)
     caul_ect_list <- vector("list", n_spec)
@@ -1025,19 +1089,21 @@ compute_separate_cauline_otu_track <- function(efa_df, specimen_df, sym_names = 
         cauline_dissection_index_med[i] <- med_col(cauline_rows, "dissection_index", 4L)
         cauline_aspect_ratio_med[i] <- med_col(cauline_rows, "aspect_ratio", 4L)
         cauline_ect_lobe_complexity[i] <- med_col(cauline_rows, "ect_lobe_complexity", 4L)
-        c_bl <- med_col(cauline_rows, "blade_length_mm", 3L, pos_only = TRUE)
-        c_cs <- med_col(cauline_rows, "centroid_size", 3L, pos_only = TRUE)
+        caul_cal <- cauline_rows[row_cal_mask(cauline_rows), , drop = FALSE]
+        bas_cal <- if (n_bas >= 1L) basal_rows[row_cal_mask(basal_rows), , drop = FALSE] else basal_rows
+        c_bl <- med_col(caul_cal, "blade_length_mm", 3L, pos_only = TRUE)
+        c_cs <- med_col(caul_cal, "centroid_size", 3L, pos_only = TRUE)
         c_cs_px <- med_col(cauline_rows, "centroid_size_px", 3L, pos_only = TRUE)
         c_apx <- med_col(cauline_rows, "area_px", 1L, pos_only = TRUE)
         cauline_blade_length_mm[i] <- if (is.finite(c_bl)) c_bl else NA_real_
 
-        b_bl <- if (n_bas >= 1L) med_col(basal_rows, "blade_length_mm", 4L, pos_only = TRUE) else NA_real_
-        if (!is.finite(b_bl) && ("blade_length_mm" %in% names(specimen_df))) {
+        b_bl <- if (n_bas >= 1L) med_col(bas_cal, "blade_length_mm", 4L, pos_only = TRUE) else NA_real_
+        if (!is.finite(b_bl) && isTRUE(spec_cal_ok[i]) && ("blade_length_mm" %in% names(specimen_df))) {
           v_b <- suppressWarnings(as.numeric(specimen_df$blade_length_mm[i]))
           if (is.finite(v_b) && v_b > 0.0) b_bl <- v_b
         }
-        b_cs <- if (n_bas >= 1L) med_col(basal_rows, "centroid_size", 4L, pos_only = TRUE) else NA_real_
-        if (!is.finite(b_cs) && ("centroid_size" %in% names(specimen_df))) {
+        b_cs <- if (n_bas >= 1L) med_col(bas_cal, "centroid_size", 4L, pos_only = TRUE) else NA_real_
+        if (!is.finite(b_cs) && isTRUE(spec_cal_ok[i]) && ("centroid_size" %in% names(specimen_df))) {
           v_c <- suppressWarnings(as.numeric(specimen_df$centroid_size[i]))
           if (is.finite(v_c) && v_c > 0.0) b_cs <- v_c
         }

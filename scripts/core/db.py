@@ -1217,6 +1217,9 @@ def record_voucher_segmentation_transaction(
             _to_str(r.get("qc_flag_reason")) or "PASS",
             _to_float(r.get("blade_cie_l_norm")),
             _to_float(r.get("blade_cie_l_sd")),
+            _to_float(r.get("blade_cie_l_sheet_delta")),
+            _to_float(r.get("blade_cie_a_delta")),
+            _to_float(r.get("blade_cie_b_delta")),
         ))
 
     if extracted_records and not leaf_rows:
@@ -1325,6 +1328,9 @@ def record_voucher_segmentation_transaction(
                 "qc_flag_reason",
                 "blade_cie_l_norm",
                 "blade_cie_l_sd",
+                "blade_cie_l_sheet_delta",
+                "blade_cie_a_delta",
+                "blade_cie_b_delta",
             ]
             known_set = set(insert_cols)
             extra_vals: List[Any] = []
@@ -1392,6 +1398,7 @@ def load_step02_records_from_db(
                 el.detector_class_id, el.is_crop_clipped, el.hole_area_frac, el.enclosed_void_frac,
                 el.bilateral_lobe_symmetry, el.efa_qc_pass, el.qc_flag_reason,
                 el.blade_cie_l_norm, el.blade_cie_l_sd,
+                el.blade_cie_l_sheet_delta, el.blade_cie_a_delta, el.blade_cie_b_delta,
                 el.petiole_length_px,
                 el.blade_length_px,
                 el.blade_width_px, el.blade_width_mm,
@@ -2430,6 +2437,9 @@ _OTU_MORPH_FLOAT_COLS: Tuple[str, ...] = (
     *PC_COLS,
     "blade_cie_l_norm",
     "blade_cie_l_sd",
+    "blade_cie_l_sheet_delta",
+    "blade_cie_a_delta",
+    "blade_cie_b_delta",
     "log1p_capitulum_count",
     "log1p_capitulum_count_std",
     "gmm_uncertainty",

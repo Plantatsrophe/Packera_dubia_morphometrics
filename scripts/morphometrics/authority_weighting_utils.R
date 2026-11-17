@@ -102,11 +102,11 @@ is_extralimital_or_conflicted_non_type <- function(df) {
   is_nb_type <- prim_mask | syntype_mask
   if (is.data.frame(df) && ("species_standardized" %in% names(df)) && any(is_nb_type)) {
     sp_std <- tolower(trimws(as.character(df$species_standardized)))
-    sp_ep <- sub("^[a-z]+\\s+([a-z-]+).*$", "\\1", sp_std)
-    has_of_binomial <- grepl("\\bof\\s+(packera|senecio|cineraria)\\s+[a-z]{3,}", raw_trim, ignore.case = TRUE)
+    sp_ep <- sub("^[a-z]+[[:space:]]+([a-z-]+).*$", "\\1", sp_std)
+    has_of_binomial <- grepl("\\bof[[:space:]]+(packera|senecio|cineraria)[[:space:]]+[a-z]{3,}", raw_trim, ignore.case = TRUE)
     if (any(is_nb_type & has_of_binomial)) {
-      of_binom <- tolower(sub("^.*\\bof\\s+((?:packera|senecio|cineraria)\\s+[a-z-]+).*$", "\\1", raw_trim))
-      of_ep <- sub("^[a-z]+\\s+([a-z-]+).*$", "\\1", of_binom)
+      of_binom <- tolower(sub("^.*\\bof[[:space:]]+((?:packera|senecio|cineraria)[[:space:]]+[a-z-]+).*$", "\\1", raw_trim))
+      of_ep <- sub("^[a-z]+[[:space:]]+([a-z-]+).*$", "\\1", of_binom)
       stem6 <- function(s) substr(gsub("(us|a|um)$", "", s), 1L, 6L)
       dyn_equiv <- rep(FALSE, n)
       if (exists("standardize_taxon_name", mode = "function")) {
@@ -542,7 +542,7 @@ select_adaptive_reference_anchors <- function(
   df,
   feature_matrix = NULL,
   taxon_col = "species_standardized",
-  min_anchors_per_taxon = 8L,
+  min_anchors_per_taxon = 5L,
   mahal_q_gold_silver = 0.95,
   mahal_q_bronze_promo = 0.80
 ) {
@@ -793,11 +793,23 @@ select_adaptive_reference_anchors <- function(
       }
     }
 
-    # Step 2: Adaptive Anchor Promotion for Gold/Silver-poor taxa (raw GS < min_anchors_per_taxon or clean n_gs < 3)
+    # Step 2: Adaptive Anchor Promotion for Gold/Silver-poor taxa (proportional eff_min_anc cap)
     n_gs <- length(idx_gs_clean)
-    if (tx != "Unassigned_Packera" && (length(idx_gs) < min_anc || n_gs < min(3L, min_anc))) {
+    n_gold_clean <- sum(is_gold[idx_gs_clean])
+    n_tx_pool <- sum(anchor_pool & (taxa_vec == tx))
+    eff_min_anc <- if (n_gs == 0L) {
+      min(min_anc, n_tx_pool)
+    } else if (n_gs < 2L) {
+      min(2L, n_tx_pool)
+    } else if (n_tx_pool >= min_anc) {
+      base_anc <- min(min_anc, as.integer(floor(0.5 * n_tx_pool)))
+      if (n_gold_clean == 0L) max(base_anc, min(n_gs + 3L, as.integer(floor(0.6 * n_tx_pool)))) else base_anc
+    } else {
+      n_gs
+    }
+    if (tx != "Unassigned_Packera" && n_gs < eff_min_anc) {
       idx_br <- which((det_tier == "Tier_3_Bronze") & anchor_pool & (taxa_vec == tx))
-      n_needed <- min_anc - n_gs
+      n_needed <- eff_min_anc - n_gs
       if (length(idx_br) > 0L && n_needed > 0L) {
         if (is.null(X_use) || ncol(X_use) == 0L) {
           ord_q <- if (!is.null(lqw_col)) {
@@ -843,7 +855,7 @@ select_adaptive_reference_anchors <- function(
           promo_ids <- idx_br[elig_ord[seq_len(min(length(elig_ord), n_needed))]]
 
           # Minimum-viability safeguard for 0/1-anchor rare taxa: allow up to 2 total anchors if within chi-sq_0.95
-          min_viable <- min(2L, min_anc)
+          min_viable <- min(2L, eff_min_anc)
           if ((n_gs + length(promo_ids)) < min_viable && length(ord_br) > length(promo_ids)) {
             q95_thr <- stats::qchisq(0.95, df = p_eff)
             rem_ord <- setdiff(ord_br[d2_br[ord_br] <= q95_thr], elig_ord)
@@ -1361,7 +1373,7 @@ solve_shrinkage_cda_eigen <- function(S_reg, B, max_axes = NULL) {
   s <- tolower(u_raw)
   for (iter in 1:2) {
     cand <- sub(
-      "^(det\\.?|determined\\s+by|annot\\.?|annotated\\s+by|ver\\.?|verified\\s+by|rev\\.?|revised\\s+by|conf\\.?|confirmed\\s+by|identified\\s+by)[:;,\\s]+",
+      "^(det\\.?|determined[[:space:]]+by|annot\\.?|annotated[[:space:]]+by|ver\\.?|verified[[:space:]]+by|rev\\.?|revised[[:space:]]+by|conf\\.?|confirmed[[:space:]]+by|identified[[:space:]]+by)[:;,[:space:]]+",
       "",
       s,
       perl = TRUE
@@ -1945,24 +1957,6 @@ compute_empirical_bayes_authority_weights <- function(
     t_self_final <- numeric(n)
     t_self_final[ds_obs_idx] <- T_mat[cbind(ds_obs_idx, y_idx[ds_obs_idx])]
     conc_final <- pmin(t_self_final, tier_ceil)
-    if ("institutionCode" %in% names(df) && (G >= 2L || isTRUE(use_loo_pc))) {
-      inst_raw <- trimws(as.character(df$institutionCode))
-      inst_valid <- !is.na(inst_raw) & nzchar(inst_raw) & !(toupper(inst_raw) %in% c("NA", "NULL", "UNKNOWN"))
-      inst_obs <- inst_valid & has_ds_Row & is.finite(conc_final)
-      if (any(inst_obs)) {
-        inst_sum <- tapply(conc_final[inst_obs], inst_raw[inst_obs], sum, na.rm = TRUE)
-        inst_cnt <- tapply(conc_final[inst_obs], inst_raw[inst_obs], length)
-        theta_inst_map <- (4.0 * 0.85 + inst_sum) / (4.0 + inst_cnt)
-        logit_fn <- function(p_v) log(pmax(1e-4, pmin(1.0 - 1e-4, p_v)) / (1.0 - pmax(1e-4, pmin(1.0 - 1e-4, p_v))))
-        inv_logit_fn <- function(z_v) 1.0 / (1.0 + exp(-z_v))
-        hit_inst <- which(eval_mask & inst_valid & (inst_raw %in% names(theta_inst_map)))
-        if (length(hit_inst) > 0L) {
-          th_inst_v <- as.numeric(theta_inst_map[inst_raw[hit_inst]])
-          adj_lo <- logit_fn(theta_curr[hit_inst]) + 0.35 * (logit_fn(th_inst_v) - logit_fn(0.85))
-          theta_curr[hit_inst] <- pmax(0.05, pmin(0.995, inv_logit_fn(adj_lo)))
-        }
-      }
-    }
     w_eb[eval_mask] <- theta_curr[eval_mask]
     p_prior <- pmax(0.05, pmin(0.995, theta_curr[ds_obs_idx]))
     l_obs <- pmax(0.02, pmin(0.995, conc_final[ds_obs_idx]))
@@ -2387,12 +2381,12 @@ fit_parallel_mclust_gmm <- function(X_core, G_vec, modelNames = NULL, max_hc_sub
   raw_v[is.na(raw_v) | !nzchar(raw_v)] <- fb[is.na(raw_v) | !nzchar(raw_v)]
   parse_one <- function(s, fb_one) {
     if (is.na(s) || !nzchar(s)) return(fb_one)
-    s_clean <- gsub("\\s+", " ", trimws(s))
-    m_infra <- regmatches(s_clean, regexpr("^[A-Z][a-z]+\\s+[a-z][a-z-]+\\s+(var\\.|subsp\\.|ssp\\.|f\\.)\\s+[a-z][a-z-]+", s_clean))
+    s_clean <- gsub("[[:space:]]+", " ", trimws(s))
+    m_infra <- regmatches(s_clean, regexpr("^[A-Z][a-z]+[[:space:]]+[a-z][a-z-]+[[:space:]]+(var\\.|subsp\\.|ssp\\.|f\\.)[[:space:]]+[a-z][a-z-]+", s_clean))
     if (length(m_infra) > 0L && nzchar(m_infra[1L])) return(m_infra[1L])
-    m_hyb <- regmatches(s_clean, regexpr("^[A-Z][a-z]+\\s+[x×]\\s*[a-z][a-z-]+", s_clean))
-    if (length(m_hyb) > 0L && nzchar(m_hyb[1L])) return(gsub("\\s+", " ", m_hyb[1L]))
-    m_bin <- regmatches(s_clean, regexpr("^[A-Z][a-z]+\\s+[a-z][a-z-]+", s_clean))
+    m_hyb <- regmatches(s_clean, regexpr("^[A-Z][a-z]+[[:space:]]+[x×][[:space:]]*[a-z][a-z-]+", s_clean))
+    if (length(m_hyb) > 0L && nzchar(m_hyb[1L])) return(gsub("[[:space:]]+", " ", m_hyb[1L]))
+    m_bin <- regmatches(s_clean, regexpr("^[A-Z][a-z]+[[:space:]]+[a-z][a-z-]+", s_clean))
     if (length(m_bin) > 0L && nzchar(m_bin[1L])) return(m_bin[1L])
     fb_one
   }
@@ -2402,7 +2396,7 @@ fit_parallel_mclust_gmm <- function(X_core, G_vec, modelNames = NULL, max_hc_sub
 .extract_terminal_epithet_stem <- function(taxon_vec) {
   vapply(as.character(taxon_vec), function(s) {
     if (is.na(s) || !nzchar(trimws(s))) return("")
-    toks <- strsplit(tolower(trimws(s)), "\\s+")[[1L]]
+    toks <- strsplit(tolower(trimws(s)), "[[:space:]]+")[[1L]]
     toks <- toks[!grepl("^(var\\.?|subsp\\.?|ssp\\.?|f\\.?|x|×)$", toks)]
     if (length(toks) < 2L) return(toks[length(toks)])
     ep <- gsub("[^a-z]", "", toks[length(toks)])
@@ -2922,7 +2916,7 @@ compute_type_specimen_morph_control <- function(
   }
 
   sp_raw <- if (!is.null(df) && "species_standardized" %in% names(df)) as.character(df$species_standardized) else as.character(taxa_vec)
-  sp_taxa <- active_taxa[grepl("^Packera\\s+", active_taxa)]
+  sp_taxa <- active_taxa[grepl("^Packera[[:space:]]+", active_taxa)]
   if (length(sp_taxa) >= 2L && !is.null(d2_mat) && ncol(d2_mat) >= 2L) {
     sp_cols <- match(sp_taxa, active_taxa)
     d2_sp <- d2_mat[, sp_cols, drop = FALSE]
@@ -2930,7 +2924,7 @@ compute_type_specimen_morph_control <- function(
     min_all[!is.finite(min_all) | min_all < 0.0] <- 0.0
     open_set_novelty_p <- round(1.0 - stats::pchisq(min_all, df = p), 6)
     for (i in seq_len(n)) {
-      yi_sp <- if (!is.na(sp_raw[i]) && grepl("^Packera\\s+", sp_raw[i])) sp_raw[i] else taxa_vec[i]
+      yi_sp <- if (!is.na(sp_raw[i]) && grepl("^Packera[[:space:]]+", sp_raw[i])) sp_raw[i] else taxa_vec[i]
       oth_idx <- which(sp_taxa != yi_sp)
       if (length(oth_idx) >= 1L) {
         d_sub <- d2_sp[i, oth_idx]
@@ -3007,8 +3001,8 @@ compute_type_specimen_morph_control <- function(
         if (length(use_c) < 2L) return(NULL)
         for (uc in use_c) db_df[[uc]] <- suppressWarnings(as.numeric(db_df[[uc]]))
         cc <- stats::complete.cases(db_df[, use_c, drop = FALSE])
-        db_df <- db_df[cc & !is.na(db_df$species_standardized) & grepl("^Packera\\s+", db_df$species_standardized), , drop = FALSE]
-        focal_sp <- unique(sp_raw[!is.na(sp_raw) & grepl("^Packera\\s+", sp_raw)])
+        db_df <- db_df[cc & !is.na(db_df$species_standardized) & grepl("^Packera[[:space:]]+", db_df$species_standardized), , drop = FALSE]
+        focal_sp <- unique(sp_raw[!is.na(sp_raw) & grepl("^Packera[[:space:]]+", sp_raw)])
         if (all(c("_osr_lat", "_osr_lon") %in% names(db_df)) && all(c("decimalLatitude", "decimalLongitude") %in% names(df))) {
           d_lat <- suppressWarnings(as.numeric(df$decimalLatitude)); d_lon <- suppressWarnings(as.numeric(df$decimalLongitude))
           act_g <- is.finite(d_lat) & is.finite(d_lon) & (abs(d_lat) <= 90) & (abs(d_lon) <= 180)
@@ -3157,65 +3151,20 @@ compute_type_specimen_morph_control <- function(
 # leaves; cauline leaves excluded whenever >= 1 basal leaf exists) and 75th-percentile petiole/blade
 # architecture traits. Short-circuits when aggregate_step03_otu_medians_fast() already populated all fields.
 reconcile_step03_basal_otu_medians <- function(specimen_df, closed_leaf_df, all_harm_cols = character(0), sym_names = character(0)) {
-  if (is.null(specimen_df) || is.null(closed_leaf_df) || nrow(specimen_df) == 0L || nrow(closed_leaf_df) == 0L) {
-    return(specimen_df)
-  }
-  expected_fast_cols <- intersect(c("area_mm2", "petiole_width_mm", "blade_width_mm", "blade_cie_l_norm", "blade_cie_l_sd", "ECT_PC1", "ECT_PC2", "ECT_PC3", "ect_lobe_complexity"), names(closed_leaf_df))
-  if (isTRUE(attr(specimen_df, "step03_fast_aggregated")) && all(expected_fast_cols %in% names(specimen_df))) {
-    return(specimen_df)
-  }
-  pids_leaf <- if ("plant_individual_id" %in% names(closed_leaf_df)) ifelse(is.na(closed_leaf_df$plant_individual_id), 0L, as.integer(closed_leaf_df$plant_individual_id)) else rep(0L, nrow(closed_leaf_df))
-  pids_spec <- if ("plant_individual_id" %in% names(specimen_df)) ifelse(is.na(specimen_df$plant_individual_id), 0L, as.integer(specimen_df$plant_individual_id)) else rep(0L, nrow(specimen_df))
-  leaf_keys <- paste(as.character(closed_leaf_df$catalogNumber), pids_leaf, sep = "__")
-  spec_keys <- paste(as.character(specimen_df$catalogNumber), pids_spec, sep = "__")
-  idx_by_key <- split(seq_len(nrow(closed_leaf_df)), leaf_keys)
-  harm_cols <- intersect(unique(c(all_harm_cols, sym_names)), names(specimen_df))
-  trait_digits <- list(
-    aspect_ratio = 4L, circularity = 4L, solidity = 4L, dissection_index = 4L,
-    area_px = 1L, area_mm2 = 2L, centroid_size = 4L,
-    log_centsize = 6L, harmonic_roughness = 6L, leaf_quality_weight = 6L,
-    pct_asymmetry = 6L, ECT_PC1 = 6L, ECT_PC2 = 6L, ECT_PC3 = 6L,
-    ect_lobe_complexity = 4L,
-    blade_cie_l_norm = 4L,
-    blade_cie_l_sd = 4L
-  )
-  pet_cols <- intersect(c("petiole_length_mm", "petiole_width_mm", "blade_length_mm", "blade_width_mm", "petiole_to_blade_ratio"), names(specimen_df))
-  for (i in seq_len(nrow(specimen_df))) {
-    rows_i <- idx_by_key[[spec_keys[i]]]
-    if (length(rows_i) < 1L) next
-    grp <- closed_leaf_df[rows_i, , drop = FALSE]
-    typ_g <- if ("is_type_specimen" %in% names(grp)) (!is.na(grp$is_type_specimen) & as.logical(grp$is_type_specimen)) else rep(FALSE, nrow(grp))
-    if ("is_contour_outlier" %in% names(grp) && any((!as.logical(grp$is_contour_outlier)) | typ_g, na.rm = TRUE)) {
-      grp <- grp[(!is.na(grp$is_contour_outlier) & !as.logical(grp$is_contour_outlier)) | typ_g, , drop = FALSE]
-    }
-    if ("leaf_zone" %in% names(grp)) {
-      lz_g <- tolower(trimws(as.character(grp$leaf_zone)))
-      if (any(!is.na(lz_g) & lz_g == "basal")) {
-        grp <- grp[!is.na(lz_g) & lz_g == "basal", , drop = FALSE]
-      }
-    }
-    if (nrow(grp) < 1L) next
-    for (hc in harm_cols) {
-      if (hc %in% names(grp)) {
-        hv <- suppressWarnings(as.numeric(grp[[hc]]))
-        hv <- hv[is.finite(hv)]
-        if (length(hv) > 0L) specimen_df[[hc]][i] <- stats::median(hv)
-      }
-    }
-    for (tc in names(trait_digits)) {
-      if ((tc %in% names(specimen_df)) && (tc %in% names(grp))) {
-        tv <- suppressWarnings(as.numeric(grp[[tc]]))
-        tv <- tv[is.finite(tv)]
-        if (length(tv) > 0L) specimen_df[[tc]][i] <- round(stats::median(tv), trait_digits[[tc]])
-      }
-    }
-    for (pc in pet_cols) {
-      if (pc %in% names(grp)) {
-        pv <- suppressWarnings(as.numeric(grp[[pc]]))
-        pv <- pv[is.finite(pv)]
-        if (length(pv) > 0L) specimen_df[[pc]][i] <- round(as.numeric(stats::quantile(pv, probs = 0.75, na.rm = TRUE, names = FALSE)), 4L)
-      }
-    }
+  if (is.null(specimen_df) || is.null(closed_leaf_df) || nrow(specimen_df) == 0L || nrow(closed_leaf_df) == 0L) return(specimen_df)
+  if (isTRUE(attr(specimen_df, "step03_fast_aggregated"))) return(specimen_df)
+  if (!exists("aggregate_step03_otu_medians_fast", mode = "function") && file.exists("scripts/morphometrics/fourier_parallel_utils.R")) source("scripts/morphometrics/fourier_parallel_utils.R")
+  orig_cols <- names(closed_leaf_df)
+  for (mc in c("scientificName", "species_raw")) if (!(mc %in% orig_cols)) closed_leaf_df[[mc]] <- NA_character_
+  if (!("plant_individual_id" %in% orig_cols)) closed_leaf_df$plant_individual_id <- 0L
+  use_harm <- intersect(unique(c(all_harm_cols, sym_names)), orig_cols)
+  fast_df <- aggregate_step03_otu_medians_fast(closed_leaf_df, use_harm, intersect(sym_names, use_harm))
+  if (nrow(fast_df) == 0L) return(specimen_df)
+  pid_fn <- function(d) if ("plant_individual_id" %in% names(d)) ifelse(is.na(d$plant_individual_id), 0L, as.integer(d$plant_individual_id)) else rep(0L, nrow(d))
+  idx <- match(paste(as.character(specimen_df$catalogNumber), pid_fn(specimen_df), sep = "__"), paste(as.character(fast_df$catalogNumber), pid_fn(fast_df), sep = "__"))
+  skip_c <- c("catalogNumber", "plant_individual_id", setdiff(c("scientificName", "species_raw", "determiner_tier", "authority_weight"), orig_cols))
+  for (cl in setdiff(intersect(names(specimen_df), names(fast_df)), skip_c)) {
+    vals <- fast_df[[cl]][idx]; ok_v <- !is.na(vals); if (any(ok_v)) specimen_df[[cl]][ok_v] <- vals[ok_v]
   }
   specimen_df
 }

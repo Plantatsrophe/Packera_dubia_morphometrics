@@ -281,6 +281,12 @@ class TestCodeHygiene(unittest.TestCase):
             PROJECT_ROOT / "scripts" / "tests" / "test_step01_robustness_audit.py": 380,
             PROJECT_ROOT / "scripts" / "vision" / "step02_photometry_corymb_utils.py": 360,
             PROJECT_ROOT / "scripts" / "tests" / "test_step02_vision_hygiene.py": 380,
+            PROJECT_ROOT / "scripts" / "morphometrics" / "step03_config_scale_utils.R": 240,
+            PROJECT_ROOT / "scripts" / "morphometrics" / "03_fourier_extractor.R": 500,
+            PROJECT_ROOT / "scripts" / "morphometrics" / "fourier_parallel_utils.R": 500,
+            PROJECT_ROOT / "scripts" / "morphometrics" / "plasticity_mitigation_utils.R": 470,
+            PROJECT_ROOT / "scripts" / "figures" / "step03_figures.R": 385,
+            PROJECT_ROOT / "scripts" / "tests" / "test_step03_audit_contracts.py": 360,
         }
         bounded_paths = (
             *strict_ceilings.keys(),

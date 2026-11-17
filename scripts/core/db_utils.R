@@ -230,7 +230,10 @@ PACKERA_DB_WC_BIO_COLS <- c(
       efa_qc_pass = "INTEGER DEFAULT 1",
       qc_flag_reason = "TEXT DEFAULT 'PASS'",
       blade_cie_l_norm = "REAL",
-      blade_cie_l_sd = "REAL"
+      blade_cie_l_sd = "REAL",
+      blade_cie_l_sheet_delta = "REAL",
+      blade_cie_a_delta = "REAL",
+      blade_cie_b_delta = "REAL"
     ))
   }
   if (identical(table_name, "run_active_cohort")) {
@@ -268,7 +271,10 @@ PACKERA_DB_WC_BIO_COLS <- c(
         is_passive = "INTEGER DEFAULT 0",
         spatial_balance_weight = "REAL",
         blade_cie_l_norm = "REAL",
-        blade_cie_l_sd = "REAL"
+        blade_cie_l_sd = "REAL",
+        blade_cie_l_sheet_delta = "REAL",
+        blade_cie_a_delta = "REAL",
+        blade_cie_b_delta = "REAL"
       )
     ))
   }
@@ -329,6 +335,9 @@ PACKERA_DB_WC_BIO_COLS <- c(
         within_rosette_efa_dispersion = "REAL",
         blade_cie_l_norm = "REAL",
         blade_cie_l_sd = "REAL",
+        blade_cie_l_sheet_delta = "REAL",
+        blade_cie_a_delta = "REAL",
+        blade_cie_b_delta = "REAL",
         log1p_capitulum_count = "REAL",
         log1p_capitulum_count_std = "REAL",
         nearest_type_basionym = "TEXT",
@@ -1214,6 +1223,9 @@ fetch_step03_contours_from_db <- function(
   sel_amm2 <- if ("area_mm2" %in% el_fields) "el.area_mm2" else "NULL AS area_mm2"
   sel_bl_lnorm <- if ("blade_cie_l_norm" %in% el_fields) "el.blade_cie_l_norm" else "NULL AS blade_cie_l_norm"
   sel_bl_lsd <- if ("blade_cie_l_sd" %in% el_fields) "el.blade_cie_l_sd" else "NULL AS blade_cie_l_sd"
+  sel_bl_ldelta <- if ("blade_cie_l_sheet_delta" %in% el_fields) "el.blade_cie_l_sheet_delta" else "NULL AS blade_cie_l_sheet_delta"
+  sel_bl_adelta <- if ("blade_cie_a_delta" %in% el_fields) "el.blade_cie_a_delta" else "NULL AS blade_cie_a_delta"
+  sel_bl_bdelta <- if ("blade_cie_b_delta" %in% el_fields) "el.blade_cie_b_delta" else "NULL AS blade_cie_b_delta"
   sel_bw_mm <- if ("blade_width_mm" %in% el_fields) "el.blade_width_mm" else "NULL AS blade_width_mm"
   sel_pw_mm <- if ("petiole_width_mm" %in% el_fields && "petiole_width_mm" %in% pi_fields) {
     "COALESCE(el.petiole_width_mm, pi.petiole_width_mm) AS petiole_width_mm"
@@ -1238,7 +1250,8 @@ fetch_step03_contours_from_db <- function(
     "  el.solidity, el.aspect_ratio, el.area_px, ",
     "  ", sel_ect, ", ", sel_zone, ", ", sel_zone_conf, ", ", sel_dist_cr, ", ", sel_cy_rel, ", ",
     "  ", sel_arch, ", ", sel_bdice, ", ", sel_sia, ", ", sel_lgates, ", ", sel_ncc, ", ", sel_scale_src, ", ",
-    "  ", sel_upright, ", ", sel_amm2, ", ", sel_bl_lnorm, ", ", sel_bl_lsd, ", ", sel_bw_mm, ", ", sel_pw_mm, ", ",
+    "  ", sel_upright, ", ", sel_amm2, ", ", sel_bl_lnorm, ", ", sel_bl_lsd, ", ",
+    sel_bl_ldelta, ", ", sel_bl_adelta, ", ", sel_bl_bdelta, ", ", sel_bw_mm, ", ", sel_pw_mm, ", ",
     "  ", sel_dcid, ", ", sel_cclip, ", ", sel_haf, ", ", sel_evf, ", ", sel_bls, ", ", sel_eqc, ", ", sel_qfr, ", ",
     "  COALESCE(el.pixels_per_mm, v.pixels_per_mm) AS pixels_per_mm, ",
     "  COALESCE(el.is_calibrated_mm, v.is_calibrated_mm) AS is_calibrated_mm, ",
@@ -1352,36 +1365,66 @@ fetch_step03_contours_from_db <- function(
     n_rows <- nrow(rows)
   }
 
+  uncal_sources <- c("mp_estimated", "predicted_from_megapixels", "tick_lattice_unboxed", "uncalibrated")
+  mh_rows <- rep(NA_integer_, n_rows)
+  if (!is.null(m_hdr) && (!is.null(m_idx_3k) || !is.null(m_idx_2k))) {
+    rc_v <- trimws(as.character(rows$catalogNumber))
+    rp_v <- ifelse(is.na(rows$plant_individual_id), 0L, suppressWarnings(as.integer(rows$plant_individual_id)))
+    rp_v[is.na(rp_v)] <- 0L
+    rl_v <- suppressWarnings(as.integer(rows$leaf_id))
+    if (!is.null(m_idx_3k)) {
+      mh_rows <- unname(m_idx_3k[paste(rc_v, rp_v, rl_v, sep = "__")])
+    }
+    if (any(is.na(mh_rows)) && !is.null(m_idx_2k)) {
+      miss_m <- is.na(mh_rows)
+      mh_rows[miss_m] <- unname(m_idx_2k[paste(rc_v[miss_m], rl_v[miss_m], sep = "__")])
+    }
+  }
+
   ppm_vec <- suppressWarnings(as.numeric(rows$pixels_per_mm))
-  raw_cal_col <- if ("is_calibrated_mm" %in% names(rows)) rows$is_calibrated_mm else rep(1L, nrow(rows))
+  raw_ss_col <- if ("scale_source" %in% names(rows)) tolower(trimws(as.character(rows$scale_source))) else rep("", n_rows)
+  raw_ss_col[is.na(raw_ss_col) | raw_ss_col %in% c("na", "null")] <- ""
+  if (!is.null(m_hdr) && "scale_source" %in% names(m_hdr) && any(!nzchar(raw_ss_col) & !is.na(mh_rows))) {
+    fill_ss <- which(!nzchar(raw_ss_col) & !is.na(mh_rows))
+    m_ss_raw <- tolower(trimws(as.character(m_hdr$scale_source[mh_rows[fill_ss]])))
+    m_ss_raw[is.na(m_ss_raw) | m_ss_raw %in% c("na", "null")] <- ""
+    nz_ss <- nzchar(m_ss_raw)
+    if (any(nz_ss)) {
+      raw_ss_col[fill_ss[nz_ss]] <- m_ss_raw[nz_ss]
+    }
+  }
+
+  raw_cal_col <- if ("is_calibrated_mm" %in% names(rows)) toupper(trimws(as.character(rows$is_calibrated_mm))) else rep(NA_character_, n_rows)
+  raw_cal_col[is.na(raw_cal_col) | !nzchar(raw_cal_col) | raw_cal_col %in% c("NA", "NULL")] <- NA_character_
+  if (!is.null(m_hdr) && "is_calibrated_mm" %in% names(m_hdr) && any(is.na(raw_cal_col) & !is.na(mh_rows))) {
+    fill_cal <- which(is.na(raw_cal_col) & !is.na(mh_rows))
+    m_cal_raw <- toupper(trimws(as.character(m_hdr$is_calibrated_mm[mh_rows[fill_cal]])))
+    m_cal_raw[is.na(m_cal_raw) | !nzchar(m_cal_raw) | m_cal_raw %in% c("NA", "NULL")] <- NA_character_
+    ok_cal <- !is.na(m_cal_raw)
+    if (any(ok_cal)) {
+      raw_cal_col[fill_cal[ok_cal]] <- m_cal_raw[ok_cal]
+    }
+  }
+
+  cal_explicit_false <- !is.na(raw_cal_col) & (raw_cal_col %in% c("0", "0.0", "FALSE", "F", "NO"))
+  cal_explicit_true <- !is.na(raw_cal_col) & (raw_cal_col %in% c("1", "1.0", "TRUE", "T", "YES"))
   cal_flag_vec <- ifelse(
-    is.na(raw_cal_col),
-    TRUE,
-    toupper(trimws(as.character(raw_cal_col))) %in% c("1", "TRUE", "T", "YES")
+    raw_ss_col %in% uncal_sources | cal_explicit_false,
+    FALSE,
+    ifelse(is.na(raw_cal_col), TRUE, cal_explicit_true)
   )
-  raw_ss_col <- if ("scale_source" %in% names(rows)) tolower(trimws(as.character(rows$scale_source))) else rep("", nrow(rows))
-  raw_ss_col[is.na(raw_ss_col)] <- ""
-  is_cal_vec <- !is.na(ppm_vec) & is.finite(ppm_vec) & (ppm_vec > 0) & cal_flag_vec &
-    !(raw_ss_col %in% c("mp_estimated", "predicted_from_megapixels", "uncalibrated"))
-  db_ar_vec <- if ("aspect_ratio" %in% names(rows)) suppressWarnings(as.numeric(rows$aspect_ratio)) else rep(NA_real_, nrow(rows))
-  db_upright_vec <- rep(NA, nrow(rows))
+  is_cal_vec <- !is.na(ppm_vec) & is.finite(ppm_vec) & (ppm_vec > 0) & cal_flag_vec & !(raw_ss_col %in% uncal_sources)
+  db_ar_vec <- if ("aspect_ratio" %in% names(rows)) suppressWarnings(as.numeric(rows$aspect_ratio)) else rep(NA_real_, n_rows)
+  db_upright_vec <- rep(NA, n_rows)
   if ("mask_is_upright" %in% names(rows)) {
     raw_up <- toupper(trimws(as.character(rows$mask_is_upright)))
     db_upright_vec[raw_up %in% c("1", "1.0", "TRUE", "T", "YES")] <- TRUE
     db_upright_vec[raw_up %in% c("0", "0.0", "FALSE", "F", "NO")] <- FALSE
   }
   if (!is.null(m_hdr) && "mask_is_upright" %in% names(m_hdr) && any(is.na(db_upright_vec))) {
-    rc_v <- trimws(as.character(rows$catalogNumber))
-    rp_v <- ifelse(is.na(rows$plant_individual_id), 0L, suppressWarnings(as.integer(rows$plant_individual_id)))
-    rl_v <- suppressWarnings(as.integer(rows$leaf_id))
-    mh_up <- if (!is.null(m_idx_3k)) unname(m_idx_3k[paste(rc_v, rp_v, rl_v, sep = "__")]) else rep(NA_integer_, nrow(rows))
-    if (any(is.na(mh_up)) && !is.null(m_idx_2k)) {
-      miss_u <- is.na(mh_up)
-      mh_up[miss_u] <- unname(m_idx_2k[paste(rc_v[miss_u], rl_v[miss_u], sep = "__")])
-    }
-    fill_u <- which(is.na(db_upright_vec) & !is.na(mh_up))
+    fill_u <- which(is.na(db_upright_vec) & !is.na(mh_rows))
     if (length(fill_u) > 0L) {
-      m_up_raw <- toupper(trimws(as.character(m_hdr$mask_is_upright[mh_up[fill_u]])))
+      m_up_raw <- toupper(trimws(as.character(m_hdr$mask_is_upright[mh_rows[fill_u]])))
       db_upright_vec[fill_u[m_up_raw %in% c("1", "1.0", "TRUE", "T", "YES")]] <- TRUE
       db_upright_vec[fill_u[m_up_raw %in% c("0", "0.0", "FALSE", "F", "NO")]] <- FALSE
     }
@@ -1527,17 +1570,7 @@ fetch_step03_contours_from_db <- function(
     }
   }
 
-  m_hit_vec <- rep(NA_integer_, n_kept)
-  if (!is.null(m_hdr)) {
-    t_cat <- trimws(cat_vec)
-    if (!is.null(m_idx_3k)) {
-      m_hit_vec <- unname(m_idx_3k[paste(t_cat, pid_vec, lid_vec, sep = "__")])
-    }
-    miss_m <- is.na(m_hit_vec)
-    if (any(miss_m) && !is.null(m_idx_2k)) {
-      m_hit_vec[miss_m] <- unname(m_idx_2k[paste(t_cat[miss_m], lid_vec[miss_m], sep = "__")])
-    }
-  }
+  m_hit_vec <- mh_rows[ok_idx]
   pull_manifest_num <- function(cn, fb_vec = rep(NA_real_, n_kept)) {
     out_v <- fb_vec
     if (!is.null(m_hdr) && cn %in% names(m_hdr) && any(!is.na(m_hit_vec))) {
@@ -1588,6 +1621,23 @@ fetch_step03_contours_from_db <- function(
   log_cs_kept <- ifelse(!is.na(cs_kept) & cs_kept > 0, round(log10(cs_kept), 6), NA_real_)
   arch_kept <- if ("archetype_score" %in% names(sub_rows)) suppressWarnings(as.numeric(sub_rows$archetype_score)) else rep(NA_real_, n_kept)
 
+  cal_kept <- is_cal_vec[ok_idx]
+  ppm_kept <- ppm_vec[ok_idx]
+  ss_kept <- raw_ss_col[ok_idx]
+  resolved_ss_kept <- ifelse(
+    cal_kept,
+    ifelse(nzchar(ss_kept), ss_kept, "ruler_calibrated"),
+    ifelse(
+      ss_kept == "tick_lattice_unboxed",
+      "tick_lattice_unboxed",
+      ifelse(
+        ss_kept %in% c("mp_estimated", "predicted_from_megapixels") | (is.finite(ppm_kept) & ppm_kept > 0 & !nzchar(ss_kept)),
+        "mp_estimated",
+        "uncalibrated"
+      )
+    )
+  )
+
   coords_list <- merged$coo[ok_idx]
   names(coords_list) <- sid_vec
   meta_df <- data.frame(
@@ -1601,22 +1651,47 @@ fetch_step03_contours_from_db <- function(
     solidity = sol_kept,
     dissection_index = merged$di[ok_idx],
     archetype_score = arch_kept,
-    pixels_per_mm = ppm_vec[ok_idx],
-    is_calibrated_mm = is_cal_vec[ok_idx],
-    scale_source = ifelse(is_cal_vec[ok_idx], "ruler_calibrated", ifelse(!is.na(ppm_vec[ok_idx]) & ppm_vec[ok_idx] > 0, "mp_estimated", "uncalibrated")),
-    mask_is_upright = ifelse(is.na(db_upright_vec[ok_idx]), isTRUE(attr(coords_list[[1L]], "lm3_from_tipup")), as.logical(db_upright_vec[ok_idx])),
+    pixels_per_mm = ppm_kept,
+    is_calibrated_mm = cal_kept,
+    scale_source = resolved_ss_kept,
+    mask_is_upright = ifelse(
+      is.na(db_upright_vec[ok_idx]),
+      vapply(coords_list, function(c_el) isTRUE(attr(c_el, "lm3_from_tipup")), logical(1L)),
+      as.logical(db_upright_vec[ok_idx])
+    ),
     area_mm2 = {
       db_am <- if ("area_mm2" %in% names(sub_rows)) suppressWarnings(as.numeric(sub_rows$area_mm2)) else rep(NA_real_, n_kept)
       db_am[!is.finite(db_am)] <- NA_real_
       am_m <- pull_manifest_num("area_mm2", db_am)
-      ifelse(is.finite(am_m), am_m, ifelse(is_cal_vec[ok_idx] & is.finite(ppm_vec[ok_idx]) & ppm_vec[ok_idx] > 0, round(merged$area[ok_idx] / (ppm_vec[ok_idx]^2), 2), NA_real_))
+      out_am <- ifelse(is.finite(am_m), am_m, ifelse(cal_kept & is.finite(ppm_kept) & ppm_kept > 0, round(merged$area[ok_idx] / (ppm_kept^2), 2), NA_real_))
+      out_am[!cal_kept] <- NA_real_
+      out_am
     },
-    petiole_length_mm = suppressWarnings(as.numeric(sub_rows$petiole_length_mm)),
-    petiole_width_mm = pull_manifest_num("petiole_width_mm", if ("petiole_width_mm" %in% names(sub_rows)) suppressWarnings(as.numeric(sub_rows$petiole_width_mm)) else rep(NA_real_, n_kept)),
-    blade_length_mm = suppressWarnings(as.numeric(sub_rows$blade_length_mm)),
-    blade_width_mm = pull_manifest_num("blade_width_mm", if ("blade_width_mm" %in% names(sub_rows)) suppressWarnings(as.numeric(sub_rows$blade_width_mm)) else rep(NA_real_, n_kept)),
+    petiole_length_mm = {
+      out_pl <- suppressWarnings(as.numeric(sub_rows$petiole_length_mm))
+      out_pl[!cal_kept] <- NA_real_
+      out_pl
+    },
+    petiole_width_mm = {
+      out_pw <- pull_manifest_num("petiole_width_mm", if ("petiole_width_mm" %in% names(sub_rows)) suppressWarnings(as.numeric(sub_rows$petiole_width_mm)) else rep(NA_real_, n_kept))
+      out_pw[!cal_kept] <- NA_real_
+      out_pw
+    },
+    blade_length_mm = {
+      out_bl <- suppressWarnings(as.numeric(sub_rows$blade_length_mm))
+      out_bl[!cal_kept] <- NA_real_
+      out_bl
+    },
+    blade_width_mm = {
+      out_bw <- pull_manifest_num("blade_width_mm", if ("blade_width_mm" %in% names(sub_rows)) suppressWarnings(as.numeric(sub_rows$blade_width_mm)) else rep(NA_real_, n_kept))
+      out_bw[!cal_kept] <- NA_real_
+      out_bw
+    },
     blade_cie_l_norm = pull_manifest_num("blade_cie_l_norm", if ("blade_cie_l_norm" %in% names(sub_rows)) suppressWarnings(as.numeric(sub_rows$blade_cie_l_norm)) else rep(NA_real_, n_kept)),
     blade_cie_l_sd = pull_manifest_num("blade_cie_l_sd", if ("blade_cie_l_sd" %in% names(sub_rows)) suppressWarnings(as.numeric(sub_rows$blade_cie_l_sd)) else rep(NA_real_, n_kept)),
+    blade_cie_l_sheet_delta = pull_manifest_num("blade_cie_l_sheet_delta", if ("blade_cie_l_sheet_delta" %in% names(sub_rows)) suppressWarnings(as.numeric(sub_rows$blade_cie_l_sheet_delta)) else rep(NA_real_, n_kept)),
+    blade_cie_a_delta = pull_manifest_num("blade_cie_a_delta", if ("blade_cie_a_delta" %in% names(sub_rows)) suppressWarnings(as.numeric(sub_rows$blade_cie_a_delta)) else rep(NA_real_, n_kept)),
+    blade_cie_b_delta = pull_manifest_num("blade_cie_b_delta", if ("blade_cie_b_delta" %in% names(sub_rows)) suppressWarnings(as.numeric(sub_rows$blade_cie_b_delta)) else rep(NA_real_, n_kept)),
     petiole_to_blade_ratio = suppressWarnings(as.numeric(sub_rows$petiole_to_blade_ratio)),
     is_dissected = eff_diss_vec,
     ect_path = db_ect_vec,
@@ -1669,7 +1744,9 @@ fetch_step03_contours_from_db <- function(
       "Cauline_ECT_PC1", "Cauline_ECT_PC2",
       "ect_lobe_complexity", "cauline_ect_lobe_complexity",
       "ect_bilateral_asym", "heteroblasty_ect_distance",
-      "area_mm2", "petiole_width_mm", "blade_width_mm", "blade_cie_l_norm", "blade_cie_l_sd",
+      "area_mm2", "petiole_width_mm", "blade_width_mm",
+      "blade_cie_l_norm", "blade_cie_l_sd",
+      "blade_cie_l_sheet_delta", "blade_cie_a_delta", "blade_cie_b_delta",
       "log1p_capitulum_count", "log1p_capitulum_count_std", "nearest_type_basionym_d2", "spatial_balance_weight"
     ),
     names(df)
@@ -1887,7 +1964,9 @@ fetch_step04_morphometrics_from_db <- function(
                 "Cauline_ECT_PC1", "Cauline_ECT_PC2", "aspect_ratio", "solidity", "q25_solidity",
                 "dissection_index", "dissected_leaf_fraction", "within_rosette_efa_dispersion",
                 "heteroblasty_efa_distance", "heteroblasty_ect_distance", "ect_lobe_complexity",
-                "cauline_ect_lobe_complexity", "blade_cie_l_norm", "blade_cie_l_sd", "centroid_size", "log_centsize", "scale_source"
+                "cauline_ect_lobe_complexity", "blade_cie_l_norm", "blade_cie_l_sd",
+                "blade_cie_l_sheet_delta", "blade_cie_a_delta", "blade_cie_b_delta",
+                "centroid_size", "log_centsize", "scale_source"
               ),
               names(hm_raw)
             )

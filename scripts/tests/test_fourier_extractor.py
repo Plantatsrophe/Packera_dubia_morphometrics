@@ -104,8 +104,6 @@ class TestFourierExtractor(unittest.TestCase):
             def run_step03(tag: str):
                 out_spec = tmp_p / f"leaf_efa_harmonics_{tag}.csv"
                 out_ind = tmp_p / f"leaf_efa_harmonics_ind_{tag}.csv"
-                out_rep = tmp_p / f"tier_report_{tag}.csv"
-                out_fig = tmp_p / f"fig_{tag}.pdf"
                 proc = run_warm_r_cmd([
                         "Rscript",
                         str(self.r_script_path),
@@ -115,7 +113,6 @@ class TestFourierExtractor(unittest.TestCase):
                         "--manifest", str(manifest_csv),
                         "--output", str(out_spec),
                         "--output-individual", str(out_ind),
-                        "--permutations", "19",
                     ], stage_key='step03', cwd=PROJECT_ROOT, skip_figures=True)
                 self.assertEqual(proc.returncode, 0, f"Step 03 Rscript failed ({tag}):\n{proc.stderr}\n{proc.stdout}")
                 return pd.read_csv(out_spec), pd.read_csv(out_ind)
@@ -269,9 +266,6 @@ class TestFourierExtractor(unittest.TestCase):
                     "--manifest", str(manifest_csv),
                     "--output", str(out_spec),
                     "--output-individual", str(out_ind),
-                    "--report-out", str(tmp_p / "tier_rep.csv"),
-                    "--plot-out", str(tmp_p / "tier_fig.pdf"),
-                    "--permutations", "19",
                 ], stage_key='step03', cwd=PROJECT_ROOT, skip_figures=True)
             self.assertEqual(proc.returncode, 0, f"Step 03 failed on 0-Gold/Silver & handoff run:\n{proc.stderr}\n{proc.stdout}")
             ind_df = pd.read_csv(out_ind)
@@ -377,9 +371,6 @@ class TestFourierExtractor(unittest.TestCase):
                     "--manifest", str(manifest_csv),
                     "--output", str(out_spec),
                     "--output-individual", str(out_ind),
-                    "--report-out", str(tmp_p / "tier_rep.csv"),
-                    "--plot-out", str(tmp_p / "tier_fig.pdf"),
-                    "--permutations", "19",
                 ], stage_key='step03', cwd=PROJECT_ROOT, skip_figures=True)
             self.assertEqual(proc.returncode, 0, f"Dynamic H_opt Step 03 failed:\n{proc.stderr}\n{proc.stdout}")
             spec_df = pd.read_csv(out_spec)
@@ -471,9 +462,6 @@ class TestFourierExtractor(unittest.TestCase):
                     "--manifest", str(manifest_csv),
                     "--output", str(out_spec),
                     "--output-individual", str(out_ind),
-                    "--report-out", str(tmp_p / "tier_rep.csv"),
-                    "--plot-out", str(tmp_p / "tier_fig.pdf"),
-                    "--permutations", "19",
                 ], stage_key='step03', cwd=PROJECT_ROOT, skip_figures=True)
             self.assertEqual(proc.returncode, 0, f"Step 03 basal/dissection test failed:\n{proc.stderr}\n{proc.stdout}")
             ind_df = pd.read_csv(out_ind)
@@ -653,9 +641,6 @@ class TestFourierExtractor(unittest.TestCase):
                     "--manifest", str(manifest_csv),
                     "--output", str(out_spec),
                     "--output-individual", str(out_ind),
-                    "--report-out", str(tmp_p / "tier_rep.csv"),
-                    "--plot-out", str(tmp_p / "tier_fig.pdf"),
-                    "--permutations", "19",
                 ], stage_key='step03', cwd=PROJECT_ROOT, skip_figures=True)
             self.assertEqual(proc.returncode, 0, f"Step 03 vertical tip-up test failed:\n{proc.stderr}\n{proc.stdout}")
             ind_df = pd.read_csv(out_ind)
@@ -819,10 +804,7 @@ class TestFourierExtractor(unittest.TestCase):
                     "--manifest", str(manifest_basal_only_csv),
                     "--output", str(out_spec_basal),
                     "--output-individual", str(out_ind_basal),
-                    "--report-out", str(tmp_p / "rep_b.csv"),
-                    "--plot-out", str(figs_b_dir / "fig_b.pdf"),
                     "--figures-dir", str(figs_b_dir),
-                    "--permutations", "9",
                 ], stage_key='step03', cwd=PROJECT_ROOT, skip_figures=False)
             self.assertEqual(proc_b.returncode, 0, f"Basal-only Step 03 failed:\n{proc_b.stderr}\n{proc_b.stdout}")
 
@@ -837,10 +819,7 @@ class TestFourierExtractor(unittest.TestCase):
                     "--manifest", str(manifest_mixed_csv),
                     "--output", str(out_spec_mix),
                     "--output-individual", str(out_ind_mix),
-                    "--report-out", str(tmp_p / "rep_m.csv"),
-                    "--plot-out", str(figs_m_dir / "fig_m.pdf"),
                     "--figures-dir", str(figs_m_dir),
-                    "--permutations", "9",
                 ], stage_key='step03', cwd=PROJECT_ROOT, skip_figures=False)
             self.assertEqual(proc_m.returncode, 0, f"Mixed basal+cauline Step 03 failed:\n{proc_m.stderr}\n{proc_m.stdout}")
 

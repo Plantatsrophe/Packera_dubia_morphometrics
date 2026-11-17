@@ -205,6 +205,12 @@ aggregate_step03_otu_medians_fast <- function(closed_leaf_df, all_harm_cols, sym
   sym_col_pos <- sym_col_pos[!is.na(sym_col_pos)]
   n_harm <- ncol(harm_mat)
 
+  ss_l <- if ("scale_source" %in% names(closed_leaf_df)) tolower(trimws(as.character(closed_leaf_df$scale_source))) else rep("", n_rows)
+  ss_l[is.na(ss_l)] <- ""
+  cal_raw <- if ("is_calibrated_mm" %in% names(closed_leaf_df)) closed_leaf_df$is_calibrated_mm else rep(TRUE, n_rows)
+  cal_flag <- if (is.character(cal_raw) || is.factor(cal_raw)) (!is.na(cal_raw) & (toupper(trimws(as.character(cal_raw))) %in% c("1", "TRUE", "T", "YES"))) else (!is.na(cal_raw) & as.logical(cal_raw))
+  cal_mask <- cal_flag & !(ss_l %in% c("mp_estimated", "predicted_from_megapixels", "tick_lattice_unboxed", "uncalibrated"))
+
   pull_num <- function(cn) {
     if (cn %in% names(closed_leaf_df)) suppressWarnings(as.numeric(closed_leaf_df[[cn]])) else rep(NA_real_, n_rows)
   }
@@ -237,18 +243,24 @@ aggregate_step03_otu_medians_fast <- function(closed_leaf_df, all_harm_cols, sym
   }
   has_pbr <- ("petiole_to_blade_ratio" %in% names(closed_leaf_df)) || any(is.finite(pbr_raw))
   pbr_v <- if (has_pbr) pbr_raw else NULL
+  cs_v[!cal_mask] <- NA_real_
+  if (!is.null(amm2_v)) amm2_v[!cal_mask] <- NA_real_
+  if (!is.null(pet_v)) pet_v[!cal_mask] <- NA_real_
+  if (!is.null(petw_v)) petw_v[!cal_mask] <- NA_real_
+  if (!is.null(bld_v)) bld_v[!cal_mask] <- NA_real_
+  if (!is.null(bldw_v)) bldw_v[!cal_mask] <- NA_real_
+
   has_ect1 <- "ECT_PC1" %in% names(closed_leaf_df)
   has_ect2 <- "ECT_PC2" %in% names(closed_leaf_df)
   has_ect3 <- "ECT_PC3" %in% names(closed_leaf_df)
   has_ectlc <- "ect_lobe_complexity" %in% names(closed_leaf_df)
-  has_blln <- "blade_cie_l_norm" %in% names(closed_leaf_df)
-  has_bllsd <- "blade_cie_l_sd" %in% names(closed_leaf_df)
-  blln_v <- if (has_blln) pull_num("blade_cie_l_norm") else NULL
-  bllsd_v <- if (has_bllsd) pull_num("blade_cie_l_sd") else NULL
   ect1_v <- if (has_ect1) pull_num("ECT_PC1") else NULL
   ect2_v <- if (has_ect2) pull_num("ECT_PC2") else NULL
   ect3_v <- if (has_ect3) pull_num("ECT_PC3") else NULL
   ectlc_v <- if (has_ectlc) pull_num("ect_lobe_complexity") else NULL
+  phot_cols <- unique(intersect(c("blade_cie_l_norm", "blade_cie_l_sd", "blade_cie_l_sheet_delta", "blade_cie_a_delta", "blade_cie_b_delta", grep("^blade_(cie_|.*browning)", names(closed_leaf_df), value = TRUE)), names(closed_leaf_df)))
+  phot_vecs <- lapply(phot_cols, pull_num)
+  names(phot_vecs) <- phot_cols
   has_dis <- "is_dissected" %in% names(closed_leaf_df)
   dis_v <- if (has_dis) as.logical(closed_leaf_df$is_dissected) else NULL
 
@@ -264,47 +276,21 @@ aggregate_step03_otu_medians_fast <- function(closed_leaf_df, all_harm_cols, sym
   agg_chunk_fn <- function(g_positions) {
     m <- length(g_positions)
     h_out <- matrix(NA_real_, nrow = m, ncol = n_harm)
-    n_lv <- integer(m)
-    f_var <- numeric(m)
-    h_idx <- numeric(m)
-    cs_m <- rep(NA_real_, m)
-    sol_m <- rep(NA_real_, m)
-    q25_m <- rep(NA_real_, m)
-    di_m <- rep(NA_real_, m)
-    dfrac_m <- rep(NA_real_, m)
-    ar_m <- rep(NA_real_, m)
-    circ_m <- rep(NA_real_, m)
-    arch_m <- rep(NA_real_, m)
-    area_m <- rep(NA_real_, m)
-    amm2_m <- rep(NA_real_, m)
-    sv_m <- rep(NA_real_, m)
-    av_m <- rep(NA_real_, m)
-    pa_m <- rep(NA_real_, m)
-    hr_m <- rep(NA_real_, m)
-    lq_m <- rep(NA_real_, m)
-    pet_m <- rep(NA_real_, m)
-    petw_m <- rep(NA_real_, m)
-    bld_m <- rep(NA_real_, m)
-    bldw_m <- rep(NA_real_, m)
-    pbr_m <- rep(NA_real_, m)
-    ect1_m <- rep(NA_real_, m)
-    ect2_m <- rep(NA_real_, m)
-    ect3_m <- rep(NA_real_, m)
-    ectlc_m <- rep(NA_real_, m)
-    blln_m <- rep(NA_real_, m)
-    bllsd_m <- rep(NA_real_, m)
-    dis_m <- rep(NA, m)
-    out_m <- logical(m)
+    n_lv <- integer(m); f_var <- numeric(m); h_idx <- numeric(m)
+    cs_m <- rep(NA_real_, m); sol_m <- rep(NA_real_, m); q25_m <- rep(NA_real_, m); di_m <- rep(NA_real_, m); dfrac_m <- rep(NA_real_, m)
+    ar_m <- rep(NA_real_, m); circ_m <- rep(NA_real_, m); arch_m <- rep(NA_real_, m); area_m <- rep(NA_real_, m); amm2_m <- rep(NA_real_, m)
+    sv_m <- rep(NA_real_, m); av_m <- rep(NA_real_, m); pa_m <- rep(NA_real_, m); hr_m <- rep(NA_real_, m); lq_m <- rep(NA_real_, m)
+    pet_m <- rep(NA_real_, m); petw_m <- rep(NA_real_, m); bld_m <- rep(NA_real_, m); bldw_m <- rep(NA_real_, m); pbr_m <- rep(NA_real_, m)
+    ect1_m <- rep(NA_real_, m); ect2_m <- rep(NA_real_, m); ect3_m <- rep(NA_real_, m); ectlc_m <- rep(NA_real_, m)
+    phot_m <- if (length(phot_cols) > 0L) matrix(NA_real_, nrow = m, ncol = length(phot_cols), dimnames = list(NULL, phot_cols)) else NULL
+    dis_m <- rep(NA, m); out_m <- logical(m)
 
     for (k in seq_len(m)) {
       idx <- grp_list[[g_positions[k]]]
       nl <- length(idx)
       n_lv[k] <- nl
       if (nl == 1L) {
-        hm <- harm_mat[idx, ]
-        h_out[k, ] <- hm
-        f_var[k] <- 0.0
-        h_idx[k] <- 0.0
+        h_out[k, ] <- harm_mat[idx, ]; f_var[k] <- 0.0; h_idx[k] <- 0.0
       } else {
         sub_h <- harm_mat[idx, , drop = FALSE]
         hm <- apply(sub_h, 2L, stats::median, na.rm = TRUE)
@@ -317,36 +303,24 @@ aggregate_step03_otu_medians_fast <- function(closed_leaf_df, all_harm_cols, sym
       mc <- stats::median(cs_v[idx], na.rm = TRUE)
       cs_m[k] <- if (is.finite(mc) && mc > 0) round(mc, 4) else NA_real_
 
-      sv <- sol_v[idx]
-      sv_f <- sv[is.finite(sv)]
+      sv <- sol_v[idx]; sv_f <- sv[is.finite(sv)]
       sol_m[k] <- if (length(sv_f) == 0L) NA_real_ else round(stats::median(sv_f), 4)
       q25_m[k] <- if (length(sv_f) == 0L) NA_real_ else round(as.numeric(stats::quantile(sv_f, probs = 0.25, na.rm = TRUE, names = FALSE)), 4)
       dr <- if (has_dis) dis_v[idx] else rep(NA, nl)
       dl <- ifelse(!is.na(dr), dr, FALSE) | (is.finite(sv) & sv < 0.72)
       dfrac_m[k] <- if (any(!is.na(dr)) || length(sv_f) > 0L) round(mean(dl, na.rm = TRUE), 4) else NA_real_
 
-      di_m[k] <- med_fin(di_v[idx], 4L)
-      ar_m[k] <- med_fin(ar_v[idx], 4L)
-      circ_m[k] <- med_fin(circ_v[idx], 4L)
-      arch_m[k] <- med_fin(arch_v[idx], 4L)
-      area_m[k] <- med_fin(area_v[idx], 1L)
+      di_m[k] <- med_fin(di_v[idx], 4L); ar_m[k] <- med_fin(ar_v[idx], 4L); circ_m[k] <- med_fin(circ_v[idx], 4L)
+      arch_m[k] <- med_fin(arch_v[idx], 4L); area_m[k] <- med_fin(area_v[idx], 1L)
       if (has_amm2) amm2_m[k] <- med_fin(amm2_v[idx], 2L)
-      sv_m[k] <- med_fin(svar_v[idx], 6L)
-      av_m[k] <- med_fin(avar_v[idx], 6L)
-      pa_m[k] <- med_fin(pasym_v[idx], 6L)
-      hr_m[k] <- med_fin(hrough_v[idx], 6L)
-      lq_m[k] <- med_fin(lqw_v[idx], 6L)
-      if (has_pet) pet_m[k] <- q75_fin(pet_v[idx])
-      if (has_petw) petw_m[k] <- q75_fin(petw_v[idx])
-      if (has_bld) bld_m[k] <- q75_fin(bld_v[idx])
-      if (has_bldw) bldw_m[k] <- q75_fin(bldw_v[idx])
+      sv_m[k] <- med_fin(svar_v[idx], 6L); av_m[k] <- med_fin(avar_v[idx], 6L); pa_m[k] <- med_fin(pasym_v[idx], 6L)
+      hr_m[k] <- med_fin(hrough_v[idx], 6L); lq_m[k] <- med_fin(lqw_v[idx], 6L)
+      if (has_pet) pet_m[k] <- q75_fin(pet_v[idx]); if (has_petw) petw_m[k] <- q75_fin(petw_v[idx])
+      if (has_bld) bld_m[k] <- q75_fin(bld_v[idx]); if (has_bldw) bldw_m[k] <- q75_fin(bldw_v[idx])
       if (has_pbr) pbr_m[k] <- q75_fin(pbr_v[idx])
-      if (has_ect1) ect1_m[k] <- med_fin(ect1_v[idx], 6L)
-      if (has_ect2) ect2_m[k] <- med_fin(ect2_v[idx], 6L)
-      if (has_ect3) ect3_m[k] <- med_fin(ect3_v[idx], 6L)
-      if (has_ectlc) ectlc_m[k] <- med_fin(ectlc_v[idx], 4L)
-      if (has_blln) blln_m[k] <- med_fin(blln_v[idx], 4L)
-      if (has_bllsd) bllsd_m[k] <- med_fin(bllsd_v[idx], 4L)
+      if (has_ect1) ect1_m[k] <- med_fin(ect1_v[idx], 6L); if (has_ect2) ect2_m[k] <- med_fin(ect2_v[idx], 6L)
+      if (has_ect3) ect3_m[k] <- med_fin(ect3_v[idx], 6L); if (has_ectlc) ectlc_m[k] <- med_fin(ectlc_v[idx], 4L)
+      if (length(phot_cols) > 0L) for (pj in seq_along(phot_cols)) phot_m[k, pj] <- med_fin(phot_vecs[[pj]][idx], 4L)
       if (has_dis) dis_m[k] <- if (any(!is.na(dr))) any(dr, na.rm = TRUE) else NA
       if (has_out_col) out_m[k] <- all(out_vec[idx], na.rm = TRUE)
     }
@@ -358,8 +332,7 @@ aggregate_step03_otu_medians_fast <- function(closed_leaf_df, all_harm_cols, sym
       sv = sv_m, av = av_m, pa = pa_m, hr = hr_m, lq = lq_m,
       pet = pet_m, petw = petw_m, bld = bld_m, bldw = bldw_m, pbr = pbr_m,
       ect1 = ect1_m, ect2 = ect2_m, ect3 = ect3_m, ectlc = ectlc_m,
-      blln = blln_m, bllsd = bllsd_m,
-      dis = dis_m, out = out_m
+      phot = phot_m, dis = dis_m, out = out_m
     )
   }
 
@@ -382,7 +355,7 @@ aggregate_step03_otu_medians_fast <- function(closed_leaf_df, all_harm_cols, sym
       sv = pull_c("sv"), av = pull_c("av"), pa = pull_c("pa"), hr = pull_c("hr"), lq = pull_c("lq"),
       pet = pull_c("pet"), petw = pull_c("petw"), bld = pull_c("bld"), bldw = pull_c("bldw"), pbr = pull_c("pbr"),
       ect1 = pull_c("ect1"), ect2 = pull_c("ect2"), ect3 = pull_c("ect3"), ectlc = pull_c("ectlc"),
-      blln = pull_c("blln"), bllsd = pull_c("bllsd"),
+      phot = if (length(phot_cols) > 0L) do.call(rbind, lapply(c_list, `[[`, "phot")) else NULL,
       dis = pull_c("dis"), out = pull_c("out")
     )
   }
@@ -401,8 +374,8 @@ aggregate_step03_otu_medians_fast <- function(closed_leaf_df, all_harm_cols, sym
     morph_tier_source = ifelse(is_caul_fb_vec, "Cauline_Only_Fallback", "Basal_Rosette"),
     foliar_variance = res$fv,
     within_rosette_efa_dispersion = res$hi,
-    scientificName = closed_leaf_df$scientificName[first_idx],
-    species_raw = closed_leaf_df$species_raw[first_idx],
+    scientificName = if ("scientificName" %in% names(closed_leaf_df)) closed_leaf_df$scientificName[first_idx] else rep(NA_character_, n_spec),
+    species_raw = if ("species_raw" %in% names(closed_leaf_df)) closed_leaf_df$species_raw[first_idx] else rep(NA_character_, n_spec),
     determiner_tier = det_vec,
     authority_weight = auth_init,
     centroid_size = res$cs,
@@ -429,6 +402,30 @@ aggregate_step03_otu_medians_fast <- function(closed_leaf_df, all_harm_cols, sym
     }
     spec_df[[m_col]] <- v_first
   }
+  has_cal_col <- "is_calibrated_mm" %in% names(closed_leaf_df)
+  has_ss_col <- "scale_source" %in% names(closed_leaf_df)
+  if (has_cal_col || has_ss_col) {
+    spec_df$is_calibrated_mm <- logical(n_spec)
+    if (has_ss_col) spec_df$scale_source <- character(n_spec)
+    for (gi in seq_len(n_spec)) {
+      idx <- grp_list[[gi]]
+      has_cal_g <- any(cal_mask[idx])
+      spec_df$is_calibrated_mm[gi] <- has_cal_g
+      if (has_ss_col) {
+        if (has_cal_g) {
+          cal_ss <- ss_l[idx[cal_mask[idx]]]
+          cal_ss <- cal_ss[nzchar(cal_ss)]
+          spec_df$scale_source[gi] <- if (length(cal_ss) > 0L) cal_ss[1L] else "ruler_calibrated"
+        } else if ("tick_lattice_unboxed" %in% ss_l[idx]) {
+          spec_df$scale_source[gi] <- "tick_lattice_unboxed"
+        } else if (any(ss_l[idx] %in% c("mp_estimated", "predicted_from_megapixels"))) {
+          spec_df$scale_source[gi] <- "mp_estimated"
+        } else {
+          spec_df$scale_source[gi] <- "uncalibrated"
+        }
+      }
+    }
+  }
 
   spec_df$basal_leaf_count <- ifelse(is_caul_fb_vec, 0L, as.integer(res$nl))
   spec_df$solidity <- res$sol
@@ -454,8 +451,7 @@ aggregate_step03_otu_medians_fast <- function(closed_leaf_df, all_harm_cols, sym
   if (has_ect2) spec_df$ECT_PC2 <- res$ect2
   if (has_ect3) spec_df$ECT_PC3 <- res$ect3
   if (has_ectlc) spec_df$ect_lobe_complexity <- res$ectlc
-  if (has_blln) spec_df$blade_cie_l_norm <- res$blln
-  if (has_bllsd) spec_df$blade_cie_l_sd <- res$bllsd
+  for (pcol in phot_cols) spec_df[[pcol]] <- as.numeric(res$phot[, pcol])
   if (has_dis) spec_df$is_dissected <- res$dis
   if (has_out_col) spec_df$is_contour_outlier <- res$out
 

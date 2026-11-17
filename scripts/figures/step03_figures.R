@@ -5,6 +5,8 @@
 #   2. fig03b_topological_ect_and_heteroblasty.png
 # ==============================================================================
 
+if (grDevices::dev.cur() == 1L) grDevices::pdf(NULL)
+
 render_step03_figures_suite <- function(
   efa_df,
   specimen_df,
@@ -25,31 +27,8 @@ render_step03_figures_suite <- function(
   }
   dir.create(fdir, recursive = TRUE, showWarnings = FALSE)
 
-  # Remove legacy multi-file Step 03 PDF/PNG clutter
-  for (old_stem in c(
-    "fig03_efa_morphospace_reconstruction", "fig03a_efa_morphospace_pca",
-    "fig03b_harmonic_power_and_asymmetry", "fig03c_cauline_efa_morphospace",
-    "fig03d_basal_ect_morphospace", "fig03e_cauline_ect_morphospace"
-  )) {
-    for (ext in c(".pdf", ".png")) {
-      p_old <- file.path(fdir, paste0(old_stem, ext))
-      if (file.exists(p_old)) unlink(p_old, force = TRUE)
-    }
-  }
-
   spec_df <- as.data.frame(if (!is.null(specimen_df) && nrow(specimen_df) > 0L) specimen_df else efa_df, stringsAsFactors = FALSE)
   if (is.null(spec_df) || nrow(spec_df) == 0L) return(invisible(character(0)))
-
-  # Trigger Step 02 native LM3 asset/ECT export if overlays do not yet exist in fdir
-  if (!dir.exists(file.path(fdir, "ect_overlays")) || length(list.files(file.path(fdir, "ect_overlays"), pattern = "\\.png$")) == 0L) {
-    py_bin <- Sys.which("python3"); if (!nzchar(py_bin)) py_bin <- Sys.which("python")
-    if (nzchar(py_bin) && file.exists("scripts/vision/step02_figures.py")) {
-      tryCatch(
-        system2(py_bin, c("scripts/vision/step02_figures.py", "--export-ect-exemplars", "--output-dir", fdir, "--zone", "all"), stdout = FALSE, stderr = FALSE),
-        error = function(e) NULL
-      )
-    }
-  }
 
   spec_df$plot_group <- resolve_plot_group_labels(spec_df)
   active_groups <- sort(unique(spec_df$plot_group[!is.na(spec_df$plot_group) & nzchar(spec_df$plot_group) & spec_df$plot_group != "Unknown"]))

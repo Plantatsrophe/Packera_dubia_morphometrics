@@ -381,7 +381,6 @@ class TestSQLPipelineHandshake(unittest.TestCase):
                 "--vouchers", str(vouchers_csv),
                 "--output", str(out_otu_csv),
                 "--output-individual", str(out_ind_csv),
-                "--permutations", "19",
             ]
             proc = run_warm_r_cmd(cmd, stage_key='step03', cwd=PROJECT_ROOT, env=env, skip_figures=True)
             combined_log = proc.stdout + "\n" + proc.stderr
