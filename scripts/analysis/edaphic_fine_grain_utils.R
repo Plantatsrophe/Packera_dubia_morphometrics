@@ -38,6 +38,9 @@ for (.gw_p in c("scripts/analysis/edaphic_geochem_wetland_utils.R", file.path(di
 for (.lh_p in c("scripts/analysis/step05_layer_hygiene_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "step05_layer_hygiene_utils.R"))) {
   if (!exists("clamp_bedrock_buffer_radius_m", mode = "function") && !is.na(.lh_p) && nzchar(.lh_p) && file.exists(.lh_p)) { source(.lh_p); break }
 }
+for (.cg_p in c("scripts/analysis/step05_config_geo_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "step05_config_geo_utils.R"))) {
+  if (!exists("load_step05_macroecology_config", mode = "function") && !is.na(.cg_p) && nzchar(.cg_p) && file.exists(.cg_p)) { source(.cg_p); break }
+}
 
 SGMC_LITHOLOGY_CLASSES <- c(
   "Ultramafic_Serpentine",
@@ -1597,11 +1600,13 @@ load_and_update_fine_grain_cache <- function(
     )
     c_by_cat <- cached_df[!duplicated(cached_df$catalogNumber), c("catalogNumber", avail_cache_cols), drop = FALSE]
     m_idx <- match(df$catalogNumber, c_by_cat$catalogNumber)
+    was_in_cache <- !is.na(m_idx)
 
     miss_cat <- which(is.na(m_idx) & !is.na(df$lat_lon_key))
     if (length(miss_cat) > 0L) {
       c_by_ll <- cached_df[!is.na(cached_df$lat_lon_key) & !duplicated(cached_df$lat_lon_key), c("lat_lon_key", avail_cache_cols), drop = FALSE]
       ll_idx <- match(df$lat_lon_key[miss_cat], c_by_ll$lat_lon_key)
+      was_in_cache[miss_cat[!is.na(ll_idx)]] <- TRUE
       for (col in avail_cache_cols) {
         df[[col]] <- c_by_cat[[col]][m_idx]
         hit_ll <- !is.na(ll_idx)
@@ -1613,9 +1618,12 @@ load_and_update_fine_grain_cache <- function(
 
     micro_elig <- is_micro_scale_coord_eligible(df, max_uncertainty_m = 250.0)
     df <- mask_micro_scale_predictors_by_uncertainty(df, cols = c("topo_tpi_30m", "topo_hli_30m", "topo_twi_30m"), max_uncertainty_m = 250.0)
-    uncached_mask <- is.na(df$fine_soil_ph) |
+    elev_na <- if ("elevation_m" %in% names(df)) is.na(df$elevation_m) else rep(TRUE, n)
+    hli_na <- if ("topo_hli_30m" %in% names(df)) is.na(df$topo_hli_30m) else rep(TRUE, n)
+    twi_na <- if ("topo_twi_30m" %in% names(df)) is.na(df$topo_twi_30m) else rep(TRUE, n)
+    uncached_mask <- (!was_in_cache) |
                      !(all(c("ilr_texture_1", "ilr_texture_2") %in% names(df))) |
-                     (has_dem_disk & micro_elig & (!("topo_hli_30m" %in% names(df)) | is.na(df$topo_hli_30m) | is.na(df$topo_twi_30m)))
+                     (has_dem_disk & micro_elig & (!("topo_hli_30m" %in% names(df)) | (elev_na & hli_na & twi_na)))
     n_uncached <- sum(uncached_mask)
     message(sprintf(
       "Loaded %d / %d fine-grain edaphic records from %s (%d coordinates requiring refresh).",
@@ -2504,15 +2512,46 @@ evaluate_multiclass_substrate_contingency <- function(
     is_t[is.na(is_t)] <- FALSE
     in_grp_mask <- in_grp_mask & (!cl_n | is_t)
   }
+  is_t2 <- if ("is_type_specimen" %in% names(d)) as.logical(d$is_type_specimen) else rep(FALSE, nrow(d))
+  is_t2[is.na(is_t2)] <- FALSE
+  coord_q_s <- if (exists("detect_r_centroid_or_inst_quarantine", mode = "function")) {
+    cq_res <- detect_r_centroid_or_inst_quarantine(d, is_type_vec = is_t2)
+    if (is.list(cq_res) && length(cq_res$is_quarantined) == nrow(d)) as.logical(cq_res$is_quarantined) else rep(FALSE, nrow(d))
+  } else if ("is_centroid_or_inst_coord" %in% names(d)) {
+    qv <- as.logical(d$is_centroid_or_inst_coord)
+    !is.na(qv) & qv & !is_t2
+  } else {
+    rep(FALSE, nrow(d))
+  }
+  coord_q_s[is.na(coord_q_s)] <- FALSE
+  ext_q_s <- if (exists(".is_step05_extralimital_non_type", mode = "function")) {
+    eq_res <- .is_step05_extralimital_non_type(d, group_vec = grp_all, clean_base_mask = in_grp_mask, is_type_vec = is_t2)
+    if (length(eq_res) == nrow(d)) as.logical(eq_res) else rep(FALSE, nrow(d))
+  } else {
+    rep(FALSE, nrow(d))
+  }
+  ext_q_s[is.na(ext_q_s)] <- FALSE
   if ("determiner_tier" %in% names(d)) {
     dt_v <- as.character(d$determiner_tier); dt_v[is.na(dt_v)] <- "Tier_3_Bronze"
     pr_v <- rep(FALSE, nrow(d))
     if ("is_promoted_bronze" %in% names(d)) { p1 <- as.logical(d$is_promoted_bronze); p1[is.na(p1)] <- FALSE; pr_v <- pr_v | p1 }
-    is_t2 <- if ("is_type_specimen" %in% names(d)) as.logical(d$is_type_specimen) else rep(FALSE, nrow(d))
-    is_t2[is.na(is_t2)] <- FALSE
     act_mask <- in_grp_mask & (grepl("Tier_1|Gold|Tier_2|Silver", dt_v, ignore.case = TRUE) | pr_v | is_t2)
-    if (sum(act_mask) >= 6L) in_grp_mask <- act_mask
+    act_mask_clean <- act_mask & !(coord_q_s | ext_q_s)
+    if (sum(act_mask_clean) >= 6L) {
+      in_grp_mask <- act_mask_clean
+    } else if (sum(act_mask) >= 6L) {
+      in_grp_mask <- act_mask
+    } else {
+      clean_grp_mask <- in_grp_mask & !(coord_q_s | ext_q_s)
+      if (sum(clean_grp_mask) >= 6L) in_grp_mask <- clean_grp_mask
+    }
+  } else {
+    clean_grp_mask <- in_grp_mask & !(coord_q_s | ext_q_s)
+    if (sum(clean_grp_mask) >= 6L) in_grp_mask <- clean_grp_mask
   }
+  post_sel_sub <- isTRUE((group_col != "species_standardized") &&
+                         exists("is_post_selection_ecotype_groups", mode = "function") &&
+                         isTRUE(is_post_selection_ecotype_groups(active_groups, TRUE, d)))
   target_df <- d[in_grp_mask, , drop = FALSE]
   n_tot <- nrow(target_df)
   if (n_tot == 0L) {
@@ -2728,7 +2767,20 @@ evaluate_multiclass_substrate_contingency <- function(
     )
   }
   if (nrow(multiclass_df) > 0L) {
-    multiclass_df$P_Value_BH <- stats::p.adjust(multiclass_df$P_Value, method = "BH")
+    if (isTRUE(post_sel_sub)) {
+      multiclass_df$P_Value_BH <- rep(NA_real_, nrow(multiclass_df))
+      non_out_dom <- multiclass_df$Substrate_Domain != "SSURGO_Outcrop"
+      if (any(non_out_dom)) {
+        multiclass_df$P_Value_BH[non_out_dom] <- stats::p.adjust(multiclass_df$P_Value[non_out_dom], method = "BH")
+      }
+      out_dom <- multiclass_df$Substrate_Domain == "SSURGO_Outcrop"
+      if (any(out_dom)) {
+        multiclass_df$P_Value[out_dom] <- NA_real_
+        multiclass_df$P_Value_BH[out_dom] <- NA_real_
+      }
+    } else {
+      multiclass_df$P_Value_BH <- stats::p.adjust(multiclass_df$P_Value, method = "BH")
+    }
   }
 
   safe_mean <- function(sub_d, col_nm) {
@@ -2767,7 +2819,7 @@ evaluate_multiclass_substrate_contingency <- function(
     if (nrow(tx_sgmc) > 0L) {
       ord_freq_l <- order(tx_sgmc$In_Class_Count, tx_sgmc$Odds_Ratio, decreasing = TRUE)
       dom_lith <- as.character(tx_sgmc$Substrate_Class[ord_freq_l[1]])
-      sig_sgmc <- tx_sgmc[tx_sgmc$P_Value_BH < 0.05 & tx_sgmc$Odds_Ratio > 1.0, , drop = FALSE]
+      sig_sgmc <- tx_sgmc[!is.na(tx_sgmc$P_Value_BH) & tx_sgmc$P_Value_BH < 0.05 & tx_sgmc$Odds_Ratio > 1.0, , drop = FALSE]
       if (nrow(sig_sgmc) > 0L) {
         top_enr_lith <- as.character(sig_sgmc$Substrate_Class[order(sig_sgmc$Odds_Ratio, sig_sgmc$In_Class_Count, decreasing = TRUE)[1]])
         dom_lith <- top_enr_lith
@@ -2789,7 +2841,7 @@ evaluate_multiclass_substrate_contingency <- function(
     top_sub_or <- round(ft_bin$odds_ratio, 3)
     best_q_bh <- NA_real_
     if (nrow(tx_mc) > 0L) {
-      sig_mc <- tx_mc[tx_mc$P_Value_BH < 0.05 & tx_mc$Odds_Ratio > 1.0, , drop = FALSE]
+      sig_mc <- tx_mc[!is.na(tx_mc$P_Value_BH) & tx_mc$P_Value_BH < 0.05 & tx_mc$Odds_Ratio > 1.0, , drop = FALSE]
       if (nrow(sig_mc) > 0L) {
         best_idx <- order(sig_mc$Odds_Ratio, sig_mc$In_Class_Count, decreasing = TRUE)[1]
         dom_sub <- as.character(sig_mc$Substrate_Class[best_idx])
@@ -2815,9 +2867,9 @@ evaluate_multiclass_substrate_contingency <- function(
       Odds_Ratio = round(ft_bin$odds_ratio, 3),
       CI_Lower = round(ft_bin$ci_lower, 3),
       CI_Upper = round(ft_bin$ci_upper, 3),
-      P_Value = signif(ft_bin$p_value, 5),
-      P_Value_BH = signif(ft_bin$p_value, 5),
-      Outcrop_Fisher_P = signif(ft_bin$p_value, 5),
+      P_Value = if (isTRUE(post_sel_sub)) NA_real_ else signif(ft_bin$p_value, 5),
+      P_Value_BH = if (isTRUE(post_sel_sub)) NA_real_ else signif(ft_bin$p_value, 5),
+      Outcrop_Fisher_P = if (isTRUE(post_sel_sub)) NA_real_ else signif(ft_bin$p_value, 5),
       Top_Substrate_P_Value_BH = signif(ifelse(is.finite(best_q_bh), best_q_bh, 1.0), 5),
       Dominant_Lithology_Class = dom_lith,
       Dominant_Substrate_Class = dom_sub,
@@ -2836,47 +2888,87 @@ evaluate_multiclass_substrate_contingency <- function(
 
   sp_df <- do.call(rbind, sp_rows)
   rownames(sp_df) <- NULL
-  bin_p_bh <- stats::p.adjust(raw_bin_p, method = "BH")
-  for (r_i in seq_len(nrow(sp_df))) {
-    tx_i <- sp_df$Taxon[r_i]
-    q_bin <- bin_p_bh[[tx_i]]
-    sp_df$P_Value_BH[r_i] <- signif(if (is.finite(q_bin)) q_bin else 1.0, 5)
+  if (isTRUE(post_sel_sub)) {
+    sp_df$P_Value <- NA_real_
+    sp_df$P_Value_BH <- NA_real_
+    sp_df$Outcrop_Fisher_P <- NA_real_
+  } else {
+    bin_p_bh <- stats::p.adjust(raw_bin_p, method = "BH")
+    for (r_i in seq_len(nrow(sp_df))) {
+      tx_i <- sp_df$Taxon[r_i]
+      q_bin <- bin_p_bh[[tx_i]]
+      sp_df$P_Value_BH[r_i] <- signif(if (is.finite(q_bin)) q_bin else 1.0, 5)
+    }
   }
 
   # Omnibus contingency test across active groups
   omnibus_fisher <- NULL
   omnibus_p <- 1.0
-  p_bin_omni <- as.numeric(sp_df$Outcrop_Fisher_P[1])
+  p_bin_omni <- if (isTRUE(post_sel_sub)) NA_real_ else as.numeric(sp_df$Outcrop_Fisher_P[1])
   if (!single_group_mode) {
-    # Test multi-group contingency across both binary outcrop/azonal and multi-class lithology/outcrop tables
-    tab_bin <- table(factor(grp_vec, levels = active_groups), factor(ifelse(is_outcrop_azonal, "Outcrop_Azonal", "Matrix"), levels = c("Outcrop_Azonal", "Matrix")))
-    f_bin_omni <- tryCatch(
-      if (nrow(tab_bin) == 2L && ncol(tab_bin) == 2L) stats::fisher.test(tab_bin)
-      else stats::fisher.test(tab_bin, simulate.p.value = TRUE, B = 5000),
-      error = function(e) tryCatch(stats::chisq.test(tab_bin, simulate.p.value = TRUE, B = 5000), error = function(e2) NULL)
-    )
-    p_bin_omni <- if (!is.null(f_bin_omni) && is.finite(f_bin_omni$p.value)) as.numeric(f_bin_omni$p.value) else 1.0
-
-    sub_lbl_vec <- if (any(!is.na(sgmc_vec))) {
-      ifelse(!is.na(sgmc_vec), sgmc_vec, out_cls_vec)
-    } else {
-      out_cls_vec
-    }
-    tab_multi <- table(factor(grp_vec, levels = active_groups), sub_lbl_vec)
-    f_multi_omni <- if (ncol(tab_multi) >= 2L) {
+    .test_omni_table <- function(lbl_vec) {
+      ok_m <- !is.na(lbl_vec) & nzchar(trimws(as.character(lbl_vec)))
+      if (sum(ok_m) < 2L) return(NULL)
+      tab_m <- table(factor(grp_vec[ok_m], levels = active_groups), as.character(lbl_vec[ok_m]))
+      tab_m <- tab_m[rowSums(tab_m) > 0L, colSums(tab_m) > 0L, drop = FALSE]
+      if (nrow(tab_m) < 2L || ncol(tab_m) < 2L) return(NULL)
       tryCatch(
-        if (nrow(tab_multi) == 2L && ncol(tab_multi) == 2L) stats::fisher.test(tab_multi)
-        else stats::fisher.test(tab_multi, simulate.p.value = TRUE, B = 5000),
-        error = function(e) tryCatch(stats::chisq.test(tab_multi, simulate.p.value = TRUE, B = 5000), error = function(e2) NULL)
+        if (nrow(tab_m) == 2L && ncol(tab_m) == 2L) stats::fisher.test(tab_m)
+        else stats::fisher.test(tab_m, simulate.p.value = TRUE, B = 5000),
+        error = function(e) tryCatch(stats::chisq.test(tab_m, simulate.p.value = TRUE, B = 5000), error = function(e2) NULL)
       )
-    } else {
-      NULL
     }
-    p_multi_omni <- if (!is.null(f_multi_omni) && is.finite(f_multi_omni$p.value)) as.numeric(f_multi_omni$p.value) else 1.0
-    omnibus_p <- min(p_bin_omni, p_multi_omni, na.rm = TRUE)
-    omnibus_fisher <- if (!is.null(f_multi_omni) && p_multi_omni <= p_bin_omni) f_multi_omni else f_bin_omni
+
+    if (isTRUE(post_sel_sub)) {
+      cand_tests <- list(
+        .test_omni_table(sgmc_vec),
+        .test_omni_table(suborder_vec),
+        if (has_wetland_obs) .test_omni_table(ifelse(is_palustrine_fen, "Palustrine_Wetland_Fen", "Upland")) else NULL
+      )
+      cand_tests <- Filter(function(ft) !is.null(ft) && is.finite(ft$p.value), cand_tests)
+      if (length(cand_tests) > 0L) {
+        p_cands <- vapply(cand_tests, function(ft) as.numeric(ft$p.value), numeric(1))
+        best_c <- which.min(p_cands)
+        f_multi_omni <- cand_tests[[best_c]]
+        p_multi_omni <- p_cands[best_c]
+      } else {
+        f_multi_omni <- NULL
+        p_multi_omni <- 1.0
+      }
+      p_bin_omni <- NA_real_
+      omnibus_p <- p_multi_omni
+      omnibus_fisher <- f_multi_omni
+    } else {
+      # Test multi-group contingency across both binary outcrop/azonal and multi-class lithology/outcrop tables
+      tab_bin <- table(factor(grp_vec, levels = active_groups), factor(ifelse(is_outcrop_azonal, "Outcrop_Azonal", "Matrix"), levels = c("Outcrop_Azonal", "Matrix")))
+      f_bin_omni <- tryCatch(
+        if (nrow(tab_bin) == 2L && ncol(tab_bin) == 2L) stats::fisher.test(tab_bin)
+        else stats::fisher.test(tab_bin, simulate.p.value = TRUE, B = 5000),
+        error = function(e) tryCatch(stats::chisq.test(tab_bin, simulate.p.value = TRUE, B = 5000), error = function(e2) NULL)
+      )
+      p_bin_omni <- if (!is.null(f_bin_omni) && is.finite(f_bin_omni$p.value)) as.numeric(f_bin_omni$p.value) else 1.0
+
+      sub_lbl_vec <- if (any(!is.na(sgmc_vec))) {
+        ifelse(!is.na(sgmc_vec), sgmc_vec, out_cls_vec)
+      } else {
+        out_cls_vec
+      }
+      tab_multi <- table(factor(grp_vec, levels = active_groups), sub_lbl_vec)
+      f_multi_omni <- if (ncol(tab_multi) >= 2L) {
+        tryCatch(
+          if (nrow(tab_multi) == 2L && ncol(tab_multi) == 2L) stats::fisher.test(tab_multi)
+          else stats::fisher.test(tab_multi, simulate.p.value = TRUE, B = 5000),
+          error = function(e) tryCatch(stats::chisq.test(tab_multi, simulate.p.value = TRUE, B = 5000), error = function(e2) NULL)
+        )
+      } else {
+        NULL
+      }
+      p_multi_omni <- if (!is.null(f_multi_omni) && is.finite(f_multi_omni$p.value)) as.numeric(f_multi_omni$p.value) else 1.0
+      omnibus_p <- min(p_bin_omni, p_multi_omni, na.rm = TRUE)
+      omnibus_fisher <- if (!is.null(f_multi_omni) && p_multi_omni <= p_bin_omni) f_multi_omni else f_bin_omni
+    }
   } else {
-    omnibus_p <- as.numeric(sp_df$P_Value[1])
+    omnibus_p <- if (isTRUE(post_sel_sub)) NA_real_ else as.numeric(sp_df$P_Value[1])
   }
 
   # Strongest specialized group summary for omnibus row effect size
@@ -2887,7 +2979,9 @@ evaluate_multiclass_substrate_contingency <- function(
   omni_or <- max(sp_df$Odds_Ratio[best_bin_idx], sp_df$Top_Substrate_Odds_Ratio[top_sp_idx], na.rm = TRUE)
   omni_lo <- sp_df$CI_Lower[best_bin_idx]
   omni_hi <- max(sp_df$CI_Upper[best_bin_idx], omni_or, na.rm = TRUE)
-  omni_q  <- min(c(sp_df$P_Value_BH, omnibus_p), na.rm = TRUE)
+  q_pool <- c(sp_df$P_Value_BH, omnibus_p)
+  q_pool <- q_pool[is.finite(q_pool)]
+  omni_q <- if (length(q_pool) > 0L) min(q_pool) else NA_real_
   omni_top_sub_q <- if (any(is.finite(sp_df$Top_Substrate_P_Value_BH))) as.numeric(sp_df$Top_Substrate_P_Value_BH[top_sp_idx]) else 1.0
 
   summary_row <- data.frame(
@@ -2899,9 +2993,9 @@ evaluate_multiclass_substrate_contingency <- function(
     Odds_Ratio = round(omni_or, 3),
     CI_Lower = round(omni_lo, 3),
     CI_Upper = round(omni_hi, 3),
-    P_Value = signif(omnibus_p, 5),
-    P_Value_BH = signif(omni_q, 5),
-    Outcrop_Fisher_P = signif(if (is.finite(p_bin_omni)) p_bin_omni else omnibus_p, 5),
+    P_Value = if (is.finite(omnibus_p)) signif(omnibus_p, 5) else NA_real_,
+    P_Value_BH = if (is.finite(omni_q)) signif(omni_q, 5) else NA_real_,
+    Outcrop_Fisher_P = if (isTRUE(post_sel_sub)) NA_real_ else signif(if (is.finite(p_bin_omni)) p_bin_omni else omnibus_p, 5),
     Top_Substrate_P_Value_BH = signif(if (is.finite(omni_top_sub_q)) omni_top_sub_q else 1.0, 5),
     Dominant_Lithology_Class = sp_df$Dominant_Lithology_Class[top_sp_idx],
     Dominant_Substrate_Class = sp_df$Dominant_Substrate_Class[top_sp_idx],
@@ -2997,7 +3091,8 @@ compute_derived_habitat_predictors <- function(df, db_conn = NULL, env_dir = "da
   if (all(c("bio4_temp_seasonality", "bio6_min_temp_coldest_month") %in% nms)) {
     b4 <- num_or_na("bio4_temp_seasonality")
     b6 <- num_or_na("bio6_min_temp_coldest_month")
-    b2 <- num_or_na("bio2_diurnal_range")
+    b2 <- num_or_na("bio2_mean_diurnal_range")
+    if (all(!is.finite(b2))) b2 <- num_or_na("bio2_diurnal_range")
     ok_mc <- is.finite(b4) & is.finite(b6)
     if (sum(ok_mc) >= 3L) {
       b4_norm <- ifelse(stats::median(abs(b4[ok_mc]), na.rm = TRUE) > 50.0, b4 / 100.0, b4)

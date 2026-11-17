@@ -3,6 +3,29 @@
 # Step 05 Spatial RF Niche Figure Delegation + MaxEnt/Ensemble SDM Engine
 # ==============================================================================
 
+.step05_sdm_env <- environment()
+if (!exists("load_step05_macroecology_config", mode = "function")) {
+  .step05_sdm_cfg_cands <- c(
+    file.path("scripts", "analysis", "step05_config_geo_utils.R"),
+    file.path(getwd(), "scripts", "analysis", "step05_config_geo_utils.R"),
+    file.path("analysis", "step05_config_geo_utils.R"),
+    "step05_config_geo_utils.R"
+  )
+  .step05_sdm_oframes <- vapply(sys.frames(), function(f) if (!is.null(f$ofile)) as.character(f$ofile) else "", character(1))
+  .step05_sdm_ohits <- .step05_sdm_oframes[nzchar(.step05_sdm_oframes)]
+  if (length(.step05_sdm_ohits) > 0L) {
+    .step05_sdm_cfg_cands <- c(file.path(dirname(utils::tail(.step05_sdm_ohits, 1L)), "step05_config_geo_utils.R"), .step05_sdm_cfg_cands)
+  }
+  .step05_sdm_cfile <- sub("^--file=", "", grep("^--file=", commandArgs(trailingOnly = FALSE), value = TRUE))
+  if (length(.step05_sdm_cfile) > 0L) {
+    .step05_sdm_cfg_cands <- c(file.path(dirname(.step05_sdm_cfile[1L]), "step05_config_geo_utils.R"), .step05_sdm_cfg_cands)
+  }
+  .step05_sdm_cfg_hit <- .step05_sdm_cfg_cands[file.exists(.step05_sdm_cfg_cands)][1L]
+  if (!is.na(.step05_sdm_cfg_hit) && nzchar(.step05_sdm_cfg_hit)) {
+    source(.step05_sdm_cfg_hit, local = .step05_sdm_env)
+  }
+}
+
 .ensure_step05_fig_modules <- function() {
   if (!exists("render_step05a_ecological_niche_png", mode = "function")) {
     for (.f in c("scripts/figures/theme_packera_pub.R", "scripts/figures/step05_figures.R")) {
@@ -1125,18 +1148,37 @@ fit_and_project_maxent_sdm_maps <- function(
       }
     }
 
+    ok_oof_mx <- is.finite(oof_mx)
+    ok_oof_rf <- is.finite(oof_rf)
+
     # Fit full models on all presence + target-group background data
     mx_full <- .fit_single_maxent_model(p_vec, X_comb, w_vec)
     rf_full <- .fit_single_srf_binary_model(p_vec, X_comb, w_vec, n_trees = 300L)
 
     # Fill any fold that lacked training presences with full model predictions
-    na_mx <- !is.finite(oof_mx)
+    na_mx <- !ok_oof_mx
     if (any(na_mx)) oof_mx[na_mx] <- mx_full$predict_cloglog(X_comb[na_mx, , drop = FALSE])
-    na_rf <- !is.finite(oof_rf)
+    na_rf <- !ok_oof_rf
     if (any(na_rf)) oof_rf[na_rf] <- rf_full$predict_prob(X_comb[na_rf, , drop = FALSE])
 
-    roc_mx <- .compute_roc_auc_curve(p_vec, oof_mx, w_vec)
-    roc_rf <- .compute_roc_auc_curve(p_vec, oof_rf, w_vec)
+    .eval_oof_roc_cbi <- function(p_v, pred_v, w_v, ok_m) {
+      use_oof <- is.logical(ok_m) && length(ok_m) == length(p_v) &&
+        sum(p_v[ok_m] == 1L) >= 2L && sum(p_v[ok_m] == 0L) >= 2L
+      idx <- if (use_oof) which(ok_m) else seq_along(p_v)
+      p_eval <- p_v[idx]
+      pred_eval <- pred_v[idx]
+      list(
+        roc = .compute_roc_auc_curve(p_eval, pred_eval, w_v[idx]),
+        cbi = compute_continuous_boyce_index(pred_eval, pred_eval[p_eval == 1L], n_bins = 20L)
+      )
+    }
+
+    eval_mx <- .eval_oof_roc_cbi(p_vec, oof_mx, w_vec, ok_oof_mx)
+    eval_rf <- .eval_oof_roc_cbi(p_vec, oof_rf, w_vec, ok_oof_rf)
+    roc_mx <- eval_mx$roc
+    cbi_mx <- eval_mx$cbi
+    roc_rf <- eval_rf$roc
+    cbi_rf <- eval_rf$cbi
     auc_mx <- if (is.finite(roc_mx$auc)) roc_mx$auc else 0.5
     auc_rf <- if (is.finite(roc_rf$auc)) roc_rf$auc else 0.5
 
@@ -1144,12 +1186,11 @@ fit_and_project_maxent_sdm_maps <- function(
     w_ens_mx <- if ((auc_mx + auc_rf) > 1e-6) auc_mx / (auc_mx + auc_rf) else 0.5
     w_ens_rf <- 1.0 - w_ens_mx
     oof_ens <- pmin(1.0, pmax(0.0, w_ens_mx * oof_mx + w_ens_rf * oof_rf))
-    roc_ens <- .compute_roc_auc_curve(p_vec, oof_ens, w_vec)
+    ok_oof_ens <- ok_oof_mx & ok_oof_rf
+    eval_ens <- .eval_oof_roc_cbi(p_vec, oof_ens, w_vec, ok_oof_ens)
+    roc_ens <- eval_ens$roc
+    cbi_ens <- eval_ens$cbi
     auc_ens <- if (is.finite(roc_ens$auc)) roc_ens$auc else round(0.5 * (auc_mx + auc_rf), 4)
-
-    cbi_mx <- compute_continuous_boyce_index(oof_mx, oof_mx[p_vec == 1L], n_bins = 20L)
-    cbi_rf <- compute_continuous_boyce_index(oof_rf, oof_rf[p_vec == 1L], n_bins = 20L)
-    cbi_ens <- compute_continuous_boyce_index(oof_ens, oof_ens[p_vec == 1L], n_bins = 20L)
 
     .pick_tg_top_pred <- function(cands, X_all, mx_m, rf_m, fallback_nm) {
       c_use <- intersect(cands, colnames(X_all))

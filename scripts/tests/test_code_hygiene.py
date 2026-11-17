@@ -292,6 +292,10 @@ class TestCodeHygiene(unittest.TestCase):
             PROJECT_ROOT / "scripts" / "morphometrics" / "pub_synthesis_plates.R": 120,
             PROJECT_ROOT / "scripts" / "figures" / "step04_figures.R": 500,
             PROJECT_ROOT / "scripts" / "tests" / "test_step04_audit_hygiene.py": 380,
+            PROJECT_ROOT / "scripts" / "analysis" / "step05_config_geo_utils.R": 320,
+            PROJECT_ROOT / "scripts" / "figures" / "step05_figures.R": 500,
+            PROJECT_ROOT / "scripts" / "figures" / "step05_sdm_figures.R": 320,
+            PROJECT_ROOT / "scripts" / "tests" / "test_step05_audit_hygiene.py": 380,
         }
         bounded_paths = (
             *strict_ceilings.keys(),

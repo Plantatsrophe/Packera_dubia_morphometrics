@@ -4,24 +4,31 @@
 # ==============================================================================
 
 .step05_pheno_env <- environment()
-.step05_hop_cands <- c(
-  file.path("scripts", "analysis", "step05_circular_hopkins_models.R"),
-  file.path(getwd(), "scripts", "analysis", "step05_circular_hopkins_models.R"),
-  file.path("analysis", "step05_circular_hopkins_models.R"),
-  "step05_circular_hopkins_models.R"
-)
 .step05_oframes <- vapply(sys.frames(), function(f) if (!is.null(f$ofile)) as.character(f$ofile) else "", character(1))
 .step05_ohits <- .step05_oframes[nzchar(.step05_oframes)]
-if (length(.step05_ohits) > 0L) {
-  .step05_hop_cands <- c(file.path(dirname(utils::tail(.step05_ohits, 1L)), "step05_circular_hopkins_models.R"), .step05_hop_cands)
-}
 .step05_cfile <- sub("^--file=", "", grep("^--file=", commandArgs(trailingOnly = FALSE), value = TRUE))
-if (length(.step05_cfile) > 0L) {
-  .step05_hop_cands <- c(file.path(dirname(.step05_cfile[1L]), "step05_circular_hopkins_models.R"), .step05_hop_cands)
+.step05_resolve_cands <- function(fname) {
+  cands <- c(
+    file.path("scripts", "analysis", fname),
+    file.path(getwd(), "scripts", "analysis", fname),
+    file.path("analysis", fname),
+    fname
+  )
+  if (length(.step05_ohits) > 0L) cands <- c(file.path(dirname(utils::tail(.step05_ohits, 1L)), fname), cands)
+  if (length(.step05_cfile) > 0L) cands <- c(file.path(dirname(.step05_cfile[1L]), fname), cands)
+  cands
 }
+.step05_hop_cands <- .step05_resolve_cands("step05_circular_hopkins_models.R")
 .step05_hop_hit <- .step05_hop_cands[file.exists(.step05_hop_cands)][1L]
 if (!is.na(.step05_hop_hit) && nzchar(.step05_hop_hit)) {
   source(.step05_hop_hit, local = .step05_pheno_env)
+}
+if (!exists("load_step05_macroecology_config", mode = "function")) {
+  .step05_cfg_cands <- .step05_resolve_cands("step05_config_geo_utils.R")
+  .step05_cfg_hit <- .step05_cfg_cands[file.exists(.step05_cfg_cands)][1L]
+  if (!is.na(.step05_cfg_hit) && nzchar(.step05_cfg_hit)) {
+    source(.step05_cfg_hit, local = .step05_pheno_env)
+  }
 }
 
 .is_step05_extralimital_non_type <- function(df, group_vec = NULL, clean_base_mask = NULL, is_type_vec = NULL) {
@@ -90,19 +97,33 @@ extract_doy_robust <- function(df) {
 }
 
 read_config_phenology_bounds <- function(config_path = "config/config.yaml") {
-  min_doy <- 60.0
+  min_doy <- 30.0
   max_doy <- 220.0
+  if (exists("load_step05_macroecology_config", mode = "function")) {
+    cfg <- tryCatch(load_step05_macroecology_config(config_path), error = function(e) NULL)
+    if (is.list(cfg)) {
+      if (!is.null(cfg$min_flowering_doy) && is.finite(cfg$min_flowering_doy) &&
+          cfg$min_flowering_doy >= 1.0 && cfg$min_flowering_doy <= 366.0) {
+        min_doy <- as.numeric(cfg$min_flowering_doy)
+      }
+      if (!is.null(cfg$max_flowering_doy) && is.finite(cfg$max_flowering_doy) &&
+          cfg$max_flowering_doy >= 1.0 && cfg$max_flowering_doy <= 366.0) {
+        max_doy <- as.numeric(cfg$max_flowering_doy)
+      }
+      return(list(min_flowering_doy = min_doy, max_flowering_doy = max_doy))
+    }
+  }
   if (!is.null(config_path) && nzchar(config_path) && file.exists(config_path)) {
     lines <- tryCatch(readLines(config_path, warn = FALSE), error = function(e) character(0))
     if (length(lines) > 0L) {
-      m_min <- grep("^\\s*min_flowering_doy\\s*:", lines, value = TRUE)
+      m_min <- grep("^[[:space:]]*min_flowering_doy[[:space:]]*:", lines, value = TRUE)
       if (length(m_min) > 0L) {
-        val <- suppressWarnings(as.numeric(sub("#.*$", "", sub("^[^:]+:\\s*", "", m_min[1]))))
+        val <- suppressWarnings(as.numeric(sub("#.*$", "", sub("^[^:]+:[[:space:]]*", "", m_min[1]))))
         if (is.finite(val) && val >= 1.0 && val <= 366.0) min_doy <- val
       }
-      m_max <- grep("^\\s*max_flowering_doy\\s*:", lines, value = TRUE)
+      m_max <- grep("^[[:space:]]*max_flowering_doy[[:space:]]*:", lines, value = TRUE)
       if (length(m_max) > 0L) {
-        val <- suppressWarnings(as.numeric(sub("#.*$", "", sub("^[^:]+:\\s*", "", m_max[1]))))
+        val <- suppressWarnings(as.numeric(sub("#.*$", "", sub("^[^:]+:[[:space:]]*", "", m_max[1]))))
         if (is.finite(val) && val >= 1.0 && val <= 366.0) max_doy <- val
       }
     }
@@ -347,18 +368,30 @@ compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = 
     v_state <- rep("", nrow(df))
   }
 
-  if ("total_capitula" %in% names(df)) {
-    tot_caps <- suppressWarnings(as.numeric(df$total_capitula))
-    tot_caps[is.na(tot_caps)] <- 0
-  } else if ("capitula_count" %in% names(df)) {
-    tot_caps <- suppressWarnings(as.numeric(df$capitula_count))
-    tot_caps[is.na(tot_caps)] <- 0
-  } else {
-    tot_caps <- rep(0, nrow(df))
+  .as_finite_num <- function(cname) {
+    if (!(cname %in% names(df))) return(rep(NA_real_, nrow(df)))
+    v <- suppressWarnings(as.numeric(df[[cname]]))
+    v[!is.finite(v)] <- NA_real_
+    v
   }
+  tot_caps <- .as_finite_num("total_capitula")
+  if ("capitula_count" %in% names(df)) {
+    cap_cnt <- .as_finite_num("capitula_count")
+    miss_tc <- !is.finite(tot_caps) & is.finite(cap_cnt)
+    if (any(miss_tc)) tot_caps[miss_tc] <- cap_cnt[miss_tc]
+  }
+  if ("corymb_head_count_est" %in% names(df)) {
+    corymb_est <- .as_finite_num("corymb_head_count_est")
+    tot_caps <- pmax(tot_caps, corymb_est, na.rm = TRUE)
+  }
+  tot_caps[!is.finite(tot_caps)] <- 0
 
-  n_anth_vec <- if ("n_anthesis" %in% names(df)) suppressWarnings(as.numeric(df$n_anthesis)) else rep(0, nrow(df))
-  n_anth_vec[is.na(n_anth_vec)] <- 0
+  n_anth_vec <- .as_finite_num("n_anthesis")
+  if ("anthesis_head_count" %in% names(df)) {
+    anth_est <- .as_finite_num("anthesis_head_count")
+    n_anth_vec <- pmax(n_anth_vec, anth_est, na.rm = TRUE)
+  }
+  n_anth_vec[!is.finite(n_anth_vec)] <- 0
   has_valid_cv <- ((v_state != "" & v_state != "unknown" & v_state != "na") & tot_caps > 0) | (n_anth_vec > 0)
   is_cv_anth_label <- grepl("anthesis", v_state) | (n_anth_vec > 0)
   raw_anthesis_cand <- valid_doy & valid_lat & pass_dwc &
@@ -441,7 +474,7 @@ compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = 
   message(sprintf("[INFO] Filtered phenology vouchers: %d verified anthesis, %d fruiting-only (excluded), %d sterile (excluded).",
                   n_verified, n_fruit_excl, n_sterile))
 
-  # Active reference filter for baseline & ANOVA (excludes unpromoted Tier_3_Bronze and Cleanlab label noise)
+  # Active reference filter for baseline & circular phase tests (excludes unpromoted Tier_3_Bronze, label noise, and quarantined centroids)
   is_active_ref <- rep(TRUE, nrow(df))
   is_t_ph <- if ("is_type_specimen" %in% names(df)) as.logical(df$is_type_specimen) else rep(FALSE, nrow(df))
   is_t_ph[is.na(is_t_ph)] <- FALSE
@@ -458,15 +491,27 @@ compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = 
     cl_ph <- as.logical(df$is_confident_label_noise); cl_ph[is.na(cl_ph)] <- FALSE
     is_active_ref <- is_active_ref & (!cl_ph | is_t_ph)
   }
+  quar_ph_mask <- if (exists("detect_r_centroid_or_inst_quarantine", mode = "function")) {
+    as.logical(detect_r_centroid_or_inst_quarantine(df, is_type_vec = is_t_ph)$is_quarantined)
+  } else if ("is_centroid_or_inst_coord" %in% names(df)) {
+    qv <- as.logical(df$is_centroid_or_inst_coord)
+    !is.na(qv) & qv & !is_t_ph
+  } else {
+    rep(FALSE, nrow(df))
+  }
+  quar_ph_mask[is.na(quar_ph_mask)] <- FALSE
+  quar_ph_mask <- quar_ph_mask & !is_t_ph
   ph_grp_v <- if ("species_standardized" %in% names(df)) as.character(df$species_standardized) else rep("ALL", nrow(df))
-  ext_ph_mask <- .is_step05_extralimital_non_type(df, group_vec = ph_grp_v, clean_base_mask = is_active_ref, is_type_vec = is_t_ph)
-  is_active_ref <- is_active_ref & !ext_ph_mask
+  ext_ph_mask <- .is_step05_extralimital_non_type(df, group_vec = ph_grp_v, clean_base_mask = is_active_ref & !quar_ph_mask, is_type_vec = is_t_ph)
+  is_active_ref <- is_active_ref & !quar_ph_mask & !ext_ph_mask
 
   anthesis_cohort <- df[df$is_verified_anthesis & is_active_ref, , drop = FALSE]
+  if (nrow(anthesis_cohort) < 5L) anthesis_cohort <- df[df$is_verified_anthesis & !quar_ph_mask, , drop = FALSE]
   if (nrow(anthesis_cohort) < 5L) anthesis_cohort <- df[df$is_verified_anthesis, , drop = FALSE]
   if (nrow(anthesis_cohort) < 5L) {
     message("[WARN] Verified anthesis cohort has < 5 vouchers; using calendar-gated cohort as baseline fallback.")
     anthesis_cohort <- df[pass_calendar & is_active_ref, , drop = FALSE]
+    if (nrow(anthesis_cohort) < 5L) anthesis_cohort <- df[pass_calendar & !quar_ph_mask, , drop = FALSE]
     if (nrow(anthesis_cohort) < 5L) anthesis_cohort <- df[pass_calendar, , drop = FALSE]
     if (nrow(anthesis_cohort) == 0L) anthesis_cohort <- df[valid_doy & valid_lat, , drop = FALSE]
   }
@@ -552,6 +597,12 @@ compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = 
   } else {
     sort(unique(as.character(df$species_standardized[!is.na(df$species_standardized) & nzchar(df$species_standardized)])))
   }
+  if (!("authority_weight" %in% names(df)) && exists("resolve_ecological_authority_weights", mode = "function")) {
+    df$authority_weight <- resolve_ecological_authority_weights(df)
+  }
+  if (!("spatial_balance_weight" %in% names(df)) && exists("compute_spatial_balance_weights", mode = "function")) {
+    df$spatial_balance_weight <- compute_spatial_balance_weights(df)
+  }
   tf_mask <- df$species_standardized %in% active_tx & !is.na(df$delta_doy) & df$is_verified_anthesis
   target_flowering <- if (sum(tf_mask & is_active_ref) >= 5L) {
     df[tf_mask & is_active_ref, , drop = FALSE]
@@ -568,23 +619,6 @@ compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = 
   }
   circ_phase_test <- run_circular_multigroup_phase_test(circ_grp_theta, target_flowering$species_standardized, B = 999L, seed = 42L)
 
-  if (nrow(target_flowering) >= 5L && length(unique(target_flowering$species_standardized)) > 1L) {
-    aov_fit <- stats::aov(delta_doy ~ species_standardized, data = target_flowering)
-    aov_summary <- summary(aov_fit)[[1]]
-    f_stat <- aov_summary[["F value"]][1]; p_val_aov <- aov_summary[["Pr(>F)"]][1]
-    df_b <- aov_summary[["Df"]][1]; df_w <- aov_summary[["Df"]][2]
-    tukey_res <- stats::TukeyHSD(aov_fit)
-    tukey_mat <- tukey_res$species_standardized
-  } else {
-    aov_fit <- NULL
-    tukey_res <- NULL
-    tukey_mat <- matrix(numeric(0), nrow = 0, ncol = 4)
-    f_stat <- NA_real_; p_val_aov <- NA_real_; df_b <- NA_real_; df_w <- NA_real_
-  }
-
-  aov_eta2 <- if (is.finite(f_stat) && is.finite(df_b) && is.finite(df_w) && (f_stat * df_b + df_w) > 0) {
-    round((f_stat * df_b) / (f_stat * df_b + df_w), 4)
-  } else NA_real_
   summary_records <- list()
   summary_records[[1]] <- data.frame(
     Analysis_Section = "Baseline_Regression", Taxon_or_Comparison = "DOY ~ decimalLatitude (Verified Anthesis)",
@@ -599,77 +633,15 @@ compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = 
     },
     stringsAsFactors = FALSE
   )
-  summary_records[[2]] <- data.frame(
-    Analysis_Section = "One_Way_ANOVA", Taxon_or_Comparison = "Across Target Taxa (Verified Anthesis)",
-    Sample_Size = nrow(target_flowering), Mean_Delta_DOY = NA_real_, SD_Delta_DOY = NA_real_,
-    Median_Delta_DOY = NA_real_, IQR_Delta_DOY = NA_real_, CI_Lower_95 = NA_real_, CI_Upper_95 = NA_real_,
-    Statistic_Primary = round(f_stat, 3), Statistic_Secondary = df_b, Effect_or_R2 = aov_eta2,
-    P_Value = if (!is.na(p_val_aov)) sprintf("%.4e", p_val_aov) else "NA",
-    Interpretation = if (is_unif) {
-      "Gated: uniform circular phase null (aseasonal cohort; divergence calls suppressed)"
-    } else if (!is.na(p_val_aov) && p_val_aov < 0.05) {
-      "Significant phenological divergence between taxa"
-    } else {
-      "No significant divergence or insufficient sample size"
-    },
-    stringsAsFactors = FALSE
+  circ_sum_rows <- summarize_weighted_circular_phenology(
+    target_flowering, active_tx, circ_phase_test,
+    is_unif = is_unif, B = 999L, seed = 42L
   )
-  for (tx in active_tx) {
-    sub_vals <- target_flowering$delta_doy[target_flowering$species_standardized == tx]
-    if (length(sub_vals) > 0L) {
-      m <- mean(sub_vals); s <- stats::sd(sub_vals); med <- stats::median(sub_vals); iq <- stats::IQR(sub_vals)
-      n_tx <- length(sub_vals); se <- if (is.finite(s) && n_tx > 0L) s / sqrt(n_tx) else NA_real_
-      summary_records[[length(summary_records) + 1L]] <- data.frame(
-        Analysis_Section = "Taxon_Distribution", Taxon_or_Comparison = tx, Sample_Size = n_tx,
-        Mean_Delta_DOY = round(m, 3), SD_Delta_DOY = round(s, 3), Median_Delta_DOY = round(med, 3),
-        IQR_Delta_DOY = round(iq, 3),
-        CI_Lower_95 = if (is.finite(se)) round(m - 1.96 * se, 3) else NA_real_,
-        CI_Upper_95 = if (is.finite(se)) round(m + 1.96 * se, 3) else NA_real_,
-        Statistic_Primary = NA_real_, Statistic_Secondary = NA_real_, Effect_or_R2 = NA_real_,
-        P_Value = "",
-        Interpretation = if (is_unif) {
-          "Gated: aseasonal / uniform phase null (timing anomaly suppressed)"
-        } else if (m < -3) {
-          "Early blooming relative to latitude"
-        } else if (m > 3) {
-          "Late blooming relative to latitude"
-        } else {
-          "Conforms to latitudinal cline"
-        },
-        stringsAsFactors = FALSE
-      )
-    }
+  summary_report <- if (is.data.frame(circ_sum_rows) && nrow(circ_sum_rows) > 0L) {
+    rbind(summary_records[[1]], circ_sum_rows)
+  } else {
+    summary_records[[1]]
   }
-  if (nrow(tukey_mat) > 0L) {
-    for (k in seq_len(nrow(tukey_mat))) {
-      comp_name <- rownames(tukey_mat)[k]
-      comp_parts <- strsplit(comp_name, "-", fixed = TRUE)[[1]]
-      diff_val <- tukey_mat[k, "diff"]; lwr <- tukey_mat[k, "lwr"]; upr <- tukey_mat[k, "upr"]; p_adj <- tukey_mat[k, "p adj"]
-      if (length(comp_parts) == 2L && comp_parts[1] > comp_parts[2]) {
-        comp_label <- paste(comp_parts[2], "vs", comp_parts[1])
-        diff_val <- -diff_val
-        tmp_lwr <- -upr; upr <- -lwr; lwr <- tmp_lwr
-      } else {
-        comp_label <- gsub("-", " vs ", comp_name)
-      }
-      summary_records[[length(summary_records) + 1L]] <- data.frame(
-        Analysis_Section = "Tukey_HSD_PostHoc", Taxon_or_Comparison = comp_label,
-        Sample_Size = nrow(target_flowering), Mean_Delta_DOY = round(diff_val, 3), SD_Delta_DOY = NA_real_,
-        Median_Delta_DOY = NA_real_, IQR_Delta_DOY = NA_real_, CI_Lower_95 = round(lwr, 3), CI_Upper_95 = round(upr, 3),
-        Statistic_Primary = round(diff_val, 3), Statistic_Secondary = NA_real_, Effect_or_R2 = NA_real_,
-        P_Value = sprintf("%.4e", p_adj),
-        Interpretation = if (is_unif) {
-          sprintf("Gated under Rayleigh uniform phase null (raw diff %.1f days)", abs(diff_val))
-        } else if (p_adj < 0.05) {
-          sprintf("Statistically significant temporal separation (%.1f days)", abs(diff_val))
-        } else {
-          "Phenologically synchronous / overlapping"
-        },
-        stringsAsFactors = FALSE
-      )
-    }
-  }
-  summary_report <- do.call(rbind, summary_records)
   summary_report$Selected_Hopkins_Model <- as.character(baseline$selected_model)
   summary_report$Hopkins_AICc_Weight <- if (!is.null(baseline$aicc_weight) && is.finite(baseline$aicc_weight)) round(as.numeric(baseline$aicc_weight), 6) else NA_real_
   summary_report$Rayleigh_R_Bar <- if (!is.null(baseline$r_bar) && is.finite(baseline$r_bar)) round(as.numeric(baseline$r_bar), 6) else NA_real_
@@ -679,7 +651,7 @@ compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = 
 
   if (!is.null(summary_csv) && nzchar(trimws(as.character(summary_csv)))) {
     if (.pheno_write_csv(summary_report, summary_csv, demo_flag = demo)) {
-      message(sprintf("Exported phenological anomaly ANOVA/Tukey summary to %s.", summary_csv))
+      message(sprintf("Exported circular phenological anomaly summary to %s.", summary_csv))
     }
     if (!is.null(baseline$model_selection_table) && is.data.frame(baseline$model_selection_table) && nrow(baseline$model_selection_table) > 0L) {
       sel_tbl_csv <- file.path(dirname(summary_csv), "hopkins_circular_model_selection.csv")
@@ -688,7 +660,7 @@ compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = 
       }
     }
   }
-  return(list(df = df, baseline = baseline, anova = aov_fit, tukey = tukey_res, circular_phase_test = circ_phase_test, summary = summary_report))
+  return(list(df = df, baseline = baseline, anova = NULL, tukey = NULL, circular_phase_test = circ_phase_test, summary = summary_report))
 }
 
 export_phenological_latitudinal_figures <- function(df, baseline, out_path) {
@@ -877,6 +849,7 @@ resolve_analysis_group <- function(
   if (!is_intra) {
     df$analysis_group <- as.character(df$species_standardized)
     df$ecotype_regime <- as.character(df$species_standardized)
+    attr(df, "is_post_selection_ecotype") <- FALSE
     return(df)
   }
 
@@ -884,6 +857,7 @@ resolve_analysis_group <- function(
   if (n_rows == 0L) {
     df$analysis_group <- character(0)
     df$ecotype_regime <- character(0)
+    attr(df, "is_post_selection_ecotype") <- FALSE
     return(df)
   }
 
@@ -960,7 +934,27 @@ resolve_analysis_group <- function(
   det_t[is.na(det_t) | !nzchar(trimws(det_t))] <- "Tier_3_Bronze"
   is_t_sp <- if ("is_type_specimen" %in% names(df_rag)) as.logical(df_rag$is_type_specimen) else rep(FALSE, n_rows)
   is_t_sp[is.na(is_t_sp)] <- FALSE
-  anc_mask <- elig_c & (grepl("Tier_0|Tier_1|Gold|Tier_2|Silver", det_t, ignore.case = TRUE) | is_t_sp)
+  quar_rag <- if (exists("detect_r_centroid_or_inst_quarantine", mode = "function")) {
+    as.logical(detect_r_centroid_or_inst_quarantine(df_rag, is_type_vec = is_t_sp)$is_quarantined)
+  } else if ("is_centroid_or_inst_coord" %in% names(df_rag)) {
+    qv <- as.logical(df_rag$is_centroid_or_inst_coord)
+    !is.na(qv) & qv & !is_t_sp
+  } else {
+    rep(FALSE, n_rows)
+  }
+  quar_rag[is.na(quar_rag)] <- FALSE
+  quar_rag <- quar_rag & !is_t_sp
+  cl_rag <- if ("is_confident_label_noise" %in% names(df_rag)) as.logical(df_rag$is_confident_label_noise) else rep(FALSE, n_rows)
+  cl_rag[is.na(cl_rag)] <- FALSE
+  cl_rag_non_type <- cl_rag & !is_t_sp
+  rag_grp_v <- if ("species_standardized" %in% names(df_rag)) {
+    ifelse(!is.na(df_rag$species_standardized) & nzchar(trimws(as.character(df_rag$species_standardized))), as.character(df_rag$species_standardized), base_taxon)
+  } else {
+    rep(base_taxon, n_rows)
+  }
+  ext_rag_mask <- .is_step05_extralimital_non_type(df_rag, group_vec = rag_grp_v, clean_base_mask = elig_c, is_type_vec = is_t_sp)
+  anc_mask <- elig_c & (grepl("Tier_0|Tier_1|Gold|Tier_2|Silver", det_t, ignore.case = TRUE) | is_t_sp) & !quar_rag & !cl_rag_non_type & !ext_rag_mask
+  if (sum(anc_mask) < 8L) anc_mask <- elig_c & !quar_rag & !cl_rag_non_type
   if (sum(anc_mask) < 8L) anc_mask <- elig_c
   if (sum(anc_mask) < 6L) anc_mask <- rep(TRUE, n_rows)
   anc_idx <- which(anc_mask)
@@ -1005,6 +999,7 @@ resolve_analysis_group <- function(
   if (length(cand_env) == 0L || n_rows < 6L) {
     df$analysis_group <- rep(base_taxon, n_rows)
     df$ecotype_regime <- df$analysis_group
+    attr(df, "is_post_selection_ecotype") <- FALSE
     return(df)
   }
 
@@ -1117,6 +1112,7 @@ resolve_analysis_group <- function(
   if (!is.finite(tot_ss) || tot_ss <= 1e-8) {
     df$analysis_group <- rep(base_taxon, n_rows)
     df$ecotype_regime <- df$analysis_group
+    attr(df, "is_post_selection_ecotype") <- FALSE
     return(df)
   }
 
@@ -1125,6 +1121,7 @@ resolve_analysis_group <- function(
   if (max_k_cand < 2L) {
     df$analysis_group <- rep(base_taxon, n_rows)
     df$ecotype_regime <- df$analysis_group
+    attr(df, "is_post_selection_ecotype") <- FALSE
     return(df)
   }
 
@@ -1277,6 +1274,7 @@ resolve_analysis_group <- function(
       message(sprintf("[Independent Step 05 ENM] Retaining K=1 unimodal ecological envelope for '%s' (no multi-axis ecological regime partition exceeded coherence thresholds).", base_taxon))
       df$analysis_group <- rep(base_taxon, n_rows)
       df$ecotype_regime <- df$analysis_group
+      attr(df, "is_post_selection_ecotype") <- FALSE
       return(df)
     }
     valid_fits <- cand_fits
@@ -1340,6 +1338,7 @@ resolve_analysis_group <- function(
   ))
   df$analysis_group <- as.character(resolved_lbls)
   df$ecotype_regime <- as.character(resolved_lbls)
+  attr(df, "is_post_selection_ecotype") <- isTRUE(k_opt >= 2L)
   return(df)
 }
 
@@ -1406,9 +1405,17 @@ select_primary_predictors_from_rf <- function(
   rf_res = NULL,
   vif_res = NULL,
   df_env = NULL,
-  cum_imp_target = 0.85,
+  cum_imp_target = NULL,
   intraspecific_mode = FALSE
 ) {
+  if (is.null(cum_imp_target) || !is.finite(cum_imp_target)) {
+    cum_imp_target <- if (exists("load_step05_macroecology_config", mode = "function")) {
+      cfg_ci <- tryCatch(load_step05_macroecology_config()$cumulative_importance_cutoff, error = function(e) NA_real_)
+      if (is.finite(cfg_ci) && cfg_ci > 0.0 && cfg_ci <= 1.0) as.numeric(cfg_ci) else 0.85
+    } else {
+      0.85
+    }
+  }
   clim_pat <- "^(bio[0-9]*_|summer_moisture_|maritime_continentality_|delta_doy$|doy$|hopkins_|sin_doy$|cos_doy$)"
   topo_pat <- "^(topo_|elevation($|_)|elev_)"
 
