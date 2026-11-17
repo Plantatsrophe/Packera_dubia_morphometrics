@@ -2774,7 +2774,7 @@ def upsert_genomic_samples(
     conn: sqlite3.Connection,
     rows: Sequence[Mapping[str, Any]],
     *,
-    preserve_existing_on_null: bool = False,
+    preserve_existing_on_null: bool = True,
 ) -> int:
     """Upsert Tier A genomic sample metadata rows into `genomic_samples`."""
     if not rows:

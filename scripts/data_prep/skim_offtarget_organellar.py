@@ -5,18 +5,18 @@ Project: Packera Species Delimitation & Morphometrics Pipeline
 Affiliation: University of North Carolina at Chapel Hill Herbarium (NCU)
 
 Description:
-  Offline off-target chloroplast (cpDNA) and nuclear ribosomal ITS skimming from
-  raw nextRAD FASTQ archives (.zip, .tar.gz) or FASTQ directories. Streams
-  compressed archives without unpacking raw reads into `data/genomics/`.
-  Auto-detects `get_organelle_from_reads.py` or `bbmap.sh` when available, with a
-  pure-Python 17-mer baiting & pileup consensus fallback seeded by Asteraceae
-  organellar/ITS/waxy references and `vcfref_packera_blast.txt`. Writes outputs
-  into `data/genomics/public_organellar_and_loci/`.
+  Offline off-target chloroplast (cpDNA), nuclear ribosomal ITS, and nuclear
+  waxy skimming from raw nextRAD FASTQ archives (.zip, .tar.gz) or FASTQ
+  directories. Streams compressed archives without unpacking raw reads into
+  `data/genomics/` using a pure-Python 17-mer baiting and pileup consensus
+  engine seeded by Asteraceae organellar/ITS/waxy references and
+  `vcfref_packera_blast.txt`. Writes outputs into
+  `data/genomics/public_organellar_and_loci/`.
 """
 
 from __future__ import annotations
 
-import argparse, gzip, importlib, io, multiprocessing as mp, os, re, shutil, subprocess, sys, tarfile, tempfile, zipfile
+import argparse, gzip, importlib, io, multiprocessing as mp, os, re, shutil, subprocess, sys, tarfile, zipfile
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
@@ -42,7 +42,6 @@ _SEED_PLASTID_ANCHORS: Dict[str, str] = {
 }
 _SEED_ITS_ANCHORS: Dict[str, str] = {"Packera_ITS_58S_core": "CGTGAACCATCGAGTCTTTGAACGCAAGTTGCGCCCGAAGCCATTAGGTTGAGGGCACGTCTGCCTGGGCGTCACGCATCGCGTCGCCCCCCACCATCCATCCCCTTAGGGATGGGGTGTGTTGGGGGCGGGGGGATATTGGCCTCCCGTGCGCTCGGTGCGCGGTTGGCCTAAATAGGAGTCCTCGGCGACGGACGTCGCGACAAGTGGTGGTTGTAAAACCCTCGTTCTCGTCGTCGTGC"}
 _SEED_WAXY_ANCHORS: Dict[str, str] = {"Packera_waxy_GBSSI_core": "ATGGTGGATTGTGTTCCATTTGTTGGTGGTGATGGAAAGGTTTTTGGTACTGCTGATGGACCTTTTGAAGGACTTAAGAAAGAGCTTCTCGTTGATGGTGTTGCTGATCCATCTAAGGTTTTCTTCGTTGCAACTCTTGAGGCTGCTAAGCGTGGTGGTATTGCACCAAAGATTGATCCAGCTCTTATGGGTTCTACTG"}
-_IUPAC_PAIR = {("A", "G"): "R", ("G", "A"): "R", ("C", "T"): "Y", ("T", "C"): "Y", ("G", "C"): "S", ("C", "G"): "S", ("A", "T"): "W", ("T", "A"): "W", ("G", "T"): "K", ("T", "G"): "K", ("A", "C"): "M", ("C", "A"): "M"}
 _MAX_BUCKET_READS = 25000
 _FQ_PAT = re.compile(r"\.(fastq|fq)(\.gz)?$", re.IGNORECASE)
 _WORKER_CTX: Dict[str, Any] = {}
@@ -304,6 +303,39 @@ def _assemble_baited_consensus(
     return cons_out
 
 
+def _discover_empirical_nuclear_taxon_map(genomics_dir: Path, out_dir: Optional[Path]) -> Dict[str, str]:
+    """Load high-confidence non-admixed Step 06 nuclear taxon predictions when staged nearby."""
+    cands: List[Path] = []
+    for base in (out_dir, genomics_dir, genomics_dir.parent / "outputs" / "genomics", genomics_dir.parent / "outputs" / "tables"):
+        if base is not None:
+            cands.append(Path(base) / "genomic_assignments.csv")
+    out: Dict[str, str] = {}
+    for p in cands:
+        if not p.is_file():
+            continue
+        try:
+            df = pd.read_csv(p, dtype=str, keep_default_na=False)
+        except Exception:
+            continue
+        if "genetic_sample_id" not in df.columns or "geno_predicted_taxon" not in df.columns:
+            continue
+        for _, row in df.iterrows():
+            sid = _clean_sample_id(row.get("genetic_sample_id", ""))
+            tx = str(row.get("geno_predicted_taxon", "")).strip()
+            if not sid or not tx.startswith("Packera "):
+                continue
+            try:
+                admix = int(float(row.get("is_geno_admixed") or 0))
+                prob = float(row.get("geno_posterior_prob") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if admix == 0 and prob >= 0.70 and sid not in out:
+                out[sid] = tx
+        if out:
+            break
+    return out
+
+
 def run_offtarget_organellar_skim(
     fastq_source: Optional[Path], genomics_dir: Path, nuclear_tree: Optional[Path] = None,
     out_dir: Optional[Path] = None, threads: Optional[int] = None,
@@ -312,9 +344,6 @@ def run_offtarget_organellar_skim(
     if fastq_source is None or not fastq_source.exists():
         msg = f"[skim-organellar] FASTQ source absent ({fastq_source}); skipping cleanly."; logger.info(msg); print(msg)
         return {"status": "skipped_missing_fastq", "n_samples": 0}
-    if (getorg_bin := shutil.which("get_organelle_from_reads.py")) and fastq_source.is_dir():
-        logger.info("Detected GetOrganelle binary at %s; running alongside pure-Python pileup audit.", getorg_bin)
-        with tempfile.TemporaryDirectory(prefix="packera_getorg_") as tmpd: _ = (tmpd, subprocess)
     plastid_seeds, its_seeds, waxy_seeds = _collect_organellar_seeds(genomics_dir)
     cp_kidx, its_kidx, waxy_kidx = _build_kmer_index(plastid_seeds), _build_kmer_index(its_seeds), _build_kmer_index(waxy_seeds)
     seed_kmers = set(cp_kidx) | set(its_kidx) | set(waxy_kidx); seen_samples: set[str] = set()
@@ -358,10 +387,12 @@ def run_offtarget_organellar_skim(
     cp_metrics = {sid: (vals[1], vals[2]) for sid, vals in cp_full.items()}
     pub_its_match = {sid: _match_best_public_lineage(seq, its_seeds, _kcache=its_cache) for sid, seq in its_cons.items()}
     waxy_match = {sid: _match_best_public_lineage(seq, waxy_seeds, _kcache=waxy_cache) or waxy_clades.get(sid, "") for sid, seq in waxy_cons.items()}
+    nuc_taxon_map = _discover_empirical_nuclear_taxon_map(genomics_dir, out_dir)
     cyto_rows = _detect_cytonuclear_discordance(
         cp_clades, its_ribo, nuclear_tree_path=nuclear_tree,
         public_plastome_matches=pub_cp_match, public_its_matches=pub_its_match,
         waxy_lineage_matches=waxy_match, plastome_match_metrics=cp_metrics,
+        nuclear_taxon_map=nuc_taxon_map,
     )
 
     target_dir = out_dir if out_dir is not None else (genomics_dir if genomics_dir.name == "public_organellar_and_loci" else (genomics_dir / "public_organellar_and_loci"))

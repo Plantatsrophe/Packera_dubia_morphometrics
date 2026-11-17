@@ -19,6 +19,11 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.core.io_utils import atomic_write_bytes, ensure_flat_filename
+from scripts.data_prep.step06_synonym_utils import (
+    CANONICAL_SENECIO_PACKERA_SYNONYMS,
+    canonical_taxon_equiv_key,
+    normalize_public_header_binomial,
+)
 
 _UA = "Plantmatics/1.0 (https://github.com/plantmatics; mailto:plantmatics@users.noreply.github.com)"
 _DRYAD_DOI = "doi%3A10.5061%2Fdryad.bg79cnppn"
@@ -40,23 +45,31 @@ def _resolve_target_meta(attr: str, env_key: str, default: str) -> str:
     except Exception:
         pass
     return (os.environ.get(f"PLANTMATICS_{env_key}") or os.environ.get(f"PACKERA_{env_key}") or default).strip() or default
-_NCBI_TERM = (
-    '("Packera"[Organism] OR "Senecio tomentosus"[Organism] OR "Senecio aureus"[Organism] OR '
-    '"Senecio anonymus"[Organism] OR "Senecio pauperculus"[Organism] OR "Senecio schweinitzianus"[Organism] OR '
-    '"Senecio millefolium"[Organism] OR "Senecio obovatus"[Organism] OR "Senecio plattensis"[Organism] OR '
-    '"Senecio antennariifolius"[Organism] OR "Senecio glabellus"[Organism]) AND 120:200000[SLEN]'
-)
-_SYNONYM_MAP: Dict[str, str] = {
-    "senecio tomentosus": "Packera_dubia", "packera tomentosa": "Packera_dubia", "senecio aureus": "Packera_aurea",
-    "senecio anonymus": "Packera_anonyma", "senecio pauperculus": "Packera_paupercula", "senecio schweinitzianus": "Packera_schweinitziana",
-    "senecio millefolium": "Packera_millefolium", "packera millefolia": "Packera_millefolium", "packera memmingeri": "Packera_xmemmingeri",
-    "packera xmemmingeri": "Packera_xmemmingeri", "senecio obovatus": "Packera_obovata", "senecio plattensis": "Packera_plattensis",
-    "senecio antennariifolius": "Packera_antennariifolia", "senecio glabellus": "Packera_glabella", "senecio loratifolius": "Packera_loratifolia",
-    "senecio pseudaureus": "Packera_pseudaurea", "senecio indecorus": "Packera_indecora", "senecio canus": "Packera_cana",
-    "senecio strepthanthifolius": "Packera_streptanthifolia", "senecio streptanthifolius": "Packera_streptanthifolia",
-    "senecio fendleri": "Packera_fendleri", "senecio multilobatus": "Packera_multilobata", "senecio neomexicanus": "Packera_neomexicana",
-    "senecio debilis": "Packera_debilis", "senecio werneriifolius": "Packera_werneriifolia", "senecio hartianus": "Packera_hartiana",
-}
+
+
+def _build_ncbi_nuccore_term(target_genus: str = "Packera") -> str:
+    genus = str(target_genus or "Packera").strip() or "Packera"
+    if genus.lower() != "packera":
+        return f'"{genus}"[Organism] AND 120:200000[SLEN]'
+    target_keys: set[str] = set()
+    try:
+        from scripts.core.step01_biogeography_utils import resolve_eastern_resident_whitelist, resolve_transcontinental_taxa
+        for tx in (*resolve_eastern_resident_whitelist(), *resolve_transcontinental_taxa()):
+            if key := canonical_taxon_equiv_key(tx):
+                target_keys.add(key)
+    except Exception:
+        target_keys = set()
+    senecio_syns = sorted({
+        syn.capitalize()
+        for syn, canon in CANONICAL_SENECIO_PACKERA_SYNONYMS.items()
+        if syn.startswith("senecio ") and (not target_keys or canonical_taxon_equiv_key(canon) in target_keys)
+    })
+    terms = ['"Packera"[Organism]', *(f'"{s}"[Organism]' for s in senecio_syns)]
+    return f"({' OR '.join(terms)}) AND 120:200000[SLEN]"
+
+
+_NCBI_TERM = _build_ncbi_nuccore_term("Packera")
+_normalize_taxon_binomial = normalize_public_header_binomial
 _DRYAD_EXACT_MAP: Dict[str, str] = {
     "18complete_packera_plastomes.fasta": "public_packera_18complete_plastomes.fasta", "111mapping_packera_plastomes.fasta": "public_packera_111mapping_plastomes.fasta",
     "mo_astral_lpp.tre": "public_packera_MO_Astral_lpp.tre", "astralpro_astral_lpp.tre": "public_packera_ASTRALPro_Astral_lpp.tre",
@@ -139,49 +152,36 @@ def _ncbi_get(endpoint: str, params: Dict[str, Any]) -> bytes:
     return _http_request(f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/{endpoint}?{urllib.parse.urlencode(q)}", timeout=90)
 
 
-def _normalize_taxon_binomial(text: str) -> str:
-    hay = text.replace("_", " ").lower()
-    for syn, canon in _SYNONYM_MAP.items():
-        if syn in hay:
-            return canon
-    if m := re.search(r"\bpackera\s+[0-9]*([a-z-]+)\b", hay):
-        return "Packera_dubia" if m.group(1) == "tomentosa" else f"Packera_{m.group(1)}"
-    return "Packera_sp"
-
 def _parse_fasta_text(text: str) -> List[Tuple[str, str]]:
-    recs, hdr, buf = [], None, []
-    for ln in text.splitlines():
-        if not (s := ln.strip()):
-            continue
+    """Parse FASTA headers and uppercase letter sequences from text."""
+    recs: List[Tuple[str, str]] = []
+    hdr, seq_parts = "", []
+    for raw in text.splitlines():
+        if not (s := raw.strip()): continue
         if s.startswith(">"):
-            if hdr is not None and buf:
-                recs.append((hdr, "".join(buf).upper()))
-            hdr, buf = s, []
-        else:
-            buf.append(s)
-    if hdr is not None and buf:
-        recs.append((hdr, "".join(buf).upper()))
+            if hdr and seq_parts: recs.append((hdr, "".join(seq_parts)))
+            hdr, seq_parts = s, []
+        else: seq_parts.append(re.sub(r"[^A-Za-z]", "", s).upper())
+    if hdr and seq_parts: recs.append((hdr, "".join(seq_parts)))
     return recs
 
-def _classify_ncbi_record(raw_hdr: str, seq: str) -> Tuple[str, str]:
+
+def _classify_ncbi_record(raw_hdr: str, seq: str) -> Tuple[Optional[str], str]:
     toks = raw_hdr.lstrip(">").strip().split(None, 1)
     acc, orig_desc = (toks[0] if toks else "UNKNOWN"), (toks[1] if len(toks) > 1 else "")
     out_hdr = f">{acc}|{_normalize_taxon_binomial(f'{acc} {orig_desc}')} {orig_desc}".rstrip()
     hlow = raw_hdr.lower()
-    if len(seq) >= 100000 or re.search(r"plastom|chloroplast|plastid|rbcl|matk|psba|trnh|trnl|trnf|ndhf|rpl16|rps16|trnk", hlow):
-        cat = "cp"
-    elif re.search(r"\bits\b|its1|5\.8s|its2|\bets\b|18s|26s|internal transcribed|external transcribed|ribosomal", hlow):
-        cat = "its"
-    elif re.search(r"waxy|gbssi|granule-bound starch|starch synthase|nuclear", hlow):
-        cat = "waxy"
-    elif re.search(r"cpdna|atpb|ycf|rpoc|rpoa|psb|ndh|trn|pet|rpl|rps|accd|ccsa", hlow) or len(seq) >= 10000:
-        cat = "cp"
-    else:
-        cat = "waxy"
+    if len(seq) >= 100000 or re.search(r"plastom|chloroplast|plastid|rbcl|matk|psba|trnh|trnl|trnf|ndhf|rpl16|rps16|trnk", hlow): cat: Optional[str] = "cp"
+    elif re.search(r"\bits\b|its1|5\.8s|its2|\bets\b|18s|26s|internal transcribed|external transcribed|ribosomal", hlow): cat = "its"
+    elif re.search(r"\bwaxy\b|\bgbssi\b|granule-bound starch|starch synthase", hlow): cat = "waxy"
+    elif re.search(r"cpdna|atpb|ycf|rpoc|rpoa|psb|ndh|trn|pet|rpl|rps|accd|ccsa", hlow) or len(seq) >= 10000: cat = "cp"
+    else: cat = None
     return cat, f"{out_hdr}\n{seq}\n"
 
-def _fetch_ncbi_nuccore(genomics_dir: Path, force: bool) -> Dict[str, int]:
-    es = json.loads(_ncbi_get("esearch.fcgi", {"db": "nuccore", "term": _NCBI_TERM, "retmax": 400, "usehistory": "y", "retmode": "json"}).decode("utf-8", errors="replace")).get("esearchresult", {})
+
+def _fetch_ncbi_nuccore(genomics_dir: Path, force: bool, target_genus: str = "Packera") -> Dict[str, int]:
+    term = _NCBI_TERM if str(target_genus or "Packera").strip().lower() == "packera" else _build_ncbi_nuccore_term(target_genus)
+    es = json.loads(_ncbi_get("esearch.fcgi", {"db": "nuccore", "term": term, "retmax": 400, "usehistory": "y", "retmode": "json"}).decode("utf-8", errors="replace")).get("esearchresult", {})
     total, webenv, qkey = int(es.get("count") or 0), str(es.get("webenv") or ""), str(es.get("querykey") or "")
     idlist, chunks = [str(x) for x in (es.get("idlist") or [])], []
     if webenv and qkey and total > 0:
@@ -193,7 +193,8 @@ def _fetch_ncbi_nuccore(genomics_dir: Path, force: bool) -> Dict[str, int]:
     buckets: Dict[str, List[str]] = {"cp": [], "its": [], "waxy": []}
     for raw_hdr, seq in _parse_fasta_text("\n".join(chunks)):
         cat, entry = _classify_ncbi_record(raw_hdr, seq)
-        buckets[cat].append(entry)
+        if cat in buckets:
+            buckets[cat].append(entry)
     counts: Dict[str, int] = {}
     for key, fname, ckey in (("cp", "public_packera_plastomes_and_cpdna.fasta", "nuccore_plastid"), ("its", "public_packera_its_ets.fasta", "nuccore_its"), ("waxy", "public_packera_waxy_nuclear.fasta", "nuccore_waxy")):
         counts[ckey] = len(buckets[key])
@@ -342,10 +343,8 @@ def _fetch_dryad(genomics_dir: Path, tmpd: Path, dryad_zip_dir: Optional[Path], 
                 if staged_zips:
                     status = "downloaded"
         except urllib.error.HTTPError as exc:
-            if exc.code in (401, 403):
-                staged_zips.clear()
-            else:
-                raise
+            if exc.code in (401, 403): staged_zips.clear()
+            else: raise
 
     if not staged_zips:
         pw_avail = importlib.util.find_spec("playwright") is not None
@@ -358,23 +357,18 @@ def _fetch_dryad(genomics_dir: Path, tmpd: Path, dryad_zip_dir: Optional[Path], 
         if str(meta.get("digestType", "")).lower() in ("sha-256", "sha256") and meta.get("digest"):
             h = hashlib.sha256()
             with open(zp, "rb") as fh:
-                for chunk in iter(lambda: fh.read(65536), b""):
-                    h.update(chunk)
+                for chunk in iter(lambda: fh.read(65536), b""): h.update(chunk)
             if h.hexdigest().lower() != str(meta["digest"]).strip().lower():
                 raise ValueError(f"SHA-256 mismatch for {zp.name}: expected {meta['digest']}, got {h.hexdigest()}")
-        unpack_dir = tmpd / f"unpack_{zp.stem}"
-        unpack_dir.mkdir(parents=True, exist_ok=True)
-        unpack_res = unpack_dir.resolve()
+        unpack_dir = tmpd / f"unpack_{zp.stem}"; unpack_dir.mkdir(parents=True, exist_ok=True); unpack_res = unpack_dir.resolve()
         with zipfile.ZipFile(zp, "r") as zf:
             for member in zf.infolist():
                 target = (unpack_dir / member.filename).resolve()
-                if target != unpack_res and unpack_res not in target.parents:
-                    raise ValueError(f"Unsafe zip-slip entry in {zp.name}: {member.filename!r}")
+                if target != unpack_res and unpack_res not in target.parents: raise ValueError(f"Unsafe zip-slip entry in {zp.name}: {member.filename!r}")
             zf.extractall(unpack_dir)
         for fp in sorted(unpack_dir.rglob("*")):
             if fp.is_file() and (out_name := _route_dryad_file(fp, zp.name)):
-                _atomic_save(genomics_dir, out_name, fp, force=force)
-                n_extracted += 1
+                _atomic_save(genomics_dir, out_name, fp, force=force); n_extracted += 1
     return status, n_extracted
 
 
@@ -454,7 +448,7 @@ def download_public_packera_sequences(
         tmpd, sra_rows = Path(tmp_str), []
         if "ncbi" in src_list:
             try:
-                counts.update(_fetch_ncbi_nuccore(genomics_dir, force=force))
+                counts.update(_fetch_ncbi_nuccore(genomics_dir, force=force, target_genus=genus))
             except Exception as exc:
                 print(f"[WARN] NCBI nuccore fetch failed: {exc}", file=sys.stderr)
         if "ncbi" in src_list or "sra" in src_list:

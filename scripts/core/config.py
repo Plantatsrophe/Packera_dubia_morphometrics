@@ -1151,3 +1151,43 @@ def resolve_target_family(
         default="Asteraceae",
     )
 
+
+_DEFAULT_GENOMICS_CONFIG: Dict[str, Any] = {
+    "min_hq_reads": 50000,
+    "max_missing_rate": 0.80,
+    "paralog_ho_threshold": 0.60,
+    "hdplot_d_threshold": 4.0,
+    "nquire_min_het_loci": 15,
+    "nquire_strong_delta_bic": 4.0,
+    "default_fallback_ploidy": 2,
+    "cytonuclear_min_containment": 0.80,
+    "cytonuclear_min_shared_kmers": 80,
+    "coalescent_block_len": 122,
+    "coalescent_n_boot": 250,
+}
+
+
+def resolve_genomics_config(
+    cfg: Optional[PipelineConfig] = None,
+    config_path: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Resolve Step 06 genomic QC, cytotype, organellar, and coalescent settings from YAML/defaults."""
+    out = dict(_DEFAULT_GENOMICS_CONFIG)
+    raw_sec: Any = cfg.get("genomics") if cfg is not None else None
+    if not isinstance(raw_sec, dict):
+        yaml_p = Path(config_path) if config_path is not None else DEFAULT_CONFIG_PATH
+        if yaml_p.is_file():
+            try:
+                loaded = yaml.safe_load(yaml_p.read_text(encoding="utf-8")) or {}
+                raw_sec = loaded.get("genomics")
+            except (OSError, yaml.YAMLError):
+                raw_sec = None
+    if isinstance(raw_sec, dict):
+        for k, default_v in _DEFAULT_GENOMICS_CONFIG.items():
+            if k in raw_sec and raw_sec[k] is not None:
+                try:
+                    out[k] = type(default_v)(raw_sec[k])
+                except (TypeError, ValueError):
+                    pass
+    return out
+

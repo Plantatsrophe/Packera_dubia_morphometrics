@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
 Module: scripts/data_prep/organellar_cytonuclear_utils.py
-Project: Packera Species Delimitation & Morphometrics Pipeline
+Project: Plantmatics - Packera Species Delimitation & Morphometrics Pipeline
 Affiliation: University of North Carolina at Chapel Hill Herbarium (NCU)
 
 Description:
   K-mer public reference lineage matching, haplotype clustering, and
-  quality-gated reference cytonuclear discordance detection for off-target
-  skimmed plastid, nrITS, and nuclear waxy sequences.
+  empirical-nuclear cytonuclear discordance detection for skimmed plastid,
+  nrITS, and nuclear waxy sequences.
 """
 
 from __future__ import annotations
@@ -18,34 +18,12 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
-_SEED_SYNONYM_TAXA: Dict[str, str] = {
-    "senecio tomentosus": "Packera dubia", "packera tomentosa": "Packera dubia", "senecio aureus": "Packera aurea",
-    "senecio anonymus": "Packera anonyma", "senecio pauperculus": "Packera paupercula", "senecio schweinitzianus": "Packera schweinitziana",
-    "senecio millefolium": "Packera millefolium", "packera millefolia": "Packera millefolium", "packera memmingeri": "Packera x memmingeri",
-    "packera xmemmingeri": "Packera x memmingeri", "senecio obovatus": "Packera obovata", "senecio plattensis": "Packera plattensis",
-    "senecio antennariifolius": "Packera antennariifolia", "senecio glabellus": "Packera glabella", "senecio loratifolius": "Packera loratifolia",
-    "senecio pseudaureus": "Packera pseudaurea", "senecio indecorus": "Packera indecora", "senecio canus": "Packera cana",
-    "senecio strepthanthifolius": "Packera streptanthifolia", "senecio streptanthifolius": "Packera streptanthifolia",
-    "senecio fendleri": "Packera fendleri", "senecio multilobatus": "Packera multilobata", "senecio neomexicanus": "Packera neomexicana",
-    "senecio debilis": "Packera debilis", "senecio werneriifolius": "Packera werneriifolia", "senecio hartianus": "Packera hartiana",
-    "kf584255": "Packera serpenticola", "kf584257": "Packera serpenticola", "42947": "Packera serpenticola", "42949": "Packera serpenticola",
-}
-_NON_EPITHET_TOKENS = frozenset({
-    "rbcl", "trnl", "its", "its1", "its2", "58s", "waxy", "gbssi", "core", "plastid",
-    "chloroplast", "plastome", "ribosomal", "nuclear", "sp", "unk", "unknown", "var", "subsp", "cf", "aff",
-})
-_CANON_EQUIV_TAXA: Dict[str, str] = {
-    "packera millefolia": "packera millefolium",
-    "packera millefolium": "packera millefolium",
-    "packera memmingeri": "packera x memmingeri",
-    "packera x memmingeri": "packera x memmingeri",
-    "packera xmemmingeri": "packera x memmingeri",
-    "packera \u00d7 memmingeri": "packera x memmingeri",
-    "packera \u00d7memmingeri": "packera x memmingeri",
-    "packera tomentosa": "packera dubia",
-    "senecio tomentosus": "packera dubia",
-    "packera dubia": "packera dubia",
-}
+from scripts.data_prep.step06_synonym_utils import (
+    CANONICAL_SENECIO_PACKERA_SYNONYMS as _SEED_SYNONYM_TAXA,
+    _NON_EPITHET_TOKENS,
+    canonical_taxon_equiv_key,
+    extract_species_from_seed_key as _extract_species_from_seed_key,
+)
 
 
 def _revcomp(seq: str) -> str:
@@ -53,8 +31,7 @@ def _revcomp(seq: str) -> str:
 
 
 def _canon_packera_taxon_key(taxon: str) -> str:
-    s = re.sub(r"[\s_]+", " ", str(taxon or "")).strip().lower()
-    return _CANON_EQUIV_TAXA.get(s, s)
+    return canonical_taxon_equiv_key(taxon)
 
 
 def _is_valid_packera_binomial(taxon: str) -> bool:
@@ -95,18 +72,6 @@ def _cluster_haplotypes(
             reps.append((lbl, ks, spos))
             out[sid] = lbl
     return out
-
-
-def _extract_species_from_seed_key(seed_key: str) -> str:
-    norm = re.sub(r"[|_/\t]+", " ", seed_key).lower()
-    for syn, canon in _SEED_SYNONYM_TAXA.items():
-        if syn in norm:
-            return canon
-    if m := re.search(r"\bpackera\s+[0-9]*([a-z]+(?:-[a-z]+)?)(?=\s|$|[0-9])", norm):
-        ep = m.group(1).strip("-")
-        if ep and ep not in _NON_EPITHET_TOKENS:
-            return "Packera dubia" if ep == "tomentosa" else f"Packera {ep}"
-    return ""
 
 
 def match_best_public_lineage_with_metrics(
@@ -170,46 +135,73 @@ def _match_best_public_lineage(
     return match_best_public_lineage_with_metrics(seq, ref_seeds, k=k, _kcache=_kcache, q_pos=q_pos)[0]
 
 
+def _infer_tree_neighbor_taxa(nuclear_tree_path: Optional[Path], raw_sp_of: Mapping[str, str]) -> Dict[str, str]:
+    if nuclear_tree_path is None or not Path(nuclear_tree_path).is_file(): return {}
+    txt = Path(nuclear_tree_path).read_text(encoding="utf-8", errors="ignore")
+    clean_fn = importlib.import_module("scripts.data_prep.06_ingest_genetic_data").clean_sample_id
+    tips = [clean_fn(t) for t in re.findall(r"([A-Za-z0-9_.-]+)\s*:[0-9.eE+-]+", txt)]
+    out: Dict[str, str] = {}
+    for idx in range(1, len(tips) - 1):
+        left_sp, right_sp = raw_sp_of.get(tips[idx - 1], ""), raw_sp_of.get(tips[idx + 1], "")
+        if _is_valid_packera_binomial(left_sp) and _canon_packera_taxon_key(left_sp) == _canon_packera_taxon_key(right_sp):
+            out[tips[idx]] = left_sp
+    return out
+
+
 def _detect_cytonuclear_discordance(
     plastid_clades: Mapping[str, str], its_ribotypes: Mapping[str, str], nuclear_tree_path: Optional[Path] = None,
     public_plastome_matches: Optional[Mapping[str, str]] = None, public_its_matches: Optional[Mapping[str, str]] = None,
-    waxy_lineage_matches: Optional[Mapping[str, str]] = None,
-    plastome_match_metrics: Optional[Mapping[str, Tuple[float, int]]] = None,
+    waxy_lineage_matches: Optional[Mapping[str, str]] = None, plastome_match_metrics: Optional[Mapping[str, Tuple[float, int]]] = None,
+    nuclear_taxon_map: Optional[Mapping[str, str]] = None,
 ) -> List[Dict[str, Any]]:
-    """Compare organellar clade vs. nuclear taxon and quality-gated reference matches to flag cytonuclear capture."""
+    """Compare organellar clade vs. empirical nuclear taxon and quality-gated reference matches."""
     parse_code = importlib.import_module("scripts.data_prep.06_ingest_genetic_data").parse_sample_code
-    _ = nuclear_tree_path
-    samples = sorted(
-        set(plastid_clades.keys())
-        | set(its_ribotypes.keys())
-        | set((waxy_lineage_matches or {}).keys())
-        | set((public_plastome_matches or {}).keys())
-    )
-    taxon_of = {sid: (parse_code(sid).get("species_standardized") or "Unknown") for sid in samples}
+    samples = sorted(set(plastid_clades) | set(its_ribotypes) | set(waxy_lineage_matches or {}) | set(public_plastome_matches or {}))
+    raw_sp_of = {sid: (parse_code(sid).get("species_standardized") or "Unknown") for sid in samples}
+    tree_inferred = _infer_tree_neighbor_taxa(nuclear_tree_path, raw_sp_of)
+    its_clusters: Dict[str, List[str]] = defaultdict(list)
+    for sid, ilbl in its_ribotypes.items():
+        if ilbl: its_clusters[ilbl].append(sid)
+
+    taxon_of: Dict[str, str] = {}
+    for sid in samples:
+        raw_sp = raw_sp_of[sid]
+        if not raw_sp.startswith("Packera ") and raw_sp != "Unknown":
+            taxon_of[sid] = raw_sp; continue
+        emp_tx = str((nuclear_taxon_map or {}).get(sid) or "").strip()
+        pub_its, pub_wx = (public_its_matches or {}).get(sid, ""), (waxy_lineage_matches or {}).get(sid, "")
+        if _is_valid_packera_binomial(emp_tx):
+            taxon_of[sid] = emp_tx
+        elif _is_valid_packera_binomial(pub_its) and _is_valid_packera_binomial(pub_wx) and _canon_packera_taxon_key(pub_its) == _canon_packera_taxon_key(pub_wx):
+            taxon_of[sid] = pub_its
+        else:
+            others = [raw_sp_of.get(o, "") for o in its_clusters.get(its_ribotypes.get(sid, ""), ()) if o != sid and _is_valid_packera_binomial(raw_sp_of.get(o, ""))]
+            if len(its_clusters) >= 2 and len(others) >= 2 and len({_canon_packera_taxon_key(x) for x in others}) == 1 and _canon_packera_taxon_key(others[0]) != _canon_packera_taxon_key(raw_sp) and not (_is_valid_packera_binomial(pub_wx) and _canon_packera_taxon_key(pub_wx) == _canon_packera_taxon_key(raw_sp)):
+                taxon_of[sid] = others[0]
+            elif sid in tree_inferred and _canon_packera_taxon_key(tree_inferred[sid]) != _canon_packera_taxon_key(raw_sp):
+                taxon_of[sid] = tree_inferred[sid]
+            else:
+                taxon_of[sid] = raw_sp
+
     by_clade: Dict[str, Counter[str]] = defaultdict(Counter)
     for sid, pc in plastid_clades.items():
-        if taxon_of[sid].startswith("Packera "):
-            by_clade[pc][taxon_of[sid]] += 1
+        if taxon_of.get(sid, "").startswith("Packera "): by_clade[pc][taxon_of[sid]] += 1
     clade_maj_taxon: Dict[str, str] = {pc: cnt.most_common(1)[0][0] for pc, cnt in by_clade.items()}
 
     rows: List[Dict[str, Any]] = []
     for sid in samples:
         pc, sp = plastid_clades.get(sid), taxon_of[sid]
-        pub_cp = (public_plastome_matches or {}).get(sid, "")
-        pub_its = (public_its_matches or {}).get(sid, "")
-        pub_wx = (waxy_lineage_matches or {}).get(sid, "")
+        pub_cp, pub_its, pub_wx = (public_plastome_matches or {}).get(sid, ""), (public_its_matches or {}).get(sid, ""), (waxy_lineage_matches or {}).get(sid, "")
         discordant = 1 if (pc and sp.startswith("Packera ") and pc in clade_maj_taxon and clade_maj_taxon[pc] != sp and by_clade[pc][sp] < by_clade[pc][clade_maj_taxon[pc]]) else 0
         if discordant == 0 and sp.startswith("Packera ") and _is_valid_packera_binomial(pub_cp):
             cp_key, sp_key = _canon_packera_taxon_key(pub_cp), _canon_packera_taxon_key(sp)
             metrics = (plastome_match_metrics or {}).get(sid)
             hq_cp = metrics is not None and float(metrics[0]) >= 0.80 and int(metrics[1]) >= 80
             nuc_matches_cp = (_canon_packera_taxon_key(pub_its) == cp_key) or (_canon_packera_taxon_key(pub_wx) == cp_key)
-            if cp_key != sp_key and hq_cp and not nuc_matches_cp:
-                discordant = 1
+            if cp_key != sp_key and hq_cp and not nuc_matches_cp: discordant = 1
         rows.append({
             "genetic_sample_id": sid, "nuclear_taxon": sp, "plastid_clade": pc or "",
             "its_ribotype": its_ribotypes.get(sid) or "", "cytonuclear_discordant": discordant,
             "public_plastome_match": pub_cp, "public_its_match": pub_its, "waxy_lineage_match": pub_wx,
         })
     return rows
-
