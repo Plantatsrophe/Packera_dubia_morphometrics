@@ -51,10 +51,14 @@ class TestPipelineConfig(unittest.TestCase):
     def test_thresholds_values(self):
         """Verify key pipeline image-quality and detection thresholds match expected parameters."""
         cfg = PipelineConfig.from_yaml()
-        self.assertAlmostEqual(cfg.thresholds.pcd_conf, 0.25)
+        self.assertAlmostEqual(cfg.thresholds.pcd_conf, 0.35)
         self.assertAlmostEqual(cfg.thresholds.min_megapixels, 8.0)
         self.assertAlmostEqual(cfg.thresholds.min_file_size_kb, 500.0)
         self.assertAlmostEqual(cfg.thresholds.min_sharpness_laplacian, 80.0)
+        self.assertAlmostEqual(cfg.segmentation.score_thresh, 0.35)
+        self.assertFalse(cfg.segmentation.save_debug_crops)
+        self.assertFalse(hasattr(cfg.segmentation, "cohort_adaptive_mode"))
+        self.assertTrue(cfg.morphometrics.cohort_adaptive_mode)
 
     def test_thresholds_safe_fallbacks_when_subkeys_missing(self):
         """Verify PipelineConfig.from_yaml safely falls back when threshold sub-keys are absent."""

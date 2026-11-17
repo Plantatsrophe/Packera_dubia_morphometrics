@@ -191,6 +191,32 @@ class TestCapitulumPhenologyClassifier(unittest.TestCase):
         self.assertFalse(res["has_pappus_plume"])
         self.assertFalse(res["has_fresh_yellow_corollas"])
 
+    def test_rotated_nodding_fixture_a_classifies_as_anthesis(self) -> None:
+        """Rotated (90 deg and 180 deg nodding) Fixture A heads orient upright and score HEAD_ANTHESIS."""
+        base_crop = create_fixture_a_fresh_flowering_head(120, 120)
+        for rot_code in (cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_180):
+            rot_crop = cv2.rotate(base_crop, rot_code)
+            res = classify_single_capitulum(rot_crop)
+            self.assertEqual(res["head_state"], HEAD_ANTHESIS)
+            self.assertTrue(res["has_fresh_yellow_corollas"])
+
+    def test_aged_ochre_flower_one_vs_bud_gating(self) -> None:
+        """Oxidized-ochre Flower_ONE (class_id=4) heads score HEAD_ANTHESIS whereas Bud (class_id=6) stays HEAD_BUD."""
+        ochre_crop = np.full((120, 120, 3), 240, dtype=np.uint8)
+        cv2.rectangle(ochre_crop, (40, 60), (80, 108), color=(35, 95, 30), thickness=-1)
+        hsv_ochre = np.uint8([[[14, 61, 179]]])
+        rgb_ochre = tuple(int(c) for c in cv2.cvtColor(hsv_ochre, cv2.COLOR_HSV2RGB)[0, 0])
+        cv2.circle(ochre_crop, (60, 38), 28, color=rgb_ochre, thickness=-1)
+
+        res_flower = classify_single_capitulum(ochre_crop, class_id=4)
+        self.assertEqual(res_flower["head_state"], HEAD_ANTHESIS)
+        self.assertTrue(res_flower["has_aged_ochre_corollas"])
+        self.assertFalse(res_flower["has_fresh_yellow_corollas"])
+
+        res_bud = classify_single_capitulum(ochre_crop, class_id=6)
+        self.assertEqual(res_bud["head_state"], HEAD_BUD)
+        self.assertFalse(res_bud["has_aged_ochre_corollas"])
+
     # -------------------------------------------------------------------------
     # 2. Voucher-Level Cyme Classification Tests
     # -------------------------------------------------------------------------

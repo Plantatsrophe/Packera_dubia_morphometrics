@@ -18,7 +18,7 @@ Description:
 from __future__ import annotations
 
 import argparse
-import importlib
+import inspect
 import json
 import logging
 import math
@@ -42,13 +42,18 @@ from scripts.core.io_utils import atomic_write_text
 from scripts.vision.leaf_geometry_utils import (
     compute_lm3_shape_metrics,
     export_standardized_contour,
-    open_hairline_sinus_bridges_and_measure_voids,
 )
+from scripts.vision.lm3_data_loader import _CALIBRATED_SCALE_SOURCES
 from scripts.vision.lm3_inference_engines import (
     evaluate_leaf_damage_and_fold_qc,
     solve_ruler_tick_lattice_px_per_mm,
 )
 from scripts.vision.organ_crown_metrics import classify_leaf_zone_anatomical
+from scripts.vision.step02_photometry_corymb_utils import (
+    compute_calibrated_blade_photometry,
+    estimate_sheet_paper_cie_l_ref,
+    harmonize_upright_mask_sinus_bridges,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -122,6 +127,26 @@ def _eval_single_leaf_qc_worker(task: Tuple[Dict[str, Any], str, bool]) -> Dict[
     clipped_val = bool(_ival("is_crop_clipped", 0))
     evf_val = 0.0
     new_cjson: Optional[str] = None
+    cal_src_set = {str(s).strip().lower() for s in _CALIBRATED_SCALE_SOURCES}
+    ss_row = str(row.get("scale_source") or "").strip().lower()
+    raw_px_row = row.get("pixels_per_mm")
+    if raw_px_row is None or pd.isna(raw_px_row):
+        raw_px_row = row.get("voucher_px_per_mm")
+    is_cal_row = (
+        (_ival("is_calibrated_mm", 0) == 1 or _ival("voucher_is_cal", 0) == 1)
+        and (not ss_row or ss_row in cal_src_set)
+    )
+    px_mm_eval: Optional[float] = (
+        float(raw_px_row)
+        if (
+            is_cal_row
+            and raw_px_row is not None
+            and pd.notna(raw_px_row)
+            and math.isfinite(float(raw_px_row))
+            and float(raw_px_row) > 0.0
+        )
+        else None
+    )
 
     if mask_u8 is not None:
         hm, wm = mask_u8.shape[:2]
@@ -134,12 +159,18 @@ def _eval_single_leaf_qc_worker(task: Tuple[Dict[str, Any], str, bool]) -> Dict[
         ):
             clipped_val = True
 
-        _, evf_val, n_opened = open_hairline_sinus_bridges_and_measure_voids(mask_u8)
+        orig_u8 = mask_u8
+        cleaned_u8, evf_val = harmonize_upright_mask_sinus_bridges(
+            orig_u8,
+            pixels_per_mm=px_mm_eval,
+        )
+        was_opened = not np.array_equal(cleaned_u8, orig_u8)
+        mask_u8 = cleaned_u8
         shape_m = compute_lm3_shape_metrics(mask_u8)
         if shape_m["area_px"] > 0.0:
             sol_val = round(float(shape_m["solidity"]), 4)
             circ_val = round(float(shape_m["circularity"]), 4)
-        if n_opened > 0:
+        if was_opened:
             c_res = export_standardized_contour(
                 mask_u8,
                 str(row["catalogNumber"]),
@@ -147,6 +178,7 @@ def _eval_single_leaf_qc_worker(task: Tuple[Dict[str, Any], str, bool]) -> Dict[
                 eff_data_dir,
                 return_coords=True,
                 already_oriented=bool(_ival("mask_is_upright", 1) or 1),
+                bridge_already_opened=True,
             )
             if isinstance(c_res, tuple) and c_res[1]:
                 new_cjson = json.dumps(c_res[1], separators=(",", ":"))
@@ -181,39 +213,20 @@ def _eval_single_leaf_qc_worker(task: Tuple[Dict[str, Any], str, bool]) -> Dict[
 
 
 def _calibrate_voucher_ruler_worker(task: Tuple[str, str, Optional[float]]) -> Optional[Tuple[str, float]]:
-    """Run CPU margin metric tick-lattice calibration for one uncalibrated voucher sheet."""
+    """Run CPU unboxed margin metric tick-lattice scan for one uncalibrated voucher sheet."""
     cat, img_path_str, mp_prior_mm = task
     img = cv2.imread(img_path_str, cv2.IMREAD_COLOR)
     if img is None or img.size == 0:
         return None
-    px_per_mm = solve_ruler_tick_lattice_px_per_mm(img, mp_prior_px_per_mm=mp_prior_mm)
+    if "verified_ruler_crop" in inspect.signature(solve_ruler_tick_lattice_px_per_mm).parameters:
+        px_per_mm = solve_ruler_tick_lattice_px_per_mm(
+            img, mp_prior_px_per_mm=mp_prior_mm, verified_ruler_crop=False
+        )
+    else:
+        px_per_mm = solve_ruler_tick_lattice_px_per_mm(img, mp_prior_px_per_mm=mp_prior_mm)
     if px_per_mm is None or not np.isfinite(float(px_per_mm)) or float(px_per_mm) <= 1.0:
         return None
     return (cat, round(float(px_per_mm), 4))
-
-
-def _is_inverted_mount_group(grp: pd.DataFrame) -> bool:
-    """Detect upside-down mounted shoots where large petiolate leaves sit near top (cy_rel < 0.35)."""
-    cy_v = pd.to_numeric(grp.get("cy_rel_plant_bbox"), errors="coerce")
-    area_v = pd.to_numeric(grp.get("area_px"), errors="coerce")
-    pbr_v = pd.to_numeric(grp.get("petiole_to_blade_ratio"), errors="coerce").fillna(0.0)
-    valid = cy_v.notna() & area_v.notna() & (area_v > 0)
-    if int(valid.sum()) < 3:
-        return False
-    cy_f = cy_v[valid].to_numpy(dtype=float)
-    ar_f = area_v[valid].to_numpy(dtype=float)
-    pb_f = pbr_v[valid].to_numpy(dtype=float)
-    max_area = float(np.max(ar_f))
-    top_large_pet = np.any((cy_f <= 0.35) & (ar_f >= 0.70 * max_area) & (pb_f >= 0.22))
-    bot_small_sess = np.any((cy_f >= 0.55) & ((ar_f <= 0.55 * max_area) | (pb_f <= 0.15)))
-    if top_large_pet and bot_small_sess:
-        return True
-    med_area = float(np.median(ar_f))
-    top_half_cy = cy_f[ar_f >= med_area]
-    bot_half_cy = cy_f[ar_f < med_area]
-    if top_half_cy.size >= 1 and bot_half_cy.size >= 1:
-        return bool(float(np.median(top_half_cy)) < 0.38 and float(np.median(bot_half_cy)) > 0.62)
-    return False
 
 
 def _resolve_crop_file(raw_crop_path: Any, data_dir: Path) -> Optional[Path]:
@@ -286,6 +299,7 @@ def rescore_tier_a_leaves(
             "catalogNumber", "leaf_id", "mask_path", "solidity", "circularity",
             "bilateral_dice", "si_a", "lm3_gates_pass", "n_lamina_components",
             "detector_class_id", "hole_area_frac", "is_crop_clipped", "mask_is_upright",
+            "pixels_per_mm", "is_calibrated_mm", "scale_source", "voucher_px_per_mm", "voucher_is_cal",
         ]
         avail_qc_cols = [c for c in qc_cols if c in el_df.columns]
         qc_tasks = [
@@ -311,27 +325,24 @@ def rescore_tier_a_leaves(
         el_df["_min_rms"] = [r["min_rms"] for r in qc_results]
         upd_contour_json: List[Optional[str]] = [r["contour_xy_json"] for r in qc_results]
 
-        # CPU metric margin tick-lattice calibration for uncalibrated vouchers
-        # Skip full-disk ruler re-scan once canonical calibration (>30,000 leaves) is stored
+        # CPU unboxed metric margin tick-lattice scan for uncalibrated vouchers
         ruler_tasks: List[Tuple[str, str, Optional[float]]] = []
         seen_cats: set[str] = set()
-        skip_ruler_rescan = int((el_df["voucher_is_cal"] == 1).sum()) > 30000
-        if not skip_ruler_rescan:
-            for _, rv in el_df[["catalogNumber", "image_path", "voucher_px_per_mm", "voucher_is_cal"]].drop_duplicates("catalogNumber").iterrows():
-                cat_s = str(rv["catalogNumber"]).strip()
-                if not cat_s or cat_s in seen_cats:
-                    continue
-                seen_cats.add(cat_s)
-                is_cal_v = int(rv["voucher_is_cal"]) if pd.notna(rv.get("voucher_is_cal")) else 0
-                if is_cal_v != 0:
-                    continue
-                img_f = _resolve_voucher_image_file(rv.get("image_path"), cat_s, eff_data_dir)
-                if img_f is None:
-                    continue
-                v_px = float(rv["voucher_px_per_mm"]) if pd.notna(rv.get("voucher_px_per_mm")) else None
-                ruler_tasks.append((cat_s, str(img_f), v_px))
+        for _, rv in el_df[["catalogNumber", "image_path", "voucher_px_per_mm", "voucher_is_cal"]].drop_duplicates("catalogNumber").iterrows():
+            cat_s = str(rv["catalogNumber"]).strip()
+            if not cat_s or cat_s in seen_cats:
+                continue
+            seen_cats.add(cat_s)
+            is_cal_v = int(rv["voucher_is_cal"]) if pd.notna(rv.get("voucher_is_cal")) else 0
+            if is_cal_v != 0:
+                continue
+            img_f = _resolve_voucher_image_file(rv.get("image_path"), cat_s, eff_data_dir)
+            if img_f is None:
+                continue
+            v_px = float(rv["voucher_px_per_mm"]) if pd.notna(rv.get("voucher_px_per_mm")) else None
+            ruler_tasks.append((cat_s, str(img_f), v_px))
 
-        calibrated_scales: Dict[str, float] = {}
+        unboxed_scales: Dict[str, float] = {}
         if ruler_tasks:
             if len(ruler_tasks) >= 8 and n_workers > 1:
                 with ProcessPoolExecutor(max_workers=n_workers) as pool:
@@ -340,9 +351,9 @@ def rescore_tier_a_leaves(
                 hits = [_calibrate_voucher_ruler_worker(t) for t in ruler_tasks]
             for h in hits:
                 if h is not None:
-                    calibrated_scales[h[0]] = h[1]
+                    unboxed_scales[h[0]] = h[1]
             logger.info(
-                f"CPU margin ruler calibration: upgraded {len(calibrated_scales)} / {len(ruler_tasks)} uncalibrated vouchers."
+                f"CPU unboxed margin tick-lattice scan: updated {len(unboxed_scales)} / {len(ruler_tasks)} uncalibrated vouchers."
             )
 
         if "scale_source" not in el_df.columns:
@@ -351,32 +362,38 @@ def rescore_tier_a_leaves(
             el_df["is_calibrated_mm"] = 0
         if "pixels_per_mm" not in el_df.columns:
             el_df["pixels_per_mm"] = np.nan
-        if calibrated_scales:
+        if unboxed_scales:
             cat_series = el_df["catalogNumber"].astype(str).str.strip()
-            cal_mask = cat_series.isin(calibrated_scales)
-            for idx_c in el_df.index[cal_mask]:
+            unb_mask = cat_series.isin(unboxed_scales)
+            for idx_c in el_df.index[unb_mask]:
                 cat_c = str(el_df.at[idx_c, "catalogNumber"]).strip()
-                new_px = float(calibrated_scales[cat_c])
+                new_px = float(unboxed_scales[cat_c])
                 el_df.at[idx_c, "pixels_per_mm"] = new_px
-                el_df.at[idx_c, "is_calibrated_mm"] = 1
-                el_df.at[idx_c, "scale_source"] = "ruler_calibrated"
-                if pd.notna(el_df.at[idx_c, "area_px"]):
-                    el_df.at[idx_c, "area_mm2"] = round(float(el_df.at[idx_c, "area_px"]) / (new_px * new_px), 4)
-                for px_col, mm_col in (
-                    ("blade_length_px", "blade_length_mm"),
-                    ("blade_width_px", "blade_width_mm"),
-                    ("petiole_length_px", "petiole_length_mm"),
-                    ("petiole_width_px", "petiole_width_mm"),
-                ):
-                    if px_col in el_df.columns and mm_col in el_df.columns and pd.notna(el_df.at[idx_c, px_col]):
-                        el_df.at[idx_c, mm_col] = round(float(el_df.at[idx_c, px_col]) / new_px, 4)
+                el_df.at[idx_c, "is_calibrated_mm"] = 0
+                el_df.at[idx_c, "scale_source"] = "tick_lattice_unboxed"
 
-        # Normalize scale_source across calibrated vs mp_estimated rows
+        # Normalize scale_source across calibrated, unboxed tick-lattice, and mp_estimated rows
+        cal_src_set = {str(s).strip().lower() for s in _CALIBRATED_SCALE_SOURCES}
         is_cal_arr = pd.to_numeric(el_df["is_calibrated_mm"], errors="coerce").fillna(0).astype(int)
         px_arr = pd.to_numeric(el_df["pixels_per_mm"], errors="coerce")
         ss_cur = el_df["scale_source"].fillna("").astype(str).str.strip()
-        el_df.loc[is_cal_arr == 1, "scale_source"] = "ruler_calibrated"
-        mp_fix = (is_cal_arr == 0) & px_arr.notna() & (px_arr > 0.0) & (~ss_cur.isin(["ruler_calibrated", "mp_estimated"]))
+        ss_low = ss_cur.str.lower()
+        is_cal_arr = (
+            (is_cal_arr == 1)
+            & px_arr.notna()
+            & (px_arr > 0.0)
+            & (ss_low.isin(cal_src_set) | (ss_low == ""))
+        ).astype(int)
+        el_df["is_calibrated_mm"] = is_cal_arr
+        el_df.loc[(is_cal_arr == 1) & (~ss_low.isin(cal_src_set)), "scale_source"] = "ruler_calibrated"
+        el_df.loc[ss_low == "tick_lattice_unboxed", "scale_source"] = "tick_lattice_unboxed"
+        el_df.loc[ss_low == "tick_lattice_unboxed", "is_calibrated_mm"] = 0
+        mp_fix = (
+            (el_df["is_calibrated_mm"] == 0)
+            & px_arr.notna()
+            & (px_arr > 0.0)
+            & (~ss_low.isin(cal_src_set | {"mp_estimated", "tick_lattice_unboxed"}))
+        )
         el_df.loc[mp_fix, "scale_source"] = "mp_estimated"
 
         # Re-evaluate basal vs. cauline leaf zones per (catalogNumber, plant_individual_id)
@@ -406,10 +423,10 @@ def rescore_tier_a_leaves(
 
             # Reconstruct anatomical frame whenever >= 2 leaves exist (flowering OR sterile)
             if len(grp) >= 2 and p_height is not None:
-                inverted_mount = _is_inverted_mount_group(grp)
-                parsed_rows: List[Tuple[Any, float, float, float, float, float, float]] = []
-                pet_prox_s: List[float] = []
-                for idx_df, r_l in grp.iterrows():
+                leaf_recs: List[Dict[str, Any]] = []
+                n_prox_pet = 0
+                for _, r_l in grp.iterrows():
+                    lid_i = int(r_l["leaf_id"])
                     bld_px = float(r_l["blade_length_px"]) if pd.notna(r_l.get("blade_length_px")) and float(r_l["blade_length_px"]) > 0 else 80.0
                     bld_w_px = float(r_l["blade_width_px"]) if pd.notna(r_l.get("blade_width_px")) and float(r_l["blade_width_px"]) > 0 else np.nan
                     pet_px = float(r_l["petiole_length_px"]) if pd.notna(r_l.get("petiole_length_px")) and float(r_l["petiole_length_px"]) >= 0 else 0.0
@@ -418,35 +435,18 @@ def rescore_tier_a_leaves(
                     dc_prev = float(r_l["dist_from_crown_norm"]) if pd.notna(r_l.get("dist_from_crown_norm")) else np.nan
                     cy_rel = float(r_l["cy_rel_plant_bbox"]) if pd.notna(r_l.get("cy_rel_plant_bbox")) else np.nan
                     if np.isfinite(cy_rel):
-                        s_est = max(0.0, min(1.0, cy_rel if inverted_mount else (1.0 - cy_rel)))
+                        s_est = max(0.0, min(1.0, 1.0 - cy_rel))
                     elif np.isfinite(dc_prev):
                         s_est = max(0.0, min(1.0, dc_prev))
                     else:
                         s_est = 0.0
-                    s_tip = max(0.0, s_est - (0.5 * bld_px + min(pet_px, 0.45 * p_height)) / p_height)
-                    parsed_rows.append((r_l, s_est, bld_px, bld_w_px, pet_px, pet_w_px, pbr_v))
-                    if pbr_v >= 0.22 and s_est <= 0.62:
-                        pet_prox_s.append(s_tip)
-
-                # Shift crown origin up from bbox bottom only when proximal petiolate leaves anchor the caudex
-                s_crown_offset = min(0.22, min(pet_prox_s)) if pet_prox_s else 0.0
-                has_rosette_root = bool(
-                    (cx_cr is not None and cy_cr is not None and len(pet_prox_s) >= 1)
-                    or len(pet_prox_s) >= 2
-                )
-
-                leaf_recs: List[Dict[str, Any]] = []
-                for r_l, s_est, bld_px, bld_w_px, pet_px, pet_w_px, pbr_v in parsed_rows:
-                    lid_i = int(r_l["leaf_id"])
-                    s_adj = max(0.0, s_est - s_crown_offset)
-                    eff_cy_rel = 1.0 - s_adj
-                    y_blade_center = cy_eval - s_adj * p_height
-                    y_base = min(cy_eval, y_blade_center + 0.5 * bld_px)
-                    y_apex = y_blade_center - 0.5 * bld_px
+                    y_c = cy_eval - s_est * p_height
+                    y_base = min(cy_eval, y_c + 0.5 * bld_px)
+                    y_apex = y_c - 0.5 * bld_px
                     y_tip = min(cy_eval, y_base + min(pet_px, 0.45 * p_height))
-                    area_val = float(r_l["area_px"]) if pd.notna(r_l.get("area_px")) and float(r_l["area_px"]) > 0 else 0.0
-                    ar_val = float(r_l["aspect_ratio"]) if pd.notna(r_l.get("aspect_ratio")) and float(r_l["aspect_ratio"]) > 0 else 1.5
-                    sol_l = float(r_l["solidity"]) if pd.notna(r_l.get("solidity")) else 0.85
+                    has_pet_m = bool(pet_px > 0.0 or pbr_v >= 0.12)
+                    if has_pet_m and s_est <= 0.45:
+                        n_prox_pet += 1
                     leaf_recs.append({
                         "leaf_id": lid_i,
                         "plant_individual_id": int(_pid),
@@ -458,12 +458,13 @@ def rescore_tier_a_leaves(
                         "petiole_length_px": pet_px,
                         "petiole_width_px": pet_w_px,
                         "petiole_to_blade_ratio": pbr_v,
-                        "has_petiole_mask": bool(pbr_v >= 0.12),
-                        "area_px": area_val,
-                        "aspect_ratio": ar_val,
-                        "solidity": sol_l,
-                        "cy_rel_plant_bbox": eff_cy_rel,
+                        "has_petiole_mask": has_pet_m,
+                        "cy_rel_plant_bbox": cy_rel if np.isfinite(cy_rel) else (1.0 - s_est),
+                        "bilateral_dice": float(r_l["bilateral_dice"]) if pd.notna(r_l.get("bilateral_dice")) else np.nan,
+                        "si_a": float(r_l["si_a"]) if pd.notna(r_l.get("si_a")) else np.nan,
+                        "lm3_gates_pass": bool(int(r_l["lm3_gates_pass"]) != 0) if pd.notna(r_l.get("lm3_gates_pass")) else True,
                     })
+                has_rosette_root = bool((cx_cr is not None and cy_cr is not None and n_prox_pet >= 1) or n_prox_pet >= 2)
                 cap_box = (
                     [(cy_eval - p_height - 20.0, cx_eval - 20.0, cy_eval - p_height + 20.0, cx_eval + 20.0)]
                     if has_caps
@@ -484,9 +485,10 @@ def rescore_tier_a_leaves(
                 for _, r_l in grp.iterrows():
                     lid_i = int(r_l["leaf_id"])
                     if lid_i in z_res:
-                        el_df.loc[(el_df["catalogNumber"] == _cat) & (el_df["plant_individual_id"] == _pid) & (el_df["leaf_id"] == lid_i), "leaf_zone"] = z_res[lid_i]["leaf_zone"]
-                        el_df.loc[(el_df["catalogNumber"] == _cat) & (el_df["plant_individual_id"] == _pid) & (el_df["leaf_id"] == lid_i), "leaf_zone_confidence"] = z_res[lid_i]["leaf_zone_confidence"]
-                        el_df.loc[(el_df["catalogNumber"] == _cat) & (el_df["plant_individual_id"] == _pid) & (el_df["leaf_id"] == lid_i), "dist_from_crown_norm"] = z_res[lid_i]["dist_from_crown_norm"]
+                        mask_r = (el_df["catalogNumber"] == _cat) & (el_df["plant_individual_id"] == _pid) & (el_df["leaf_id"] == lid_i)
+                        el_df.loc[mask_r, "leaf_zone"] = z_res[lid_i]["leaf_zone"]
+                        el_df.loc[mask_r, "leaf_zone_confidence"] = z_res[lid_i]["leaf_zone_confidence"]
+                        el_df.loc[mask_r, "dist_from_crown_norm"] = z_res[lid_i]["dist_from_crown_norm"]
 
             # Within-rosette sibling aspect-ratio half-fold screen on basal leaves
             grp_after = el_df.loc[grp.index]
@@ -516,36 +518,57 @@ def rescore_tier_a_leaves(
         upd_cie_l_sd: List[Optional[float]] = [None] * n_rows
         n_photo_upd = 0
         if recompute_photometry:
-            s02_mod = importlib.import_module("scripts.pipeline.02_segment_and_extract")
-            est_paper_fn = s02_mod.estimate_sheet_paper_cie_l_ref
-            cie_l_fn = s02_mod.compute_eroded_blade_cie_l_metrics
-            by_cat_photo: Dict[str, List[Tuple[int, Any, Any, Any]]] = {}
+            by_cat_photo: Dict[str, List[Tuple[int, Any, Any, Any, Optional[float]]]] = {}
             for pos_p, (idx_p, row_p) in enumerate(el_df.iterrows()):
                 cat_p = str(row_p["catalogNumber"]).strip()
-                by_cat_photo.setdefault(cat_p, []).append((pos_p, row_p.get("image_path"), row_p.get("mask_path"), row_p.get("crop_path")))
+                is_cal_p = int(row_p.get("is_calibrated_mm") or 0) == 1
+                px_raw_p = row_p.get("pixels_per_mm")
+                px_mm_p = (
+                    float(px_raw_p)
+                    if (
+                        is_cal_p
+                        and px_raw_p is not None
+                        and pd.notna(px_raw_p)
+                        and math.isfinite(float(px_raw_p))
+                        and float(px_raw_p) > 0.0
+                    )
+                    else None
+                )
+                by_cat_photo.setdefault(cat_p, []).append(
+                    (pos_p, row_p.get("image_path"), row_p.get("mask_path"), row_p.get("crop_path"), px_mm_p)
+                )
 
-            def _photo_sheet_worker(item: Tuple[str, List[Tuple[int, Any, Any, Any]]]) -> List[Tuple[int, Optional[float], Optional[float]]]:
+            def _photo_sheet_worker(
+                item: Tuple[str, List[Tuple[int, Any, Any, Any, Optional[float]]]],
+            ) -> List[Tuple[int, Optional[float], Optional[float]]]:
                 cat_w, recs_w = item
                 img_f = _resolve_voucher_image_file(recs_w[0][1], cat_w, eff_data_dir)
                 img_bgr = cv2.imread(str(img_f), cv2.IMREAD_COLOR) if img_f is not None else None
                 sh_hw = img_bgr.shape[:2] if (img_bgr is not None and img_bgr.ndim == 3 and img_bgr.size > 0) else None
-                paper_ref = est_paper_fn(img_bgr) if sh_hw is not None else 90.0
+                paper_ref = estimate_sheet_paper_cie_l_ref(img_bgr) if sh_hw is not None else 90.0
                 out_w: List[Tuple[int, Optional[float], Optional[float]]] = []
-                for pos_i, _, m_raw, c_raw in recs_w:
+                for pos_i, _, m_raw, c_raw, px_mm_i in recs_w:
                     m_f = _resolve_mask_file(m_raw, eff_data_dir)
                     m_u8 = cv2.imread(str(m_f), cv2.IMREAD_GRAYSCALE) if m_f is not None else None
                     if m_u8 is None or int(np.count_nonzero(m_u8)) == 0:
-                        out_w.append((pos_i, None, None)); continue
+                        out_w.append((pos_i, None, None))
+                        continue
                     mh_mw = m_u8.shape[:2]
                     c_f = _resolve_crop_file(c_raw, eff_data_dir)
                     c_bgr = cv2.imread(str(c_f), cv2.IMREAD_COLOR) if c_f is not None else None
                     if c_bgr is not None and c_bgr.ndim == 3 and c_bgr.shape[:2] == mh_mw:
-                        res_p = cie_l_fn(c_bgr, m_u8, mask_origin=(0, 0), paper_l_ref=paper_ref)
+                        res_p = compute_calibrated_blade_photometry(
+                            c_bgr, m_u8, mask_origin=(0, 0), paper_l_ref=paper_ref, pixels_per_mm=px_mm_i
+                        )
                     elif sh_hw is not None and mh_mw == sh_hw:
-                        res_p = cie_l_fn(img_bgr, m_u8, mask_origin=(0, 0), paper_l_ref=paper_ref)
+                        res_p = compute_calibrated_blade_photometry(
+                            img_bgr, m_u8, mask_origin=(0, 0), paper_l_ref=paper_ref, pixels_per_mm=px_mm_i
+                        )
                     else:
-                        out_w.append((pos_i, None, None)); continue
-                    ln = float(res_p["blade_cie_l_norm"]); ls = float(res_p["blade_cie_l_sd"])
+                        out_w.append((pos_i, None, None))
+                        continue
+                    ln = float(res_p["blade_cie_l_norm"])
+                    ls = float(res_p["blade_cie_l_sd"])
                     out_w.append((pos_i, ln if math.isfinite(ln) else None, ls if math.isfinite(ls) else None))
                 return out_w
 
@@ -649,71 +672,35 @@ def rescore_tier_a_leaves(
                     """,
                     crown_backfills,
                 )
-            if calibrated_scales:
-                v_rows = [(float(px), str(cat)) for cat, px in calibrated_scales.items()]
+            if unboxed_scales:
+                v_rows = [(float(px), str(cat)) for cat, px in unboxed_scales.items()]
                 conn.executemany(
                     """
                     UPDATE vouchers
-                    SET pixels_per_mm = ?, is_calibrated_mm = 1
+                    SET pixels_per_mm = ?, is_calibrated_mm = 0
                     WHERE catalogNumber = ?;
                     """,
                     v_rows,
                 )
-                conn.executemany(
-                    """
-                    UPDATE plant_individuals
-                    SET plant_height_mm = CASE WHEN plant_height_px IS NOT NULL THEN ROUND(plant_height_px / ?, 4) ELSE plant_height_mm END,
-                        plant_height_cm = CASE WHEN plant_height_px IS NOT NULL THEN ROUND(plant_height_px / (? * 10.0), 4) ELSE plant_height_cm END,
-                        petiole_length_mm = CASE WHEN petiole_length_px IS NOT NULL THEN ROUND(petiole_length_px / ?, 4) ELSE petiole_length_mm END,
-                        petiole_width_mm = CASE WHEN petiole_width_px IS NOT NULL THEN ROUND(petiole_width_px / ?, 4) ELSE petiole_width_mm END,
-                        blade_length_mm = CASE WHEN blade_length_px IS NOT NULL THEN ROUND(blade_length_px / ?, 4) ELSE blade_length_mm END
-                    WHERE catalogNumber = ?;
-                    """,
-                    [(float(px), float(px), float(px), float(px), float(px), str(cat)) for cat, px in calibrated_scales.items()],
-                )
-                conn.executemany(
-                    """
-                    UPDATE voucher_reproductive_phenology
-                    SET involucre_height_mm = CASE WHEN involucre_height_px IS NOT NULL THEN ROUND(involucre_height_px / ?, 4) ELSE involucre_height_mm END,
-                        involucre_width_mm = CASE WHEN involucre_width_px IS NOT NULL THEN ROUND(involucre_width_px / ?, 4) ELSE involucre_width_mm END
-                    WHERE catalogNumber = ?;
-                    """,
-                    [(float(px), float(px), str(cat)) for cat, px in calibrated_scales.items()],
-                )
 
         # Synchronize companion CSV snapshots when present
         tables_dir = eff_manifest.parent
-        if calibrated_scales:
+        if unboxed_scales:
             curated_csv = tables_dir / "curated_vouchers.csv"
             if curated_csv.is_file() and curated_csv.stat().st_size > 0:
                 c_df = pd.read_csv(curated_csv, low_memory=False)
                 if "catalogNumber" in c_df.columns:
                     for ci in c_df.index:
                         c_key = str(c_df.at[ci, "catalogNumber"]).strip()
-                        if c_key in calibrated_scales:
-                            px_new = float(calibrated_scales[c_key])
+                        if c_key in unboxed_scales:
+                            px_new = float(unboxed_scales[c_key])
                             if "pixels_per_mm" in c_df.columns:
                                 c_df.at[ci, "pixels_per_mm"] = px_new
                             if "is_calibrated_mm" in c_df.columns:
-                                c_df.at[ci, "is_calibrated_mm"] = True
+                                c_df.at[ci, "is_calibrated_mm"] = False
                             if "scale_source" in c_df.columns:
-                                c_df.at[ci, "scale_source"] = "ruler_calibrated"
+                                c_df.at[ci, "scale_source"] = "tick_lattice_unboxed"
                     atomic_write_text(curated_csv, c_df.to_csv(index=False))
-            repro_csv = tables_dir / "voucher_reproductive_metrics.csv"
-            if repro_csv.is_file() and repro_csv.stat().st_size > 0:
-                vr_df = pd.read_csv(repro_csv, low_memory=False)
-                if "catalogNumber" in vr_df.columns:
-                    for vi in vr_df.index:
-                        c_key = str(vr_df.at[vi, "catalogNumber"]).strip()
-                        if c_key in calibrated_scales:
-                            px_new = float(calibrated_scales[c_key])
-                            for px_col, mm_col in (
-                                ("involucre_height_px", "involucre_height_mm"),
-                                ("involucre_width_px", "involucre_width_mm"),
-                            ):
-                                if px_col in vr_df.columns and mm_col in vr_df.columns and pd.notna(vr_df.at[vi, px_col]):
-                                    vr_df.at[vi, mm_col] = round(float(vr_df.at[vi, px_col]) / px_new, 4)
-                    atomic_write_text(repro_csv, vr_df.to_csv(index=False))
 
         if eff_manifest.is_file() and eff_manifest.stat().st_size > 0:
             m_df = pd.read_csv(eff_manifest, low_memory=False)
@@ -785,7 +772,7 @@ def rescore_tier_a_leaves(
         n_caul = int((el_df["leaf_zone"].astype(str).str.lower() == "cauline").sum())
         logger.info(
             f"Re-scored {n_rows} leaves: efa_qc_pass={n_pass}, flagged={n_flag}, "
-            f"basal={n_bas}, cauline={n_caul}, ruler_upgraded={len(calibrated_scales)}."
+            f"basal={n_bas}, cauline={n_caul}, tick_lattice_unboxed={len(unboxed_scales)}."
         )
         return {
             "total": n_rows,
@@ -793,7 +780,8 @@ def rescore_tier_a_leaves(
             "flagged": n_flag,
             "basal": n_bas,
             "cauline": n_caul,
-            "ruler_calibrated_vouchers": len(calibrated_scales),
+            "ruler_calibrated_vouchers": 0,
+            "tick_lattice_unboxed_vouchers": len(unboxed_scales),
             "photometry_recomputed": n_photo_upd,
         }
     finally:

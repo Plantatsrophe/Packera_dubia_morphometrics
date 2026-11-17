@@ -279,6 +279,8 @@ class TestCodeHygiene(unittest.TestCase):
             PROJECT_ROOT / "scripts" / "core" / "step01_biogeography_utils.py": 300,
             PROJECT_ROOT / "scripts" / "data_prep" / "prune_eastern_cohort.py": 500,
             PROJECT_ROOT / "scripts" / "tests" / "test_step01_robustness_audit.py": 380,
+            PROJECT_ROOT / "scripts" / "vision" / "step02_photometry_corymb_utils.py": 360,
+            PROJECT_ROOT / "scripts" / "tests" / "test_step02_vision_hygiene.py": 380,
         }
         bounded_paths = (
             *strict_ceilings.keys(),

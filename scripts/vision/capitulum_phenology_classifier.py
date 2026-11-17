@@ -34,7 +34,8 @@ Execution Constraints:
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Tuple
+import math
+from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -64,6 +65,9 @@ class CapitulumResult(dict):
 
     def __hash__(self) -> int:
         return hash(self.get("head_state"))
+
+
+HeadPhenologyResult = CapitulumResult
 
 
 class VoucherPhenologyResult(dict):
@@ -347,6 +351,195 @@ def extract_biomarker_involucre_posture(
     return erect_involucre, reflexed_involucre, diagnostics
 
 
+def orient_capitulum_crop_upright(
+    crop_rgb: np.ndarray,
+    peduncle_dir_xy: Optional[Tuple[float, float]] = None,
+) -> np.ndarray:
+    """
+    Reorients a capitulum RGB crop so its basal-to-distal axis points upward.
+
+    Uses `peduncle_dir_xy` when supplied and falls back to crop biomarker centroids
+    between distal florets or pappus bristles and the herbaceous involucre cup.
+    """
+    if (
+        crop_rgb is None
+        or not isinstance(crop_rgb, np.ndarray)
+        or crop_rgb.size == 0
+        or crop_rgb.ndim < 3
+        or crop_rgb.shape[2] < 3
+        or min(crop_rgb.shape[:2]) < 5
+    ):
+        return crop_rgb
+
+    h, w = crop_rgb.shape[:2]
+    dx: Optional[float] = None
+    dy: Optional[float] = None
+
+    if peduncle_dir_xy is not None and len(peduncle_dir_xy) >= 2:
+        try:
+            px = float(peduncle_dir_xy[0])
+            py = float(peduncle_dir_xy[1])
+        except (TypeError, ValueError):
+            px, py = float("nan"), float("nan")
+        if np.isfinite(px) and np.isfinite(py):
+            nrm = math.hypot(px, py)
+            if nrm >= 1e-3:
+                dx = px / nrm
+                dy = py / nrm
+
+    if dx is None or dy is None:
+        rgb3 = crop_rgb[:, :, :3]
+        lab = cv2.cvtColor(rgb3, cv2.COLOR_RGB2LAB)
+        hsv = cv2.cvtColor(rgb3, cv2.COLOR_RGB2HSV)
+        gray = cv2.cvtColor(rgb3, cv2.COLOR_RGB2GRAY)
+
+        l_star = lab[:, :, 0].astype(np.float32) * (100.0 / 255.0)
+        b_star = lab[:, :, 2].astype(np.float32) - 128.0
+        h_deg = hsv[:, :, 0].astype(np.float32) * 2.0
+        s_norm = hsv[:, :, 1].astype(np.float32) / 255.0
+        v_norm = hsv[:, :, 2].astype(np.float32) / 255.0
+
+        non_paper = ~((l_star >= 75.0) & (s_norm <= 0.20))
+        floret_m = (
+            (h_deg >= 10.0)
+            & (h_deg <= 50.0)
+            & (s_norm >= 0.18)
+            & (v_norm >= 0.28)
+            & (b_star >= 8.0)
+        )
+        edges = cv2.Canny(gray, 50, 150)
+        dil_edges = cv2.dilate(edges, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))) > 0
+        pappus_m = (l_star >= 75.0) & (s_norm <= 0.18) & dil_edges
+        distal_m = floret_m | pappus_m
+        cup_m = non_paper & (~floret_m)
+
+        if np.count_nonzero(distal_m) >= 8 and np.count_nonzero(cup_m) >= 8:
+            ys_d, xs_d = np.where(distal_m)
+            ys_c, xs_c = np.where(cup_m)
+            cy_d, cx_d = float(np.mean(ys_d)), float(np.mean(xs_d))
+            cy_c, cx_c = float(np.mean(ys_c)), float(np.mean(xs_c))
+            vx = cx_d - cx_c
+            vy = cy_d - cy_c
+            if math.hypot(vx, vy) >= 3.0:
+                dx = vx
+                dy = vy
+
+    if dx is None or dy is None:
+        return crop_rgb
+
+    theta_vec = math.degrees(math.atan2(dy, dx))
+    rot_deg = ((theta_vec + 90.0 + 180.0) % 360.0) - 180.0
+    if abs(rot_deg) <= 25.0:
+        return crop_rgb
+
+    rad = math.radians(rot_deg)
+    abs_cos = abs(math.cos(rad))
+    abs_sin = abs(math.sin(rad))
+    new_w = max(1, int(round(h * abs_sin + w * abs_cos)))
+    new_h = max(1, int(round(h * abs_cos + w * abs_sin)))
+    rot_mat = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), rot_deg, 1.0)
+    rot_mat[0, 2] += (new_w / 2.0) - (w / 2.0)
+    rot_mat[1, 2] += (new_h / 2.0) - (h / 2.0)
+    return cv2.warpAffine(
+        crop_rgb,
+        rot_mat,
+        (new_w, new_h),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=(240, 240, 240),
+    )
+
+
+def extract_biomarker_aged_ochre_corollas(
+    crop_rgb: np.ndarray,
+    h_min_deg: float = 10.0,
+    h_max_deg: float = 48.0,
+    s_min: float = 0.18,
+    s_max: float = 0.32,
+    v_min: float = 0.28,
+    min_b_star_excess: float = 8.0,
+    ochre_threshold: float = 0.10,
+) -> Tuple[bool, float, Dict[str, float]]:
+    """
+    Biomarker B2: Aged Ochre and Amber Corollas (Herbarium Anthesis Indicator).
+
+    Detects oxidized ochre, amber, and browned ligules or disc corollas in the
+    upper capitulum dome by thresholding HSV hue/saturation/value and CIE b*
+    excess over border mounting paper while excluding bright achromatic pappus plumes.
+    """
+    if (
+        crop_rgb is None
+        or not isinstance(crop_rgb, np.ndarray)
+        or crop_rgb.size == 0
+        or crop_rgb.ndim < 3
+        or crop_rgb.shape[2] < 3
+    ):
+        return False, 0.0, {
+            "ochre_ratio": 0.0,
+            "ochre_pixel_count": 0,
+            "paper_b_star": 0.0,
+        }
+
+    h, w = crop_rgb.shape[:2]
+    if h < 3 or w < 3:
+        return False, 0.0, {
+            "ochre_ratio": 0.0,
+            "ochre_pixel_count": 0,
+            "paper_b_star": 0.0,
+        }
+
+    rgb3 = crop_rgb[:, :, :3]
+    crop_lab = cv2.cvtColor(rgb3, cv2.COLOR_RGB2LAB)
+    crop_hsv = cv2.cvtColor(rgb3, cv2.COLOR_RGB2HSV)
+
+    l_full = crop_lab[:, :, 0].astype(np.float32) * (100.0 / 255.0)
+    b_full = crop_lab[:, :, 2].astype(np.float32) - 128.0
+    h_full = crop_hsv[:, :, 0].astype(np.float32) * 2.0
+    s_full = crop_hsv[:, :, 1].astype(np.float32) / 255.0
+    v_full = crop_hsv[:, :, 2].astype(np.float32) / 255.0
+
+    # Estimate border mounting paper CIE b* baseline from outermost 3 px border
+    border_mask = np.zeros((h, w), dtype=bool)
+    bw = min(3, max(1, h // 4), max(1, w // 4))
+    border_mask[:bw, :] = True
+    border_mask[-bw:, :] = True
+    border_mask[:, :bw] = True
+    border_mask[:, -bw:] = True
+    paper_border = border_mask & (l_full >= 65.0) & (s_full <= 0.22)
+    b_paper = float(np.median(b_full[paper_border])) if np.any(paper_border) else 0.0
+
+    upper_h = max(1, int(round(h * 0.58)))
+    l_star = l_full[:upper_h, :]
+    b_star = b_full[:upper_h, :]
+    h_deg = h_full[:upper_h, :]
+    s_norm = s_full[:upper_h, :]
+    v_norm = v_full[:upper_h, :]
+
+    is_achromatic_pappus = (l_star >= 75.0) & (s_norm <= 0.18)
+    ochre_mask = (
+        (h_deg >= h_min_deg)
+        & (h_deg <= h_max_deg)
+        & (s_norm >= s_min)
+        & (s_norm < max(s_max, s_min + 1e-4))
+        & (v_norm >= v_min)
+        & ((b_star - b_paper) >= min_b_star_excess)
+        & (~is_achromatic_pappus)
+    )
+
+    ochre_pixels = int(np.count_nonzero(ochre_mask))
+    n_upper = max(1, upper_h * w)
+    ochre_ratio = float(ochre_pixels / n_upper)
+    has_aged_ochre = bool(ochre_ratio >= ochre_threshold)
+
+    diagnostics = {
+        "ochre_ratio": round(ochre_ratio, 4),
+        "ochre_pixel_count": ochre_pixels,
+        "paper_b_star": round(b_paper, 2),
+    }
+
+    return has_aged_ochre, float(round(ochre_ratio, 4)), diagnostics
+
+
 def classify_single_capitulum(
     crop_rgb: np.ndarray,
     min_crop_dim: int = 5,
@@ -355,15 +548,19 @@ def classify_single_capitulum(
     min_pappus_area_ratio: float = 0.18,
     min_floret_yellow_saturation: float = 0.32,
     min_floret_yellow_ratio: float = 0.12,
-) -> Dict[str, Any]:
+    class_id: Optional[int] = None,
+    peduncle_dir_xy: Optional[Tuple[float, float]] = None,
+) -> CapitulumResult:
     """
     Performs head-level phenological biomarker classification on a single cropped capitulum.
 
     Decision Logic:
       1. If has_pappus_plume and not has_fresh_yellow_corollas -> HEAD_FRUIT.
       2. If has_fresh_yellow_corollas and erect_involucre -> HEAD_ANTHESIS.
-      3. If erect_involucre and low yellow and low white -> HEAD_BUD.
-      4. Fallback arbitration:
+      3. If both pappus and fresh yellow are absent and aged ochre corollas pass
+         class/posture gating -> HEAD_ANTHESIS.
+      4. If erect_involucre and low yellow and low white -> HEAD_BUD.
+      5. Fallback arbitration:
          - has_pappus_plume -> HEAD_FRUIT
          - has_fresh_yellow_corollas -> HEAD_ANTHESIS
          - reflexed_involucre -> HEAD_FRUIT
@@ -375,15 +572,21 @@ def classify_single_capitulum(
         (H, W, 3) RGB image patch of a single detected capitulum.
     min_crop_dim : int
         Minimum height and width required to process crop (default 5 px).
+    class_id : Optional[int]
+        Optional LeafMachine3 reproductive class identifier (2..6).
+    peduncle_dir_xy : Optional[Tuple[float, float]]
+        Optional basal-to-distal peduncle direction vector in image (x, y) coordinates.
 
     Returns
     -------
-    Dict[str, Any]
+    CapitulumResult
         Dictionary with classification state, booleans, and extracted biomarkers.
     """
     if (
         crop_rgb is None
         or crop_rgb.size == 0
+        or crop_rgb.ndim < 3
+        or crop_rgb.shape[2] < 3
         or crop_rgb.shape[0] < min_crop_dim
         or crop_rgb.shape[1] < min_crop_dim
     ):
@@ -391,18 +594,22 @@ def classify_single_capitulum(
             "head_state": HEAD_UNKNOWN,
             "has_pappus_plume": False,
             "has_fresh_yellow_corollas": False,
+            "has_aged_ochre_corollas": False,
             "erect_involucre": False,
             "reflexed_involucre": False,
             "white_fibrous_ratio": 0.0,
             "yellow_ratio": 0.0,
+            "ochre_ratio": 0.0,
             "involucre_aspect_ratio": 0.0,
             "boundary_roughness": 1.0,
             "diagnostics": {},
         })
 
+    oriented_rgb = orient_capitulum_crop_upright(crop_rgb, peduncle_dir_xy=peduncle_dir_xy)
+
     # Extract Biomarker A: Pappus Plume
     has_pappus_plume, white_fibrous_ratio, diag_a = extract_biomarker_pappus_plume(
-        crop_rgb,
+        oriented_rgb,
         min_l_star=float(min_pappus_luminance),
         max_s=float(max_pappus_saturation),
         plume_threshold=float(min_pappus_area_ratio),
@@ -410,18 +617,38 @@ def classify_single_capitulum(
 
     # Extract Biomarker B: Active Yellow Corollas
     has_fresh_yellow_corollas, yellow_ratio, diag_b = extract_biomarker_yellow_corollas(
-        crop_rgb,
+        oriented_rgb,
         s_min=float(min_floret_yellow_saturation),
         corolla_threshold=float(min_floret_yellow_ratio),
     )
 
+    # Extract Biomarker B2: Aged Ochre / Amber Corollas
+    has_aged_ochre, ochre_ratio, diag_ochre = extract_biomarker_aged_ochre_corollas(
+        oriented_rgb,
+        s_max=float(min_floret_yellow_saturation),
+    )
+
     # Extract Biomarker C: Involucre Posture
-    erect_involucre, reflexed_involucre, diag_c = extract_biomarker_involucre_posture(crop_rgb)
+    erect_involucre, reflexed_involucre, diag_c = extract_biomarker_involucre_posture(oriented_rgb)
+    inv_ar = float(diag_c.get("involucre_aspect_ratio", 1.0))
+
+    aged_anthesis_ok = bool(
+        (not has_pappus_plume)
+        and (not has_fresh_yellow_corollas)
+        and has_aged_ochre
+        and (class_id != 6)
+        and (
+            (class_id in (4, 5))
+            or (erect_involucre and inv_ar >= 0.95 and (not reflexed_involucre))
+        )
+    )
 
     # Head Decision Logic
     if has_pappus_plume and (not has_fresh_yellow_corollas):
         head_state = HEAD_FRUIT
     elif has_fresh_yellow_corollas and erect_involucre:
+        head_state = HEAD_ANTHESIS
+    elif aged_anthesis_ok:
         head_state = HEAD_ANTHESIS
     elif erect_involucre and (not has_fresh_yellow_corollas) and (not has_pappus_plume):
         head_state = HEAD_BUD
@@ -440,15 +667,18 @@ def classify_single_capitulum(
         "head_state": head_state,
         "has_pappus_plume": has_pappus_plume,
         "has_fresh_yellow_corollas": has_fresh_yellow_corollas,
+        "has_aged_ochre_corollas": bool(aged_anthesis_ok),
         "erect_involucre": erect_involucre,
         "reflexed_involucre": reflexed_involucre,
         "white_fibrous_ratio": white_fibrous_ratio,
         "yellow_ratio": yellow_ratio,
+        "ochre_ratio": ochre_ratio,
         "involucre_aspect_ratio": diag_c.get("involucre_aspect_ratio", 1.0),
         "boundary_roughness": diag_c.get("boundary_roughness", 1.0),
         "diagnostics": {
             "pappus": diag_a,
             "corolla": diag_b,
+            "aged_ochre": diag_ochre,
             "involucre": diag_c,
         },
     })

@@ -37,6 +37,11 @@ LM3_SINGLE_CAPITULUM_CLASS_IDS: Tuple[int, ...] = (2, 4, 6)
 DEFAULT_HERBARIUM_DPI: float = 600.0
 DEFAULT_PX_PER_CM: float = DEFAULT_HERBARIUM_DPI / 2.54  # ~236.2205 px/cm
 DEFAULT_PX_PER_MM: float = DEFAULT_PX_PER_CM / 10.0     # ~23.6220 px/mm
+_CALIBRATED_SCALE_SOURCES: Tuple[str, ...] = (
+    "ruler_calibrated",
+    "measured_from_ruler",
+    "measured_from_fieldprism",
+)
 
 
 def compute_lm3_work_scale(
@@ -171,6 +176,21 @@ def _extract_catalog_number(raw_identifier: Any) -> str:
     return cat
 
 
+def _resolve_scale_provenance(
+    eff_source: str,
+    raw_scale_src: str,
+    empirical_sources: Any,
+) -> Tuple[str, str, bool]:
+    """Normalize `(cf_source, scale_source, is_empirical_ruler)` across row schemas."""
+    src_norm = str(eff_source or "").strip().lower()
+    if raw_scale_src == "tick_lattice_unboxed" or src_norm == "tick_lattice_unboxed":
+        return "tick_lattice_unboxed", "tick_lattice_unboxed", False
+    if src_norm == "mp_estimated":
+        return "predicted_from_megapixels", "mp_estimated", False
+    is_emp = src_norm in empirical_sources
+    return str(eff_source or "").strip(), ("ruler_calibrated" if is_emp else "mp_estimated"), is_emp
+
+
 def _parse_calibration_row(
     row: Mapping[str, Any],
     min_confidence: float = 0.50,
@@ -188,10 +208,12 @@ def _parse_calibration_row(
     if not cat:
         return None
 
-    _EMPIRICAL_RULER_SOURCES = {"measured_from_ruler", "measured_from_fieldprism"}
+    _EMPIRICAL_RULER_SOURCES = set(_CALIBRATED_SCALE_SOURCES)
     raw_scale_src = str(row.get("scale_source") or "").strip().lower()
     cf_source = str(row.get("cf_source") or row.get("conversion_determination") or "").strip()
-    if not cf_source:
+    if raw_scale_src == "tick_lattice_unboxed" or cf_source.lower() == "tick_lattice_unboxed":
+        cf_source = "tick_lattice_unboxed"
+    elif not cf_source:
         if raw_scale_src == "mp_estimated":
             cf_source = "predicted_from_megapixels"
         elif raw_scale_src == "uncalibrated":
@@ -211,7 +233,11 @@ def _parse_calibration_row(
         "ruler_class_confidence",
         row.get("ruler_confidence", row.get("confidence", np.nan)),
     )
-    if pd.notna(conf_raw) and cf_source not in {"measured_from_fieldprism", "predicted_from_megapixels"}:
+    if pd.notna(conf_raw) and cf_source.lower() not in {
+        "measured_from_fieldprism",
+        "predicted_from_megapixels",
+        "tick_lattice_unboxed",
+    }:
         try:
             conf_val = float(conf_raw)
             if conf_val < 0:
@@ -237,17 +263,18 @@ def _parse_calibration_row(
         try:
             val_mm = normalize_pixels_per_mm(float(direct_px_mm))
             if val_mm is not None and val_mm > 0:
-                eff_direct_src = cf_source or "measured_from_ruler"
-                if eff_direct_src.lower() == "mp_estimated":
-                    eff_direct_src = "predicted_from_megapixels"
-                is_emp = eff_direct_src in _EMPIRICAL_RULER_SOURCES
+                eff_direct_src, out_scale_src, is_emp = _resolve_scale_provenance(
+                    cf_source or "measured_from_ruler",
+                    raw_scale_src,
+                    _EMPIRICAL_RULER_SOURCES,
+                )
                 return {
                     "catalog_number": cat,
                     "pixels_per_mm": val_mm,
                     "cf_px_per_cm": val_mm * 10.0,
                     "fp_cf_px_per_cm": None,
                     "cf_source": eff_direct_src,
-                    "scale_source": "ruler_calibrated" if is_emp else "mp_estimated",
+                    "scale_source": out_scale_src,
                     "work_scale": work_scale,
                     "is_empirical_ruler": is_emp,
                 }
@@ -285,15 +312,20 @@ def _parse_calibration_row(
                 eff_source = "measured_from_fieldprism"
             else:
                 eff_source = "measured_from_ruler"
+        eff_source, out_scale_src, is_emp = _resolve_scale_provenance(
+            eff_source,
+            raw_scale_src,
+            _EMPIRICAL_RULER_SOURCES,
+        )
         return {
             "catalog_number": cat,
             "pixels_per_mm": cf_val / 10.0,
             "cf_px_per_cm": cf_val,
             "fp_cf_px_per_cm": fp_val,
             "cf_source": eff_source,
-            "scale_source": "ruler_calibrated" if eff_source in {"measured_from_ruler", "measured_from_fieldprism"} else "mp_estimated",
+            "scale_source": out_scale_src,
             "work_scale": work_scale,
-            "is_empirical_ruler": eff_source in {"measured_from_ruler", "measured_from_fieldprism"},
+            "is_empirical_ruler": is_emp,
         }
 
     # 3. CSV fallback columns (conversion_mean, predicted_conversion_factor_cm)
@@ -314,15 +346,20 @@ def _parse_calibration_row(
         pass
 
     if (success and conversion_val and conversion_val > 0) or (conversion_val and conversion_val > 10.0):
+        inferred_source, out_scale_src, is_emp = _resolve_scale_provenance(
+            inferred_source,
+            raw_scale_src,
+            _EMPIRICAL_RULER_SOURCES,
+        )
         return {
             "catalog_number": cat,
             "pixels_per_mm": conversion_val / 10.0,
             "cf_px_per_cm": conversion_val,
             "fp_cf_px_per_cm": fp_val,
             "cf_source": inferred_source,
-            "scale_source": "ruler_calibrated" if inferred_source in {"measured_from_ruler", "measured_from_fieldprism"} else "mp_estimated",
+            "scale_source": out_scale_src,
             "work_scale": work_scale,
-            "is_empirical_ruler": inferred_source in {"measured_from_ruler", "measured_from_fieldprism"},
+            "is_empirical_ruler": is_emp,
         }
 
     return None
@@ -422,10 +459,11 @@ class RulerCalibrationMap(dict):
             other_sources = getattr(other, "sources", None)
             other_records = getattr(other, "records", None)
             if isinstance(other_sources, dict):
+                empirical_sources = set(_CALIBRATED_SCALE_SOURCES)
                 for cat_k, src_v in other_sources.items():
-                    prev_src = self.sources.get(cat_k, "")
-                    prev_emp = prev_src in {"measured_from_ruler", "measured_from_fieldprism"}
-                    new_emp = src_v in {"measured_from_ruler", "measured_from_fieldprism"}
+                    prev_src = str(self.sources.get(cat_k, "")).strip().lower()
+                    prev_emp = prev_src in empirical_sources
+                    new_emp = str(src_v or "").strip().lower() in empirical_sources
                     if prev_emp and not new_emp:
                         continue
                     self.sources[str(cat_k)] = str(src_v)
@@ -519,6 +557,7 @@ __all__ = [
     "DEFAULT_HERBARIUM_DPI",
     "DEFAULT_PX_PER_CM",
     "DEFAULT_PX_PER_MM",
+    "_CALIBRATED_SCALE_SOURCES",
     "compute_lm3_work_scale",
     "compute_work_scale",
     "unscale_working_bbox_to_sheet",

@@ -341,6 +341,7 @@ def _extract_resampled_contour_pts(
     p_apex_pt: Optional[Tuple[float, float]] = None,
     keypoints_31: Optional[Any] = None,
     already_oriented: bool = False,
+    bridge_already_opened: bool = False,
 ) -> Optional[np.ndarray]:
     is_preoriented = bool(already_oriented)
     if momocs_outline_xy is not None and len(np.asarray(momocs_outline_xy)) >= 10:
@@ -362,7 +363,8 @@ def _extract_resampled_contour_pts(
             raw_u8 = (arr_in > 0).astype(np.uint8) * 255
             if not is_preoriented and hole_mask is not None and isinstance(hole_mask, np.ndarray) and hole_mask.shape[:2] == raw_u8.shape[:2]:
                 raw_u8 = np.where((raw_u8 > 0) & (hole_mask == 0), 255, 0).astype(np.uint8)
-            raw_u8, _, _ = open_hairline_sinus_bridges_and_measure_voids(raw_u8, hole_mask=hole_mask)
+            if not bridge_already_opened:
+                raw_u8, _, _ = open_hairline_sinus_bridges_and_measure_voids(raw_u8, hole_mask=hole_mask)
             extracted_xy = extract_contour(raw_u8)
             if extracted_xy is None or len(extracted_xy) < 10:
                 return None
@@ -440,6 +442,7 @@ def resample_normalized_contour(
     keypoints_31: Optional[Any] = None,
     n_pts: Optional[int] = None,
     already_oriented: bool = False,
+    bridge_already_opened: bool = False,
 ) -> Optional[np.ndarray]:
     """Extracts resampled, tip-up unit-scaled 2D coordinates via LeafMachine3 helpers."""
     _ = petiole_mask
@@ -455,6 +458,7 @@ def resample_normalized_contour(
         p_apex_pt=p_apex_pt,
         keypoints_31=keypoints_31,
         already_oriented=already_oriented,
+        bridge_already_opened=bridge_already_opened,
     )
     if resamp_pts is None:
         return None
@@ -484,6 +488,7 @@ def export_standardized_contour(
     momocs_outline_xy: Optional[np.ndarray] = None,
     keypoints_31: Optional[Any] = None,
     already_oriented: bool = False,
+    bridge_already_opened: bool = False,
 ) -> Any:
     """Exports LeafMachine3 120-vertex clockwise tip-up contour CSV to `output_dir/contours/{catalogNumber}_leaf{id}.csv`."""
     _ = petiole_mask
@@ -499,6 +504,7 @@ def export_standardized_contour(
         p_apex_pt=p_apex_pt,
         keypoints_31=keypoints_31,
         already_oriented=already_oriented,
+        bridge_already_opened=bridge_already_opened,
     )
     if resamp_pts is None:
         return empty_ret

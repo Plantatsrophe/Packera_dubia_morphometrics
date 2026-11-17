@@ -90,7 +90,7 @@ taxonomy:
 # Pipeline Quality & Morphological Thresholds
 thresholds:
   # Standard baseline gatekeepers (existing)
-  pcd_conf: 0.25
+  pcd_conf: 0.35
   minimum_confidence_threshold: 0.65
   min_megapixels: 8.0
   min_file_size_kb: 500.0
@@ -153,13 +153,8 @@ harvesting:
   usda_county_buffer_km: 50.0
   usda_exempt_gold: true
 
-# Phase 2: LeafMachine3 Segmentation & Geometric Leaf Extraction
-# Cohort-adaptive mode derives empirical organ geometry bounds from verified Gold/Silver
-# anchors when N_anchor >= min_anchor_n_for_empirical (5); scalar thresholds below serve
-# as physical safety bounds and low-sample fallbacks when N_anchor < 5.
+# Phase 2: LeafMachine3 ONNX Segmentation & Morphological Extraction
 segmentation:
-  cohort_adaptive_mode: true
-  min_anchor_n_for_empirical: 5
   lm3_root: "LeafMachine3"
   models_dir: "models/lm3"
   model_weights: "models/lm3/lm3_leaf_segmenter__yolo26x_seg_1024.onnx"
@@ -178,12 +173,13 @@ segmentation:
   subtract_holes: true
   use_cf_predicted_by_mp: false
   ect_num_dirs: 360
-  minimum_confidence_threshold: 0.50
+  minimum_confidence_threshold: 0.35
   treat_leaflet_as_leaf_whole: false
   use_efds_for_png_masks: false
   do_apply_landmarks: true
   segment_partial_leaves: false
-  score_thresh: 0.25
+  score_thresh: 0.35
+  save_debug_crops: false
   rosette_plant_bbox_lower_fraction: 0.60
   device: "cuda"
 
@@ -192,35 +188,11 @@ plant_component_detector:
   detector_version: "lm3_plant_detector__yolo26x_det_1280"
   plant_detector_model: "lm3_plant_detector__yolo26x_det_1280"
   archival_detector_model: "lm3_archival_detector__yolo26x_det_1280"
-  minimum_confidence_threshold: 0.25
+  minimum_confidence_threshold: 0.35
   iou: 0.55
   max_det: 1000
   min_box_area: 16
   include_partial: true
-
-leaf_segmentation:
-  leaf_segmenter_model: "lm3_leaf_segmenter__yolo26x_seg_1024"
-  specimen_segmenter_model: "lm3_specimen_segmenter__unetpp_effb7_1024_dinov3_vith16plus_2048_selftrain"
-  landmark_detector_model: "lm3_landmark_detector__yolo26x_pose_640"
-  mp_conversion_model: "lm3_mp_conversion_factor__sqrt_fit"
-  max_working_dim: 3200
-  specimen_max_working_dim: 3200
-  paperclean: true
-  llr_hyst_keep_blobs: true
-  paperclean_llr_hyst_keepblobs: true
-  subtract_holes: true
-  use_cf_predicted_by_mp: false
-  ect_num_dirs: 360
-  treat_leaflet_as_leaf_whole: false
-  use_efds_for_png_masks: false
-  do_apply_landmarks: true
-  segment_partial_leaves: false
-
-vision:
-  leafmachine3:
-    subtract_holes: true
-    paperclean_llr_hyst_keepblobs: true
-    specimen_max_working_dim: 3200
 
 # Phase 3 & 4: Elliptic Fourier Analysis & Statistical Morphometrics (Momocs / MorphoTools2)
 # Cohort-adaptive mode dynamically calibrates EFD harmonic order (A1..D24, >=99% cumulative

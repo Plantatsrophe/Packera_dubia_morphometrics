@@ -443,9 +443,9 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
         self.assertEqual(len(extracted_df), 1)
         self.assertEqual(len(failed_df), 0)
 
-        # Verify cropped capitula patches saved to data/cropped_patches/capitula/
-        cap_patches = sorted(self.pipeline.capitula_patches_dir.glob("NCU123_cap*.jpg"))
-        self.assertEqual(len(cap_patches), 3, "All 3 reproductive detections must be saved as capitula crops.")
+        # Default save_debug_crops=False skips writing debug capitula JPEGs while preserving phenology tally
+        cap_patches_default = sorted(self.pipeline.capitula_patches_dir.glob("NCU123_cap*.jpg"))
+        self.assertEqual(cap_patches_default, [], "Debug capitula crops must be skipped when save_debug_crops=False.")
 
         # Verify voucher_phenological_states.csv was written and contains total_capitula == 3
         pheno_csv = self.pipeline.tables_dir / "voucher_phenological_states.csv"
@@ -457,6 +457,19 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
             pheno_df.iloc[0]["voucher_phenological_state"],
             {"anthesis", "fruit", "bud"},
         )
+
+        # Enabling save_debug_crops=True exports all 3 capitula patch JPEGs
+        self.pipeline.save_debug_crops = True
+        self.pipeline.force = True
+        with patch("cv2.imread", return_value=sheet_img):
+            with patch.object(self.pipeline.stage1_detector, "predict", return_value=stage1_dets):
+                with patch.object(self.pipeline.model_engine, "predict", side_effect=fake_stage2_predict):
+                    extracted_dbg, failed_dbg = self.pipeline.run()
+
+        self.assertEqual(len(extracted_dbg), 1)
+        self.assertEqual(len(failed_dbg), 0)
+        cap_patches = sorted(self.pipeline.capitula_patches_dir.glob("NCU123_cap*.jpg"))
+        self.assertEqual(len(cap_patches), 3, "All 3 reproductive detections must be saved as capitula crops when save_debug_crops=True.")
 
     def test_multi_plant_clustering_and_tier1_mask_generation(self) -> None:
         """Verify multi-plant DBSCAN clustering and Tier 1 binary mask saving per plant_individual_id."""
@@ -2055,7 +2068,7 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
              `mask_is_upright`, `petiole_width_px`, `petiole_width_mm`, `blade_width_px`, and `blade_width_mm`.
           5. `generate_step02_publication_figures` scales `fig02a` `ylim` below `1.0` for reniform blades
              (`aspect_ratio < 1.0`), `device="cpu", threads=2` initializes without `torch` NameError,
-             JPEG->WebP migration converts `.jpg` via `PIL.Image`, runtime crashes record
+             existing `.jpg` scans remain intact without Step 02 mutation, runtime crashes record
              `SEGMENTATION_RUNTIME_ERROR`, and stale docstrings are purged.
         """
         from PIL import Image as PILImage
@@ -2173,7 +2186,7 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
         v_pheno_2 = classify_voucher_phenology("NCU_PHENO", [permissive_head], min_anthesis_heads_for_flowering=2)
         self.assertNotEqual(v_pheno_2["voucher_phenological_state"], "anthesis")
 
-        # 4. Nested LM3_settings.yaml lookup, CPU threads init, JPEG->WebP migration, SQLite width/upright round-trip,
+        # 4. Nested LM3_settings.yaml lookup, CPU threads init, SQLite width/upright round-trip,
         #    RUNTIME_ERROR label, and reniform aspect_ratio < 1.0 plotting
         cfg_loaded = PipelineConfig.from_yaml()
         self.assertFalse(cfg_loaded.segmentation.segment_partial_leaves)
@@ -2239,9 +2252,8 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
                     with patch.object(pipe, "process_voucher", side_effect=_side_effect_proc):
                         ext_df, fail_df = pipe.run()
 
-                # JPEG migrated cleanly to WebP via PIL.Image
-                self.assertFalse(jpg_path.exists())
-                self.assertTrue(jpg_path.with_suffix(".webp").exists())
+                # Step 02 leaves existing raw JPEG scans untouched on disk
+                self.assertTrue(jpg_path.exists())
 
                 # Runtime crash tagged as SEGMENTATION_RUNTIME_ERROR, not UNRESOLVED_CLUMP
                 self.assertEqual(len(fail_df), 1)
@@ -2458,12 +2470,12 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
         """Verify cluster_plant_individuals reunites bolting stems, mask-bridged shoots, and 1-leaf strays while separating side-by-side rooted plants."""
         dummy_mask = np.ones((12, 12), dtype=np.uint8)
         # Single bolting plant on a 2000x3000 sheet: basal rosette at y~2550, upper cauline leaves at y~1250 (dy=1300 > 0.15*3000=450),
-        # plus 1 splayed outer basal leaf 650 px laterally from the rosette.
+        # plus 1 splayed outer basal leaf 270 px laterally from the rosette (<= 0.12*3000=360 px).
         b1 = DetectedInstance(catalog_number="BOLT1", leaf_id=1, bbox=(2500, 860, 2620, 960), mask=dummy_mask, score=0.95, class_id=0)
         b2 = DetectedInstance(catalog_number="BOLT1", leaf_id=2, bbox=(2520, 930, 2640, 1030), mask=dummy_mask, score=0.94, class_id=0)
         c1 = DetectedInstance(catalog_number="BOLT1", leaf_id=3, bbox=(1200, 890, 1300, 970), mask=dummy_mask, score=0.92, class_id=0)
         c2 = DetectedInstance(catalog_number="BOLT1", leaf_id=4, bbox=(1120, 910, 1210, 980), mask=dummy_mask, score=0.91, class_id=0)
-        splay = DetectedInstance(catalog_number="BOLT1", leaf_id=5, bbox=(2530, 1520, 2630, 1620), mask=dummy_mask, score=0.89, class_id=0)
+        splay = DetectedInstance(catalog_number="BOLT1", leaf_id=5, bbox=(2530, 1200, 2630, 1300), mask=dummy_mask, score=0.89, class_id=0)
 
         out_single = cluster_plant_individuals([b1, b2, c1, c2, splay], sheet_width=2000, sheet_height=3000)
         self.assertEqual([inst.plant_individual_id for inst in out_single], [0, 0, 0, 0, 0])

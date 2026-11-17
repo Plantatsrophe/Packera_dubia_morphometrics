@@ -84,6 +84,7 @@ import yaml
 
 from scripts.vision.configure_leafmachine3 import load_native_lm3_config
 from scripts.vision.lm3_data_loader import (
+    _CALIBRATED_SCALE_SOURCES,
     RulerCalibrationMap,
     compute_area_mm2,
     DEFAULT_HERBARIUM_DPI,
@@ -98,7 +99,6 @@ from scripts.vision.leaf_geometry_utils import (
     compute_lm3_shape_metrics,
     estimate_rosette_crown_point,
     export_standardized_contour,
-    open_hairline_sinus_bridges_and_measure_voids,
     save_leaf_mask_png,
 )
 from scripts.vision.capitulum_phenology_classifier import (
@@ -106,6 +106,13 @@ from scripts.vision.capitulum_phenology_classifier import (
     classify_voucher_phenology,
 )
 from scripts.vision.organ_crown_metrics import classify_leaf_zone_anatomical
+from scripts.vision.step02_photometry_corymb_utils import (
+    compute_calibrated_blade_photometry,
+    estimate_corymb_cluster_head_count,
+    estimate_sheet_paper_cie_l_ref,
+    harmonize_upright_mask_sinus_bridges,
+    resolve_effective_px_per_mm,
+)
 
 from scripts.vision.lm3_compat import (
     _components,
@@ -413,43 +420,6 @@ def _build_native_lm3_crop_masks(
 
 
 
-def estimate_sheet_paper_cie_l_ref(image_bgr: Optional[np.ndarray]) -> float:
-    """
-    Estimates the clean mounting-paper CIE L* white-point reference (0..100 scale)
-    for a herbarium sheet using an interior border band (3%..15% from image edges,
-    excluding outer black scan borders and central specimen foliage) filtered for
-    neutral low-chroma mounting paper (`C*_ab <= 12`, `70 <= L* <= 99`) at P90.
-    """
-    if image_bgr is None or not isinstance(image_bgr, np.ndarray) or image_bgr.ndim != 3 or image_bgr.size == 0:
-        return 90.0
-    sample = image_bgr[::8, ::8]
-    if sample.size == 0:
-        sample = image_bgr
-    lab = cv2.cvtColor(sample, cv2.COLOR_BGR2LAB)
-    l_cie = lab[:, :, 0].astype(np.float32) * (100.0 / 255.0)
-    a_c = lab[:, :, 1].astype(np.float32) - 128.0
-    b_c = lab[:, :, 2].astype(np.float32) - 128.0
-    chroma = np.hypot(a_c, b_c)
-    sh, sw = l_cie.shape
-    if sh >= 24 and sw >= 24:
-        r0, r1 = max(1, int(round(0.03 * sh))), max(3, int(round(0.15 * sh)))
-        c0, c1 = max(1, int(round(0.03 * sw))), max(3, int(round(0.15 * sw)))
-        yy, xx = np.ogrid[:sh, :sw]
-        outer_ok = (yy >= r0) & (yy < sh - r0) & (xx >= c0) & (xx < sw - c0)
-        core_mask = (yy >= r1) & (yy < sh - r1) & (xx >= c1) & (xx < sw - c1)
-        border_band = outer_ok & ~core_mask
-    else:
-        border_band = np.ones((sh, sw), dtype=bool)
-    paper_cand = l_cie[border_band & (l_cie >= 70.0) & (l_cie <= 99.0) & (chroma <= 12.0)]
-    if paper_cand.size < 32:
-        paper_cand = l_cie[(l_cie >= 65.0) & (l_cie <= 99.0) & (chroma <= 18.0)]
-    if paper_cand.size >= 16:
-        ref = float(np.percentile(paper_cand, 90.0))
-    else:
-        ref = float(np.percentile(l_cie, 85.0))
-    return float(np.clip(ref, 65.0, 99.0))
-
-
 def compute_eroded_blade_cie_l_metrics(
     image_bgr: Optional[np.ndarray],
     mask: Optional[np.ndarray],
@@ -457,95 +427,35 @@ def compute_eroded_blade_cie_l_metrics(
     hole_mask: Optional[np.ndarray] = None,
     petiole_mask: Optional[np.ndarray] = None,
     paper_l_ref: Optional[float] = None,
+    pixels_per_mm: Optional[float] = None,
 ) -> Dict[str, float]:
-    """
-    Computes paper-normalized eroded-lamina CIE L* reflectance (`blade_cie_l_norm`)
-    and multi-pixel band-pass floccose texture SD (`blade_cie_l_sd`) from native
-    LeafMachine3 RGB crops and separated lamina/petiole/hole masks:
-      1. Excludes petiole and hole masks so caudex/petiole wool and insect holes
-         never bias lamina vestiture.
-      2. Erodes inward from lamina margins via Euclidean distance transform
-         (`clip(0.12 * r_max, 2.0, 8.0) px`) to eliminate shadow rims and paper bleed.
-      3. Masks out white linen mounting-paper straps crossing the blade
-         (`L* >= paper_l_ref - 3.5` and `C*ab <= 6.0`).
-    """
-    nan_out = {"blade_cie_l_norm": np.nan, "blade_cie_l_sd": np.nan}
-    if (
-        image_bgr is None
-        or mask is None
-        or not isinstance(image_bgr, np.ndarray)
-        or not isinstance(mask, np.ndarray)
-        or image_bgr.ndim != 3
-        or mask.size == 0
-    ):
-        return nan_out
-
-    sh, sw = image_bgr.shape[:2]
-    mh, mw = mask.shape[:2]
-    ox, oy = int(mask_origin[0]), int(mask_origin[1])
-    x0 = max(0, ox)
-    y0 = max(0, oy)
-    x1 = min(sw, ox + mw)
-    y1 = min(sh, oy + mh)
-    if x1 <= x0 or y1 <= y0:
-        return nan_out
-
-    mx0, my0 = x0 - ox, y0 - oy
-    mx1, my1 = mx0 + (x1 - x0), my0 + (y1 - y0)
-    crop_bgr = image_bgr[y0:y1, x0:x1]
-    lam = mask[my0:my1, mx0:mx1] > 0
-    if hole_mask is not None and isinstance(hole_mask, np.ndarray) and hole_mask.shape[:2] == (mh, mw):
-        lam = lam & ~(hole_mask[my0:my1, mx0:mx1] > 0)
-    if petiole_mask is not None and isinstance(petiole_mask, np.ndarray) and petiole_mask.shape[:2] == (mh, mw):
-        lam = lam & ~(petiole_mask[my0:my1, mx0:mx1] > 0)
-    if int(np.count_nonzero(lam)) < 9:
-        return nan_out
-
-    dist = cv2.distanceTransform(lam.astype(np.uint8), cv2.DIST_L2, 3)
-    max_d = float(dist.max())
-    if max_d <= 0.0:
-        return nan_out
-    margin_px = float(np.clip(0.12 * max_d, 2.0, 8.0))
-    interior = dist >= margin_px
-    if int(np.count_nonzero(interior)) < 16:
-        interior = dist >= 1.0
-    if int(np.count_nonzero(interior)) < 9:
-        interior = lam
-
-    eff_paper_l = (
-        float(paper_l_ref)
-        if (paper_l_ref is not None and np.isfinite(float(paper_l_ref)) and float(paper_l_ref) >= 50.0)
-        else estimate_sheet_paper_cie_l_ref(image_bgr)
+    """Backward-compatible wrapper delegating lamina photometry to `compute_calibrated_blade_photometry`."""
+    return compute_calibrated_blade_photometry(
+        sheet_bgr=image_bgr,
+        blade_mask=mask,
+        mask_origin=mask_origin,
+        paper_l_ref=paper_l_ref,
+        petiole_mask=petiole_mask,
+        hole_mask=hole_mask,
+        pixels_per_mm=pixels_per_mm,
     )
-    lab = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2LAB)
-    l_cie = lab[:, :, 0].astype(np.float32) * (100.0 / 255.0)
-    a_c = lab[:, :, 1].astype(np.float32) - 128.0
-    b_c = lab[:, :, 2].astype(np.float32) - 128.0
-    chroma = np.hypot(a_c, b_c)
 
-    if eff_paper_l >= 72.0:
-        is_strap = (l_cie >= (eff_paper_l - 3.5)) & (chroma <= 6.0)
-        non_strap = interior & (~is_strap)
-        if int(np.count_nonzero(non_strap)) >= 16:
-            interior = non_strap
 
-    l_vals = l_cie[interior]
-    if l_vals.size < 9:
-        return nan_out
-
-    l_norm = float(np.clip(float(np.median(l_vals)) / max(eff_paper_l, 50.0), 0.0, 1.25))
-    # Band-pass filter (0.8 px to 3.5 px) captures 0.2 to 1.5 mm arachnoid-floccose wool tufts
-    # while rejecting single-pixel sensor noise and broad lighting gradients across the sheet
-    blur_fine = cv2.GaussianBlur(l_cie, (0, 0), sigmaX=0.8, sigmaY=0.8)
-    blur_coarse = cv2.GaussianBlur(l_cie, (0, 0), sigmaX=3.5, sigmaY=3.5)
-    bp_vals = (blur_fine - blur_coarse)[interior]
-    bp_med = float(np.median(bp_vals))
-    mad_sd = 1.4826 * float(np.median(np.abs(bp_vals - bp_med))) * (90.0 / max(eff_paper_l, 50.0))
-
-    return {
-        "blade_cie_l_norm": round(l_norm, 4),
-        "blade_cie_l_sd": round(max(0.0, mad_sd), 4),
-    }
+def _resolve_scale_source(
+    pixels_per_mm: Optional[float],
+    is_calibrated_mm: bool,
+    cf_source: Any = "",
+) -> str:
+    """Normalizes Step 02 scale provenance across empirical rulers, unboxed ticks, and MP priors."""
+    src_low = str(cf_source or "").strip().lower()
+    has_px = bool(pixels_per_mm is not None and pd.notna(pixels_per_mm) and float(pixels_per_mm) > 0.0)
+    if src_low == "tick_lattice_unboxed":
+        return "tick_lattice_unboxed"
+    if has_px and src_low in {"predicted_from_megapixels", "mp_estimated"}:
+        return "mp_estimated"
+    if has_px and bool(is_calibrated_mm):
+        return "ruler_calibrated"
+    return "uncalibrated"
 
 
 class SegmentAndExtractPipeline:
@@ -570,6 +480,7 @@ class SegmentAndExtractPipeline:
         prefetch_workers: Optional[int] = None,
         prep_workers: Optional[int] = None,
         post_workers: Optional[int] = None,
+        save_debug_crops: Optional[bool] = None,
     ) -> None:
         self.db_path = db_path
         self.vouchers_csv = Path(vouchers_csv)
@@ -622,7 +533,6 @@ class SegmentAndExtractPipeline:
             self.contours_dir,
             self.ect_dir,
             self.tables_dir,
-            self.capitula_patches_dir,
         ]:
             d.mkdir(parents=True, exist_ok=True)
 
@@ -676,6 +586,13 @@ class SegmentAndExtractPipeline:
 
         _ect_cfg = _mod_section("ect")
         _seg_cfg = getattr(self.config, "segmentation", None)
+        self.save_debug_crops: bool = (
+            bool(save_debug_crops)
+            if save_debug_crops is not None
+            else bool(getattr(_seg_cfg, "save_debug_crops", False) if _seg_cfg is not None else False)
+        )
+        if self.save_debug_crops:
+            self.capitula_patches_dir.mkdir(parents=True, exist_ok=True)
         _cfg_ect_dirs = int(getattr(_seg_cfg, "ect_num_dirs", 0) or 0) if _seg_cfg is not None else 0
         self.ect_enabled: bool = bool(_ect_cfg.get("enabled", True))
         self.ect_num_dirs: int = max(8, _cfg_ect_dirs if _cfg_ect_dirs > 0 else int(_ect_cfg.get("num_dirs", 360) or 360))
@@ -693,7 +610,7 @@ class SegmentAndExtractPipeline:
         _kp_cfg = _mod_section("landmark_detector", legacy_alias="pose_detector")
 
         _s1_conf_cfg = float(_pd_cfg.get("conf_thres", 0.25) or 0.25)
-        _s1_iou_cfg = float(_pd_cfg.get("iou_thres", 0.95) or 0.95)
+        _s1_iou_cfg = float(_pd_cfg.get("iou_thres", 0.55) or 0.55)
         _s1_img_size = max(320, int(_pd_cfg.get("img_size", 1280) or 1280))
         _s1_work_dim = max(
             640,
@@ -744,7 +661,7 @@ class SegmentAndExtractPipeline:
         _aux_default_weights = self.model_weights if _is_dummy_test_weights else None
 
         _ls_conf_cfg = float(_ls_cfg.get("conf_thres", 0.35) or 0.35)
-        _cfg_default_thresh = float(getattr(_seg_cfg, "score_thresh", 0.25) or 0.25) if _seg_cfg is not None else 0.25
+        _cfg_default_thresh = float(getattr(_seg_cfg, "score_thresh", 0.35) or 0.35) if _seg_cfg is not None else 0.35
         _is_default_score_arg = abs(float(self.score_thresh) - _cfg_default_thresh) < 1e-6
         _eff_s1_conf = (
             _s1_conf_cfg
@@ -1004,6 +921,7 @@ class SegmentAndExtractPipeline:
         img_bgr: np.ndarray,
         stage1_detections: Sequence[Any],
         pixels_per_mm: Optional[float],
+        cf_source: str = "measured_from_ruler",
     ) -> Tuple[
         List[Tuple[Tuple[int, int, int, int], float, int, np.ndarray, Tuple[int, int, int, int]]],
         List[Tuple[Tuple[int, int, int, int], Optional[np.ndarray], float, int]],
@@ -1024,8 +942,12 @@ class SegmentAndExtractPipeline:
         """
         sheet_h, sheet_w = img_bgr.shape[:2]
 
+        _cal_src_set = {str(s).strip().lower() for s in _CALIBRATED_SCALE_SOURCES}
         s1_is_calibrated_mm = bool(
-            pixels_per_mm is not None and not np.isnan(pixels_per_mm) and float(pixels_per_mm) > 0.0
+            pixels_per_mm is not None
+            and not np.isnan(pixels_per_mm)
+            and float(pixels_per_mm) > 0.0
+            and str(cf_source).strip().lower() in _cal_src_set
         )
         s1_px_per_cm = (
             resolve_px_per_cm(
@@ -1356,6 +1278,7 @@ class SegmentAndExtractPipeline:
                     img_bgr=img_bgr,
                     stage1_detections=stage1_detections,
                     pixels_per_mm=pixels_per_mm,
+                    cf_source=cf_source,
                 )
                 all_crop_preds = (
                     self.model_engine.predict_batch([c[3] for c in candidate_s1_crops])
@@ -1679,11 +1602,12 @@ class SegmentAndExtractPipeline:
                     fg_area,
                 ))
 
+        _cal_src_set = {str(s).strip().lower() for s in _CALIBRATED_SCALE_SOURCES}
         is_calibrated_mm = bool(
             pixels_per_mm is not None
             and not np.isnan(pixels_per_mm)
             and float(pixels_per_mm) > 0.0
-            and str(cf_source).strip().lower() not in {"predicted_from_megapixels", "mp_estimated", "uncalibrated"}
+            and str(cf_source).strip().lower() in _cal_src_set
         )
 
         if not leaf_detections and not capitulum_detections:
@@ -1742,11 +1666,13 @@ class SegmentAndExtractPipeline:
 
             head_pheno_item: Optional[Dict[str, Any]] = None
             if crop_bgr.size > 0:
-                cap_patch_path = self.capitula_patches_dir / f"{catalog_number}_cap{cap_idx}.jpg"
-                try:
-                    cv2.imwrite(str(cap_patch_path), crop_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
-                except TypeError:
-                    cv2.imwrite(str(cap_patch_path), crop_bgr)
+                if bool(getattr(self, "save_debug_crops", False)):
+                    self.capitula_patches_dir.mkdir(parents=True, exist_ok=True)
+                    cap_patch_path = self.capitula_patches_dir / f"{catalog_number}_cap{cap_idx}.jpg"
+                    try:
+                        cv2.imwrite(str(cap_patch_path), crop_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+                    except TypeError:
+                        cv2.imwrite(str(cap_patch_path), crop_bgr)
 
                 if crop_bgr.shape[0] >= 5 and crop_bgr.shape[1] >= 5:
                     crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
@@ -1757,6 +1683,7 @@ class SegmentAndExtractPipeline:
                         min_pappus_area_ratio=_min_pappus_area,
                         min_floret_yellow_saturation=_min_floret_sat,
                         min_floret_yellow_ratio=_min_floret_rat,
+                        class_id=int(class_id),
                     )
                     head_pheno_results.append(head_pheno_item)
 
@@ -1784,19 +1711,35 @@ class SegmentAndExtractPipeline:
                 "head_pheno": head_pheno_item,
             })
 
-        def _summarize_repro_subset(cap_metrics_sub: List[Dict[str, Any]], pid_val: int = 0) -> Dict[str, Any]:
-            c_cnt = len(cap_metrics_sub)
-            if c_cnt > 0:
-                mh_px = float(np.median([c["involucre_height_px"] for c in cap_metrics_sub]))
-                mw_px = float(np.median([c["involucre_width_px"] for c in cap_metrics_sub]))
-                hmm_l = [c["involucre_height_mm"] for c in cap_metrics_sub if not np.isnan(c["involucre_height_mm"])]
-                wmm_l = [c["involucre_width_mm"] for c in cap_metrics_sub if not np.isnan(c["involucre_width_mm"])]
+        def _summarize_repro_subset(
+            cap_items_sub: List[Dict[str, Any]],
+            pid_val: int = 0,
+        ) -> Tuple[Dict[str, Any], int]:
+            valid_metrics_sub = [
+                it["metrics"]
+                for it in cap_items_sub
+                if it.get("metrics") is not None and int(it.get("class_id", -1)) in (2, 4, 6)
+            ]
+            cluster_items_sub = [it for it in cap_items_sub if int(it.get("class_id", -1)) in (3, 5)]
+            single_items_sub = [it for it in cap_items_sub if int(it.get("class_id", -1)) in (2, 4, 6)]
+            extra_cluster_heads, _ = estimate_corymb_cluster_head_count(
+                cluster_items_sub,
+                single_items_sub,
+                pixels_per_mm=pixels_per_mm if is_calibrated_mm else None,
+                sheet_shape_hw=(sheet_h, sheet_w),
+            )
+            c_cnt = len(valid_metrics_sub) + int(extra_cluster_heads)
+            if valid_metrics_sub:
+                mh_px = float(np.median([c["involucre_height_px"] for c in valid_metrics_sub]))
+                mw_px = float(np.median([c["involucre_width_px"] for c in valid_metrics_sub]))
+                hmm_l = [c["involucre_height_mm"] for c in valid_metrics_sub if not np.isnan(c["involucre_height_mm"])]
+                wmm_l = [c["involucre_width_mm"] for c in valid_metrics_sub if not np.isnan(c["involucre_width_mm"])]
                 mh_mm = float(np.median(hmm_l)) if hmm_l else np.nan
                 mw_mm = float(np.median(wmm_l)) if wmm_l else np.nan
-                m_ar = float(np.median([c["AR_inv"] for c in cap_metrics_sub]))
+                m_ar = float(np.median([c["AR_inv"] for c in valid_metrics_sub]))
             else:
                 mh_px = mw_px = mh_mm = mw_mm = m_ar = np.nan
-            return {
+            rec = {
                 "catalogNumber": catalog_number,
                 "plant_individual_id": int(pid_val),
                 "capitula_count": int(c_cnt),
@@ -1810,15 +1753,17 @@ class SegmentAndExtractPipeline:
                 "scape_to_basal_leaf_ratio": np.nan,
                 "is_bent_stem": False,
             }
+            return rec, int(extra_cluster_heads)
 
+        repro_summary, _voucher_extra_heads = _summarize_repro_subset(raw_cap_items, pid_val=0)
+        capitula_count = int(repro_summary["capitula_count"])
         _pheno_rec = dict(classify_voucher_phenology(
             catalog_number,
             head_pheno_results,
             min_anthesis_heads_for_flowering=_min_anth_heads,
         ))
         _pheno_rec["plant_individual_id"] = 0
-        capitula_count = len(valid_capitula)
-        repro_summary = _summarize_repro_subset(valid_capitula, pid_val=0)
+        _pheno_rec["total_capitula"] = int(_pheno_rec.get("total_capitula", 0)) + int(_voucher_extra_heads)
 
         if not leaf_detections:
             failure_record = {
@@ -1875,6 +1820,7 @@ class SegmentAndExtractPipeline:
             sheet_h,
             specimen_mask=_spec_mask_sheet,
             root_boxes=root_detections,
+            pixels_per_mm=pixels_per_mm if is_calibrated_mm else None,
         )
 
         # 5. Basal Rosette Zone Statistics per plant_individual_id
@@ -1983,6 +1929,7 @@ class SegmentAndExtractPipeline:
                 rosette_centroids_by_pid[pid] = None
 
         extracted_records: List[Dict[str, Any]] = []
+        _ori_hole_by_leaf: Dict[int, Optional[np.ndarray]] = {}
         candidate_extractions: List[
             Tuple[
                 DetectedInstance,
@@ -2092,13 +2039,14 @@ class SegmentAndExtractPipeline:
         for inst in instances:
             if int(np.count_nonzero(inst.mask)) <= 0:
                 continue
-            _vest_l = compute_eroded_blade_cie_l_metrics(
+            _vest_l = compute_calibrated_blade_photometry(
                 img_bgr,
                 inst.mask,
                 mask_origin=inst.mask_origin,
                 hole_mask=inst.hole_mask,
                 petiole_mask=inst.petiole_mask,
                 paper_l_ref=_sheet_paper_l_ref,
+                pixels_per_mm=pixels_per_mm if is_calibrated_mm else None,
             )
             inst.blade_cie_l_norm = float(_vest_l["blade_cie_l_norm"])
             inst.blade_cie_l_sd = float(_vest_l["blade_cie_l_sd"])
@@ -2232,10 +2180,12 @@ class SegmentAndExtractPipeline:
                 else:
                     _hole_px = float(np.count_nonzero(_ori_hole_m > 0))
             _hole_area_frac = _hole_px / max(_lam_fg_px + _hole_px, 1.0)
-            _, _enclosed_void_frac, _ = open_hairline_sinus_bridges_and_measure_voids(
+            _persisted_mask_u8, _enclosed_void_frac = harmonize_upright_mask_sinus_bridges(
                 _persisted_mask_u8,
+                pixels_per_mm=pixels_per_mm if is_calibrated_mm else None,
                 hole_mask=_ori_hole_m if isinstance(_ori_hole_m, np.ndarray) else None,
             )
+            _ori_hole_by_leaf[int(inst.leaf_id)] = _ori_hole_m if isinstance(_ori_hole_m, np.ndarray) else None
             _trim_d = inst.trim_meta if isinstance(inst.trim_meta, dict) else {}
             _is_clipped = bool(_trim_d.get("is_crop_clipped", False))
             if not _is_clipped and inst.mask.shape[:2] == (sheet_h, sheet_w):
@@ -2340,34 +2290,52 @@ class SegmentAndExtractPipeline:
         caps_by_pid_boxes: Dict[int, List[Tuple[int, int, int, int]]] = {pid: [] for pid in unique_leaf_pids}
         cap_items_by_pid: Dict[int, List[Dict[str, Any]]] = {pid: [] for pid in unique_leaf_pids}
 
+        def _refresh_cap_item_with_crown(
+            c_it: Dict[str, Any],
+            crown_xy: Tuple[float, float],
+        ) -> None:
+            ped_dir = (c_it["center_xy"][0] - float(crown_xy[0]), c_it["center_xy"][1] - float(crown_xy[1]))
+            m_ref = compute_capitulum_metrics(
+                c_it["mask"],
+                c_it["bbox"],
+                pixels_per_mm=pixels_per_mm if is_calibrated_mm else None,
+                crop_bgr=c_it["crop_bgr"],
+                class_id=c_it["class_id"],
+                peduncle_dir_xy=ped_dir,
+                is_calibrated_mm=is_calibrated_mm,
+            )
+            if m_ref is not None:
+                m_ref["score"] = c_it["score"]
+                m_ref["class_id"] = c_it["class_id"]
+            c_it["metrics"] = m_ref
+            c_bgr_r = c_it.get("crop_bgr")
+            if c_bgr_r is not None and c_bgr_r.size > 0 and c_bgr_r.shape[0] >= 5 and c_bgr_r.shape[1] >= 5:
+                c_it["head_pheno"] = classify_single_capitulum(
+                    cv2.cvtColor(c_bgr_r, cv2.COLOR_BGR2RGB),
+                    min_pappus_luminance=_min_pappus_lum,
+                    max_pappus_saturation=_max_pappus_sat,
+                    min_pappus_area_ratio=_min_pappus_area,
+                    min_floret_yellow_saturation=_min_floret_sat,
+                    min_floret_yellow_ratio=_min_floret_rat,
+                    class_id=int(c_it["class_id"]),
+                    peduncle_dir_xy=ped_dir,
+                )
+
         if len(unique_leaf_pids) <= 1:
             only_pid = unique_leaf_pids[0] if unique_leaf_pids else 0
             cr_only = crowns_by_pid.get(only_pid) if isinstance(crowns_by_pid, dict) else None
             refreshed_valid: List[Dict[str, Any]] = []
             for c_it in raw_cap_items:
                 if cr_only is not None:
-                    ped_dir = (c_it["center_xy"][0] - float(cr_only[0]), c_it["center_xy"][1] - float(cr_only[1]))
-                    m_ref = compute_capitulum_metrics(
-                        c_it["mask"],
-                        c_it["bbox"],
-                        pixels_per_mm=pixels_per_mm if is_calibrated_mm else None,
-                        crop_bgr=c_it["crop_bgr"],
-                        class_id=c_it["class_id"],
-                        peduncle_dir_xy=ped_dir,
-                        is_calibrated_mm=is_calibrated_mm,
-                    )
-                    if m_ref is not None:
-                        m_ref["score"] = c_it["score"]
-                        m_ref["class_id"] = c_it["class_id"]
-                    c_it["metrics"] = m_ref
+                    _refresh_cap_item_with_crown(c_it, cr_only)
                 if c_it["metrics"] is not None:
                     refreshed_valid.append(c_it["metrics"])
                 caps_by_pid_boxes.setdefault(only_pid, []).append(c_it["bbox"])
                 cap_items_by_pid.setdefault(only_pid, []).append(c_it)
             valid_capitula = refreshed_valid
-            capitula_count = len(valid_capitula)
-            repro_summary = _summarize_repro_subset(valid_capitula, pid_val=only_pid)
-            _pheno_rec["plant_individual_id"] = int(only_pid)
+            repro_summary, _voucher_extra_heads = _summarize_repro_subset(raw_cap_items, pid_val=only_pid)
+            capitula_count = int(repro_summary["capitula_count"])
+            _pheno_pid_v = int(only_pid)
         else:
             cc_labels_sheet: Optional[np.ndarray] = None
             pid_cc_sets: Dict[int, Set[int]] = {pid: set() for pid in unique_leaf_pids}
@@ -2415,27 +2383,23 @@ class SegmentAndExtractPipeline:
                 if assigned_pid is not None:
                     cr_ass = crowns_by_pid.get(assigned_pid) if isinstance(crowns_by_pid, dict) else None
                     if cr_ass is not None:
-                        ped_dir = (cx_c - float(cr_ass[0]), cy_c - float(cr_ass[1]))
-                        m_ref = compute_capitulum_metrics(
-                            c_it["mask"],
-                            c_it["bbox"],
-                            pixels_per_mm=pixels_per_mm if is_calibrated_mm else None,
-                            crop_bgr=c_it["crop_bgr"],
-                            class_id=c_it["class_id"],
-                            peduncle_dir_xy=ped_dir,
-                            is_calibrated_mm=is_calibrated_mm,
-                        )
-                        if m_ref is not None:
-                            m_ref["score"] = c_it["score"]
-                            m_ref["class_id"] = c_it["class_id"]
-                        c_it["metrics"] = m_ref
+                        _refresh_cap_item_with_crown(c_it, cr_ass)
                     caps_by_pid_boxes[assigned_pid].append(c_it["bbox"])
                     cap_items_by_pid[assigned_pid].append(c_it)
                 if c_it["metrics"] is not None:
                     refreshed_valid.append(c_it["metrics"])
             valid_capitula = refreshed_valid
-            capitula_count = len(valid_capitula)
-            repro_summary = _summarize_repro_subset(valid_capitula, pid_val=0)
+            repro_summary, _voucher_extra_heads = _summarize_repro_subset(raw_cap_items, pid_val=0)
+            capitula_count = int(repro_summary["capitula_count"])
+            _pheno_pid_v = 0
+
+        _pheno_rec = dict(classify_voucher_phenology(
+            catalog_number,
+            [it["head_pheno"] for it in raw_cap_items if it.get("head_pheno") is not None],
+            min_anthesis_heads_for_flowering=_min_anth_heads,
+        ))
+        _pheno_rec["plant_individual_id"] = _pheno_pid_v
+        _pheno_rec["total_capitula"] = int(_pheno_rec.get("total_capitula", 0)) + int(_voucher_extra_heads)
 
         petiole_scape_res = approximate_petiole_and_scape_metrics(
             basal_leaves=pose_inputs,
@@ -2514,9 +2478,8 @@ class SegmentAndExtractPipeline:
         _pheno_by_pid_out: Dict[int, Dict[str, Any]] = {}
         for _pid_r in unique_leaf_pids:
             _p_caps = cap_items_by_pid.get(_pid_r) or []
-            _p_valid_m = [it["metrics"] for it in _p_caps if it.get("metrics") is not None]
             _p_heads_ph = [it["head_pheno"] for it in _p_caps if it.get("head_pheno") is not None]
-            _r_sub = _summarize_repro_subset(_p_valid_m, pid_val=_pid_r)
+            _r_sub, _sub_extra_heads = _summarize_repro_subset(_p_caps, pid_val=_pid_r)
             _pet_sub = _petiole_out.get(_pid_r, {})
             if len(unique_leaf_pids) <= 1:
                 _r_sub["plant_height_cm"] = repro_summary["plant_height_cm"]
@@ -2533,6 +2496,7 @@ class SegmentAndExtractPipeline:
                 min_anthesis_heads_for_flowering=_min_anth_heads,
             ))
             _ph_sub["plant_individual_id"] = int(_pid_r)
+            _ph_sub["total_capitula"] = int(_ph_sub.get("total_capitula", 0)) + int(_sub_extra_heads)
             _pheno_by_pid_out[_pid_r] = _ph_sub
 
         # Screen basal rosettes (>= 3 basal leaves) for half-folded blades (`AR > 1.85 * sibling_median` + straight fold edge)
@@ -2580,6 +2544,7 @@ class SegmentAndExtractPipeline:
                     p_apex_pt=_ori_apex,
                     return_coords=True,
                     already_oriented=True,
+                    bridge_already_opened=True,
                 )
             else:
                 c_res = export_standardized_contour(
@@ -2592,6 +2557,7 @@ class SegmentAndExtractPipeline:
                     hole_mask=inst.hole_mask,
                     return_coords=True,
                     keypoints_31=inst.keypoints_31,
+                    bridge_already_opened=True,
                 )
             if isinstance(c_res, tuple):
                 inst.contour_path, c_xy = c_res
@@ -2602,9 +2568,21 @@ class SegmentAndExtractPipeline:
 
             if getattr(self, "ect_dir", None) is not None and getattr(self, "ect_enabled", True):
                 ect_out = self.ect_dir / f"{catalog_number}_leaf{inst.leaf_id}_ect.npy"
+                _ori_hm = _ori_hole_by_leaf.get(int(inst.leaf_id))
+                if not is_upright_mask and _ori_hm is None:
+                    _ori_hm = inst.hole_mask
+                if (
+                    not bool(getattr(self, "ect_include_holes", True))
+                    and _ori_hm is not None
+                    and isinstance(_ori_hm, np.ndarray)
+                    and _ori_hm.shape[:2] == persisted_mask_u8.shape[:2]
+                ):
+                    ect_mask_in = ((persisted_mask_u8 > 0) | (_ori_hm > 0)).astype(np.uint8) * 255
+                else:
+                    ect_mask_in = persisted_mask_u8
                 try:
                     ect_mat = compute_leaf_ect_descriptor(
-                        persisted_mask_u8,
+                        ect_mask_in,
                         num_dirs=getattr(self, "ect_num_dirs", 360),
                         num_thresh=getattr(self, "ect_num_thetas", 32),
                         output_path=ect_out,
@@ -2616,7 +2594,7 @@ class SegmentAndExtractPipeline:
                         already_oriented=is_upright_mask,
                     )
                 except TypeError:
-                    ect_mat = compute_leaf_ect_descriptor(persisted_mask_u8, output_path=ect_out)
+                    ect_mat = compute_leaf_ect_descriptor(ect_mask_in, output_path=ect_out)
                 if ect_mat is not None:
                     inst.ect_path = str(ect_out)
 
@@ -2697,13 +2675,10 @@ class SegmentAndExtractPipeline:
                 "pixels_per_mm": round(float(inst.pixels_per_mm), 4) if inst.pixels_per_mm else np.nan,
                 "is_calibrated_mm": bool(inst.is_calibrated_mm),
                 "cf_source": inst.cf_source,
-                "scale_source": (
-                    "mp_estimated"
-                    if (
-                        inst.pixels_per_mm
-                        and str(inst.cf_source).strip().lower() in {"predicted_from_megapixels", "mp_estimated"}
-                    )
-                    else ("ruler_calibrated" if (inst.pixels_per_mm and inst.is_calibrated_mm) else "uncalibrated")
+                "scale_source": _resolve_scale_source(
+                    inst.pixels_per_mm,
+                    bool(inst.is_calibrated_mm),
+                    inst.cf_source,
                 ),
                 "mask_path": inst.mask_path,
                 "mask_is_upright": bool(is_upright_mask),
@@ -2786,13 +2761,30 @@ class SegmentAndExtractPipeline:
                 "AR_inv",
             ])
         else:
+            _cal_src_set = {str(s).strip().lower() for s in _CALIBRATED_SCALE_SOURCES}
             if "scale_source" not in extracted_df.columns:
-                extracted_df["scale_source"] = extracted_df.get("pixels_per_mm", pd.Series(dtype=float)).apply(
-                    lambda x: "ruler_calibrated" if (pd.notna(x) and float(x) > 0) else "uncalibrated"
+                _px_s = extracted_df.get("pixels_per_mm", pd.Series([np.nan] * len(extracted_df)))
+                _cal_s = (
+                    extracted_df["is_calibrated_mm"]
+                    if "is_calibrated_mm" in extracted_df.columns
+                    else pd.Series([True] * len(extracted_df))
                 )
+                _cf_s = (
+                    extracted_df["cf_source"]
+                    if "cf_source" in extracted_df.columns
+                    else pd.Series([""] * len(extracted_df))
+                )
+                extracted_df["scale_source"] = [
+                    _resolve_scale_source(
+                        px,
+                        bool(ic) and (str(cf).strip().lower() in _cal_src_set or not str(cf).strip()),
+                        cf,
+                    )
+                    for px, ic, cf in zip(_px_s, _cal_s, _cf_s)
+                ]
             if "is_calibrated_mm" not in extracted_df.columns:
                 extracted_df["is_calibrated_mm"] = [
-                    bool(pd.notna(px) and float(px) > 0 and str(src).strip().lower() not in {"mp_estimated", "predicted_from_megapixels", "uncalibrated"})
+                    bool(pd.notna(px) and float(px) > 0 and str(src).strip().lower() in _cal_src_set)
                     for px, src in zip(
                         extracted_df.get("pixels_per_mm", pd.Series([np.nan] * len(extracted_df))),
                         extracted_df["scale_source"],
@@ -2901,40 +2893,6 @@ class SegmentAndExtractPipeline:
 
         if "catalogNumber" not in df_vouchers.columns or "image_path" not in df_vouchers.columns:
             raise KeyError("Vouchers CSV must contain 'catalogNumber' and 'image_path' columns.")
-
-        # Automatic one-time migration of existing uncompressed .jpg/.jpeg in raw_vouchers/ to .webp
-        try:
-            from PIL import Image as _PILImage
-
-            _webp_q = int(getattr(getattr(self.config, "harvesting", None), "webp_quality", 92) or 92)
-            _raw_vouchers_dir = self.output_dir / "raw_vouchers"
-            if _raw_vouchers_dir.is_dir():
-                _migrated_map: Dict[str, str] = {}
-                for _jpg_f in list(_raw_vouchers_dir.glob("*.jpg")) + list(_raw_vouchers_dir.glob("*.jpeg")):
-                    _webp_f = _jpg_f.with_suffix(".webp")
-                    if not _webp_f.exists() or _webp_f.stat().st_size == 0:
-                        try:
-                            with _PILImage.open(_jpg_f) as _im:
-                                _im.convert("RGB").save(_webp_f, format="WEBP", quality=_webp_q, method=4)
-                            if _webp_f.exists() and _webp_f.stat().st_size > 0:
-                                _jpg_f.unlink()
-                                _migrated_map[_jpg_f.name] = _webp_f.name
-                        except Exception as _mig_exc:
-                            logger.debug(f"Skipped JPEG->WebP migration for {_jpg_f}: {_mig_exc}")
-                    elif _webp_f.stat().st_size > 0:
-                        try:
-                            _jpg_f.unlink()
-                            _migrated_map[_jpg_f.name] = _webp_f.name
-                        except Exception as _unlink_exc:
-                            logger.debug(f"Could not remove migrated JPEG {_jpg_f}: {_unlink_exc}")
-                if _migrated_map and "image_path" in df_vouchers.columns:
-                    df_vouchers["image_path"] = df_vouchers["image_path"].apply(
-                        lambda p: str(Path(str(p)).with_name(_migrated_map[Path(str(p)).name]))
-                        if pd.notna(p) and Path(str(p)).name in _migrated_map
-                        else p
-                    )
-        except Exception as _outer_mig_exc:
-            logger.debug(f"Raw voucher JPEG->WebP migration check skipped: {_outer_mig_exc}")
 
         if limit and limit > 0:
             df_vouchers = df_vouchers.head(limit)
@@ -3772,6 +3730,13 @@ def parse_args() -> argparse.Namespace:
         default=False,
         help="Reload Step 02 to 04 tables and regenerate post-QC Step 02 publication figures without running segmentation.",
     )
+    parser.add_argument(
+        "--save-debug-crops",
+        dest="save_debug_crops",
+        action="store_true",
+        default=bool(getattr(cfg.segmentation, "save_debug_crops", False)),
+        help="Save per-capitulum RGB debug crop JPEGs under data/cropped_patches/capitula/.",
+    )
     return parser.parse_args()
 
 
@@ -3806,6 +3771,7 @@ def main() -> None:
         prefetch_workers=getattr(args, "prefetch_workers", None),
         prep_workers=getattr(args, "prep_workers", None),
         post_workers=getattr(args, "post_workers", None),
+        save_debug_crops=bool(getattr(args, "save_debug_crops", False)),
     )
     pipeline.run(limit=args.limit)
 

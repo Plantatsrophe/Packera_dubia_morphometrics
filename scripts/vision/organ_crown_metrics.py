@@ -59,6 +59,7 @@ def cluster_plant_individuals(
     eps_ratio: float = 0.15,
     specimen_mask: Optional[np.ndarray] = None,
     root_boxes: Optional[Sequence[Any]] = None,
+    pixels_per_mm: Optional[float] = None,
 ) -> List[Any]:
     """
     Stem-aware spatial clustering across detected leaves on a herbarium sheet.
@@ -112,14 +113,16 @@ def cluster_plant_individuals(
                 else:
                     parent[ra] = rb
 
-        # 1. Merge leaf clusters connected on the bridged Specimen_Segmenter mask
-        if (
+        has_spec_mask = bool(
             isinstance(specimen_mask, np.ndarray)
             and specimen_mask.ndim == 2
             and specimen_mask.shape[0] == sheet_height
             and specimen_mask.shape[1] == sheet_width
             and np.any(specimen_mask > 0)
-        ):
+        )
+
+        # 1. Merge leaf clusters connected on the bridged Specimen_Segmenter mask
+        if has_spec_mask:
             k_bridge = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
             bridged = cv2.dilate((specimen_mask > 0).astype(np.uint8), k_bridge, iterations=1)
             _, cc_map = cv2.connectedComponents(bridged, connectivity=8)
@@ -196,13 +199,6 @@ def cluster_plant_individuals(
                     np.min(np.hypot(pts_a[:, 0:1] - pts_b[:, 0:1].T, pts_a[:, 1:2] - pts_b[:, 1:2].T))
                 )
                 diag_s = math.hypot(sw, sh)
-                has_spec_mask = bool(
-                    isinstance(specimen_mask, np.ndarray)
-                    and specimen_mask.ndim == 2
-                    and specimen_mask.shape[0] == sheet_height
-                    and specimen_mask.shape[1] == sheet_width
-                    and np.any(specimen_mask > 0)
-                )
                 has_bridge = False
                 if has_spec_mask:
                     ia_x, ia_y = int(np.clip(round(xa), 0, sheet_width - 1)), int(np.clip(round(ya), 0, sheet_height - 1))
@@ -230,20 +226,140 @@ def cluster_plant_individuals(
             merged_members.setdefault(_find(cid_i), []).append(idx_i)
         multi_clusters = [ck for ck, idxs in merged_members.items() if len(idxs) >= 2]
         if multi_clusters:
-            absorb_rad = 0.34 * max_dim
+            has_cal_px = False
+            cal_ppm = 0.0
+            if pixels_per_mm is not None:
+                try:
+                    cal_ppm = float(pixels_per_mm)
+                    has_cal_px = bool(np.isfinite(cal_ppm) and cal_ppm > 0.0)
+                except (TypeError, ValueError):
+                    has_cal_px = False
+            absorb_rad = (35.0 * cal_ppm) if has_cal_px else (0.12 * max_dim)
+
+            def _leaf_attach_pt(idx_leaf: int) -> Tuple[float, float]:
+                inst = instances[idx_leaf]
+                fb = (float(coords[idx_leaf, 0]), float(coords[idx_leaf, 1]))
+                meta = getattr(inst, "trim_meta", None)
+
+                def _meta_get(key: str) -> Any:
+                    if meta is None:
+                        return None
+                    return meta.get(key) if isinstance(meta, Mapping) else getattr(meta, key, None)
+
+                origin = getattr(inst, "mask_origin", None)
+                ox, oy = (
+                    (float(origin[0]), float(origin[1]))
+                    if origin is not None and len(origin) >= 2
+                    else (0.0, 0.0)
+                )
+                in_sheet = bool(
+                    getattr(inst, "keypoints_in_sheet_space", False)
+                    or getattr(inst, "coords_in_sheet_space", False)
+                    or _meta_get("coords_in_sheet_space")
+                )
+
+                def _coerce_pt(raw: Any, force_sheet: bool = False) -> Optional[Tuple[float, float]]:
+                    if raw is None:
+                        return None
+                    pt: Optional[Tuple[float, float]] = None
+                    if (
+                        isinstance(raw, (tuple, list, np.ndarray))
+                        and len(raw) in (2, 3)
+                        and all(isinstance(v, (int, float, np.number)) for v in raw[:2])
+                    ):
+                        pt = (float(raw[0]), float(raw[1]))
+                    else:
+                        pt = _extract_xy_point(raw)
+                    if pt is None or not (np.isfinite(pt[0]) and np.isfinite(pt[1])):
+                        return None
+                    px, py = float(pt[0]), float(pt[1])
+                    if force_sheet or in_sheet or (ox == 0.0 and oy == 0.0):
+                        return (px, py)
+                    d_raw = math.hypot(px - fb[0], py - fb[1])
+                    d_off = math.hypot((px + ox) - fb[0], (py + oy) - fb[1])
+                    if d_off < d_raw:
+                        return (px + ox, py + oy)
+                    return (px, py)
+
+                b_ymin, b_xmin, b_ymax, b_xmax = [float(v) for v in getattr(inst, "bbox", (fb[1], fb[0], fb[1], fb[0]))]
+                pad_b = max(128.0, 2.0 * max(b_ymax - b_ymin, b_xmax - b_xmin))
+
+                def _within_bbox_reach(pt_xy: Tuple[float, float]) -> bool:
+                    return (
+                        (b_xmin - pad_b) <= pt_xy[0] <= (b_xmax + pad_b)
+                        and (b_ymin - pad_b) <= pt_xy[1] <= (b_ymax + pad_b)
+                    )
+
+                for raw_cand, f_sheet in (
+                    (getattr(inst, "p_petiole_tip_sheet", None), True),
+                    (_meta_get("p_petiole_tip_sheet"), True),
+                    (getattr(inst, "p_petiole_tip", None), False),
+                    (_meta_get("p_petiole_tip"), False),
+                    (getattr(inst, "p_base_sheet", None), True),
+                    (_meta_get("p_base_sheet"), True),
+                    (getattr(inst, "p_base", None), False),
+                    (_meta_get("p_base"), False),
+                ):
+                    cand = _coerce_pt(raw_cand, force_sheet=f_sheet)
+                    if cand is not None and _within_bbox_reach(cand):
+                        return cand
+
+                if getattr(inst, "keypoints_31", None) is not None or ox != 0.0 or oy != 0.0:
+                    parsed_l = _parse_basal_leaf_pose(inst)
+                    if parsed_l is not None:
+                        cand_p = parsed_l.get("p_petiole_tip") or parsed_l.get("p_base")
+                        if cand_p is not None and np.isfinite(cand_p[0]) and np.isfinite(cand_p[1]):
+                            pt_cand = (float(cand_p[0]), float(cand_p[1]))
+                            if _within_bbox_reach(pt_cand):
+                                return pt_cand
+                return fb
+
+            attach_coords = np.array(
+                [_leaf_attach_pt(i) for i in range(len(instances))],
+                dtype=np.float32,
+            )
+
+            def _has_mask_bridge(p1: Sequence[float], p2: Sequence[float]) -> bool:
+                if not has_spec_mask or specimen_mask is None:
+                    return False
+                n_chk = 16
+                x1, y1 = float(p1[0]), float(p1[1])
+                x2, y2 = float(p2[0]), float(p2[1])
+                hits = 0
+                for s_i in range(n_chk + 1):
+                    frac = float(s_i) / float(n_chk)
+                    sx = int(np.clip(round(x1 + (x2 - x1) * frac), 0, sheet_width - 1))
+                    sy = int(np.clip(round(y1 + (y2 - y1) * frac), 0, sheet_height - 1))
+                    yy0 = max(0, sy - 1)
+                    yy1 = min(sheet_height, sy + 2)
+                    xx0 = max(0, sx - 1)
+                    xx1 = min(sheet_width, sx + 2)
+                    if np.any(specimen_mask[yy0:yy1, xx0:xx1] > 0):
+                        hits += 1
+                return (float(hits) / float(n_chk + 1)) >= 0.70
+
             for ck_s, idxs_s in list(merged_members.items()):
                 if len(idxs_s) != 1:
                     continue
-                pt_s = coords[idxs_s[0]]
+                pt_s = attach_coords[idxs_s[0]]
                 best_mc: Optional[int] = None
-                best_d = float("inf")
+                best_attach_d = float("inf")
+                best_nearest_pt: Optional[np.ndarray] = None
                 for ck_m in multi_clusters:
-                    pts_m = coords[merged_members[ck_m]]
-                    d_m = float(np.min(np.hypot(pts_m[:, 0] - pt_s[0], pts_m[:, 1] - pt_s[1])))
-                    if d_m < best_d:
-                        best_d = d_m
+                    pts_m = attach_coords[merged_members[ck_m]]
+                    dists_m = np.hypot(pts_m[:, 0] - pt_s[0], pts_m[:, 1] - pt_s[1])
+                    min_idx = int(np.argmin(dists_m))
+                    d_m = float(dists_m[min_idx])
+                    if d_m < best_attach_d:
+                        best_attach_d = d_m
                         best_mc = ck_m
-                if best_mc is not None and best_d <= absorb_rad:
+                        best_nearest_pt = pts_m[min_idx]
+                has_bridge_to_best = (
+                    _has_mask_bridge(pt_s, best_nearest_pt)
+                    if (best_mc is not None and best_nearest_pt is not None and has_spec_mask)
+                    else False
+                )
+                if best_mc is not None and (has_bridge_to_best or best_attach_d <= absorb_rad):
                     _union(ck_s, best_mc)
 
         ordered_roots: List[int] = []
@@ -1318,9 +1434,11 @@ def classify_leaf_zone_anatomical(
             "leaf_zone": "basal" | "cauline",
             "leaf_zone_confidence": float,
             "dist_from_crown_norm": float,
+            "cy_rel_plant_bbox": float,
+            "archetype_score": float,
         }
     """
-    _ = (sheet_shape, plant_bbox)
+    _ = sheet_shape
     if not leaf_records:
         return {}
 
@@ -1526,17 +1644,28 @@ def classify_leaf_zone_anatomical(
     def _resolve_leaf_blade_length_px(rec: Mapping[str, Any], geom: Mapping[str, Any]) -> float:
         for key in ("blade_length_px", "length_px"):
             val = rec.get(key)
-            if val is not None and np.isfinite(float(val)) and float(val) > 0.0:
-                return float(val)
+            if val is not None:
+                try:
+                    fval = float(val)
+                    if np.isfinite(fval) and fval > 0.0:
+                        return fval
+                except (TypeError, ValueError):
+                    pass
         pb = geom["p_base"]
         pa = geom["p_apex"]
         d = float(math.hypot(float(pa[0]) - float(pb[0]), float(pa[1]) - float(pb[1])))
-        if d > 0.0:
+        if np.isfinite(d) and d > 0.0:
             return d
-        area_px = float(rec.get("area_px", 0.0) or 0.0)
-        if area_px > 0.0:
-            return float(math.sqrt(area_px) * 1.4)
-        return 40.0
+        bbox = rec.get("bbox")
+        if bbox is not None and len(bbox) == 4:
+            try:
+                ymin, xmin, ymax, xmax = [float(v) for v in bbox]
+                span = max(abs(ymax - ymin), abs(xmax - xmin))
+                if np.isfinite(span) and span > 0.0:
+                    return float(span)
+            except (TypeError, ValueError):
+                pass
+        return 50.0
 
     def _resolve_intrinsic_petiole_ratio(
         rec: Mapping[str, Any],
@@ -1545,57 +1674,61 @@ def classify_leaf_zone_anatomical(
         dist_crown_px: float,
     ) -> Tuple[float, bool]:
         """
-        Evaluates leaf-intrinsic petiole ratio and petiole presence without
-        conflating upper-stem crown distance with true petiole length.
+        Evaluates leaf-intrinsic petiole ratio and topological petiole organ presence
+        without conflating upper-stem crown distance or blade-shape cutoffs.
         """
+        def _safe_nonneg(val: Any) -> Optional[float]:
+            if val is None:
+                return None
+            try:
+                fval = float(val)
+                return fval if (np.isfinite(fval) and fval >= 0.0) else None
+            except (TypeError, ValueError):
+                return None
+
         has_pet_mask = bool(rec.get("has_petiole_mask", False))
         pet_mask = rec.get("petiole_mask")
         if isinstance(pet_mask, np.ndarray) and np.count_nonzero(pet_mask) > 0:
             has_pet_mask = True
 
         pose_poly = max(
-            float(rec.get("pose_petiole_polyline_px", 0.0) or 0.0),
-            float(geom.get("pose_poly_px", 0.0) or 0.0),
+            _safe_nonneg(rec.get("pose_petiole_polyline_px")) or 0.0,
+            _safe_nonneg(geom.get("pose_poly_px")) or 0.0,
         )
-        geo_skel = float(rec.get("geodesic_petiole_skeleton_px", 0.0) or 0.0)
+        geo_skel = _safe_nonneg(rec.get("geodesic_petiole_skeleton_px")) or 0.0
         p_tip = geom["p_tip"]
         p_base = geom["p_base"]
         tip_base_px = float(math.hypot(float(p_tip[0]) - float(p_base[0]), float(p_tip[1]) - float(p_base[1])))
 
-        direct_pet_px = max(pose_poly, geo_skel, tip_base_px)
-        if direct_pet_px > 0.0 and blade_px > 1e-6:
-            return float(direct_pet_px / blade_px), (has_pet_mask or direct_pet_px >= 0.12 * blade_px)
+        direct_pet_px = max(pose_poly, geo_skel, tip_base_px if tip_base_px > 3.0 else 0.0)
+        if direct_pet_px > 0.0:
+            ratio = float(direct_pet_px / blade_px) if blade_px > 1e-6 else 0.0
+            return ratio, True
 
-        raw_ratio = rec.get("petiole_to_blade_ratio")
-        if raw_ratio is not None and np.isfinite(float(raw_ratio)) and float(raw_ratio) >= 0.0:
-            r_val = float(raw_ratio)
-            if dist_crown_px > 1.75 * max(blade_px, 1.0) and not has_pet_mask and direct_pet_px <= 0.0:
+        r_val = _safe_nonneg(rec.get("petiole_to_blade_ratio"))
+        if r_val is not None and r_val > 0.0:
+            if dist_crown_px > 1.75 * max(blade_px, 1.0) and not has_pet_mask:
                 crown_ratio_est = dist_crown_px / max(blade_px, 1.0)
                 if abs(r_val - crown_ratio_est) <= 0.25 * max(crown_ratio_est, 1.0):
                     return 0.0, False
-            return r_val, (has_pet_mask or r_val >= 0.12)
+            return r_val, True
 
-        pet_px = rec.get("petiole_length_px")
-        if pet_px is not None and np.isfinite(float(pet_px)) and float(pet_px) > 0.0 and blade_px > 1e-6:
-            p_val = float(pet_px)
+        p_val = _safe_nonneg(rec.get("petiole_length_px"))
+        if p_val is not None and p_val > 0.0:
             if dist_crown_px > 1.75 * max(blade_px, 1.0) and not has_pet_mask and abs(p_val - dist_crown_px) <= 5.0:
                 return 0.0, False
-            r_val = p_val / blade_px
-            return r_val, (has_pet_mask or r_val >= 0.12)
+            r_px = float(p_val / blade_px) if blade_px > 1e-6 else 0.0
+            return r_px, True
 
-        pet_mm = rec.get("petiole_length_mm")
-        blade_mm = rec.get("blade_length_mm")
-        if (
-            pet_mm is not None
-            and blade_mm is not None
-            and np.isfinite(float(pet_mm))
-            and np.isfinite(float(blade_mm))
-            and float(blade_mm) > 1e-6
-        ):
-            r_val = float(pet_mm) / float(blade_mm)
-            if dist_crown_px > 1.75 * max(blade_px, 1.0) and not has_pet_mask and r_val > 1.75:
-                return 0.0, False
-            return r_val, (has_pet_mask or r_val >= 0.12)
+        pet_mm = _safe_nonneg(rec.get("petiole_length_mm"))
+        if pet_mm is not None and pet_mm > 0.0:
+            blade_mm = _safe_nonneg(rec.get("blade_length_mm"))
+            if blade_mm is not None and blade_mm > 1e-6:
+                r_mm = float(pet_mm / blade_mm)
+                if dist_crown_px > 1.75 * max(blade_px, 1.0) and not has_pet_mask and r_mm > 1.75:
+                    return 0.0, False
+                return r_mm, True
+            return 0.18, True
 
         return (0.18 if has_pet_mask else 0.0), has_pet_mask
 
@@ -1847,7 +1980,7 @@ def classify_leaf_zone_anatomical(
                 s_prelim = ((p_tip_i[0] - c_pt[0]) * prelim_scape_dx + (p_tip_i[1] - c_pt[1]) * prelim_scape_dy) / (
                     prelim_scape_len * prelim_scape_len
                 )
-                s_cap_thresh = 0.28 if (has_pet_i and pet_ratio_i >= 0.40) else 0.18
+                s_cap_thresh = 0.22 if has_pet_i else 0.16
                 if s_prelim > s_cap_thresh:
                     is_aerial_stem_node = True
 
@@ -1861,7 +1994,7 @@ def classify_leaf_zone_anatomical(
                     and not is_aerial_stem_node
                     and (
                         not has_caps
-                        or (has_pet_i and pet_ratio_i >= 0.35 and raw_d_crown <= 2.15 * r_hub)
+                        or (has_pet_i and pet_ratio_i >= 0.30 and raw_d_crown <= 1.95 * r_hub)
                         or (has_pet_i and raw_d_crown <= 1.55 * r_hub)
                         or raw_d_crown <= 1.25 * r_hub
                     )
@@ -2002,36 +2135,95 @@ def classify_leaf_zone_anatomical(
         ]
         max_dist_att = max(dists_att_crown) if dists_att_crown else 0.0
 
-        # Within-individual anatomical heteroblasty descriptors (Barkley 1962; Trock 2006)
-        areas_pid = [
-            float(rec["area_px"])
-            if rec.get("area_px") is not None and np.isfinite(float(rec.get("area_px"))) and float(rec.get("area_px")) > 0.0
-            else float("nan")
-            for _, rec in pid_items
-        ]
-        finite_areas = [a for a in areas_pid if np.isfinite(a)]
-        max_area_pid = max(finite_areas) if finite_areas else 0.0
-        ar_vals_pid = [
-            float(rec["aspect_ratio"])
-            if rec.get("aspect_ratio") is not None and np.isfinite(float(rec.get("aspect_ratio"))) and float(rec.get("aspect_ratio")) > 0.0
-            else float("nan")
-            for _, rec in pid_items
-        ]
-        rel_areas_pid: List[float] = []
-        basal_morph_scores: List[float] = []
-        has_morph_covs = len(finite_areas) > 0 or any(np.isfinite(v) for v in ar_vals_pid)
-        for i_m, (_, rec_m) in enumerate(pid_items):
-            ra_i = (areas_pid[i_m] / max_area_pid) if (max_area_pid > 0.0 and np.isfinite(areas_pid[i_m])) else 0.65
-            rel_areas_pid.append(ra_i)
-            ra_sc = float(np.clip((ra_i - 0.18) / 0.52, 0.0, 1.0)) if (len(finite_areas) >= 3 and max_area_pid > 0.0) else 0.60
-            ar_v = ar_vals_pid[i_m]
-            ar_sc = float(np.clip(1.0 - (ar_v - 1.35) / 2.25, 0.0, 1.0)) if np.isfinite(ar_v) else 0.55
-            pw_v = float(rec_m.get("petiole_width_px") or 0.0)
-            bw_v = float(rec_m.get("blade_width_px") or 0.0)
-            slender_sc = float(np.clip(1.0 - ((pw_v / max(bw_v, 1.0)) - 0.18) / 0.30, 0.10, 1.0)) if (pw_v > 0.0 and bw_v > 1.0) else 0.55
-            pet_cue = min(1.0, 0.38 + 0.65 * effective_pet_ratios[i_m]) if effective_has_pet[i_m] else 0.15
-            bms_i = 0.30 * ra_sc + 0.25 * ar_sc + 0.15 * slender_sc + 0.30 * pet_cue
-            basal_morph_scores.append(float(np.clip(bms_i, 0.0, 1.0)))
+        # Per-individual vertical bounding span [ymin_pid, ymax_pid] and vertical insertion rank
+        ys_span_pid: List[float] = []
+        leaf_cy_vals: List[float] = []
+        for idx_y, (_, rec_y) in enumerate(pid_items):
+            g_y = g_list[idx_y]
+            pby = float(g_y["p_base"][1])
+            pay = float(g_y["p_apex"][1])
+            pty = float(g_y["p_tip"][1])
+            ys_span_pid.extend([pby, pay, pty])
+            bbox_y = rec_y.get("bbox")
+            if bbox_y is not None and len(bbox_y) == 4:
+                try:
+                    by0, by1 = float(bbox_y[0]), float(bbox_y[2])
+                    if np.isfinite(by0) and np.isfinite(by1):
+                        ys_span_pid.extend([by0, by1])
+                except (TypeError, ValueError):
+                    pass
+            cy_cand: Optional[float] = None
+            for ck_y in ("cy", "centroid_y"):
+                raw_cy = rec_y.get(ck_y)
+                if raw_cy is not None:
+                    try:
+                        cy_f = float(raw_cy)
+                        if np.isfinite(cy_f):
+                            cy_cand = cy_f
+                            break
+                    except (TypeError, ValueError):
+                        pass
+            if cy_cand is None:
+                cy_cand = 0.5 * (pby + pay)
+            leaf_cy_vals.append(cy_cand)
+
+        for rp_y in roots_pid:
+            ys_span_pid.append(float(rp_y[1]))
+        for cp_y in caps_pid:
+            ys_span_pid.append(float(cp_y[1]))
+        ys_span_pid.append(float(c_pt[1]))
+        if plant_bbox is not None and len(plant_bbox) == 4 and len(records_by_pid) == 1:
+            try:
+                pb0, pb2 = float(plant_bbox[0]), float(plant_bbox[2])
+                if np.isfinite(pb0) and np.isfinite(pb2):
+                    ys_span_pid.extend([pb0, pb2])
+            except (TypeError, ValueError):
+                pass
+
+        ymin_pid = min(ys_span_pid) if ys_span_pid else 0.0
+        ymax_pid = max(ys_span_pid) if ys_span_pid else 0.0
+        span_y_pid = max(ymax_pid - ymin_pid, 1.0)
+
+        # Detect inverted mounts where roots are near top of plant span or basal pole sits above capitula
+        is_inverted_mount = False
+        if cap_pt is not None and c_pt[1] < cap_pt[1] - 10.0:
+            is_inverted_mount = True
+        elif has_roots:
+            root_med_y = float(np.median([p[1] for p in roots_pid]))
+            leaf_med_y = float(np.median(leaf_cy_vals)) if leaf_cy_vals else float(c_pt[1])
+            if (
+                root_med_y < c_pt[1] + 0.05 * span_y_pid
+                and root_med_y < ymin_pid + 0.40 * span_y_pid
+                and root_med_y < leaf_med_y
+            ):
+                is_inverted_mount = True
+
+        cy_rel_by_leaf: List[float] = []
+        base_rel_y_vals: List[float] = []
+        for idx_y, (_, rec_y) in enumerate(pid_items):
+            raw_cy_rel = rec_y.get("cy_rel_plant_bbox")
+            eff_cy_rel: Optional[float] = None
+            if raw_cy_rel is not None:
+                try:
+                    cy_rel_f = float(raw_cy_rel)
+                    if np.isfinite(cy_rel_f):
+                        eff_cy_rel = float(np.clip(cy_rel_f, 0.0, 1.0))
+                except (TypeError, ValueError):
+                    pass
+            if eff_cy_rel is None:
+                eff_cy_rel = (
+                    float(np.clip((leaf_cy_vals[idx_y] - ymin_pid) / span_y_pid, 0.0, 1.0))
+                    if (ymax_pid - ymin_pid) > 1e-6
+                    else 0.5
+                )
+            cy_rel_by_leaf.append(eff_cy_rel)
+            base_rel_y_vals.append(eff_cy_rel if is_inverted_mount else (1.0 - eff_cy_rel))
+
+        y_rank_order = sorted(range(n_leaves_pid), key=lambda k: base_rel_y_vals[k])
+        y_rank_from_base = [0.0] * n_leaves_pid
+        if n_leaves_pid > 1:
+            for r_pos, orig_idx in enumerate(y_rank_order):
+                y_rank_from_base[orig_idx] = float(r_pos) / float(n_leaves_pid - 1)
 
         # Evaluate Case 3B: Clipped upper flowering stem fragment (has_caps, no roots, no genuine petiolate rosette hub)
         is_clipped_upper_flowering_stem = False
@@ -2039,8 +2231,7 @@ def classify_leaf_zone_anatomical(
             n_prox_pet = sum(
                 1
                 for i in range(n_leaves_pid)
-                if (intrinsic_has_pet[i] and intrinsic_pet_ratios[i] >= 0.25 and basal_morph_scores[i] >= 0.48)
-                or (intrinsic_pet_ratios[i] >= 0.30 and dists_att_crown[i] <= 1.85 * r_hub)
+                if intrinsic_has_pet[i] and dists_att_crown[i] <= 1.85 * r_hub
             )
             if n_prox_pet == 0:
                 is_clipped_upper_flowering_stem = True
@@ -2048,21 +2239,16 @@ def classify_leaf_zone_anatomical(
         # Evaluate Case 4A: Detached sterile basal rosette / basal tuft (no roots, no capitula, radial/fasciculate hub)
         is_detached_sterile_rosette = False
         n_pet_pid = sum(1 for hp in effective_has_pet if hp)
-        finite_ar_pid = [v for v in ar_vals_pid if np.isfinite(v)]
-        max_ar_pid = max(finite_ar_pid) if finite_ar_pid else 1.8
-        mean_bms_pid = float(np.mean(basal_morph_scores)) if basal_morph_scores else 0.60
+        is_sessile_stem_fragment = False
         if not has_roots and not has_caps:
             is_sessile_stem_fragment = (
                 n_pet_pid == 0
-                and max(effective_pet_ratios, default=0.0) < 0.16
-                and (
-                    (n_leaves_pid >= 2 and att_span_px > 1.15 * med_blade_px)
-                    or (has_morph_covs and max_ar_pid >= 2.45 and mean_bms_pid < 0.46)
-                )
+                and n_leaves_pid >= 2
+                and att_span_px > 1.15 * med_blade_px
             )
             if not is_sessile_stem_fragment and (
                 (n_leaves_pid <= 2 and max_dist_att <= 2.2 * r_hub and (n_pet_pid >= 1 or att_span_px <= 1.15 * med_blade_px))
-                or (frac_converging >= 0.85 and max_dist_att <= 1.85 * r_hub and (n_pet_pid >= 1 or max_ar_pid < 2.4))
+                or (frac_converging >= 0.85 and max_dist_att <= 1.85 * r_hub and n_pet_pid >= 1)
                 or (att_span_px < 1.85 * med_blade_px and (n_pet_pid >= 1 or frac_converging >= 0.65))
                 or (att_elongation < 2.4 and max_dist_att <= 1.85 * r_hub and n_pet_pid >= 1)
             ):
@@ -2080,10 +2266,6 @@ def classify_leaf_zone_anatomical(
             converges_i = ray_converges_to_crown[idx_item]
             pet_ratio = effective_pet_ratios[idx_item]
             has_pet = effective_has_pet[idx_item]
-            bms_item = basal_morph_scores[idx_item]
-            rel_a_item = rel_areas_pid[idx_item]
-            ar_item = ar_vals_pid[idx_item]
-            morph_adj = 0.10 * (bms_item - 0.50) if has_morph_covs else 0.0
 
             # Compute normalized progression s_i = dist_norm in [0.0, 1.0] and p_basal in [0.0, 1.0]
             if is_detached_sterile_rosette:
@@ -2106,43 +2288,30 @@ def classify_leaf_zone_anatomical(
                 # Cases 1 & 3A: Stem path from basal crown c_pt (s = 0.0) to apical corymb cap_pt (s = 1.0)
                 p_tip_raw = g_list[idx_item]["p_tip"]
                 raw_d_tip = float(math.hypot(p_tip_raw[0] - c_pt[0], p_tip_raw[1] - c_pt[1]))
-                s_stem_att = _project_along_stem_polyline(p_att, c_pt, cap_pt, p_bend)
                 s_stem_tip = _project_along_stem_polyline(p_tip_raw, c_pt, cap_pt, p_bend)
-                s_stem = max(s_stem_att, 0.85 * s_stem_tip)
                 scape_span = max(math.hypot(cap_pt[0] - c_pt[0], cap_pt[1] - c_pt[1]), 1.5 * r_hub, 100.0)
                 radial_norm = min(1.0, raw_d_tip / scape_span)
                 dist_norm = max(0.0, min(1.0, 0.78 * s_stem_tip + 0.22 * radial_norm))
 
-                is_long_pet_rosette = (
+                is_long_pet_rosette = bool(
                     has_pet
-                    and pet_ratio >= 0.35
-                    and s_stem_tip <= 0.32
-                    and (converges_i or raw_d_tip <= 2.15 * r_hub)
-                    and (not has_morph_covs or (bms_item >= 0.46 and rel_a_item >= 0.32))
-                )
-                is_sessile_narrow_cauline = (
-                    not has_pet
-                    and pet_ratio < 0.15
-                    and has_morph_covs
-                    and np.isfinite(ar_item)
-                    and ar_item >= 2.55
-                    and rel_a_item < 0.45
+                    and pet_ratio >= 0.30
+                    and s_stem_tip <= 0.22
+                    and (converges_i or raw_d_tip <= 1.95 * r_hub)
                 )
 
-                if is_sessile_narrow_cauline and s_stem_tip > 0.08:
-                    p_basal = max(0.05, min(0.36, 0.38 * (1.0 - dist_norm) + morph_adj))
-                elif converges_i and s_stem_tip <= 0.16 and (raw_d_tip <= 1.15 * r_hub or (has_pet and pet_ratio >= 0.22 and raw_d_tip <= 1.55 * r_hub)):
+                if converges_i and s_stem_tip <= 0.18 and (raw_d_tip <= 1.15 * r_hub or (has_pet and raw_d_tip <= 1.55 * r_hub)):
                     dist_norm = min(dist_norm, 0.18)
-                    p_basal = max(0.68, min(0.98, 0.90 - 0.55 * dist_norm + min(0.10, 0.15 * pet_ratio) + 0.5 * morph_adj))
+                    p_basal = max(0.68, min(0.98, 0.90 - 0.55 * dist_norm + min(0.10, 0.15 * pet_ratio)))
                 elif is_long_pet_rosette:
                     dist_norm = min(dist_norm, 0.24)
-                    p_basal = max(0.64, min(0.95, 0.82 - 0.35 * dist_norm + min(0.10, 0.12 * pet_ratio) + 0.5 * morph_adj))
-                elif s_stem_tip <= 0.12 and raw_d_tip <= 1.05 * r_hub:
-                    p_basal = max(0.62, min(0.95, 0.84 - 0.60 * dist_norm + (0.08 if has_pet else 0.0) + 0.5 * morph_adj))
-                elif s_stem_tip <= 0.18 and has_pet and pet_ratio >= 0.25 and raw_d_tip <= 1.45 * r_hub:
-                    p_basal = max(0.56, min(0.88, 0.78 - 0.55 * dist_norm + min(0.12, 0.15 * pet_ratio) + 0.5 * morph_adj))
+                    p_basal = max(0.64, min(0.95, 0.82 - 0.35 * dist_norm + min(0.10, 0.12 * pet_ratio)))
+                elif s_stem_tip <= 0.14 and raw_d_tip <= 1.10 * r_hub:
+                    p_basal = max(0.62, min(0.95, 0.84 - 0.60 * dist_norm + (0.08 if has_pet else 0.0)))
+                elif s_stem_tip <= 0.18 and has_pet and raw_d_tip <= 1.45 * r_hub:
+                    p_basal = max(0.56, min(0.88, 0.78 - 0.55 * dist_norm + min(0.12, 0.15 * pet_ratio)))
                 else:
-                    p_basal = max(0.04, min(0.46, 0.40 * (1.0 - dist_norm) + (0.04 if (has_pet and s_stem_tip < 0.28) else 0.0) + morph_adj))
+                    p_basal = max(0.04, min(0.46, 0.42 * (1.0 - dist_norm) + (0.03 if (has_pet and s_stem_tip < 0.24) else 0.0)))
             elif has_roots and not has_caps:
                 # Case 2 (bolting/decapitated stem with roots): leaves outside root hub along stem axis
                 denom = max(max_dist_att, 2.5 * r_hub, 120.0)
@@ -2164,7 +2333,10 @@ def classify_leaf_zone_anatomical(
                 p_ptp = max(max(proj_vals) - p_min, 2.5 * r_hub, 120.0) if proj_vals else 120.0
                 s_axis = max(0.0, min(1.0, (proj_vals[idx_item] - p_min) / p_ptp))
                 dist_norm = max(radial_c4, s_axis) if n_converging >= 2 else s_axis
-                if converges_i or dist_crown_px <= 1.15 * r_hub or (dist_norm <= 0.32 and has_pet):
+                if is_sessile_stem_fragment and not pid_has_explicit_crown:
+                    dist_norm = max(0.55, min(1.0, 0.55 + 0.45 * s_axis))
+                    p_basal = max(0.04, min(0.42, 0.40 * (1.0 - dist_norm)))
+                elif converges_i or dist_crown_px <= 1.15 * r_hub or (dist_norm <= 0.32 and has_pet):
                     dist_norm = min(dist_norm, 0.28)
                     p_basal = max(0.64, min(0.96, 0.86 - 0.45 * dist_norm + (0.06 if has_pet else 0.0)))
                 else:
@@ -2174,10 +2346,79 @@ def classify_leaf_zone_anatomical(
             zone_label = "basal" if p_basal >= 0.50 else "cauline"
             zone_conf = round(float(max(p_basal, 1.0 - p_basal)), 4)
 
+            eff_cy_rel_i = cy_rel_by_leaf[idx_item]
+            _y_rank_i = y_rank_from_base[idx_item]
+
+            bd_raw = rec.get("bilateral_dice")
+            bd_v = 0.85
+            if bd_raw is not None:
+                try:
+                    bd_f = float(bd_raw)
+                    if np.isfinite(bd_f):
+                        bd_v = float(np.clip(bd_f, 0.0, 1.0))
+                except (TypeError, ValueError):
+                    pass
+            sia_raw = rec.get("si_a")
+            sia_v = 0.05
+            if sia_raw is not None:
+                try:
+                    sia_f = float(sia_raw)
+                    if np.isfinite(sia_f):
+                        sia_v = abs(sia_f)
+                except (TypeError, ValueError):
+                    pass
+            kps_raw = rec.get("keypoints_31")
+            kp_confs: List[float] = []
+            if isinstance(kps_raw, Mapping):
+                for kp_v in kps_raw.values():
+                    if isinstance(kp_v, Mapping):
+                        c_val = kp_v.get("conf", kp_v.get("confidence"))
+                        if c_val is not None:
+                            try:
+                                cf = float(c_val)
+                                if np.isfinite(cf):
+                                    kp_confs.append(float(np.clip(cf, 0.0, 1.0)))
+                            except (TypeError, ValueError):
+                                pass
+                    elif isinstance(kp_v, (tuple, list, np.ndarray)) and len(kp_v) >= 3:
+                        try:
+                            cf = float(kp_v[2])
+                            if np.isfinite(cf):
+                                kp_confs.append(float(np.clip(cf, 0.0, 1.0)))
+                        except (TypeError, ValueError):
+                            pass
+            elif isinstance(kps_raw, np.ndarray) and kps_raw.ndim == 2 and kps_raw.shape[1] >= 3:
+                col_c = kps_raw[:, 2].astype(np.float64, copy=False)
+                fin_c = col_c[np.isfinite(col_c)]
+                if fin_c.size > 0:
+                    kp_confs = [float(np.clip(c, 0.0, 1.0)) for c in fin_c]
+            has_pet_fallback = bool(rec.get("has_petiole_mask")) or (
+                isinstance(rec.get("petiole_mask"), np.ndarray)
+                and np.count_nonzero(rec.get("petiole_mask")) > 0
+            )
+            kp_conf_mean = float(np.mean(kp_confs)) if kp_confs else (0.90 if has_pet_fallback else 0.75)
+            raw_gates = rec.get("lm3_gates_pass", True)
+            qc_ok = 1.0 if (True if raw_gates is None else bool(raw_gates)) else 0.40
+            arch_score = float(
+                np.clip(
+                    (
+                        0.40 * bd_v
+                        + 0.20 * (1.0 - min(1.0, sia_v))
+                        + 0.20 * kp_conf_mean
+                        + 0.20 * zone_conf
+                    )
+                    * qc_ok,
+                    0.0,
+                    1.0,
+                )
+            )
+
             results[int(lid)] = {
                 "leaf_zone": zone_label,
                 "leaf_zone_confidence": zone_conf,
                 "dist_from_crown_norm": round(float(dist_norm), 4),
+                "cy_rel_plant_bbox": round(float(eff_cy_rel_i), 4),
+                "archetype_score": round(float(arch_score), 4),
             }
 
     return results

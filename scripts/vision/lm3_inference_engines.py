@@ -3518,15 +3518,18 @@ def _scan_margin_strips_for_mm_lattice(
     horizontal: bool,
     p_min: float,
     p_max: float,
+    verified_ruler_crop: bool = False,
 ) -> Optional[tuple[float, int, float]]:
     """Scan parallel strips across a margin ROI for strict hierarchical 1-5-10 mm ticks."""
     roi = gray_roi if horizontal else gray_roi.T
     rh, rw = roi.shape
-    if rh < 16 or rw < int(max(180.0, 18.0 * p_max)):
+    min_rw = int(max(180.0, 14.0 * p_min)) if verified_ruler_crop else int(max(180.0, 18.0 * p_max))
+    if rh < 16 or rw < min_rw:
         return None
     p_lo = int(np.floor(p_min))
     p_hi = int(np.ceil(p_max))
-    if p_lo < 4 or p_hi <= p_lo + 1:
+    min_p_lo = 3 if verified_ruler_crop else 4
+    if p_lo < min_p_lo or p_hi <= p_lo + 1:
         return None
     strip_h = max(6, min(14, rh // 10))
     step_y = max(3, strip_h // 2)
@@ -3534,10 +3537,11 @@ def _scan_margin_strips_for_mm_lattice(
     step_x = rw if win_w == rw else max(400, int(0.25 * rw))
     bg_half = max(3, int(round(0.45 * 0.5 * (p_min + p_max))))
 
+    min_win_rw = int(max(120.0, 12.0 * p_min)) if verified_ruler_crop else int(15.0 * p_max)
     candidates: list[tuple[float, int, int, int, float]] = []
     for x0 in range(0, max(1, rw - win_w + 1), step_x):
         x1 = min(rw, x0 + win_w)
-        if x1 - x0 < int(15.0 * p_max):
+        if x1 - x0 < min_win_rw:
             continue
         for y0 in range(0, max(1, rh - strip_h + 1), step_y):
             patch = roi[y0 : y0 + strip_h, x0:x1]
@@ -3550,17 +3554,38 @@ def _scan_margin_strips_for_mm_lattice(
             # Test dominant polarity (dark ticks on light scale or bright ticks on dark scale)
             pos_sig = np.maximum(0.0, prof - local_bg)
             neg_sig = np.maximum(0.0, local_bg - prof)
-            sig = neg_sig if float(np.sum(neg_sig > np.std(neg_sig))) >= float(np.sum(pos_sig > np.std(pos_sig))) else pos_sig
+            sig = neg_sig if float(np.sum(neg_sig * neg_sig)) >= float(np.sum(pos_sig * pos_sig)) else pos_sig
             if float(np.std(sig)) < 1.5 or float(np.mean(sig > 0.5 * np.max(sig))) > 0.45:
                 continue
             max_lag = min(sig.size // 4, max(p_hi * 4 + 4, 48))
             ac = _acorr_unbiased_1d(sig, max_lag=max_lag)
-            if ac.size <= p_hi + 2:
-                continue
-            search = ac[p_lo : p_hi + 1]
+            if verified_ruler_crop:
+                p_hi_eff = min(p_hi, ac.size - 3)
+                if p_hi_eff < p_lo:
+                    continue
+            else:
+                if ac.size <= p_hi + 2:
+                    continue
+                p_hi_eff = p_hi
+            search = ac[p_lo : p_hi_eff + 1]
             rel_idx = int(np.argmax(search))
             k = p_lo + rel_idx
             peak_val = float(ac[k])
+            if verified_ruler_crop and k >= 2 * p_lo:
+                for div in (3, 2):
+                    c_sub = int(round(k / float(div)))
+                    s_lo, s_hi = max(p_lo, c_sub - 1), min(p_hi_eff, c_sub + 1)
+                    if s_lo <= s_hi:
+                        sub_k = s_lo + int(np.argmax(ac[s_lo : s_hi + 1]))
+                        if (
+                            1 < sub_k < ac.size - 2
+                            and ac[sub_k] > ac[sub_k - 1]
+                            and ac[sub_k] > ac[sub_k + 1]
+                            and float(ac[sub_k]) >= max(0.24, 0.72 * peak_val)
+                        ):
+                            k = sub_k
+                            peak_val = float(ac[sub_k])
+                            break
             if peak_val < 0.24 or k <= 1 or k >= ac.size - 2:
                 continue
             # Anti-plateau and local concavity guard
@@ -3607,7 +3632,7 @@ def _scan_margin_strips_for_mm_lattice(
         f_bg = (f_cs[f_hi] - f_cs[f_lo]) / np.maximum(1, f_hi - f_lo)
         f_pos = np.maximum(0.0, f_prof - f_bg)
         f_neg = np.maximum(0.0, f_bg - f_prof)
-        f_sig = f_neg if float(np.sum(f_neg > np.std(f_neg))) >= float(np.sum(f_pos > np.std(f_pos))) else f_pos
+        f_sig = f_neg if float(np.sum(f_neg * f_neg)) >= float(np.sum(f_pos * f_pos)) else f_pos
         p_est = float(np.median(agree_p))
         need_lag = int(np.ceil(10.5 * p_est)) + 2
         if f_sig.size > need_lag + 16:
@@ -3639,17 +3664,21 @@ def _scan_margin_strips_for_mm_lattice(
 def solve_ruler_tick_lattice_px_per_mm(
     image_bgr: np.ndarray,
     mp_prior_px_per_mm: Optional[float] = None,
+    verified_ruler_crop: bool = False,
 ) -> Optional[float]:
     """
-    Detect a metric millimeter tick lattice in outer sheet margins on CPU.
-    Enforces non-plateau parabolic peaks, >=3 consistent parallel strips
-    (std <= 0.12 px), decimal 5x/10x vs imperial 4x/8x discrimination, and
-    anatomical megapixel/sheet-width bounds.
+    Detect a metric millimeter tick lattice in outer sheet margins or verified
+    ruler crops on CPU. Enforces non-plateau parabolic peaks, >=3 consistent
+    parallel strips (std <= 0.12 px), decimal 5x/10x vs imperial 4x/8x
+    discrimination, and anatomical megapixel/sheet-width bounds.
     """
     if image_bgr is None or not isinstance(image_bgr, np.ndarray) or image_bgr.ndim < 2 or image_bgr.size == 0:
         return None
     sh, sw = int(image_bgr.shape[0]), int(image_bgr.shape[1])
-    if sh < 400 or sw < 400:
+    if verified_ruler_crop:
+        if min(sh, sw) < 24 or max(sh, sw) < 180:
+            return None
+    elif sh < 400 or sw < 400:
         return None
     if image_bgr.ndim == 3 and image_bgr.shape[2] >= 3:
         gray = (
@@ -3665,21 +3694,44 @@ def solve_ruler_tick_lattice_px_per_mm(
         if mp_prior_px_per_mm is not None and np.isfinite(float(mp_prior_px_per_mm)) and float(mp_prior_px_per_mm) > 0.5
         else (LM3ScaleCalibrator.MP_PRIOR_SLOPE_PX_PER_CM * float(np.sqrt((sh * sw) / 1e6))) / 10.0
     )
-    sheet_floor = 0.85 * (float(min(sh, sw)) / 292.0) if min(sh, sw) >= 1200 else 0.0
-    p_min = max(4.0, 0.80 * mp_est, sheet_floor)
-    p_max = max(p_min + 0.5, 1.25 * mp_est)
+    if verified_ruler_crop:
+        p_min = max(3.5, 0.45 * mp_est)
+        p_max = max(p_min + 0.5, 2.20 * mp_est)
+        rois: List[Tuple[np.ndarray, bool]] = [
+            (gray, True),
+            (gray, False),
+        ]
+        if sh >= 400 and sw >= 400:
+            m_h = max(32, int(0.18 * sh))
+            m_w = max(32, int(0.18 * sw))
+            rois.extend([
+                (gray[:m_h, :], True),
+                (gray[sh - m_h :, :], True),
+                (gray[:, :m_w], False),
+                (gray[:, sw - m_w :], False),
+            ])
+    else:
+        sheet_floor = 0.85 * (float(min(sh, sw)) / 292.0) if min(sh, sw) >= 1200 else 0.0
+        p_min = max(4.0, 0.80 * mp_est, sheet_floor)
+        p_max = max(p_min + 0.5, 1.25 * mp_est)
+        m_h = max(32, int(0.18 * sh))
+        m_w = max(32, int(0.18 * sw))
+        rois = [
+            (gray[:m_h, :], True),
+            (gray[sh - m_h :, :], True),
+            (gray[:, :m_w], False),
+            (gray[:, sw - m_w :], False),
+        ]
 
-    m_h = max(32, int(0.18 * sh))
-    m_w = max(32, int(0.18 * sw))
-    rois = [
-        (gray[:m_h, :], True),
-        (gray[sh - m_h :, :], True),
-        (gray[:, :m_w], False),
-        (gray[:, sw - m_w :], False),
-    ]
     best: Optional[tuple[float, int, float]] = None
     for roi, horiz in rois:
-        hit = _scan_margin_strips_for_mm_lattice(roi, horizontal=horiz, p_min=p_min, p_max=p_max)
+        hit = _scan_margin_strips_for_mm_lattice(
+            roi,
+            horizontal=horiz,
+            p_min=p_min,
+            p_max=p_max,
+            verified_ruler_crop=verified_ruler_crop,
+        )
         if hit is not None and (best is None or hit[2] > best[2]):
             best = hit
     if best is None:
@@ -3832,8 +3884,11 @@ class LM3ScaleCalibrator:
         """
         Resolves `pixels_per_mm`, `is_calibrated_mm`, `cf_source`, and `scale_source` for a herbarium sheet:
           1. Attempts direct ruler measurement via `lm3_archival_detector__yolo26x_det_1280` +
-             `RulerClassifierModel` + `RulerCFLattice` (`cf_source = 'measured_from_ruler'`).
-          2. When `use_cf_predicted_by_mp` is enabled, falls back to `MpConversionFactorModel`
+             `RulerClassifierModel` + `RulerCFLattice` (`measured_from_ruler`) or verified-crop CPU
+             tick-lattice fallback (`ruler_calibrated`).
+          2. Falls back to unboxed full-sheet outer-margin tick-lattice detection
+             (`cf_source = 'tick_lattice_unboxed'`, `is_calibrated_mm = False`).
+          3. When `use_cf_predicted_by_mp` is enabled, falls back to `MpConversionFactorModel`
              (`cf_source = 'predicted_from_megapixels'`, `is_calibrated_mm = False`); otherwise
              returns `uncalibrated` (`pixels_per_mm = None`, `is_calibrated_mm = False`).
         """
@@ -3847,7 +3902,8 @@ class LM3ScaleCalibrator:
             }
 
         sh, sw = image_bgr.shape[:2]
-        if self.archival_session is not None and self.ruler_lattice is not None:
+        mp_prior_mm = (self.MP_PRIOR_SLOPE_PX_PER_CM * float(np.sqrt((sh * sw) / 1e6))) / 10.0
+        if self.archival_session is not None:
             ruler_boxes = self._detect_ruler_boxes(image_bgr)
             for (ymin, xmin, ymax, xmax), _det_sc in ruler_boxes:
                 crop = image_bgr[ymin:ymax, xmin:xmax]
@@ -3859,28 +3915,45 @@ class LM3ScaleCalibrator:
                         cls_pred = self.ruler_classifier.predict(crop_rgb)
                         if not getattr(cls_pred, "is_ruler", True):
                             continue
-                    lat_res = self.ruler_lattice.predict(crop_rgb)
-                    px_per_cm = getattr(lat_res, "px_per_cm", None)
-                    conf = float(getattr(lat_res, "confidence", 0.0) or 0.0)
-                    if px_per_cm is not None and np.isfinite(float(px_per_cm)) and float(px_per_cm) > 10.0 and conf >= 0.45:
-                        px_per_mm = round(float(px_per_cm) / 10.0, 4)
+                    if self.ruler_lattice is not None:
+                        lat_res = self.ruler_lattice.predict(crop_rgb)
+                        px_per_cm = getattr(lat_res, "px_per_cm", None)
+                        conf = float(getattr(lat_res, "confidence", 0.0) or 0.0)
+                        if px_per_cm is not None and np.isfinite(float(px_per_cm)) and float(px_per_cm) > 10.0 and conf >= 0.45:
+                            px_per_mm = round(float(px_per_cm) / 10.0, 4)
+                            return {
+                                "pixels_per_mm": px_per_mm,
+                                "is_calibrated_mm": True,
+                                "cf_source": "measured_from_ruler",
+                                "scale_source": "ruler_calibrated",
+                            }
+                except Exception:
+                    pass
+                if float(_det_sc) >= 0.45:
+                    crop_ruler_mm = solve_ruler_tick_lattice_px_per_mm(
+                        crop,
+                        mp_prior_px_per_mm=mp_prior_mm,
+                        verified_ruler_crop=True,
+                    )
+                    if crop_ruler_mm is not None and np.isfinite(float(crop_ruler_mm)) and float(crop_ruler_mm) > 1.0:
                         return {
-                            "pixels_per_mm": px_per_mm,
+                            "pixels_per_mm": round(float(crop_ruler_mm), 4),
                             "is_calibrated_mm": True,
-                            "cf_source": "measured_from_ruler",
+                            "cf_source": "ruler_calibrated",
                             "scale_source": "ruler_calibrated",
                         }
-                except Exception:
-                    continue
 
-        mp_prior_mm = (self.MP_PRIOR_SLOPE_PX_PER_CM * float(np.sqrt((sh * sw) / 1e6))) / 10.0
-        cpu_ruler_mm = solve_ruler_tick_lattice_px_per_mm(image_bgr, mp_prior_px_per_mm=mp_prior_mm)
+        cpu_ruler_mm = solve_ruler_tick_lattice_px_per_mm(
+            image_bgr,
+            mp_prior_px_per_mm=mp_prior_mm,
+            verified_ruler_crop=False,
+        )
         if cpu_ruler_mm is not None and np.isfinite(float(cpu_ruler_mm)) and float(cpu_ruler_mm) > 1.0:
             return {
                 "pixels_per_mm": round(float(cpu_ruler_mm), 4),
-                "is_calibrated_mm": True,
-                "cf_source": "measured_from_ruler",
-                "scale_source": "ruler_calibrated",
+                "is_calibrated_mm": False,
+                "cf_source": "tick_lattice_unboxed",
+                "scale_source": "tick_lattice_unboxed",
             }
 
         eff_use_mp = (

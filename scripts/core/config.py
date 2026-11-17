@@ -421,7 +421,7 @@ def normalize_countries_list(raw_countries: Any, default: Optional[List[str]] = 
 @dataclass(frozen=True)
 class ThresholdsConfig:
     """Botanical optical quality and harvesting thresholds."""
-    pcd_conf: float = 0.25
+    pcd_conf: float = 0.35
     minimum_confidence_threshold: float = 0.65
     min_megapixels: float = 8.0
     min_file_size_kb: float = 500.0
@@ -518,8 +518,6 @@ class HarvestingConfig:
 @dataclass(frozen=True)
 class SegmentationConfig:
     """Phase 2 LeafMachine3 ONNX segmentation and morphological extraction parameters."""
-    cohort_adaptive_mode: bool = True
-    min_anchor_n_for_empirical: int = 5
     lm3_root: Path = PROJECT_ROOT / "LeafMachine3"
     models_dir: Path = PROJECT_ROOT / "models" / "lm3"
     model_weights: Path = (
@@ -540,13 +538,14 @@ class SegmentationConfig:
     subtract_holes: bool = True
     use_cf_predicted_by_mp: bool = False
     ect_num_dirs: int = 360
-    minimum_confidence_threshold: float = 0.50
+    minimum_confidence_threshold: float = 0.35
     treat_leaflet_as_leaf_whole: bool = False
     use_efds_for_png_masks: bool = False
     do_apply_landmarks: bool = True
     segment_partial_leaves: bool = False
     rosette_plant_bbox_lower_fraction: float = 0.60
-    score_thresh: float = 0.25
+    score_thresh: float = 0.35
+    save_debug_crops: bool = False
     device: str = "cuda"
 
 
@@ -725,6 +724,10 @@ class PipelineConfig:
             and k not in non_float_thresh_fields
             and not isinstance(v, (dict, list))
         }
+        if "pcd_conf" not in thresh_dict:
+            pcd_min_conf = (raw_cfg.get("plant_component_detector") or {}).get("minimum_confidence_threshold")
+            if pcd_min_conf is not None:
+                thresh_kwargs["pcd_conf"] = float(pcd_min_conf)
         raw_t_scope = str(thresh_dict.get("geographic_scope", harv_dict.get("geographic_scope", "eastern_na"))).strip().lower()
         thresh_kwargs["geographic_scope"] = raw_t_scope if raw_t_scope in VALID_GEOGRAPHIC_SCOPES else "eastern_na"
         thresh_kwargs["countries"] = normalize_countries_list(
@@ -786,8 +789,9 @@ class PipelineConfig:
             harv_kwargs["transcontinental_ecoregion_gate"] = bool(harv_kwargs["transcontinental_ecoregion_gate"])
         harvesting = HarvestingConfig(**harv_kwargs)
 
+        vision_lm3_fallback = (raw_cfg.get("vision") or {}).get("leafmachine3", {}) or {}
         leaf_seg_fallback = raw_cfg.get("leaf_segmentation", {}) or {}
-        seg_dict = {**leaf_seg_fallback, **(raw_cfg.get("segmentation", {}) or {})}
+        seg_dict = {**vision_lm3_fallback, **leaf_seg_fallback, **(raw_cfg.get("segmentation", {}) or {})}
         seg_kwargs: Dict[str, Any] = {
             k: v for k, v in seg_dict.items() if k in SegmentationConfig.__dataclass_fields__
         }
@@ -795,7 +799,6 @@ class PipelineConfig:
             if path_k in seg_kwargs and seg_kwargs[path_k] is not None:
                 seg_kwargs[path_k] = _resolve(seg_kwargs[path_k])
         for bool_k in (
-            "cohort_adaptive_mode",
             "paperclean",
             "llr_hyst_keep_blobs",
             "paperclean_llr_hyst_keepblobs",
@@ -805,10 +808,11 @@ class PipelineConfig:
             "use_efds_for_png_masks",
             "do_apply_landmarks",
             "segment_partial_leaves",
+            "save_debug_crops",
         ):
             if bool_k in seg_kwargs and seg_kwargs[bool_k] is not None:
                 seg_kwargs[bool_k] = bool(seg_kwargs[bool_k])
-        for int_k in ("min_anchor_n_for_empirical", "max_working_dim", "specimen_max_working_dim", "ect_num_dirs"):
+        for int_k in ("max_working_dim", "specimen_max_working_dim", "ect_num_dirs"):
             if int_k in seg_kwargs and seg_kwargs[int_k] is not None:
                 seg_kwargs[int_k] = int(seg_kwargs[int_k])
         for float_k in ("minimum_confidence_threshold", "rosette_plant_bbox_lower_fraction", "score_thresh"):
