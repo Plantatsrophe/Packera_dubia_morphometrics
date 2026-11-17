@@ -1747,6 +1747,9 @@ fetch_step03_contours_from_db <- function(
       "area_mm2", "petiole_width_mm", "blade_width_mm",
       "blade_cie_l_norm", "blade_cie_l_sd",
       "blade_cie_l_sheet_delta", "blade_cie_a_delta", "blade_cie_b_delta",
+      "blade_cie_a_browning_delta", "blade_cie_b_yellowing_delta",
+      "corymb_head_count_est", "anthesis_head_count", "fruiting_head_count",
+      "Boot_LRT_Stat_prev", "Boot_LRT_P_prev",
       "log1p_capitulum_count", "log1p_capitulum_count_std", "nearest_type_basionym_d2", "spatial_balance_weight"
     ),
     names(df)
@@ -1840,6 +1843,418 @@ persist_step03_to_sqlite <- function(
 # Step 04: OTU Morphometrics + Plant Individuals + Reproductive Joins & Updates
 # ==============================================================================
 
+.restore_raw_step03_from_leaf_harmonics_db <- function(conn, rid, df) {
+  empty_res <- list(df = df, restored_mask = list())
+  if (is.null(conn) || is.null(df) || !is.data.frame(df) || nrow(df) == 0L ||
+      !db_table_exists_safe(conn, "leaf_efa_harmonics")) {
+    return(empty_res)
+  }
+  leaf_df <- tryCatch(
+    DBI::dbGetQuery(conn, "SELECT * FROM leaf_efa_harmonics WHERE run_id = $1;", params = list(rid)),
+    error = function(e) NULL
+  )
+  if (is.null(leaf_df) || nrow(leaf_df) == 0L) {
+    return(empty_res)
+  }
+  leaf_df <- coerce_sqlite_logical_cols(leaf_df)
+  n_df <- nrow(df)
+
+  norm_pid <- function(d) {
+    if ("plant_individual_id" %in% names(d)) {
+      v <- suppressWarnings(as.integer(d$plant_individual_id))
+      v[is.na(v)] <- 0L
+      v
+    } else {
+      rep(0L, nrow(d))
+    }
+  }
+  df_keys <- paste(trimws(as.character(df$catalogNumber)), norm_pid(df), sep = "\r")
+  l_keys <- paste(trimws(as.character(leaf_df$catalogNumber)), norm_pid(leaf_df), sep = "\r")
+  leaf_groups <- split(seq_len(nrow(leaf_df)), l_keys)
+
+  type_mask_fn <- function(d) {
+    if (exists(".identify_type_specimen_vec", mode = "function")) {
+      res_t <- tryCatch(as.logical(.identify_type_specimen_vec(d)$is_type_specimen), error = function(e) NULL)
+      if (!is.null(res_t) && length(res_t) == nrow(d)) {
+        res_t[is.na(res_t)] <- FALSE
+        return(res_t)
+      }
+    }
+    n_r <- nrow(d)
+    b_t <- if ("is_type_specimen" %in% names(d)) {
+      v <- as.logical(d$is_type_specimen)
+      !is.na(v) & v
+    } else {
+      rep(FALSE, n_r)
+    }
+    raw_t <- if ("type_status" %in% names(d)) {
+      trimws(as.character(d$type_status))
+    } else if ("typeStatus" %in% names(d)) {
+      trimws(as.character(d$typeStatus))
+    } else {
+      rep("", n_r)
+    }
+    raw_t[is.na(raw_t)] <- ""
+    neg_m <- grepl("not a type|non-type|non type|false type|no type|unverified|type locality|type species|type collection", raw_t, ignore.case = TRUE)
+    pos_m <- !neg_m & grepl("(^|[^a-z])(holotype|lectotype|neotype|epitype|isotype|isolectotype|isoneotype|syntype|isosyntype|paratype|isoparatype|type|cotype)s?([^a-z]|$)", raw_t, ignore.case = TRUE)
+    pos_m | (b_t & !neg_m)
+  }
+
+  df_is_type <- type_mask_fn(df)
+  l_is_type <- type_mask_fn(leaf_df)
+  l_out <- if ("is_contour_outlier" %in% names(leaf_df)) {
+    !is.na(leaf_df$is_contour_outlier) & as.logical(leaf_df$is_contour_outlier)
+  } else {
+    rep(FALSE, nrow(leaf_df))
+  }
+  l_lz <- if ("leaf_zone" %in% names(leaf_df)) {
+    tolower(trimws(as.character(leaf_df$leaf_zone)))
+  } else {
+    rep("basal", nrow(leaf_df))
+  }
+
+  prim_idx <- vector("list", n_df)
+  matched_rows <- logical(n_df)
+  for (i in seq_len(n_df)) {
+    idx <- leaf_groups[[df_keys[i]]]
+    if (is.null(idx) || length(idx) == 0L) next
+    matched_rows[i] <- TRUE
+    row_type <- l_is_type[idx] | isTRUE(df_is_type[i])
+    eff_out <- l_out[idx] & !row_type
+    if (any(!eff_out)) {
+      idx <- idx[!eff_out]
+    }
+    lz_i <- l_lz[idx]
+    is_basal_primary <- !is.na(lz_i) & (lz_i == "basal")
+    if (any(is_basal_primary)) {
+      idx <- idx[is_basal_primary]
+    }
+    prim_idx[[i]] <- idx
+  }
+  if (!any(matched_rows)) {
+    return(empty_res)
+  }
+
+  restored_mask <- list()
+  has_fin_in_leaf <- function(cn) {
+    (cn %in% names(leaf_df)) && any(is.finite(suppressWarnings(as.numeric(leaf_df[[cn]]))))
+  }
+  agg_med_col <- function(cn, digits = NULL, pos_only = FALSE, cal_vec = NULL) {
+    out <- rep(NA_real_, n_df)
+    if (!(cn %in% names(leaf_df))) return(out)
+    v_all <- suppressWarnings(as.numeric(leaf_df[[cn]]))
+    for (i in which(matched_rows)) {
+      idx <- prim_idx[[i]]
+      if (!is.null(cal_vec)) idx <- idx[cal_vec[idx]]
+      if (length(idx) == 0L) next
+      vf <- v_all[idx]
+      vf <- if (isTRUE(pos_only)) vf[is.finite(vf) & vf > 0.0] else vf[is.finite(vf)]
+      if (length(vf) > 0L) {
+        mv <- stats::median(vf)
+        out[i] <- if (!is.null(digits)) round(mv, digits) else mv
+      }
+    }
+    out
+  }
+
+  harm_cols <- intersect(PACKERA_DB_HARMONIC_COLS, names(leaf_df))
+  harm_cols <- harm_cols[vapply(harm_cols, has_fin_in_leaf, logical(1L))]
+  for (hc in harm_cols) {
+    vals <- agg_med_col(hc)
+    if (!(hc %in% names(df))) df[[hc]] <- rep(NA_real_, n_df)
+    df[[hc]][matched_rows] <- vals[matched_rows]
+    restored_mask[[hc]] <- matched_rows
+  }
+
+  for (spec in list(
+    list(col = "ECT_PC1", d = 6L), list(col = "ECT_PC2", d = 6L), list(col = "ECT_PC3", d = 6L),
+    list(col = "ect_lobe_complexity", d = 4L),
+    list(col = "solidity", d = 4L), list(col = "dissection_index", d = 4L), list(col = "aspect_ratio", d = 4L)
+  )) {
+    cn <- spec$col
+    if (has_fin_in_leaf(cn)) {
+      vals <- agg_med_col(cn, digits = spec$d)
+      ok_v <- matched_rows & is.finite(vals)
+      if (any(ok_v)) {
+        if (!(cn %in% names(df))) df[[cn]] <- rep(NA_real_, n_df)
+        df[[cn]][ok_v] <- vals[ok_v]
+        restored_mask[[cn]] <- ok_v
+      }
+    }
+  }
+
+  if (has_fin_in_leaf("solidity")) {
+    q25_vals <- rep(NA_real_, n_df)
+    sol_all <- suppressWarnings(as.numeric(leaf_df$solidity))
+    for (i in which(matched_rows)) {
+      sf <- sol_all[prim_idx[[i]]]
+      sf <- sf[is.finite(sf)]
+      if (length(sf) > 0L) {
+        q25_vals[i] <- round(as.numeric(stats::quantile(sf, probs = 0.25, na.rm = TRUE, names = FALSE)), 4)
+      }
+    }
+    ok_q <- matched_rows & is.finite(q25_vals)
+    if (any(ok_q)) {
+      if (!("q25_solidity" %in% names(df))) df$q25_solidity <- rep(NA_real_, n_df)
+      df$q25_solidity[ok_q] <- q25_vals[ok_q]
+      restored_mask[["q25_solidity"]] <- ok_q
+    }
+  }
+
+  l_cal <- if ("is_calibrated_mm" %in% names(leaf_df)) {
+    !is.na(leaf_df$is_calibrated_mm) & as.logical(leaf_df$is_calibrated_mm)
+  } else {
+    rep(TRUE, nrow(leaf_df))
+  }
+  if ("scale_source" %in% names(leaf_df)) {
+    ss_l <- tolower(trimws(as.character(leaf_df$scale_source)))
+    ss_l[is.na(ss_l)] <- ""
+    l_cal <- l_cal & !(ss_l %in% c("mp_estimated", "predicted_from_megapixels", "tick_lattice_unboxed", "uncalibrated"))
+  }
+  d_cal <- if ("is_calibrated_mm" %in% names(df)) {
+    !is.na(df$is_calibrated_mm) & as.logical(df$is_calibrated_mm)
+  } else {
+    rep(TRUE, n_df)
+  }
+  if ("scale_source" %in% names(df)) {
+    ss_d <- tolower(trimws(as.character(df$scale_source)))
+    ss_d[is.na(ss_d)] <- ""
+    d_cal <- d_cal & !(ss_d %in% c("mp_estimated", "predicted_from_megapixels", "tick_lattice_unboxed", "uncalibrated"))
+  }
+  if (has_fin_in_leaf("centroid_size") || has_fin_in_leaf("log_centsize")) {
+    cs_vals <- if (has_fin_in_leaf("centroid_size")) agg_med_col("centroid_size", digits = 4L, pos_only = TRUE, cal_vec = l_cal) else rep(NA_real_, n_df)
+    lcs_fb <- if (has_fin_in_leaf("log_centsize")) agg_med_col("log_centsize", digits = 6L, cal_vec = l_cal) else rep(NA_real_, n_df)
+    cs_vals[!d_cal] <- NA_real_
+    lcs_vals <- ifelse(is.finite(cs_vals) & cs_vals > 0.0, round(log10(cs_vals), 6), ifelse(d_cal, lcs_fb, NA_real_))
+    if (has_fin_in_leaf("centroid_size")) {
+      if (!("centroid_size" %in% names(df))) df$centroid_size <- rep(NA_real_, n_df)
+      df$centroid_size[matched_rows] <- cs_vals[matched_rows]
+      restored_mask[["centroid_size"]] <- matched_rows
+    }
+    if (!("log_centsize" %in% names(df))) df$log_centsize <- rep(NA_real_, n_df)
+    df$log_centsize[matched_rows] <- lcs_vals[matched_rows]
+    restored_mask[["log_centsize"]] <- matched_rows
+  }
+
+  phot_cols <- unique(c(
+    intersect(c("blade_cie_l_norm", "blade_cie_l_sd", "blade_cie_l_sheet_delta", "blade_cie_a_delta", "blade_cie_b_delta", "blade_cie_a_browning_delta", "blade_cie_b_yellowing_delta"), names(leaf_df)),
+    grep("^blade_cie_", names(leaf_df), value = TRUE)
+  ))
+  phot_cols <- phot_cols[vapply(phot_cols, has_fin_in_leaf, logical(1L))]
+  for (pcol in phot_cols) {
+    vals <- agg_med_col(pcol, digits = 4L)
+    ok_p <- matched_rows & is.finite(vals)
+    if (any(ok_p)) {
+      if (!(pcol %in% names(df))) df[[pcol]] <- rep(NA_real_, n_df)
+      df[[pcol]][ok_p] <- vals[ok_p]
+      restored_mask[[pcol]] <- ok_p
+    }
+  }
+
+  pca_sym_cols <- grep("^[AD][0-9]+$", harm_cols, value = TRUE)
+  if (length(pca_sym_cols) == 0L) {
+    pca_sym_cols <- harm_cols
+  } else {
+    a_c <- grep("^A[0-9]+$", pca_sym_cols, value = TRUE)
+    d_c <- grep("^D[0-9]+$", pca_sym_cols, value = TRUE)
+    if (length(a_c) > 1L) a_c <- a_c[order(as.integer(sub("^A", "", a_c)))]
+    if (length(d_c) > 1L) d_c <- d_c[order(as.integer(sub("^D", "", d_c)))]
+    pca_sym_cols <- c(a_c, d_c)
+  }
+
+  leaf_pc_cols <- grep("^PC[0-9]+$", names(leaf_df), value = TRUE)
+  leaf_pc_cols <- leaf_pc_cols[vapply(leaf_pc_cols, has_fin_in_leaf, logical(1L))]
+  if (length(leaf_pc_cols) > 1L) {
+    leaf_pc_cols <- leaf_pc_cols[order(as.integer(sub("^PC", "", leaf_pc_cols)))]
+  }
+  df_pc_cols <- grep("^PC[0-9]+$", names(df), value = TRUE)
+  df_pc_cols <- df_pc_cols[vapply(df_pc_cols, function(cn) any(is.finite(suppressWarnings(as.numeric(df[[cn]])))), logical(1L))]
+  if (length(df_pc_cols) > 1L) {
+    df_pc_cols <- df_pc_cols[order(as.integer(sub("^PC", "", df_pc_cols)))]
+  }
+
+  k_target <- if (length(leaf_pc_cols) >= 2L) {
+    length(leaf_pc_cols)
+  } else if (length(df_pc_cols) >= 2L) {
+    length(df_pc_cols)
+  } else {
+    min(5L, max(2L, length(pca_sym_cols)))
+  }
+  k_target <- max(2L, min(15L, as.integer(k_target)))
+  target_pcs <- paste0("PC", seq_len(k_target))
+
+  leaf_pc_med <- NULL
+  if (length(leaf_pc_cols) >= 2L) {
+    k_leaf <- min(k_target, length(leaf_pc_cols))
+    leaf_pc_med <- matrix(NA_real_, nrow = n_df, ncol = k_target, dimnames = list(NULL, target_pcs))
+    for (pj in seq_len(k_leaf)) {
+      leaf_pc_med[, pj] <- agg_med_col(leaf_pc_cols[pj], digits = 6L)
+    }
+  }
+
+  if (length(pca_sym_cols) >= 1L) {
+    X_spec <- as.matrix(df[, pca_sym_cols, drop = FALSE])
+    storage.mode(X_spec) <- "double"
+    otu_has_efa <- matched_rows & stats::complete.cases(X_spec)
+    pc_lm <- NULL
+    pc_cov <- NULL
+
+    if (any(otu_has_efa) && !is.null(leaf_pc_med)) {
+      all_single_leaf <- all(vapply(prim_idx[otu_has_efa], length, integer(1L)) <= 1L)
+      if (isTRUE(all_single_leaf) && all(is.finite(leaf_pc_med[otu_has_efa, seq_len(min(2L, ncol(leaf_pc_med))), drop = FALSE]))) {
+        pc_lm <- leaf_pc_med[otu_has_efa, , drop = FALSE]
+      } else {
+        k_leaf <- min(k_target, length(leaf_pc_cols))
+        lv_ok <- stats::complete.cases(leaf_df[, c(pca_sym_cols, leaf_pc_cols[seq_len(k_leaf)]), drop = FALSE])
+        if (sum(lv_ok) > length(pca_sym_cols) + 2L) {
+          lv_h <- as.matrix(leaf_df[lv_ok, pca_sym_cols, drop = FALSE])
+          storage.mode(lv_h) <- "double"
+          lv_v <- apply(lv_h, 2L, stats::var, na.rm = TRUE)
+          fit_h <- names(lv_v[is.finite(lv_v) & lv_v > 1e-10])
+          if (length(fit_h) >= 1L && sum(lv_ok) > length(fit_h) + 2L) {
+            X_des <- cbind(1.0, lv_h[, fit_h, drop = FALSE])
+            Y_pcs <- as.matrix(leaf_df[lv_ok, leaf_pc_cols[seq_len(k_leaf)], drop = FALSE])
+            storage.mode(Y_pcs) <- "double"
+            qr_x <- tryCatch(qr(X_des), error = function(e) NULL)
+            if (!is.null(qr_x) && qr_x$rank == ncol(X_des)) {
+              fit_b <- tryCatch(stats::lm.fit(X_des, Y_pcs), error = function(e) NULL)
+              if (!is.null(fit_b) && all(is.finite(fit_b$coefficients)) &&
+                  max(abs(fit_b$residuals), na.rm = TRUE) < 1e-4) {
+                X_sp_des <- cbind(1.0, X_spec[otu_has_efa, fit_h, drop = FALSE])
+                proj_lm <- X_sp_des %*% fit_b$coefficients
+                pc_lm <- matrix(0.0, nrow = sum(otu_has_efa), ncol = k_target)
+                for (pj in seq_len(k_leaf)) {
+                  pc_lm[, pj] <- round(proj_lm[, pj], 6)
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    if (sum(otu_has_efa) >= 2L) {
+      w_auth <- if ("authority_weight" %in% names(df)) suppressWarnings(as.numeric(df$authority_weight)) else rep(0.0, n_df)
+      if ("authority_weight" %in% names(leaf_df) && any(is.finite(suppressWarnings(as.numeric(leaf_df$authority_weight))))) {
+        l_aw <- agg_med_col("authority_weight")
+        use_l <- matched_rows & is.finite(l_aw)
+        w_auth[use_l] <- l_aw[use_l]
+      }
+      w_auth[!is.finite(w_auth) | w_auth < 0.0] <- 0.0
+
+      w_sb <- if ("spatial_balance_weight" %in% names(df)) suppressWarnings(as.numeric(df$spatial_balance_weight)) else rep(1.0, n_df)
+      if ("spatial_balance_weight" %in% names(leaf_df) && any(is.finite(suppressWarnings(as.numeric(leaf_df$spatial_balance_weight))))) {
+        l_sb <- agg_med_col("spatial_balance_weight")
+        use_sb <- matched_rows & is.finite(l_sb) & (l_sb > 0.0)
+        w_sb[use_sb] <- l_sb[use_sb]
+      }
+      w_sb[!is.finite(w_sb) | w_sb <= 0.0] <- 1.0
+
+      is_tier1_ok <- if ("morph_tier_source" %in% names(df)) {
+        is.na(df$morph_tier_source) | !(df$morph_tier_source %in% c("Cauline_Only_Fallback", "Transitional_Passive"))
+      } else {
+        rep(TRUE, n_df)
+      }
+      not_out_otu <- if ("is_contour_outlier" %in% names(df)) {
+        is.na(df$is_contour_outlier) | !as.logical(df$is_contour_outlier) | df_is_type
+      } else {
+        rep(TRUE, n_df)
+      }
+      fit_mask <- otu_has_efa & (w_auth > 0.0) & is_tier1_ok & not_out_otu
+      fit_idx <- which(fit_mask)
+      w_eff <- w_auth * w_sb
+
+      rot_mat <- NULL
+      cen_vec <- NULL
+      if (length(fit_idx) >= 2L && sum(w_eff[fit_idx], na.rm = TRUE) > 0.0) {
+        cv <- apply(X_spec[fit_idx, , drop = FALSE], 2L, stats::var, na.rm = TRUE)
+        nz_cols <- names(cv[is.finite(cv) & cv > 1e-10])
+        if (length(nz_cols) >= 1L) {
+          wt_cov <- tryCatch(stats::cov.wt(X_spec[fit_idx, nz_cols, drop = FALSE], wt = w_eff[fit_idx], center = TRUE), error = function(e) NULL)
+          if (!is.null(wt_cov)) {
+            eig <- tryCatch(eigen(wt_cov$cov, symmetric = TRUE), error = function(e) NULL)
+            if (!is.null(eig)) {
+              rot_mat <- eig$vectors
+              cen_vec <- wt_cov$center
+            }
+          }
+        }
+      }
+      if (is.null(rot_mat)) {
+        all_idx <- which(otu_has_efa)
+        cv <- apply(X_spec[all_idx, , drop = FALSE], 2L, stats::var, na.rm = TRUE)
+        nz_cols <- names(cv[is.finite(cv) & cv > 1e-10])
+        if (length(nz_cols) >= 1L) {
+          pr <- tryCatch(stats::prcomp(X_spec[all_idx, nz_cols, drop = FALSE], center = TRUE, scale. = FALSE), error = function(e) NULL)
+          if (!is.null(pr)) {
+            rot_mat <- pr$rotation
+            cen_vec <- pr$center
+          }
+        }
+      }
+      if (!is.null(rot_mat) && !is.null(cen_vec)) {
+        sc_raw <- sweep(X_spec[otu_has_efa, nz_cols, drop = FALSE], 2L, cen_vec, "-") %*% rot_mat
+        pc_cov <- matrix(0.0, nrow = sum(otu_has_efa), ncol = k_target)
+        n_copy <- min(k_target, ncol(sc_raw))
+        for (pj in seq_len(n_copy)) {
+          sc_col <- sc_raw[, pj]
+          ref_col <- NULL
+          raw_ind_nm <- sprintf("PC%d_raw_individual", pj)
+          if (raw_ind_nm %in% names(df)) {
+            cand_r <- suppressWarnings(as.numeric(df[[raw_ind_nm]][otu_has_efa]))
+            if (sum(is.finite(cand_r)) >= 2L) ref_col <- cand_r
+          }
+          if (is.null(ref_col) && !is.null(pc_lm) && pj <= ncol(pc_lm)) {
+            cand_lm <- pc_lm[, pj]
+            if (sum(is.finite(cand_lm)) >= 2L) ref_col <- cand_lm
+          }
+          if (is.null(ref_col) && !is.null(leaf_pc_med) && pj <= ncol(leaf_pc_med)) {
+            cand_l <- leaf_pc_med[otu_has_efa, pj]
+            if (sum(is.finite(cand_l)) >= 2L) ref_col <- cand_l
+          }
+          if (!is.null(ref_col)) {
+            ok_s <- is.finite(sc_col) & is.finite(ref_col)
+            if (sum(ok_s) >= 2L) {
+              dp <- sum((sc_col[ok_s] - mean(sc_col[ok_s])) * (ref_col[ok_s] - mean(ref_col[ok_s])))
+              if (is.finite(dp) && dp < 0.0) sc_col <- -sc_col
+            }
+          }
+          pc_cov[, pj] <- round(sc_col, 6)
+        }
+      }
+    }
+
+    pc_restored_mat <- if (!is.null(pc_lm) && !is.null(pc_cov)) {
+      if (isTRUE(max(abs(pc_cov - pc_lm), na.rm = TRUE) < 5e-5)) pc_cov else pc_lm
+    } else if (!is.null(pc_lm)) {
+      pc_lm
+    } else {
+      pc_cov
+    }
+
+    if (!is.null(pc_restored_mat)) {
+      for (pj in seq_len(k_target)) {
+        p_nm <- target_pcs[pj]
+        if (!(p_nm %in% names(df))) df[[p_nm]] <- rep(NA_real_, n_df)
+        df[[p_nm]][otu_has_efa] <- pc_restored_mat[, pj]
+        restored_mask[[p_nm]] <- matched_rows & otu_has_efa
+      }
+    }
+  } else if (!is.null(leaf_pc_med)) {
+    for (pj in seq_len(min(k_target, length(leaf_pc_cols)))) {
+      p_nm <- target_pcs[pj]
+      ok_p <- matched_rows & is.finite(leaf_pc_med[, pj])
+      if (any(ok_p)) {
+        if (!(p_nm %in% names(df))) df[[p_nm]] <- rep(NA_real_, n_df)
+        df[[p_nm]][ok_p] <- leaf_pc_med[ok_p, pj]
+        restored_mask[[p_nm]] <- ok_p
+      }
+    }
+  }
+
+  list(df = df, restored_mask = restored_mask)
+}
+
 fetch_step04_morphometrics_from_db <- function(
   vouchers_path = NULL,
   harmonics_path = NULL,
@@ -1867,36 +2282,76 @@ fetch_step04_morphometrics_from_db <- function(
     return(NULL)
   }
 
-  v_cols <- tryCatch(DBI::dbListFields(conn, "vouchers"), error = function(e) character(0))
+  om_cols <- tryCatch(DBI::dbListFields(conn, "otu_morphometrics"), error = function(e) character(0))
+  pi_cols <- if (db_table_exists_safe(conn, "plant_individuals")) tryCatch(DBI::dbListFields(conn, "plant_individuals"), error = function(e) character(0)) else character(0)
+  vrp_cols <- if (db_table_exists_safe(conn, "voucher_reproductive_phenology")) tryCatch(DBI::dbListFields(conn, "voucher_reproductive_phenology"), error = function(e) character(0)) else character(0)
+  v_cols <- if (db_table_exists_safe(conn, "vouchers")) tryCatch(DBI::dbListFields(conn, "vouchers"), error = function(e) character(0)) else character(0)
+
   extra_v_cols <- intersect(
     c("usda_symbol", "usda_county_status", "exsiccatae_key", "exsiccatae_taxonomic_conflict", "exsiccatae_gold_taxon", "is_centroid_or_inst_coord", "coord_quarantine_reason"),
     v_cols
   )
+
+  dyn_select_exprs <- character(0)
+  dyn_joined_cols <- character(0)
+  used_pi <- FALSE
+  used_vrp <- FALSE
+  used_v <- length(extra_v_cols) > 0L
+
+  add_coalesce_col <- function(col_nm, order_tbls) {
+    exprs <- character(0)
+    for (tb in order_tbls) {
+      if (tb == "om" && (col_nm %in% om_cols)) {
+        exprs <- c(exprs, if (col_nm == "scale_source") "NULLIF(TRIM(om.scale_source), '')" else paste0("om.", col_nm))
+      } else if (tb == "pi" && (col_nm %in% pi_cols)) {
+        exprs <- c(exprs, if (col_nm == "scale_source") "NULLIF(TRIM(pi.scale_source), '')" else paste0("pi.", col_nm))
+        used_pi <<- TRUE
+      } else if (tb == "vrp" && (col_nm %in% vrp_cols)) {
+        exprs <- c(exprs, sprintf("CASE WHEN vrp.catalogNumber IS NOT NULL THEN vrp.%s ELSE vrp0.%s END", col_nm, col_nm))
+        used_vrp <<- TRUE
+      } else if (tb == "v" && (col_nm %in% v_cols)) {
+        exprs <- c(exprs, if (col_nm == "scale_source") "NULLIF(TRIM(v.scale_source), '')" else paste0("v.", col_nm))
+        used_v <<- TRUE
+      }
+    }
+    if (length(exprs) == 0L) return(invisible(NULL))
+    sel_e <- if (length(exprs) == 1L) exprs[1L] else sprintf("COALESCE(%s)", paste(exprs, collapse = ", "))
+    dyn_select_exprs <<- c(dyn_select_exprs, sprintf("%s AS %s_joined", sel_e, col_nm))
+    dyn_joined_cols <<- c(dyn_joined_cols, col_nm)
+    invisible(NULL)
+  }
+
+  for (cn_pi in c("petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio", "scale_source", "is_calibrated_mm", "blade_cie_l_sheet_delta", "blade_cie_a_browning_delta", "blade_cie_b_yellowing_delta")) {
+    add_coalesce_col(cn_pi, c("om", "pi", "vrp", "v"))
+  }
+  add_coalesce_col("AR_inv", c("om", "vrp"))
+  for (cn_vrp in c("capitula_count", "involucre_height_px", "involucre_width_px", "involucre_height_mm", "involucre_width_mm", "corymb_head_count_est", "anthesis_head_count", "fruiting_head_count")) {
+    add_coalesce_col(cn_vrp, c("vrp", "pi", "om", "v"))
+  }
+
   extra_v_sql <- if (length(extra_v_cols) > 0L) {
     paste0(", ", paste0("v.", extra_v_cols, " AS ", extra_v_cols, "_v_joined", collapse = ", "))
   } else ""
-  extra_v_join <- if (length(extra_v_cols) > 0L) {
+  dyn_sql_part <- if (length(dyn_select_exprs) > 0L) {
+    paste0(", ", paste(dyn_select_exprs, collapse = ", "))
+  } else ""
+  pi_join <- if (isTRUE(used_pi)) {
+    "LEFT JOIN plant_individuals pi ON pi.catalogNumber = om.catalogNumber AND pi.plant_individual_id = om.plant_individual_id "
+  } else ""
+  vrp_join <- if (isTRUE(used_vrp)) {
+    paste0(
+      "LEFT JOIN voucher_reproductive_phenology vrp ON vrp.catalogNumber = om.catalogNumber AND vrp.plant_individual_id = om.plant_individual_id ",
+      "LEFT JOIN voucher_reproductive_phenology vrp0 ON vrp0.catalogNumber = om.catalogNumber AND vrp0.plant_individual_id = 0 "
+    )
+  } else ""
+  v_join <- if (isTRUE(used_v)) {
     "LEFT JOIN vouchers v ON v.catalogNumber = om.catalogNumber "
   } else ""
 
   sql <- paste0(
-    "SELECT ",
-    "  om.*, ",
-    "  COALESCE(om.petiole_length_mm, pi.petiole_length_mm) AS petiole_length_mm_joined, ",
-    "  COALESCE(om.blade_length_mm, pi.blade_length_mm) AS blade_length_mm_joined, ",
-    "  COALESCE(om.petiole_to_blade_ratio, pi.petiole_to_blade_ratio) AS petiole_to_blade_ratio_joined, ",
-    "  COALESCE(om.AR_inv, CASE WHEN vrp.catalogNumber IS NOT NULL THEN vrp.AR_inv ELSE vrp0.AR_inv END) AS AR_inv_joined, ",
-    "  CASE WHEN vrp.catalogNumber IS NOT NULL THEN vrp.capitula_count ELSE vrp0.capitula_count END AS capitula_count_joined, ",
-    "  CASE WHEN vrp.catalogNumber IS NOT NULL THEN vrp.involucre_height_px ELSE vrp0.involucre_height_px END AS involucre_height_px_joined, ",
-    "  CASE WHEN vrp.catalogNumber IS NOT NULL THEN vrp.involucre_width_px ELSE vrp0.involucre_width_px END AS involucre_width_px_joined, ",
-    "  CASE WHEN vrp.catalogNumber IS NOT NULL THEN vrp.involucre_height_mm ELSE vrp0.involucre_height_mm END AS involucre_height_mm_joined, ",
-    "  CASE WHEN vrp.catalogNumber IS NOT NULL THEN vrp.involucre_width_mm ELSE vrp0.involucre_width_mm END AS involucre_width_mm_joined",
-    extra_v_sql, " ",
+    "SELECT om.*", dyn_sql_part, extra_v_sql, " ",
     "FROM otu_morphometrics om ",
-    "LEFT JOIN plant_individuals pi ON pi.catalogNumber = om.catalogNumber AND pi.plant_individual_id = om.plant_individual_id ",
-    "LEFT JOIN voucher_reproductive_phenology vrp ON vrp.catalogNumber = om.catalogNumber AND vrp.plant_individual_id = om.plant_individual_id ",
-    "LEFT JOIN voucher_reproductive_phenology vrp0 ON vrp0.catalogNumber = om.catalogNumber AND vrp0.plant_individual_id = 0 ",
-    extra_v_join,
+    pi_join, vrp_join, v_join,
     "WHERE om.run_id = $1 ",
     "ORDER BY om.catalogNumber, om.plant_individual_id;"
   )
@@ -1913,19 +2368,12 @@ fetch_step04_morphometrics_from_db <- function(
     }
   }
 
-  for (pair in list(
-    c("petiole_length_mm", "petiole_length_mm_joined"),
-    c("blade_length_mm", "blade_length_mm_joined"),
-    c("petiole_to_blade_ratio", "petiole_to_blade_ratio_joined"),
-    c("AR_inv", "AR_inv_joined"),
-    c("capitula_count", "capitula_count_joined"),
-    c("involucre_height_px", "involucre_height_px_joined"),
-    c("involucre_width_px", "involucre_width_px_joined"),
-    c("involucre_height_mm", "involucre_height_mm_joined"),
-    c("involucre_width_mm", "involucre_width_mm_joined")
-  )) {
-    df[[pair[1]]] <- df[[pair[2]]]
-    df[[pair[2]]] <- NULL
+  for (cn in dyn_joined_cols) {
+    jc <- paste0(cn, "_joined")
+    if (jc %in% names(df)) {
+      df[[cn]] <- df[[jc]]
+      df[[jc]] <- NULL
+    }
   }
   for (vcol in extra_v_cols) {
     vj <- paste0(vcol, "_v_joined")
@@ -1939,6 +2387,9 @@ fetch_step04_morphometrics_from_db <- function(
   has_prev_s04 <- ("cda_predicted_taxon" %in% names(df) && any(!is.na(df$cda_predicted_taxon))) ||
     ("gmm_cluster" %in% names(df) && any(!is.na(df$gmm_cluster)))
   if (isTRUE(has_prev_s04)) {
+    restored_db <- .restore_raw_step03_from_leaf_harmonics_db(conn, rid, df)
+    df <- restored_db$df
+    restored_map <- restored_db$restored_mask
     if (!is.null(harmonics_path) && nzchar(harmonics_path) && file.exists(harmonics_path)) {
       hm_raw <- tryCatch(
         if (requireNamespace("data.table", quietly = TRUE)) {
@@ -1959,19 +2410,30 @@ fetch_step04_morphometrics_from_db <- function(
           if (length(ok_m) > 0L) {
             raw_s03_cols <- intersect(
               c(
-                PACKERA_DB_SYM_HARMONIC_COLS, PACKERA_DB_PC_COLS,
+                PACKERA_DB_HARMONIC_COLS, PACKERA_DB_PC_COLS,
                 "ECT_PC1", "ECT_PC2", "ECT_PC3", "Cauline_PC1", "Cauline_PC2", "Cauline_PC3",
                 "Cauline_ECT_PC1", "Cauline_ECT_PC2", "aspect_ratio", "solidity", "q25_solidity",
                 "dissection_index", "dissected_leaf_fraction", "within_rosette_efa_dispersion",
                 "heteroblasty_efa_distance", "heteroblasty_ect_distance", "ect_lobe_complexity",
                 "cauline_ect_lobe_complexity", "blade_cie_l_norm", "blade_cie_l_sd",
                 "blade_cie_l_sheet_delta", "blade_cie_a_delta", "blade_cie_b_delta",
+                "blade_cie_a_browning_delta", "blade_cie_b_yellowing_delta",
                 "centroid_size", "log_centsize", "scale_source"
               ),
               names(hm_raw)
             )
             for (rc in raw_s03_cols) {
-              df[[rc]][ok_m] <- hm_raw[[rc]][m_idx[ok_m]]
+              fill_pos <- if (rc %in% names(restored_map)) {
+                ok_m[!restored_map[[rc]][ok_m]]
+              } else {
+                ok_m
+              }
+              if (length(fill_pos) > 0L) {
+                if (!(rc %in% names(df))) {
+                  df[[rc]] <- hm_raw[[rc]][rep(NA_integer_, nrow(df))]
+                }
+                df[[rc]][fill_pos] <- hm_raw[[rc]][m_idx[fill_pos]]
+              }
             }
           }
         }

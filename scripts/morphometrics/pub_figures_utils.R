@@ -745,22 +745,15 @@ generate_step04_pub_figures <- function(
       identical(Sys.getenv("PACKERA_SKIP_FIGURES", unset = ""), "1")) return(invisible(TRUE))
   fdir <- resolve_active_figures_dir(figures_dir, reference_path)
   canon_04b <- file.path(fdir, "fig04b_gmm_cda_morphometrics.png")
-  ref_png <- if (!is.null(reference_path) && nzchar(reference_path)) normalize_png_path(reference_path) else ""
-  if (!file.exists(canon_04b)) {
-    if (nzchar(ref_png) && file.exists(ref_png)) {
-      dir.create(dirname(canon_04b), recursive = TRUE, showWarnings = FALSE)
-      file.copy(ref_png, canon_04b, overwrite = TRUE)
-    } else {
-      render_step04_gmm_cda_png(
-        audit_df = audit_df,
-        cda_res = cda_res,
-        gmm_res = gmm_res,
-        output_path = canon_04b,
-        feature_cols = if (!is.null(cda_res)) cda_res$selected_features else NULL,
-        manova_res = manova_res
-      )
-    }
-  }
+  ref_png <- if (!is.null(reference_path) && length(reference_path) == 1L && !is.na(reference_path) && nzchar(reference_path)) normalize_png_path(reference_path) else ""
+  render_step04_gmm_cda_png(
+    audit_df = audit_df,
+    cda_res = cda_res,
+    gmm_res = gmm_res,
+    output_path = if (nzchar(ref_png)) ref_png else canon_04b,
+    feature_cols = if (!is.null(cda_res)) cda_res$selected_features else NULL,
+    manova_res = manova_res
+  )
   if (exists("render_fig04c_supervised_ecoregion_cda", mode = "function")) {
     render_fig04c_supervised_ecoregion_cda(
       audit_df = audit_df,

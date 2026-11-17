@@ -358,6 +358,16 @@ infer_epa_level3_ecoregion <- function(
   out
 }
 
+.is_quarantined_ecoregion_coord <- function(df) {
+  if (is.null(df) || !is.data.frame(df) || nrow(df) == 0L) return(logical(0))
+  if (!("is_centroid_or_inst_coord" %in% names(df))) return(rep(FALSE, nrow(df)))
+  v <- df$is_centroid_or_inst_coord
+  if (is.logical(v)) return(!is.na(v) & v)
+  if (is.numeric(v)) return(!is.na(v) & is.finite(v) & (v != 0))
+  lv <- tolower(trimws(as.character(v)))
+  !is.na(lv) & (lv %in% c("true", "1", "t", "yes"))
+}
+
 run_supervised_ecoregion_cda <- function(
   df,
   feature_cols,
@@ -368,15 +378,21 @@ run_supervised_ecoregion_cda <- function(
   min_anchors_per_ecoregion = 3L
 ) {
   n <- nrow(df)
+  quar_mask <- .is_quarantined_ecoregion_coord(df)
+  not_quar <- !quar_mask
   rg <- if ("regional_group" %in% names(df)) standardize_epa_l3_label_r(df$regional_group) else rep(NA_character_, n)
 
   # If regional_group was absent or contained only legacy non-EPA heuristic strings, infer via polygon lookup
   if (all(is.na(rg))) {
     lat_col <- intersect(c("decimalLatitude"), names(df))
     lon_col <- intersect(c("decimalLongitude"), names(df))
-    if (length(lat_col) > 0L && length(lon_col) > 0L || any(c("stateProvince", "county") %in% names(df))) {
-      lat_v <- if (length(lat_col) > 0L) df[[lat_col[1]]] else rep(NA_real_, n)
-      lon_v <- if (length(lon_col) > 0L) df[[lon_col[1]]] else rep(NA_real_, n)
+    if ((length(lat_col) > 0L && length(lon_col) > 0L) || any(c("stateProvince", "county") %in% names(df))) {
+      lat_v <- if (length(lat_col) > 0L) suppressWarnings(as.numeric(df[[lat_col[1]]])) else rep(NA_real_, n)
+      lon_v <- if (length(lon_col) > 0L) suppressWarnings(as.numeric(df[[lon_col[1]]])) else rep(NA_real_, n)
+      if (any(quar_mask)) {
+        lat_v[quar_mask] <- NA_real_
+        lon_v[quar_mask] <- NA_real_
+      }
       st_v <- if ("stateProvince" %in% names(df)) df$stateProvince else NULL
       co_v <- if ("county" %in% names(df)) df$county else NULL
       rg <- tryCatch(infer_epa_level3_ecoregion(lat_v, lon_v, state_province = st_v, county = co_v), error = function(e) rg)
@@ -390,18 +406,18 @@ run_supervised_ecoregion_cda <- function(
   auth_w[is.na(auth_w)] <- 0.0
   is_t1 <- if ("morph_tier_source" %in% names(df)) (!is.na(df$morph_tier_source) & df$morph_tier_source == "Basal_Rosette") else rep(TRUE, n)
 
-  # Strictly prefer Basal_Rosette Gold/Silver anchors (>= 3 per EPA Level III Ecoregion), with valid Basal_Rosette fallback only when Gold/Silver < 2 groups
-  cand_mask <- !is.na(rg) & has_pcs & is_t1 & (auth_w > 0)
+  # Strictly prefer unquarantined Basal_Rosette Gold/Silver anchors (>= 3 per EPA Level III Ecoregion), with unquarantined fallback only when Gold/Silver < 2 groups
+  cand_mask <- !is.na(rg) & has_pcs & is_t1 & (auth_w > 0) & not_quar
   tab_cand <- table(rg[cand_mask])
   active_ecos <- sort(names(tab_cand[tab_cand >= min_anchors_per_ecoregion]))
   if (length(active_ecos) < 2L) {
-    cand_t1 <- !is.na(rg) & has_pcs & is_t1
+    cand_t1 <- !is.na(rg) & has_pcs & is_t1 & not_quar
     tab_t1 <- table(rg[cand_t1])
     if (sum(tab_t1 >= min_anchors_per_ecoregion) >= 2L) {
       cand_mask <- cand_t1
       active_ecos <- sort(names(tab_t1[tab_t1 >= min_anchors_per_ecoregion]))
     } else {
-      cand_all <- !is.na(rg) & has_pcs
+      cand_all <- !is.na(rg) & has_pcs & not_quar
       tab_all <- table(rg[cand_all])
       if (sum(tab_all >= min_anchors_per_ecoregion) >= 2L) {
         cand_mask <- cand_all
@@ -452,13 +468,16 @@ run_supervised_ecoregion_cda <- function(
   is_train <- rep(FALSE, n)
 
   if (length(active_ecos) >= 2L) {
-    is_train <- cand_mask & (rg %in% active_ecos)
+    is_train <- cand_mask & (rg %in% active_ecos) & not_quar
     X_full <- as.matrix(df[, feature_cols, drop = FALSE])
     storage.mode(X_full) <- "double"
     for (j in seq_len(ncol(X_full))) {
-      if (any(is.na(X_full[, j]))) {
-        fill_v <- if (any(!is.na(X_full[is_train, j]))) mean(X_full[is_train, j], na.rm = TRUE) else 0.0
-        X_full[is.na(X_full[, j]), j] <- fill_v
+      bad_j <- !is.finite(X_full[, j])
+      if (any(bad_j)) {
+        fin_tr_j <- is.finite(X_full[is_train, j])
+        fill_v <- if (any(fin_tr_j)) stats::median(X_full[is_train, j][fin_tr_j], na.rm = TRUE) else 0.0
+        if (!is.finite(fill_v)) fill_v <- 0.0
+        X_full[bad_j, j] <- fill_v
       }
     }
 
@@ -503,12 +522,15 @@ run_supervised_ecoregion_cda <- function(
       if (!any(is.finite(w_eco_a) & w_eco_a > 0.0)) w_eco_a <- rep(1.0, length(active_idx))
 
       if (exists("compute_weighted_shrinkage_cda_loocv", mode = "function")) {
+        X_cand_eco <- as.matrix(df[active_idx, feature_cols, drop = FALSE])
+        storage.mode(X_cand_eco) <- "double"
         loocv_acc <- tryCatch(
           compute_weighted_shrinkage_cda_loocv(
             X_a_fit, grp_a, w_a = w_eco_a,
             coords_df = df[active_idx, , drop = FALSE],
-            X_cand = X_full[active_idx, , drop = FALSE],
-            deme_radius_km = 10.0
+            deme_radius_km = 10.0,
+            X_cand = X_cand_eco,
+            allow_supervised_f = FALSE
           ),
           error = function(e) NA_real_
         )
@@ -996,13 +1018,18 @@ run_multivariate_manova_audit <- function(
   )
 
   # 3. Non-NA regional_group US EPA Level III Ecoregions (>= 2 regions with >= 3 vouchers)
+  quar_mask <- .is_quarantined_ecoregion_coord(df)
   rg_vec <- if ("regional_group" %in% names(df)) standardize_epa_l3_label_r(df$regional_group) else rep(NA_character_, n)
   if (all(is.na(rg_vec))) {
     lat_col <- intersect(c("decimalLatitude"), names(df))
     lon_col <- intersect(c("decimalLongitude"), names(df))
     if ((length(lat_col) > 0L && length(lon_col) > 0L) || any(c("stateProvince", "county") %in% names(df))) {
-      lat_v <- if (length(lat_col) > 0L) df[[lat_col[1]]] else rep(NA_real_, n)
-      lon_v <- if (length(lon_col) > 0L) df[[lon_col[1]]] else rep(NA_real_, n)
+      lat_v <- if (length(lat_col) > 0L) suppressWarnings(as.numeric(df[[lat_col[1]]])) else rep(NA_real_, n)
+      lon_v <- if (length(lon_col) > 0L) suppressWarnings(as.numeric(df[[lon_col[1]]])) else rep(NA_real_, n)
+      if (any(quar_mask)) {
+        lat_v[quar_mask] <- NA_real_
+        lon_v[quar_mask] <- NA_real_
+      }
       st_v <- if ("stateProvince" %in% names(df)) df$stateProvince else NULL
       co_v <- if ("county" %in% names(df)) df$county else NULL
       rg_vec <- tryCatch(infer_epa_level3_ecoregion(lat_v, lon_v, state_province = st_v, county = co_v), error = function(e) rg_vec)
@@ -1030,15 +1057,16 @@ run_multivariate_manova_audit <- function(
   for (spec in factor_specs) {
     g_raw <- spec$vec
     min_n <- as.integer(spec$min_n)
-    if (length(unique(g_raw[!is.na(g_raw)])) < 2L) next
+    geo_ok_spec <- if (identical(spec$name, "regional_group")) !quar_mask else rep(TRUE, n)
+    if (length(unique(g_raw[!is.na(g_raw) & geo_ok_spec])) < 2L) next
 
     # Enforce strict Tier_1/Tier_2 authority anchor split when positive anchors exist
     if (has_positive_anchors) {
-      cand_mask <- !is.na(g_raw) & has_pcs & is_t1 & (auth_w > 0)
+      cand_mask <- !is.na(g_raw) & has_pcs & is_t1 & (auth_w > 0) & geo_ok_spec
       tab_c <- table(g_raw[cand_mask])
       act_lvls <- sort_group_levels(names(tab_c[tab_c >= min_n]))
       if (length(act_lvls) < 2L) {
-        cand_alt <- !is.na(g_raw) & has_pcs & (auth_w > 0)
+        cand_alt <- !is.na(g_raw) & has_pcs & (auth_w > 0) & geo_ok_spec
         tab_alt <- table(g_raw[cand_alt])
         if (sum(tab_alt >= min_n) >= 2L) {
           cand_mask <- cand_alt
@@ -1047,11 +1075,11 @@ run_multivariate_manova_audit <- function(
       }
       w_use <- auth_w
     } else {
-      cand_mask <- !is.na(g_raw) & has_pcs & is_t1
+      cand_mask <- !is.na(g_raw) & has_pcs & is_t1 & geo_ok_spec
       tab_c <- table(g_raw[cand_mask])
       act_lvls <- sort_group_levels(names(tab_c[tab_c >= min_n]))
       if (length(act_lvls) < 2L) {
-        cand_alt <- !is.na(g_raw) & has_pcs
+        cand_alt <- !is.na(g_raw) & has_pcs & geo_ok_spec
         tab_alt <- table(g_raw[cand_alt])
         if (sum(tab_alt >= min_n) >= 2L) {
           cand_mask <- cand_alt
@@ -1062,7 +1090,7 @@ run_multivariate_manova_audit <- function(
     }
 
     if (length(act_lvls) < 2L) next
-    is_train <- cand_mask & (g_raw %in% act_lvls)
+    is_train <- cand_mask & (g_raw %in% act_lvls) & geo_ok_spec
     if (has_positive_anchors && exists("compute_spatial_balance_weights", mode = "function")) w_use <- auth_w * compute_spatial_balance_weights(df, active_mask = is_train, recompute = TRUE)
 
     X_full <- as.matrix(df[, avail_cols, drop = FALSE])
