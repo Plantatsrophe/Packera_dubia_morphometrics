@@ -396,7 +396,7 @@ build_na_projected_basemap_gg <- function(lon_vec, lat_vec, target_crs = 5070L) 
     bg_sf <- tryCatch({
       m_usa <- maps::map("state", plot = FALSE, fill = TRUE)
       sf_usa <- sf::st_as_sf(m_usa)
-      sf::st_crs(sf_usa) <- 4326
+      if (is.na(sf::st_crs(sf_usa))) sf_usa <- sf::st_set_crs(sf_usa, 4326) else sf_usa <- sf::st_transform(sf_usa, 4326)
       sf_usa <- sf::st_make_valid(sf_usa)
       sf::st_transform(sf_usa, target_crs)
     }, error = function(e) NULL)

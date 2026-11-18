@@ -233,6 +233,7 @@ load_contour_file <- function(filepath) {
 
     ppm <- mn("pixels_per_mm"); cr <- resolve_step03_calibration_provenance(ppm, if (!is.null(mm) && "is_calibrated_mm" %in% names(mm)) mm$is_calibrated_mm[1L] else NULL, ms("scale_source", ""))
     is_cal <- cr$is_calibrated_mm[1L]; mmn <- function(cn) if (is_cal) mn(cn) else NA_real_
+    is_unb <- exists("is_step03_plausible_unboxed_mm", mode = "function") && isTRUE(is_step03_plausible_unboxed_mm(ppm, cr$scale_source[1L]))
     area_px <- abs(0.5 * sum(coo[, 1] * c(coo[-1, 2], coo[1, 2]) - coo[, 2] * c(coo[-1, 1], coo[1, 1])))
     perim_px <- sum(sqrt(diff(c(coo[, 1], coo[1, 1]))^2 + diff(c(coo[, 2], coo[1, 2]))^2))
     circ <- if (is.finite(perim_px) && perim_px > 1e-6) round(min(1.0, (4 * pi * area_px) / (perim_px^2)), 4) else NA_real_
@@ -258,13 +259,34 @@ load_contour_file <- function(filepath) {
       blade_length_mm = mmn("blade_length_mm"), blade_width_mm = mmn("blade_width_mm"), petiole_to_blade_ratio = mn("petiole_to_blade_ratio"),
       is_dissected = ml("is_dissected", (ncc > 1L) || (is.finite(sol) && (sol < 0.72))), cy_rel_plant_bbox = mn("cy_rel_plant_bbox"), area_px = round(area_px, 1),
       centroid_size_px = if (!is.na(cs_px)) round(cs_px, 2) else NA_real_, centroid_size = if (is_cal && !is.na(cs_mm)) round(cs_mm, 4) else NA_real_,
-      log_centsize = if (is_cal && !is.na(cs_mm) && cs_mm > 0) round(log10(cs_mm), 6) else NA_real_, mask_source = f, stringsAsFactors = FALSE)
+      log_centsize = if (is_cal && !is.na(cs_mm) && cs_mm > 0) round(log10(cs_mm), 6) else NA_real_,
+      log_centsize_unboxed = if (is_unb && !is_cal && !is.na(cs_px) && is.finite(cs_px) && cs_px > 0) round(log10(cs_px / ppm), 6) else NA_real_, mask_source = f, stringsAsFactors = FALSE)
     for (dc in dyn_cols) rec[[dc]] <- mn(dc)
     list(shape_name = meta$shape_id, coo = coo, rec = rec)
   }
   ing_l <- if (.Platform$OS.type == "unix" && length(cfiles) >= 100 && exists("packera_mclapply", mode = "function")) packera_mclapply(cfiles, ingest_one, mc.cores = resolve_packera_workers(32L, length(cfiles))) else lapply(cfiles, ingest_one)
   valid <- Filter(Negate(is.null), ing_l); if (length(valid) == 0) stop("Failed to extract valid QC-passing coordinate contours.")
   list(fac_df = do.call(rbind, lapply(valid, `[[`, "rec")), coo_list = lapply(valid, `[[`, "coo"), shape_names = vapply(valid, `[[`, character(1), "shape_name"))
+}
+
+.propagate_step03_unboxed_otu <- function(specimen_df, leaf_df) {
+  if (is.null(specimen_df) || nrow(specimen_df) == 0L || is.null(leaf_df) || nrow(leaf_df) == 0L) return(specimen_df)
+  pid <- function(d) if ("plant_individual_id" %in% names(d)) ifelse(is.na(d$plant_individual_id), 0L, suppressWarnings(as.integer(d$plant_individual_id))) else rep(0L, nrow(d))
+  grp_l <- split(seq_len(nrow(leaf_df)), paste0(trimws(as.character(leaf_df$catalogNumber)), "__", pid(leaf_df)))
+  s_key <- paste0(trimws(as.character(specimen_df$catalogNumber)), "__", pid(specimen_df))
+  lz <- if ("leaf_zone" %in% names(leaf_df)) tolower(trimws(as.character(leaf_df$leaf_zone))) else rep("basal", nrow(leaf_df))
+  out <- if ("is_contour_outlier" %in% names(leaf_df)) (!is.na(leaf_df$is_contour_outlier) & as.logical(leaf_df$is_contour_outlier)) else rep(FALSE, nrow(leaf_df))
+  typ <- if ("is_type_specimen" %in% names(leaf_df)) (!is.na(leaf_df$is_type_specimen) & as.logical(leaf_df$is_type_specimen)) else rep(FALSE, nrow(leaf_df))
+  lcu_l <- if ("log_centsize_unboxed" %in% names(leaf_df)) suppressWarnings(as.numeric(leaf_df$log_centsize_unboxed)) else rep(NA_real_, nrow(leaf_df))
+  cal_s <- if ("is_calibrated_mm" %in% names(specimen_df)) (!is.na(specimen_df$is_calibrated_mm) & as.logical(specimen_df$is_calibrated_mm)) else rep(FALSE, nrow(specimen_df))
+  lcu_s <- vapply(seq_len(nrow(specimen_df)), function(i) {
+    if (cal_s[i]) return(NA_real_); idx <- grp_l[[s_key[i]]]; if (length(idx) == 0L) return(NA_real_)
+    ko <- !(out[idx] & !typ[idx]); if (any(ko)) idx <- idx[ko]; bas <- idx[is.na(lz[idx]) | lz[idx] == "basal"]; if (length(bas) > 0L) idx <- bas
+    vals <- lcu_l[idx]; vals <- vals[is.finite(vals)]; if (length(vals) > 0L) round(stats::median(vals), 6) else NA_real_
+  }, numeric(1L))
+  n_cal <- sum(!is.na(leaf_df$is_calibrated_mm) & as.logical(leaf_df$is_calibrated_mm), na.rm = TRUE)
+  specimen_df$log_centsize_unboxed <- lcu_s; specimen_df$allometry_scale_tier <- ifelse(cal_s, "verified_ruler", if (n_cal < 10L) ifelse(is.finite(lcu_s), "tick_lattice_fallback", "uncalibrated") else "uncalibrated")
+  specimen_df
 }
 
 # 4. Standardized Workflow Orchestrator
@@ -291,6 +313,7 @@ run_fourier_extraction <- function(opts) {
     cal_db <- resolve_step03_calibration_provenance(if ("pixels_per_mm" %in% names(fac_df)) fac_df$pixels_per_mm else NA_real_, if ("is_calibrated_mm" %in% names(fac_df)) fac_df$is_calibrated_mm else NULL, if ("scale_source" %in% names(fac_df)) fac_df$scale_source else NULL)
     fac_df$is_calibrated_mm <- cal_db$is_calibrated_mm; fac_df$scale_source <- cal_db$scale_source
     if (any(!cal_db$is_calibrated_mm)) for (gc in intersect(c("centroid_size", "log_centsize", "area_mm2", "petiole_length_mm", "petiole_width_mm", "blade_length_mm", "blade_width_mm"), names(fac_df))) fac_df[[gc]][!cal_db$is_calibrated_mm] <- NA_real_
+    fac_df <- .populate_step03_unboxed_scale(fac_df, coo_list, centsize_fn = compute_centsize_robust)
     message("Ingested ", length(coo_list), " QC-passing 120-vertex contours directly from SQLite extracted_leaves.")
   } else { csv_ing <- .ingest_step03_csv_contours(opts, sec_dup_cats, active_voucher_cats); fac_df <- csv_ing$fac_df; coo_list <- csv_ing$coo_list; shape_names_vec <- csv_ing$shape_names }
 
@@ -299,6 +322,7 @@ run_fourier_extraction <- function(opts) {
   had_explicit_lz <- ("leaf_zone" %in% names(fac_df) && any(!is.na(fac_df$leaf_zone) & nzchar(trimws(as.character(fac_df$leaf_zone))))) || ("dist_from_crown_norm" %in% names(fac_df) && any(is.finite(suppressWarnings(as.numeric(fac_df$dist_from_crown_norm)))))
   if (exists("filter_basal_lamina_contours", mode = "function")) { bg <- filter_basal_lamina_contours(fac_df, coo_list, retain_cauline_tagged = TRUE); fac_df <- bg$fac_df; coo_list <- bg$coo_list }
   if (exists("align_contour_horizontal_xax", mode = "function")) coo_list <- Map(align_contour_horizontal_xax, coo_list, if ("mask_is_upright" %in% names(fac_df)) as.logical(fac_df$mask_is_upright) else rep(NA, length(coo_list)))
+  fac_df <- .populate_step03_unboxed_scale(fac_df, coo_list, centsize_fn = compute_centsize_robust)
   message(sprintf("Assembled %d valid QC-passing contours for Elliptic Fourier Analysis & ECT.", length(coo_list)))
 
   # 3. Dynamic Harmonic Power Calibration & Homologized EFA
@@ -316,6 +340,7 @@ run_fourier_extraction <- function(opts) {
         cal_ok <- if ("is_calibrated_mm" %in% names(fac_df)) (!is.na(fac_df$is_calibrated_mm) & as.logical(fac_df$is_calibrated_mm)) else rep(TRUE, nrow(fac_df))
         fac_df$centroid_size <- ifelse(cal_ok, round(as.numeric(cs_v), 4), NA_real_)
         fac_df$log_centsize <- ifelse(cal_ok & !is.na(fac_df$centroid_size) & fac_df$centroid_size > 0, round(log10(fac_df$centroid_size), 6), NA_real_)
+        fac_df <- .populate_step03_unboxed_scale(fac_df, cs_px_override = ifelse(!cal_ok, as.numeric(cs_v), NA_real_))
       }
       out_obj <- Momocs::coo_center(out_obj) %>% Momocs::coo_scale(); h_opt <- cal_fn(out_obj, nb_h = f_cfg$harmonics); harmonic_names <- as.vector(outer(c("A", "B", "C", "D"), seq_len(h_opt), function(x, y) paste0(x, y)))
       ef_res <- tryCatch(Momocs::efourier(out_obj, nb.h = h_opt, norm = FALSE, start = FALSE), error = function(e) NULL)
@@ -432,14 +457,15 @@ run_fourier_extraction <- function(opts) {
     }
   }
   efa_df$efd_harmonic_opt <- specimen_df$efd_harmonic_opt <- as.integer(h_opt); efa_df$efd_k95_pcs <- specimen_df$efd_k95_pcs <- as.integer(k_95)
+  specimen_df <- .propagate_step03_unboxed_otu(specimen_df, efa_df)
   if (exists("compute_separate_cauline_otu_track", mode = "function")) specimen_df <- compute_separate_cauline_otu_track(efa_df, specimen_df, sym_names)
 
   # 6. Export CSVs, SQLite Persistence & Step 03 Figures
   exp_pcs <- paste0("PC", seq_len(k_export))
-  lead_cols <- intersect(c("catalogNumber", "plant_individual_id", "leaf_id", "mask_is_upright", "leaf_zone", "leaf_zone_confidence", "dist_from_crown_norm", "cy_rel_plant_bbox", "pixels_per_mm", "is_calibrated_mm", "scale_source", "species_standardized", "scientificName", "species_raw", "identifiedBy", "determiner_tier", "type_status", "is_type_specimen", "is_promoted_bronze", "anchor_tier_source", "authority_weight", "is_passive", "spatial_balance_weight", "efd_harmonic_opt", "efd_k95_pcs", exp_pcs, "ECT_PC1", "ECT_PC2", "ECT_PC3", "ect_lobe_complexity", "ect_bilateral_asym", "aspect_ratio", "circularity", "solidity", "dissection_index", "archetype_score", "petiole_length_mm", "petiole_width_mm", "blade_length_mm", "blade_width_mm", "petiole_to_blade_ratio", discover_step03_photometry_cols(names(efa_df)), "is_dissected", "harmonic_roughness", "is_contour_outlier", "leaf_quality_weight", "area_mm2", "area_px", "centroid_size_px", "centroid_size", "log_centsize", "mask_source"), names(efa_df))
+  lead_cols <- intersect(c("catalogNumber", "plant_individual_id", "leaf_id", "mask_is_upright", "leaf_zone", "leaf_zone_confidence", "dist_from_crown_norm", "cy_rel_plant_bbox", "pixels_per_mm", "is_calibrated_mm", "scale_source", "allometry_scale_tier", "species_standardized", "scientificName", "species_raw", "identifiedBy", "determiner_tier", "type_status", "is_type_specimen", "is_promoted_bronze", "anchor_tier_source", "authority_weight", "is_passive", "spatial_balance_weight", "efd_harmonic_opt", "efd_k95_pcs", exp_pcs, "ECT_PC1", "ECT_PC2", "ECT_PC3", "ect_lobe_complexity", "ect_bilateral_asym", "aspect_ratio", "circularity", "solidity", "dissection_index", "archetype_score", "petiole_length_mm", "petiole_width_mm", "blade_length_mm", "blade_width_mm", "petiole_to_blade_ratio", discover_step03_photometry_cols(names(efa_df)), "is_dissected", "harmonic_roughness", "is_contour_outlier", "leaf_quality_weight", "area_mm2", "area_px", "centroid_size_px", "centroid_size", "log_centsize", "log_centsize_unboxed", "mask_source"), names(efa_df))
   efa_df <- efa_df[, c(lead_cols, setdiff(names(efa_df), lead_cols))]; for (anm in intersect(c("ect_sym_mats", "ect_sym_vecs", "ect_coo_list", "ect_basal_var_exp", "ect_sym_dim"), names(ect_attrs))) attr(efa_df, anm) <- ect_attrs[[anm]]
   spec_attrs <- attributes(specimen_df)[c("ect_basal_var_exp", "ect_cauline_var_exp")]
-  lead_spec <- intersect(c("catalogNumber", "plant_individual_id", "leaf_count", "basal_leaf_count", "cauline_leaf_count", "morph_tier_source", "foliar_variance", "within_rosette_efa_dispersion", "heteroblasty_efa_distance", "heteroblasty_ect_distance", "pixels_per_mm", "is_calibrated_mm", "scale_source", "mask_is_upright", "species_standardized", "scientificName", "species_raw", "identifiedBy", "determiner_tier", "type_status", "is_type_specimen", "is_promoted_bronze", "anchor_tier_source", "authority_weight", "is_passive", "spatial_balance_weight", "efd_harmonic_opt", "efd_k95_pcs", exp_pcs, "Cauline_PC1", "Cauline_PC2", "Cauline_PC3", "ECT_PC1", "ECT_PC2", "ECT_PC3", "Cauline_ECT_PC1", "Cauline_ECT_PC2", "ect_lobe_complexity", "cauline_ect_lobe_complexity", "aspect_ratio", "circularity", "solidity", "q25_solidity", "dissection_index", "dissected_leaf_fraction", "cauline_solidity_med", "cauline_dissection_index_med", "cauline_aspect_ratio_med", "cauline_blade_length_mm", "basal_vs_cauline_length_ratio", "basal_vs_cauline_solidity_delta", "archetype_score", "petiole_length_mm", "petiole_width_mm", "blade_length_mm", "blade_width_mm", "petiole_to_blade_ratio", discover_step03_photometry_cols(names(specimen_df)), "is_dissected", "harmonic_roughness", "is_contour_outlier", "leaf_quality_weight", "area_mm2", "area_px", "centroid_size", "log_centsize"), names(specimen_df))
+  lead_spec <- intersect(c("catalogNumber", "plant_individual_id", "leaf_count", "basal_leaf_count", "cauline_leaf_count", "morph_tier_source", "foliar_variance", "within_rosette_efa_dispersion", "heteroblasty_efa_distance", "heteroblasty_ect_distance", "pixels_per_mm", "is_calibrated_mm", "scale_source", "allometry_scale_tier", "mask_is_upright", "species_standardized", "scientificName", "species_raw", "identifiedBy", "determiner_tier", "type_status", "is_type_specimen", "is_promoted_bronze", "anchor_tier_source", "authority_weight", "is_passive", "spatial_balance_weight", "efd_harmonic_opt", "efd_k95_pcs", exp_pcs, "Cauline_PC1", "Cauline_PC2", "Cauline_PC3", "ECT_PC1", "ECT_PC2", "ECT_PC3", "Cauline_ECT_PC1", "Cauline_ECT_PC2", "ect_lobe_complexity", "cauline_ect_lobe_complexity", "aspect_ratio", "circularity", "solidity", "q25_solidity", "dissection_index", "dissected_leaf_fraction", "cauline_solidity_med", "cauline_dissection_index_med", "cauline_aspect_ratio_med", "cauline_blade_length_mm", "basal_vs_cauline_length_ratio", "basal_vs_cauline_solidity_delta", "archetype_score", "petiole_length_mm", "petiole_width_mm", "blade_length_mm", "blade_width_mm", "petiole_to_blade_ratio", discover_step03_photometry_cols(names(specimen_df)), "is_dissected", "harmonic_roughness", "is_contour_outlier", "leaf_quality_weight", "area_mm2", "area_px", "centroid_size", "log_centsize", "log_centsize_unboxed"), names(specimen_df))
   specimen_df <- specimen_df[, c(lead_spec, setdiff(names(specimen_df), lead_spec))]; for (anm in intersect(c("ect_basal_var_exp", "ect_cauline_var_exp"), names(spec_attrs))) attr(specimen_df, anm) <- spec_attrs[[anm]]
 
   if (!is.null(opts$output_individual) && nzchar(opts$output_individual)) {

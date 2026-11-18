@@ -2347,10 +2347,25 @@ assign_spatial_grid_blocks <- function(coords, block_deg = 0.50, k = 5L) {
 
 compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_mode = FALSE, vif_res = NULL, env_dir = NULL, demo = FALSE) {
   message("Generating Moran's Eigenvector Maps (MEM1..MEM5) & fitting Authority-Anchored Spatial Random Forests...")
+  env_vars_in <- env_vars
   cfg_s05 <- if (exists("load_step05_macroecology_config", mode = "function")) {
     load_step05_macroecology_config()
   } else {
-    list(cor_threshold = 0.70, vif_threshold = 5.0, cumulative_importance_cutoff = 0.85)
+    list(
+      cor_threshold = 0.70, vif_threshold = 5.0, cumulative_importance_cutoff = 0.85,
+      min_node_size = 12L, max_depth = 6L, sample_fraction = 0.70,
+      ecotype_min_silhouette = 0.40, ecotype_min_fold_jaccard = 0.60
+    )
+  }
+  rf_min_node_cfg <- if (!is.null(cfg_s05$min_node_size) && is.finite(cfg_s05$min_node_size)) as.integer(round(cfg_s05$min_node_size)) else 12L
+  rf_max_depth_cfg <- if (!is.null(cfg_s05$max_depth) && is.finite(cfg_s05$max_depth)) max(1L, as.integer(round(cfg_s05$max_depth))) else 6L
+  rf_sample_frac_cfg <- if (!is.null(cfg_s05$sample_fraction) && is.finite(cfg_s05$sample_fraction)) min(1.0, max(0.05, as.numeric(cfg_s05$sample_fraction))) else 0.70
+  eco_min_jacc <- if (!is.null(cfg_s05$ecotype_min_fold_jaccard) && is.finite(cfg_s05$ecotype_min_fold_jaccard)) as.numeric(cfg_s05$ecotype_min_fold_jaccard) else 0.60
+  .clamp_rf_min_node <- function(n_obs) {
+    max(2L, min(rf_min_node_cfg, max(2L, as.integer(floor(as.numeric(n_obs) / 3.0)))))
+  }
+  .clamp_rf_sample_frac <- function(n_obs) {
+    max(rf_sample_frac_cfg, min(1.0, 2.0 / max(1.0, as.numeric(n_obs))))
   }
   .old_seed_srf <- if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) get(".Random.seed", envir = .GlobalEnv) else NULL
   set.seed(42L)
@@ -2358,6 +2373,7 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
   if (!("analysis_group" %in% names(df)) || all(is.na(df$analysis_group) | !nzchar(trimws(as.character(df$analysis_group))))) {
     df <- resolve_analysis_group(df, intraspecific_mode = intraspecific_mode)
   }
+  df_in <- df
   if (exists("flag_coordinate_uncertainty", mode = "function") && !("is_training_eligible_coord" %in% names(df))) {
     df <- flag_coordinate_uncertainty(df, max_uncertainty_m = 10000.0)
   }
@@ -2716,11 +2732,13 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
     df_env_pb <- data.frame(y = y_pb, as.data.frame(X_env_pb), check.names = FALSE)
     df_all_pb <- data.frame(y = y_pb, as.data.frame(X_all_pb), check.names = FALSE)
     if (requireNamespace("ranger", quietly = TRUE)) {
-      rf_nonspatial <- ranger::ranger(y ~ ., data = df_env_pb, num.trees = n_trees, importance = "permutation", probability = FALSE, case.weights = wts_pb, num.threads = rf_threads, seed = 42)
+      mns_pb <- .clamp_rf_min_node(nrow(df_env_pb))
+      sf_pb <- .clamp_rf_sample_frac(nrow(df_env_pb))
+      rf_nonspatial <- ranger::ranger(y ~ ., data = df_env_pb, num.trees = n_trees, importance = "permutation", probability = FALSE, min.node.size = mns_pb, max.depth = rf_max_depth_cfg, sample.fraction = sf_pb, case.weights = wts_pb, num.threads = rf_threads, seed = 42)
       oob_acc_nonspatial <- 1.0 - rf_nonspatial$prediction.error
-      rf_spatial <- ranger::ranger(y ~ ., data = df_all_pb, num.trees = n_trees, importance = "permutation", probability = FALSE, case.weights = wts_pb, num.threads = rf_threads, seed = 42)
+      rf_spatial <- ranger::ranger(y ~ ., data = df_all_pb, num.trees = n_trees, importance = "permutation", probability = FALSE, min.node.size = mns_pb, max.depth = rf_max_depth_cfg, sample.fraction = sf_pb, case.weights = wts_pb, num.threads = rf_threads, seed = 42)
       oob_acc_spatial <- 1.0 - rf_spatial$prediction.error
-      rf_prob_anchor <- ranger::ranger(y ~ ., data = df_env_pb, num.trees = n_trees, probability = TRUE, case.weights = wts_pb, num.threads = rf_threads, seed = 42)
+      rf_prob_anchor <- ranger::ranger(y ~ ., data = df_env_pb, num.trees = n_trees, probability = TRUE, min.node.size = mns_pb, max.depth = rf_max_depth_cfg, sample.fraction = sf_pb, case.weights = wts_pb, num.threads = rf_threads, seed = 42)
     } else {
       rf_nonspatial <- randomForest::randomForest(x = X_env_pb, y = y_pb, ntree = n_trees, importance = TRUE)
       oob_acc_nonspatial <- 1.0 - rf_nonspatial$err.rate[n_trees, "OOB"]
@@ -2796,7 +2814,9 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
         )
         if (requireNamespace("ranger", quietly = TRUE)) {
           tr_df_pb <- data.frame(y = droplevels(y_pb[tr_i]), fold_scr_pb$X_tr_imp, check.names = FALSE)
-          fit_b <- ranger::ranger(y ~ ., data = tr_df_pb, num.trees = max(100L, floor(n_trees / 2L)), probability = TRUE, case.weights = wts_pb[tr_i], num.threads = rf_threads, seed = 42L + as.integer(k_f))
+          mns_pbf <- .clamp_rf_min_node(nrow(tr_df_pb))
+          sf_pbf <- .clamp_rf_sample_frac(nrow(tr_df_pb))
+          fit_b <- ranger::ranger(y ~ ., data = tr_df_pb, num.trees = max(100L, floor(n_trees / 2L)), probability = TRUE, min.node.size = mns_pbf, max.depth = rf_max_depth_cfg, sample.fraction = sf_pbf, case.weights = wts_pb[tr_i], num.threads = rf_threads, seed = 42L + as.integer(k_f))
           pr_b <- stats::predict(fit_b, data = X_te_pb_f, num.threads = rf_threads)$predictions
           if (is.matrix(pr_b) && "Presence" %in% colnames(pr_b)) oof_pb_pres[te_i] <- pr_b[, "Presence"]
         } else {
@@ -2911,11 +2931,13 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
   if (requireNamespace("ranger", quietly = TRUE)) {
     df_env_anc <- data.frame(y = y_anchor, as.data.frame(X_env_anc), check.names = FALSE)
     df_all_anc <- data.frame(y = y_anchor, as.data.frame(X_all_anc), check.names = FALSE)
-    rf_nonspatial <- ranger::ranger(y ~ ., data = df_env_anc, num.trees = n_trees, importance = "permutation", probability = FALSE, case.weights = wts_anc, num.threads = rf_threads, seed = 42)
+    mns_anc <- .clamp_rf_min_node(nrow(df_env_anc))
+    sf_anc <- .clamp_rf_sample_frac(nrow(df_env_anc))
+    rf_nonspatial <- ranger::ranger(y ~ ., data = df_env_anc, num.trees = n_trees, importance = "permutation", probability = FALSE, min.node.size = mns_anc, max.depth = rf_max_depth_cfg, sample.fraction = sf_anc, case.weights = wts_anc, num.threads = rf_threads, seed = 42)
     oob_acc_nonspatial <- 1 - rf_nonspatial$prediction.error
-    rf_spatial <- ranger::ranger(y ~ ., data = df_all_anc, num.trees = n_trees, importance = "permutation", probability = FALSE, case.weights = wts_anc, num.threads = rf_threads, seed = 42)
+    rf_spatial <- ranger::ranger(y ~ ., data = df_all_anc, num.trees = n_trees, importance = "permutation", probability = FALSE, min.node.size = mns_anc, max.depth = rf_max_depth_cfg, sample.fraction = sf_anc, case.weights = wts_anc, num.threads = rf_threads, seed = 42)
     oob_acc_spatial <- 1 - rf_spatial$prediction.error
-    rf_prob_anchor <- ranger::ranger(y ~ ., data = df_env_anc, num.trees = n_trees, probability = TRUE, case.weights = wts_anc, num.threads = rf_threads, seed = 42)
+    rf_prob_anchor <- ranger::ranger(y ~ ., data = df_env_anc, num.trees = n_trees, probability = TRUE, min.node.size = mns_anc, max.depth = rf_max_depth_cfg, sample.fraction = sf_anc, case.weights = wts_anc, num.threads = rf_threads, seed = 42)
   } else {
     rf_nonspatial <- randomForest::randomForest(x = X_env_anc, y = y_anchor, ntree = n_trees, importance = TRUE)
     oob_acc_nonspatial <- 1 - rf_nonspatial$err.rate[n_trees, "OOB"]
@@ -3018,8 +3040,11 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
       wts_tr_f <- pmin(4.0, pmax(0.25, wts_tr_f / max(mean(wts_tr_f, na.rm = TRUE), 1e-8)))
       if (requireNamespace("ranger", quietly = TRUE)) {
         tr_df <- data.frame(y = y_tr_f, fold_scr$X_tr_imp, check.names = FALSE)
+        mns_cv <- .clamp_rf_min_node(nrow(tr_df))
+        sf_cv <- .clamp_rf_sample_frac(nrow(tr_df))
         fit_cv <- ranger::ranger(y ~ ., data = tr_df, num.trees = max(100, floor(n_trees / 2)),
-                                 probability = TRUE, case.weights = wts_tr_f, num.threads = rf_threads, seed = 42 + as.integer(f_id))
+                                 probability = TRUE, min.node.size = mns_cv, max.depth = rf_max_depth_cfg,
+                                 sample.fraction = sf_cv, case.weights = wts_tr_f, num.threads = rf_threads, seed = 42 + as.integer(f_id))
         pr_mat <- stats::predict(fit_cv, data = X_te_f, num.threads = rf_threads)$predictions
         if (!is.matrix(pr_mat)) pr_mat <- matrix(pr_mat, nrow = length(te_sub), dimnames = list(NULL, names(pr_mat)))
         oof_prob_mat[te_sub, ] <- 0.0
@@ -3170,6 +3195,42 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
     }
   }
   cv_stab <- .compute_cv_fold_stability(fold_selected_sets, length(env_vars))
+  cl_fold_jacc <- if (length(ok_cv) > 0L) {
+    ref_v <- as.character(oof_ref_anc[ok_cv]); anc_v <- as.character(y_anchor[ok_cv])
+    u_cls_j <- unique(c(ref_v, anc_v))
+    j_cls <- vapply(u_cls_j, function(cl) {
+      a <- anc_v == cl; b <- ref_v == cl; u_ab <- sum(a | b)
+      if (u_ab > 0L) sum(a & b) / u_ab else 0.0
+    }, numeric(1))
+    mean(j_cls, na.rm = TRUE)
+  } else {
+    0.0
+  }
+  eff_eco_jacc <- max(c(cv_stab$jaccard, min(cl_fold_jacc, spatial_block_cv_acc)), na.rm = TRUE)
+  if (isTRUE(intraspecific_mode) && isTRUE(post_sel_rf) &&
+      (!is.finite(eff_eco_jacc) || eff_eco_jacc < eco_min_jacc ||
+       !is.finite(cv_stab$jaccard) || cv_stab$jaccard < 0.35 ||
+       !is.finite(spatial_block_cv_acc) || spatial_block_cv_acc < 0.70)) {
+    sp_vals_fb <- if ("species_standardized" %in% names(df_in)) stats::na.omit(trimws(as.character(df_in$species_standardized))) else character(0)
+    base_taxon <- if (length(sp_vals_fb) > 0L && nzchar(sp_vals_fb[1L])) sp_vals_fb[1L] else "Intraspecific_Lineage"
+    message(sprintf(
+      "[Step 05 Ecotype Collapse] Unstable intraspecific Ecotype_* partition (eff_Jaccard=%.3f < %.2f, pred_Jaccard=%.3f, cl_Jaccard=%.3f, or Spatial_Block_CV=%.3f < 0.70); collapsing back to unimodal K=1 envelope '%s'.",
+      if (is.finite(eff_eco_jacc)) eff_eco_jacc else 0.0, eco_min_jacc,
+      if (is.finite(cv_stab$jaccard)) cv_stab$jaccard else 0.0, cl_fold_jacc,
+      if (is.finite(spatial_block_cv_acc)) spatial_block_cv_acc else 0.0, base_taxon
+    ))
+    df_k1 <- df_in
+    df_k1$analysis_group <- rep(base_taxon, nrow(df_k1))
+    df_k1$ecotype_regime <- df_k1$analysis_group
+    attr(df_k1, "is_post_selection_ecotype") <- FALSE
+    k1_res <- compute_spatial_rf_mems(
+      df_k1, env_vars = env_vars_in, n_trees = n_trees,
+      intraspecific_mode = intraspecific_mode, vif_res = NULL, env_dir = env_dir, demo = demo
+    )
+    k1_res$is_post_selection_ecotype <- FALSE
+    k1_res$ecotype_collapsed_to_unimodal <- TRUE
+    return(k1_res)
+  }
   message(sprintf(
     "Authority-Anchored Spatial RF (%d Gold/Silver anchors, %d passive projections | Block Range = %.1f km | Fold p = %.2f, Jaccard = %.3f): NonSpatial_OOB_Acc = %.2f%% | Spatial_Block_CV_Acc = %.2f%% | Residual Moran's I = %.4f (p = %.4f)",
     n_anc, length(passive_idx), autocorr_info$range_km, cv_stab$mean_p, cv_stab$jaccard,
@@ -3941,7 +4002,11 @@ main <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
   cfg_s05 <- if (exists("load_step05_macroecology_config", mode = "function")) {
     load_step05_macroecology_config()
   } else {
-    list(cor_threshold = 0.70, vif_threshold = 5.0, cumulative_importance_cutoff = 0.85)
+    list(
+      cor_threshold = 0.70, vif_threshold = 5.0, cumulative_importance_cutoff = 0.85,
+      min_node_size = 12L, max_depth = 6L, sample_fraction = 0.70,
+      ecotype_min_silhouette = 0.40, ecotype_min_fold_jaccard = 0.60
+    )
   }
   message("=== Starting Multimodal Spatial RF & Ecological Niche Analysis ===")
 
@@ -4177,6 +4242,13 @@ main <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
     env_dir = opts$env_dir,
     demo = demo_mode
   )
+  if (is_intra_run && (isTRUE(srf_res$ecotype_collapsed_to_unimodal) || !isTRUE(srf_res$is_post_selection_ecotype))) {
+    sp_base_vals <- stats::na.omit(trimws(as.character(vouchers_df$species_standardized)))
+    base_tx_u <- if (length(sp_base_vals) > 0L && nzchar(sp_base_vals[1L])) sp_base_vals[1L] else "Intraspecific_Lineage"
+    vouchers_df$analysis_group <- rep(base_tx_u, nrow(vouchers_df))
+    vouchers_df$ecotype_regime <- vouchers_df$analysis_group
+    attr(vouchers_df, "is_post_selection_ecotype") <- FALSE
+  }
   vif_res <- NULL
   kept_rf_vars <- cand_eco
   if (!is.null(srf_res$collinearity_screening) && is.list(srf_res$collinearity_screening)) {
@@ -4318,6 +4390,46 @@ main <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
     tryCatch(persist_step05_to_sqlite(vouchers_df, opts$vouchers, demo = demo_mode), error = function(e) warning("SQLite Step 05 persistence note: ", e$message))
   }
 
+  sdm_out_dir <- dirname(dirname(opts$output_plot))
+  if (is.null(sdm_out_dir) || !nzchar(sdm_out_dir) || identical(sdm_out_dir, ".")) sdm_out_dir <- "outputs"
+  focal_tx_use <- if (!is.null(opts$focal_taxon) && nzchar(trimws(opts$focal_taxon))) {
+    standardize_packera_taxon(opts$focal_taxon)
+  } else {
+    "Packera dubia"
+  }
+  sdm_res <- if (!identical(trimws(env_plantmatics_or_packera("PLANTMATICS_SKIP_FIGURES", "PACKERA_SKIP_FIGURES")), "1")) {
+    tryCatch(
+      fit_and_project_maxent_sdm_maps(
+        df = geo_vouchers_df,
+        srf_res = srf_res,
+        env_dir = opts$env_dir,
+        out_dir = sdm_out_dir,
+        kept_vars = kept_rf_vars,
+        primary_clim_vars = primary_clim_vars,
+        primary_edaph_vars = primary_edaph_vars,
+        focal_taxon = focal_tx_use,
+        intraspecific_mode = is_intra_run,
+        demo = demo_mode
+      ),
+      error = function(e) {
+        warning("Step 05 MaxEnt/Ensemble SDM projection warning: ", e$message)
+        NULL
+      }
+    )
+  } else {
+    NULL
+  }
+
+  .extract_perf_mean <- function(perf_df, cand_cols) {
+    if (is.null(perf_df) || !is.data.frame(perf_df) || nrow(perf_df) == 0L) return(NA_real_)
+    for (cc in intersect(cand_cols, names(perf_df))) {
+      vals <- suppressWarnings(as.numeric(perf_df[[cc]]))
+      vals <- vals[is.finite(vals)]
+      if (length(vals) > 0L) return(round(mean(vals), 4))
+    }
+    NA_real_
+  }
+
   cv_p_out <- if (!is.null(srf_res$cv_mean_fold_predictors) && is.finite(srf_res$cv_mean_fold_predictors)) {
     round(as.numeric(srf_res$cv_mean_fold_predictors), 2)
   } else {
@@ -4328,14 +4440,38 @@ main <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
   } else {
     1.0
   }
+  oob_acc_out <- if (!is.null(srf_res$OOB_Accuracy) && is.finite(srf_res$OOB_Accuracy)) round(as.numeric(srf_res$OOB_Accuracy), 4) else NA_real_
+  sbcv_acc_out <- if (!is.null(srf_res$Spatial_Block_CV_Accuracy) && is.finite(srf_res$Spatial_Block_CV_Accuracy)) round(as.numeric(srf_res$Spatial_Block_CV_Accuracy), 4) else NA_real_
+  oob_block_gap <- if (is.finite(oob_acc_out) && is.finite(sbcv_acc_out)) round(oob_acc_out - sbcv_acc_out, 4) else NA_real_
+  auc_block_mean <- if (!is.null(sdm_res) && is.list(sdm_res)) {
+    .extract_perf_mean(sdm_res$performance, c("AUC_Block_Ensemble", "AUC_Block", "AUC_Block_Mean", "AUC_Block_SpatialRF", "AUC_Block_MaxEnt"))
+  } else {
+    NA_real_
+  }
+  cbi_mean <- if (!is.null(sdm_res) && is.list(sdm_res)) {
+    .extract_perf_mean(sdm_res$performance, c("CBI_Ensemble", "CBI", "CBI_Mean", "CBI_SpatialRF", "CBI_MaxEnt"))
+  } else {
+    NA_real_
+  }
+
   niche_summary_df <- if (!is.null(niche_res$summary) && is.data.frame(niche_res$summary)) {
     ns_df <- niche_res$summary
     if (nrow(ns_df) > 0L) {
       ns_df$CV_Mean_Fold_Predictors <- rep(cv_p_out, nrow(ns_df))
       ns_df$CV_Fold_Predictor_Jaccard <- rep(cv_j_out, nrow(ns_df))
+      ns_df$OOB_Accuracy <- rep(oob_acc_out, nrow(ns_df))
+      ns_df$Spatial_Block_CV_Accuracy <- rep(sbcv_acc_out, nrow(ns_df))
+      ns_df$OOB_Block_Gap <- rep(oob_block_gap, nrow(ns_df))
+      ns_df$AUC_Block_Mean <- rep(auc_block_mean, nrow(ns_df))
+      ns_df$CBI_Mean <- rep(cbi_mean, nrow(ns_df))
     } else {
       ns_df$CV_Mean_Fold_Predictors <- numeric(0)
       ns_df$CV_Fold_Predictor_Jaccard <- numeric(0)
+      ns_df$OOB_Accuracy <- numeric(0)
+      ns_df$Spatial_Block_CV_Accuracy <- numeric(0)
+      ns_df$OOB_Block_Gap <- numeric(0)
+      ns_df$AUC_Block_Mean <- numeric(0)
+      ns_df$CBI_Mean <- numeric(0)
     }
     ns_df
   } else {
@@ -4343,9 +4479,12 @@ main <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
       Pair = character(0), Taxon1 = character(0), Taxon2 = character(0),
       Schoener_D = numeric(0), p_value_D = numeric(0),
       CV_Mean_Fold_Predictors = numeric(0), CV_Fold_Predictor_Jaccard = numeric(0),
+      OOB_Accuracy = numeric(0), Spatial_Block_CV_Accuracy = numeric(0),
+      OOB_Block_Gap = numeric(0), AUC_Block_Mean = numeric(0), CBI_Mean = numeric(0),
       stringsAsFactors = FALSE
     )
   }
+  if (!is.null(niche_res) && is.list(niche_res)) niche_res$summary <- niche_summary_df
   if (write_csv_atomic(niche_summary_df, opts$output_summary, demo = demo_mode)) {
     message(sprintf("Saved Warren's Niche Identity summary to %s.", opts$output_summary))
   }
@@ -4393,29 +4532,6 @@ main <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
   if (!identical(trimws(env_plantmatics_or_packera("PLANTMATICS_SKIP_FIGURES", "PACKERA_SKIP_FIGURES")), "1")) {
     export_spatial_rf_figures(geo_vouchers_df, srf_res, niche_res, opts$output_plot, pheno_res = pheno_res)
   }
-
-  sdm_out_dir <- dirname(dirname(opts$output_plot))
-  if (is.null(sdm_out_dir) || !nzchar(sdm_out_dir) || identical(sdm_out_dir, ".")) sdm_out_dir <- "outputs"
-  focal_tx_use <- if (!is.null(opts$focal_taxon) && nzchar(trimws(opts$focal_taxon))) {
-    standardize_packera_taxon(opts$focal_taxon)
-  } else {
-    "Packera dubia"
-  }
-  if (!identical(trimws(env_plantmatics_or_packera("PLANTMATICS_SKIP_FIGURES", "PACKERA_SKIP_FIGURES")), "1")) tryCatch(
-    fit_and_project_maxent_sdm_maps(
-      df = geo_vouchers_df,
-      srf_res = srf_res,
-      env_dir = opts$env_dir,
-      out_dir = sdm_out_dir,
-      kept_vars = kept_rf_vars,
-      primary_clim_vars = primary_clim_vars,
-      primary_edaph_vars = primary_edaph_vars,
-      focal_taxon = focal_tx_use,
-      intraspecific_mode = is_intra_run,
-      demo = demo_mode
-    ),
-    error = function(e) warning("Step 05 MaxEnt/Ensemble SDM projection warning: ", e$message)
-  )
 
   message("=== Multimodal Spatial RF & Niche Modeling Analysis Complete ===")
 }

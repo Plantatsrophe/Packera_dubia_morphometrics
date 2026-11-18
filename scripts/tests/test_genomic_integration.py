@@ -2552,6 +2552,39 @@ class TestStep06OrganellarAndReplicateRegression(unittest.TestCase):
             self.assertAlmostEqual(float(samp_df.loc["TEST_TOMSC1M", "coalescent_gdi"]), float(samp_df.loc["TEST_TOMSC1P", "coalescent_gdi"]), places=6)
             self.assertAlmostEqual(float(samp_df.loc["TEST_ANOJE1M", "coalescent_gdi"]), float(samp_df.loc["TEST_ANOJE1P", "coalescent_gdi"]), places=6)
 
+    def test_w4_post_hdplot_diploid_x23_guard_stays_2x(self) -> None:
+        """Verify x=23 diploid library stays 2x when HDplot drops paralogs or remaining loci stay below 60/25.0/0.15 gates."""
+        from scripts.data_prep import step06_ploidy_hdplot_utils as hd
+
+        n_sc, n_para = 30, 50
+        sub_pass = np.tile(np.array([[0.0], [0.5], [1.0]], dtype=np.float32), (2, n_sc + n_para))
+        sub_ref = sub_pass.copy()
+        ref_d = np.full((6, n_sc + n_para), 20.0, dtype=np.float32)
+        alt_d = np.full((6, n_sc + n_para), 20.0, dtype=np.float32)
+        sub_ref[:, n_sc:] = 0.25
+        ref_d[:, n_sc:] = 30.0
+        alt_d[:, n_sc:] = 10.0
+        keep_mask, _ = hd._evaluate_hdplot_loci(sub_pass, sub_ref, ref_d, alt_d, [f"L{i}" for i in range(n_sc + n_para)])
+        self.assertTrue(bool(np.all(keep_mask[:n_sc])))
+        self.assertFalse(bool(np.any(keep_mask[n_sc:])))
+
+        # Simulated library with all loci kept vs post-HDplot paralogs filtered
+        ref_v = np.concatenate([np.full(n_sc, 20.0), np.full(n_para, 30.0)])
+        alt_v = np.concatenate([np.full(n_sc, 20.0), np.full(n_para, 10.0)])
+        dos_v = np.full(n_sc + n_para, 0.5, dtype=np.float32)
+        cy_post, _ = hd._infer_sample_cytotype(
+            ref_v[keep_mask], alt_v[keep_mask], dos_v[keep_mask], None,
+            species_modal_ploidy=2, is_multi_cytotype=False,
+        )
+        self.assertEqual(cy_post, "2x")
+
+        # Even 40 single-copy skewed loci below nquire_min_het_loci=60 hold diploid 2x prior
+        cy_sub60, dl_sub60 = hd._infer_sample_cytotype(
+            np.array([30.0, 10.0] * 20), np.array([10.0, 30.0] * 20), np.full(40, 0.5, dtype=np.float32), None,
+            species_modal_ploidy=2, is_multi_cytotype=False, min_het_loci=60, strong_delta_bic=25.0, min_delta_logl_per_locus=0.15,
+        )
+        self.assertEqual((cy_sub60, dl_sub60), ("2x", 0.0))
+
 
 if __name__ == "__main__":
     unittest.main()

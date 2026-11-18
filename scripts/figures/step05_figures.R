@@ -79,6 +79,7 @@ render_step05a_ecological_niche_png <- function(
     }
   }
 
+  imp_df <- imp_df[is.finite(imp_df$imp) & !is.na(imp_df$var) & nzchar(as.character(imp_df$var)), , drop = FALSE]
   p_imp <- if (nrow(imp_df) > 0L) {
     imp_df <- imp_df[order(imp_df$imp, decreasing = TRUE), , drop = FALSE]
     imp_top <- utils::head(imp_df, 14L)
@@ -89,7 +90,7 @@ render_step05a_ecological_niche_png <- function(
       stats::median(suppressWarnings(as.numeric(vdf$spatial_block_cv_acc)), na.rm = TRUE)
     } else NA_real_
     ggplot2::ggplot(imp_top, ggplot2::aes(x = .data$imp, y = .data$lbl, fill = .data$domain)) +
-      ggplot2::geom_col(width = 0.68, alpha = 0.88, color = "#374151", linewidth = 0.35) +
+      ggplot2::geom_col(alpha = 0.88, color = "#374151", linewidth = 0.35, na.rm = TRUE) +
       ggplot2::scale_fill_manual(
         values = c(
           "Climatic (WorldClim)" = "#56B4E9",
@@ -232,9 +233,10 @@ render_step05a_ecological_niche_png <- function(
                    AdjR2 = pmax(0.0, suppressWarnings(as.numeric(ibe_df$Pure_Space_MEM_AdjR2))), stringsAsFactors = FALSE)
       )
       ibe_long$Modality_lbl <- gsub("_", " ", ibe_long$Modality)
+      ibe_long <- ibe_long[is.finite(ibe_long$AdjR2) & !is.na(ibe_long$Modality_lbl) & nzchar(ibe_long$Modality_lbl), , drop = FALSE]
       min_p_ibe <- if ("Partial_RDA_p" %in% names(ibe_df)) suppressWarnings(min(as.numeric(ibe_df$Partial_RDA_p), na.rm = TRUE)) else NA_real_
       ggplot2::ggplot(ibe_long, ggplot2::aes(x = .data$AdjR2, y = .data$Partition, fill = .data$Partition)) +
-        ggplot2::geom_col(alpha = 0.88, width = 0.62, show.legend = FALSE) +
+        ggplot2::geom_col(alpha = 0.88, show.legend = FALSE, na.rm = TRUE) +
         ggplot2::facet_wrap(~ Modality_lbl, ncol = 1L, scales = "fixed") +
         ggplot2::scale_fill_manual(values = c(
           "Pure Edaphic [A|B,C]" = "#009E73",
@@ -253,8 +255,9 @@ render_step05a_ecological_niche_png <- function(
       r2_c <- intersect(c("Adj_R2", "R2", "Variance_Pct", "Total_Explained_AdjR2"), names(ibe_df))[1L]
       ibe_df$comp <- if (!is.na(comp_c)) as.character(ibe_df[[comp_c]]) else paste0("Row_", seq_len(nrow(ibe_df)))
       ibe_df$r2v <- if (!is.na(r2_c)) pmax(0.0, suppressWarnings(as.numeric(ibe_df[[r2_c]]))) else rep(0.0, nrow(ibe_df))
+      ibe_df <- ibe_df[is.finite(ibe_df$r2v) & !is.na(ibe_df$comp) & nzchar(ibe_df$comp), , drop = FALSE]
       ggplot2::ggplot(ibe_df, ggplot2::aes(x = .data$r2v, y = .data$comp)) +
-        ggplot2::geom_col(fill = "#0072B2", alpha = 0.85, width = 0.6) +
+        ggplot2::geom_col(fill = "#0072B2", alpha = 0.85, na.rm = TRUE) +
         theme_packera_pub() +
         ggplot2::labs(title = "D. Isolation-by-Environment (IBE) vs. IBD Partial RDA", x = "Adjusted R\u00b2", y = NULL)
     }
@@ -385,8 +388,9 @@ render_step05b_hopkins_phenology_png <- function(
   month_breaks <- c(1, 32, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335)
   month_lbls <- c("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
-  p_polar <- ggplot2::ggplot(sub_p, ggplot2::aes(x = .data$hop_clean, fill = .data$plot_group, color = .data$plot_group)) +
-    ggplot2::geom_histogram(binwidth = 15.2, boundary = 1, position = "identity", alpha = 0.25, linewidth = 0.65, show.legend = FALSE) +
+  sub_polar <- sub_p[is.finite(sub_p$hop_clean) & (sub_p$hop_clean >= 1.0) & (sub_p$hop_clean <= 366.25) & !is.na(sub_p$plot_group) & nzchar(as.character(sub_p$plot_group)), , drop = FALSE]
+  p_polar <- ggplot2::ggplot(sub_polar, ggplot2::aes(x = .data$hop_clean, fill = .data$plot_group, color = .data$plot_group)) +
+    ggplot2::geom_histogram(binwidth = 365.25 / 24.0, boundary = 1, position = "identity", alpha = 0.25, linewidth = 0.65, show.legend = FALSE, na.rm = TRUE) +
     ggplot2::coord_polar(start = 0) +
     ggplot2::scale_x_continuous(limits = c(1, 366.25), breaks = month_breaks, labels = month_lbls) +
     ggplot2::scale_fill_manual(values = pal_map) +

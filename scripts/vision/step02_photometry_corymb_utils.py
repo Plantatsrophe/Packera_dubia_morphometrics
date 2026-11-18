@@ -112,12 +112,13 @@ def compute_calibrated_blade_photometry(
 ) -> Dict[str, float]:
     """
     Compute paper-adapted lamina CIELAB photometry (`blade_cie_l_norm`,
-    `blade_cie_l_sd`, `blade_cie_a_delta`, `blade_cie_b_delta`) using physical-mm
-    inward margin erosion, mounting-strap exclusion, and linearized Y/Y_n scaling.
+    `blade_cie_l_sd`, `blade_cie_l_sheet_delta`, `blade_cie_a_delta`, `blade_cie_b_delta`)
+    using physical-mm inward margin erosion, mounting-strap exclusion, and linearized Y/Y_n scaling.
     """
     nan_out: Dict[str, float] = {
         "blade_cie_l_norm": np.nan,
         "blade_cie_l_sd": np.nan,
+        "blade_cie_l_sheet_delta": np.nan,
         "blade_cie_a_delta": np.nan,
         "blade_cie_b_delta": np.nan,
     }
@@ -217,6 +218,7 @@ def compute_calibrated_blade_photometry(
     return {
         "blade_cie_l_norm": round(l_norm, 4),
         "blade_cie_l_sd": round(max(0.0, mad_sd), 4),
+        "blade_cie_l_sheet_delta": round(med_l - eff_paper_l, 4),
         "blade_cie_a_delta": round(med_a - paper_a, 4),
         "blade_cie_b_delta": round(med_b - paper_b, 4),
     }

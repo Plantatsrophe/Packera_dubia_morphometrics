@@ -2436,8 +2436,9 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
           stringsAsFactors = FALSE
         )
         res_iosr <- apply_taxonomic_decision_matrix(df_intra_osr, intraspecific_mode = TRUE)
-        stopifnot(res_iosr$taxonomic_treatment_subtype[4] == "Misidentification_Reassign")
-        stopifnot(res_iosr$recommended_determination[4] == "Packera anonyma")
+        stopifnot(res_iosr$taxonomic_treatment_subtype[4] == "Subspecies_Ecotype")
+        stopifnot(res_iosr$recommended_determination[4] == "Packera dubia var. morphotype_K2")
+        stopifnot(grepl("Residual Congener Proximity Audit", res_iosr$triage_rationale[4], fixed = TRUE))
         stopifnot(res_iosr$taxonomic_treatment_subtype[5] == "Ecophenotypic_Plasticity")
         stopifnot(res_iosr$recommended_determination[5] == "Packera dubia")
         stopifnot(res_iosr$taxonomic_treatment_subtype[6] == "Confirmed_Species")

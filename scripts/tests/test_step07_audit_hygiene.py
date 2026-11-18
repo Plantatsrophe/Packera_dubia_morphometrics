@@ -216,6 +216,49 @@ syn_fig_df$w_morph_kappa <- 0.85; syn_fig_df$w_edaphic_kappa <- 0.65; syn_fig_df
 render_step07a_integrative_synthesis_png(syn_fig_df, out_plot_path = png_a)
 render_step07a_integrative_synthesis_png(syn_fig_df, out_plot_path = png_b)
 
+# 5. W5 --intraspecific-mode reassignment freeze & osr_gold_eco_lock under <3 type localities
+df_intra_frz <- data.frame(
+  catalogNumber = sprintf("IFR_%02d", 1:8),
+  species_standardized = rep("Packera dubia", 8L),
+  determiner_tier = rep("Tier_1_Gold", 8L),
+  usda_county_status = c(rep("in_range", 6L), "out_of_range", "out_of_range"),
+  decimalLatitude = c(rep(35.0, 6L), NA_real_, NA_real_),
+  decimalLongitude = c(rep(-80.0, 6L), NA_real_, NA_real_),
+  can1 = c(rep(0.0, 6L), 4.0, 4.0), can2 = rep(0.0, 8L),
+  cda_predicted_taxon = c(rep("Packera dubia", 6L), "Packera anonyma", "Packera anonyma"),
+  cda_posterior_prob = c(rep(0.95, 6L), 0.90, 0.90),
+  min_congener_taxon = c(rep(NA_character_, 6L), "Packera anonyma", "Packera anonyma"),
+  min_congener_mahal_d2 = c(rep(25.0, 6L), 0.2, 0.2),
+  self_morph_mahal_d2 = c(rep(1.0, 6L), 25.0, 25.0),
+  gmm_cluster = rep(1L, 8L), morph_tier_source = rep("Basal_Rosette", 8L), basal_leaf_count = rep(3L, 8L),
+  stringsAsFactors = FALSE
+)
+res_ifr <- apply_taxonomic_decision_matrix(df_intra_frz, intraspecific_mode = TRUE, opts = list(demo = TRUE))
+
+df_willi <- data.frame(
+  catalogNumber = c("DT_1", paste0("D_", 1:7), "WILLI_23847", paste0("A_", 1:8)),
+  species_standardized = c(rep("Packera dubia", 9L), rep("Packera anonyma", 8L)),
+  determiner_tier = rep("Tier_1_Gold", 17L),
+  is_type_specimen = c(TRUE, rep(FALSE, 16L)),
+  usda_county_status = rep("in_range", 17L),
+  decimalLatitude = c(rep(36.8, 9L), rep(35.2, 8L)), decimalLongitude = c(rep(-76.3, 9L), rep(-80.5, 8L)),
+  edaphic_best_fit_taxon = c(rep("Packera dubia", 9L), rep("Packera anonyma", 8L)),
+  edaphic_z_score = c(rep(0.5, 8L), 1.2, rep(0.5, 8L)),
+  climatic_z_score = c(rep(0.4, 8L), 0.8, rep(0.4, 8L)),
+  rf_predicted_taxon = c(rep("Packera dubia", 9L), rep("Packera anonyma", 8L)),
+  rf_posterior_prob = c(rep(0.90, 8L), 0.75, rep(0.90, 8L)),
+  can1 = c(rep(0.0, 8L), 3.8, rep(4.0, 8L)), can2 = rep(0.0, 17L),
+  cda_predicted_taxon = c(rep("Packera dubia", 8L), "Packera anonyma", rep("Packera anonyma", 8L)),
+  cda_posterior_prob = c(rep(0.95, 8L), 0.60, rep(0.95, 8L)),
+  min_congener_taxon = c(rep("Packera anonyma", 9L), rep("Packera dubia", 8L)),
+  min_congener_mahal_d2 = c(rep(25.0, 8L), 0.4, rep(25.0, 8L)),
+  self_morph_mahal_d2 = c(rep(1.0, 8L), 18.0, rep(1.0, 8L)),
+  gmm_cluster = rep(1L, 17L), morph_tier_source = rep("Basal_Rosette", 17L), basal_leaf_count = rep(3L, 17L),
+  stringsAsFactors = FALSE
+)
+res_willi <- apply_taxonomic_decision_matrix(df_willi, intraspecific_mode = FALSE, opts = list(demo = TRUE))
+willi_sub <- as.character(res_willi$taxonomic_treatment_subtype[match("WILLI_23847", res_willi$catalogNumber)])
+
 write_json(list(
   anc_responses = as.character(anc_1$Response),
   anc_identical_cauline = isTRUE(all.equal(anc_1, anc_2, tolerance = 1e-8)),
@@ -231,7 +274,10 @@ write_json(list(
   kw_frt_pheno = kw_frt$w_pheno_raw,
   diff_bronze = diff_bronze, diff_gold = diff_gold,
   g_uncal_traits = I(as.character(g_uncal$trait)),
-  g_cal_traits = I(as.character(g_cal$trait))
+  g_cal_traits = I(as.character(g_cal$trait)),
+  ifr_n_misid = sum(as.character(res_ifr$taxonomic_treatment_subtype) == "Misidentification_Reassign", na.rm = TRUE),
+  ifr_n_gate3 = sum(grepl("Gate3_Ungeoref_Extralimital", as.character(res_ifr$portal_lag_gate), fixed = TRUE), na.rm = TRUE),
+  willi_sub = willi_sub
 ), out_json, auto_unbox = TRUE, na = "null")
 """
 
@@ -317,6 +363,12 @@ class TestStep07AuditHygiene(unittest.TestCase):
         ba, bb = self.png_bytes
         self.assertTrue(ba.startswith(b"\x89PNG\r\n\x1a\n"))
         self.assertEqual(hashlib.md5(ba).hexdigest(), hashlib.md5(bb).hexdigest())
+
+    @unittest.skipIf(SKIP_R_COND, "Fast audit or Rscript unavailable")
+    def test_w5_intraspecific_freeze_and_osr_gold_eco_lock(self) -> None:
+        self.assertEqual(int(self.r_res["ifr_n_misid"]), 0)
+        self.assertEqual(int(self.r_res["ifr_n_gate3"]), 0)
+        self.assertNotEqual(str(self.r_res["willi_sub"]), "Misidentification_Reassign")
 
 
 if __name__ == "__main__":

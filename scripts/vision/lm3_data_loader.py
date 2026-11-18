@@ -183,12 +183,18 @@ def _resolve_scale_provenance(
 ) -> Tuple[str, str, bool]:
     """Normalize `(cf_source, scale_source, is_empirical_ruler)` across row schemas."""
     src_norm = str(eff_source or "").strip().lower()
-    if raw_scale_src == "tick_lattice_unboxed" or src_norm == "tick_lattice_unboxed":
+    raw_norm = str(raw_scale_src or "").strip().lower()
+    emp_norm = {str(s).strip().lower() for s in (empirical_sources or ())}
+    if raw_norm == "tick_lattice_unboxed" or src_norm == "tick_lattice_unboxed":
         return "tick_lattice_unboxed", "tick_lattice_unboxed", False
-    if src_norm == "mp_estimated":
+    if src_norm in emp_norm or raw_norm in emp_norm:
+        out_cf = str(eff_source or "").strip()
+        if not out_cf or src_norm not in emp_norm:
+            out_cf = raw_norm if raw_norm in emp_norm else "ruler_calibrated"
+        return out_cf, "ruler_calibrated", True
+    if raw_norm == "mp_estimated" or src_norm in {"mp_estimated", "predicted_from_megapixels"}:
         return "predicted_from_megapixels", "mp_estimated", False
-    is_emp = src_norm in empirical_sources
-    return str(eff_source or "").strip(), ("ruler_calibrated" if is_emp else "mp_estimated"), is_emp
+    return str(eff_source or "").strip(), "mp_estimated", False
 
 
 def _parse_calibration_row(
@@ -219,7 +225,7 @@ def _parse_calibration_row(
         elif raw_scale_src == "uncalibrated":
             cf_source = "uncalibrated"
         elif raw_scale_src == "ruler_calibrated":
-            cf_source = "measured_from_ruler"
+            cf_source = "ruler_calibrated"
     if cf_source.lower() == "uncalibrated" or raw_scale_src == "uncalibrated":
         return None
     work_scale_raw = row.get("work_scale", 1.0)

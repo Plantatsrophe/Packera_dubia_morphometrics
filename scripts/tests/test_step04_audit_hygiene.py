@@ -171,13 +171,21 @@ Sys.setenv(PLANTMATICS_DB_PATH = db_path, PACKERA_DB_PATH = db_path, PLANTMATICS
 ok_p3 <- persist_step03_to_sqlite(efa_df = leaf_df, specimen_df = spec_df, vouchers_path = v_csv, run_id = "run_s04_idemp")
 mk_opts <- function(tag) {
   d <- file.path(s04_dir, tag); dir.create(d, recursive = TRUE, showWarnings = FALSE)
-  list(vouchers = v_csv, harmonics = harm_csv, reproductive = "", outline_only = FALSE, correct_allometry = "auto", allometry_report = file.path(d, "allom.csv"), allometry_pairwise = "", allometry_plot = "", use_clustvarsel = FALSE, output_flags = file.path(d, "flags.csv"), output_plot = file.path(d, "fig04b.png"), output_report = file.path(d, "gmm.csv"), output_batch_audit = file.path(d, "batch.csv"), max_k = 4L, num_pcs = 5L, permutations = 199L, seed = 42L, intraspecific_mode = FALSE, focal_taxon = "")
+  list(vouchers = v_csv, harmonics = harm_csv, reproductive = "", outline_only = FALSE, correct_allometry = "auto", allometry_report = file.path(d, "allom.csv"), allometry_pairwise = "", allometry_plot = file.path(d, "fig04a.png"), use_clustvarsel = FALSE, output_flags = file.path(d, "flags.csv"), output_plot = file.path(d, "fig04b.png"), output_report = file.path(d, "gmm.csv"), output_batch_audit = file.path(d, "batch.csv"), max_k = 4L, num_pcs = 5L, permutations = 199L, seed = 42L, intraspecific_mode = FALSE, focal_taxon = "")
 }
+ins_allom <- NULL
 out1 <- run_gmm_morphotools_pipeline(mk_opts("r1")); unlink(harm_csv); harm_gone <- !file.exists(harm_csv)
 out2 <- run_gmm_morphotools_pipeline(mk_opts("r2"))
-Sys.unsetenv(c("PLANTMATICS_DB_PATH", "PACKERA_DB_PATH", "PLANTMATICS_RUN_DIR", "PACKERA_RUN_DIR", "RUN_ID"))
+Sys.unsetenv(c("PLANTMATICS_DB_PATH", "PACKERA_DB_PATH", "PLANTMATICS_RUN_DIR", "PACKERA_RUN_DIR", "RUN_ID", "PLANTMATICS_SKIP_FIGURES", "PACKERA_SKIP_FIGURES"))
+Sys.setenv(PLANTMATICS_DEMO_MODE = "1")
+ins_allom <- test_and_correct_allometry(spec_df[1:6, , drop = FALSE], output_report = file.path(tmp_root, "insuff_allom.csv"), output_plot = file.path(tmp_root, "insuff_04a.png"))
+spec_ph <- spec_df; spec_ph$blade_cie_l_norm <- round(stats::rnorm(n_id, 0.70, 0.08), 4); spec_ph$blade_cie_l_sheet_delta <- round(rep(c(-32.0, -8.0, -28.0, -12.0), length.out = n_id), 4)
+harm_ph <- file.path(s04_dir, "harm_ph.csv"); write.csv(spec_ph, harm_ph, row.names = FALSE); o_ph <- mk_opts("r_ph"); o_ph$harmonics <- harm_ph
+out_ph <- run_gmm_morphotools_pipeline(o_ph); bic_sel <- read.csv(file.path(s04_dir, "r_ph", "gmm_bic_model_selection.csv"), stringsAsFactors = FALSE)
+Sys.unsetenv("PLANTMATICS_DEMO_MODE")
 out1 <- out1[order(out1$catalogNumber, out1$plant_individual_id), , drop = FALSE]; out2 <- out2[order(out2$catalogNumber, out2$plant_individual_id), , drop = FALSE]
 al_r1 <- read.csv(file.path(s04_dir, "r1", "allom.csv"), stringsAsFactors = FALSE)
+res$w3 <- list(insuff_csv = file.exists(file.path(tmp_root, "insuff_allom.csv")), insuff_png = file.exists(file.path(tmp_root, "insuff_04a.png")), r1_png = file.exists(file.path(s04_dir, "r_ph", "fig04a.png")), bic_cols = all(c("optimal_K_raw", "optimal_K_merged", "selected_model") %in% names(bic_sel)), has_sheet_delta = "blade_cie_l_sheet_delta_std" %in% names(out_ph), sel_feats = as.character(out_ph$selected_morph_features[1L]))
 res$rerun <- list(ok_p3 = isTRUE(ok_p3), harm_gone = harm_gone, n1 = nrow(out1), n2 = nrow(out2), r2_size = as.numeric(al_r1$R2[grepl("^log_centsize$", al_r1$Term)][1L]), slopes_homog = isTRUE(as.logical(al_r1$Slopes_Homogeneous[grepl(":", al_r1$Term)][1L])), a1_changed = max(abs(out1$A1 - spec_df$A1[match(out1$catalogNumber, spec_df$catalogNumber)])), diff_pc1 = max(abs(out1$PC1 - out2$PC1)), diff_a1 = max(abs(out1$A1 - out2$A1)), diff_sol = max(abs(out1$solidity - out2$solidity)), diff_prob = max(abs(out1$cda_posterior_prob - out2$cda_posterior_prob)))
 jsonlite::write_json(res, out_json, auto_unbox = TRUE, na = "null", digits = 10)
 """
@@ -291,6 +299,10 @@ class TestStep04AuditHygiene(unittest.TestCase):
         self.assertGreater(float(rr["a1_changed"]), 1e-4)
         for dk in ("diff_pc1", "diff_a1", "diff_sol", "diff_prob"):
             self.assertLess(float(rr[dk]), 1e-6, f"Non-idempotent SQLite rerun delta on {dk}: {rr[dk]}")
+        w3 = self.results["w3"]
+        self.assertTrue(bool(w3["insuff_csv"]) and bool(w3["insuff_png"]) and bool(w3["r1_png"]))
+        self.assertTrue(bool(w3["bic_cols"]) and bool(w3["has_sheet_delta"]))
+        self.assertNotIn("blade_cie_l_norm_std", str(w3["sel_feats"]).split(";"))
 
     def test_pruned_dead_paths_and_line_ceilings(self) -> None:
         ceilings = {

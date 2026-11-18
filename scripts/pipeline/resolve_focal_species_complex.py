@@ -41,7 +41,7 @@ import subprocess
 import sys
 from collections import Counter
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -268,8 +268,17 @@ def _extract_stage_metrics(
     triage_rows = _fetch_triage_rows_for_run(conn, run_id, run_dir)
     complex_rows = _fetch_complex_rows_for_run(conn, run_id, run_dir)
 
-    gmm_rows = _read_csv_rows(run_dir / "outputs" / "reports" / "gmm_bayes_factors_summary.csv")
+    gmm_rows: List[Dict[str, str]] = []
+    for gmm_cand in (
+        run_dir / "outputs" / "reports" / "gmm_bic_model_selection.csv",
+        run_dir / "data" / "tables" / "gmm_bic_model_selection.csv",
+        run_dir / "outputs" / "reports" / "gmm_bayes_factors_summary.csv",
+    ):
+        gmm_rows = _read_csv_rows(gmm_cand)
+        if gmm_rows:
+            break
     srf_rows = _read_csv_rows(run_dir / "outputs" / "reports" / "multimodal_spatial_rf_summary.csv")
+    srf_flag_rows = _read_csv_rows(run_dir / "data" / "tables" / "multimodal_conflict_flags.csv")
     warren_rows = _read_csv_rows(run_dir / "outputs" / "reports" / "warren_niche_identity_summary.csv")
     batch_rows = _read_csv_rows(run_dir / "outputs" / "reports" / "institutional_batch_effect_audit.csv")
 
@@ -279,6 +288,15 @@ def _extract_stage_metrics(
         if (standardize_packera_taxon(str(r.get("species_standardized") or r.get("scientificName") or "")) == focal_std)
     ]
     eval_rows = focal_rows if focal_rows else triage_rows
+    non_focal_rows = (
+        [
+            r
+            for r in triage_rows
+            if (standardize_packera_taxon(str(r.get("species_standardized") or r.get("scientificName") or "")) != focal_std)
+        ]
+        if focal_rows
+        else []
+    )
 
     def _count_sub(subtype: str, *, pool: Optional[List[Dict[str, Any]]] = None) -> int:
         rows_chk = pool if pool is not None else eval_rows
@@ -302,37 +320,134 @@ def _extract_stage_metrics(
         if str(r.get("species_standardized", "")).strip() not in {"", "NA", "None"}
     }
 
+    raw_k: Optional[int] = None
     opt_k: Optional[int] = None
-    max_two_delta_bic: Optional[float] = None
+    max_unmerged_two_delta_bic: Optional[float] = None
+    two_delta_by_k: Dict[int, float] = {}
+    delta_icl_by_k: Dict[int, float] = {}
+    boot_p_by_k: Dict[int, float] = {}
+    best_bic_val: Optional[float] = None
+    best_bic_k: Optional[int] = None
+    is_opt_k: Optional[int] = None
     for gr in gmm_rows:
-        for k_col in ("optimal_K_merged", "optimal_k_merged", "optimal_K", "optimal_k", "G_opt", "best_K"):
-            kv = _safe_float(gr.get(k_col))
-            if kv is not None and opt_k is None:
-                opt_k = int(round(kv))
-                break
+        if raw_k is None:
+            for rk_col in ("optimal_K_raw", "optimal_k_raw", "optimal_K", "optimal_k", "G_opt", "best_K"):
+                rkv = _safe_float(gr.get(rk_col))
+                if rkv is not None:
+                    raw_k = int(round(rkv))
+                    break
+        if opt_k is None:
+            for k_col in ("optimal_K_merged", "optimal_k_merged", "optimal_K", "optimal_k", "G_opt", "best_K"):
+                kv = _safe_float(gr.get(k_col))
+                if kv is not None:
+                    opt_k = int(round(kv))
+                    break
         k_row = _safe_float(gr.get("K"))
-        if k_row is None or k_row >= 2.0:
-            for b_col in ("Two_Delta_BIC", "two_delta_BIC", "delta_bic_2x", "bayes_factor_2lnB", "delta_BIC"):
-                bv = _safe_float(gr.get(b_col))
-                if bv is not None:
-                    max_two_delta_bic = bv if max_two_delta_bic is None else max(max_two_delta_bic, bv)
-    if opt_k is None and clusters:
-        opt_k = len(clusters)
+        k_int = int(round(k_row)) if k_row is not None else None
+        if is_opt_k is None and k_int is not None and _is_truthy(gr.get("is_optimal")):
+            is_opt_k = k_int
+        bic_v = _safe_float(gr.get("BIC"))
+        if bic_v is not None and k_int is not None and (best_bic_val is None or bic_v > best_bic_val):
+            best_bic_val = bic_v
+            best_bic_k = k_int
+        for b_col in ("Two_Delta_BIC", "two_delta_BIC", "two_delta_bic", "delta_bic_2x", "bayes_factor_2lnB", "delta_BIC"):
+            bv = _safe_float(gr.get(b_col))
+            if bv is not None:
+                if k_int is not None and k_int not in two_delta_by_k:
+                    two_delta_by_k[k_int] = bv
+                if k_row is None or k_row >= 2.0:
+                    max_unmerged_two_delta_bic = bv if max_unmerged_two_delta_bic is None else max(max_unmerged_two_delta_bic, bv)
+                break
+        for icl_col in ("Delta_ICL_vs_Null", "delta_icl_vs_null"):
+            iv = _safe_float(gr.get(icl_col))
+            if iv is not None:
+                if k_int is not None:
+                    delta_icl_by_k[k_int] = iv
+                break
+        for bp_col in ("Boot_LRT_P_K1_vs_K2", "boot_lrt_p_k1_vs_k2"):
+            bpv = _safe_float(gr.get(bp_col))
+            if bpv is not None:
+                if k_int is not None:
+                    boot_p_by_k[k_int] = bpv
+                elif -1 not in boot_p_by_k:
+                    boot_p_by_k[-1] = bpv
+                break
+    if raw_k is None:
+        raw_k = is_opt_k if is_opt_k is not None else best_bic_k
+    if opt_k is None:
+        opt_k = raw_k if raw_k is not None else (len(clusters) if clusters else None)
+    if raw_k is None and opt_k is not None:
+        raw_k = opt_k
 
+    two_delta_bic_at_opt: Optional[float] = None
+    if opt_k is not None:
+        if opt_k <= 1:
+            two_delta_bic_at_opt = 0.0
+        elif opt_k in two_delta_by_k:
+            two_delta_bic_at_opt = two_delta_by_k[opt_k]
+        elif max_unmerged_two_delta_bic is not None:
+            two_delta_bic_at_opt = max_unmerged_two_delta_bic
+
+    delta_icl_vs_null: Optional[float] = None
+    for cand_icl_k in (raw_k, opt_k, 2):
+        if cand_icl_k is not None and cand_icl_k in delta_icl_by_k:
+            delta_icl_vs_null = delta_icl_by_k[cand_icl_k]
+            break
+    if delta_icl_vs_null is None and delta_icl_by_k:
+        delta_icl_vs_null = delta_icl_by_k[sorted(delta_icl_by_k.keys())[-1]]
+
+    boot_lrt_p_k1_vs_k2: Optional[float] = None
+    if 2 in boot_p_by_k:
+        boot_lrt_p_k1_vs_k2 = boot_p_by_k[2]
+    elif boot_p_by_k:
+        boot_lrt_p_k1_vs_k2 = next(iter(boot_p_by_k.values()))
+
+    def _row_involves_focal(row_map: Mapping[str, Any]) -> bool:
+        for tcol in ("Taxon1", "Taxon2", "taxon1", "taxon2"):
+            tv = str(row_map.get(tcol) or "").strip()
+            if tv and standardize_packera_taxon(tv) == focal_std:
+                return True
+        pair_raw = str(row_map.get("Pair") or row_map.get("pair") or "").strip()
+        if pair_raw:
+            for part in re.split(r"\s+vs\.?\s+|\s*[|/&]\s*|__", pair_raw, flags=re.IGNORECASE):
+                p_clean = part.replace("_", " ").strip()
+                if p_clean and standardize_packera_taxon(p_clean) == focal_std:
+                    return True
+        return False
+
+    srf_focal_rows = [sr for sr in srf_rows if _row_involves_focal(sr)]
+    srf_scope = srf_focal_rows if srf_focal_rows else srf_rows
     d_edaph_vals = [
         v
-        for sr in srf_rows
+        for sr in srf_scope
         for v in (_safe_float(sr.get("D_edaph")),)
         if v is not None
     ]
     if not d_edaph_vals:
+        w_pool = warren_rows or srf_rows
+        w_focal = [wr for wr in w_pool if _row_involves_focal(wr)]
+        w_scope = w_focal if w_focal else w_pool
         d_edaph_vals = [
             v
-            for wr in (warren_rows or srf_rows)
+            for wr in w_scope
             for v in (_safe_float(wr.get("Schoener_D")),)
             if v is not None
         ]
     min_d_edaph = min(d_edaph_vals) if d_edaph_vals else None
+
+    cv_acc_vals: List[float] = []
+    for src_rows in (srf_rows, srf_flag_rows, eval_rows):
+        for r_cv in src_rows:
+            for cv_col in ("spatial_block_cv_acc", "Spatial_Block_CV_Acc", "spatial_block_cv_accuracy"):
+                cv_v = _safe_float(r_cv.get(cv_col))
+                if cv_v is not None:
+                    cv_acc_vals.append(cv_v)
+                    break
+        if cv_acc_vals:
+            break
+    spatial_block_cv_acc: Optional[float] = (
+        float(statistics.mean(cv_acc_vals)) if cv_acc_vals else None
+    )
 
     doy_vals = [
         abs(v)
@@ -428,11 +543,18 @@ def _extract_stage_metrics(
         "n_total_otus": len(triage_rows),
         "n_focal_otus": len(focal_rows),
         "n_taxa_present": len(taxa_present),
+        "gmm_raw_k": raw_k if raw_k is not None else "",
         "gmm_optimal_k": opt_k if opt_k is not None else "",
-        "max_two_delta_bic": f"{max_two_delta_bic:.2f}" if max_two_delta_bic is not None else "",
+        "two_delta_bic_at_optimal_k": f"{two_delta_bic_at_opt:.2f}" if two_delta_bic_at_opt is not None else "",
+        "max_unmerged_two_delta_bic": f"{max_unmerged_two_delta_bic:.2f}" if max_unmerged_two_delta_bic is not None else "",
+        "max_two_delta_bic": f"{max_unmerged_two_delta_bic:.2f}" if max_unmerged_two_delta_bic is not None else "",
+        "delta_icl_vs_null": f"{delta_icl_vs_null:.2f}" if delta_icl_vs_null is not None else "",
+        "boot_lrt_p_k1_vs_k2": f"{boot_lrt_p_k1_vs_k2:.4f}" if boot_lrt_p_k1_vs_k2 is not None else "",
+        "spatial_block_cv_acc": f"{spatial_block_cv_acc:.4f}" if spatial_block_cv_acc is not None else "",
         "n_confirmed_species": _count_sub("Confirmed_Species"),
-        "n_confirmed_type_control": _count_sub("Confirmed_Type_Control", pool=triage_rows),
-        "n_type_synonymy_candidate": _count_sub("Type_Synonymy_Candidate", pool=triage_rows),
+        "n_confirmed_type_control": _count_sub("Confirmed_Type_Control"),
+        "n_type_synonymy_candidate": _count_sub("Type_Synonymy_Candidate"),
+        "n_neighbor_type_controls": _count_sub("Confirmed_Type_Control", pool=non_focal_rows),
         "n_misidentification_reassign": _count_sub("Misidentification_Reassign"),
         "n_hybrid_introgressant": _count_sub("Hybrid_Introgressant"),
         "hybrid_parent_pairs": "; ".join(
@@ -557,6 +679,41 @@ def compile_complex_resolution_summary(
         if conn is not None:
             conn.close()
 
+    s1, s2, s3, s4 = summary_rows
+    clean_rows = stage_triage_map.get("Stage_3_Intraspecific_Clean", [])
+    s2_eval_rows = stage_triage_map.get("Stage_2_Complex_Triage", [])
+    s2_misid_keys = {
+        (str(r.get("catalogNumber") or "").strip(), str(r.get("plant_individual_id") or "0").strip())
+        for r in s2_eval_rows
+        if str(r.get("taxonomic_treatment_subtype", "")).strip() in {"Misidentification_Reassign", "Misidentification_Severe"}
+        or str(r.get("taxonomic_status_call", "")).strip() in {"Misidentification_Reassign", "Misidentification_Severe"}
+    }
+    s2_all_keys = {
+        (str(r.get("catalogNumber") or "").strip(), str(r.get("plant_individual_id") or "0").strip())
+        for r in s2_eval_rows
+    }
+    s2_misid_sheets = {c for c, _ in s2_misid_keys if c}
+    s3_all_keys = {
+        (str(r.get("catalogNumber") or "").strip(), str(r.get("plant_individual_id") or "0").strip())
+        for r in clean_rows
+    }
+    s3_sheets = {c for c, _ in s3_all_keys if c}
+    if clean_rows:
+        n_purged_before_stage3_otus = len(s2_misid_keys - s3_all_keys)
+        n_purged_before_stage3_sheets = len(s2_misid_sheets - s3_sheets)
+    else:
+        s2_non_misid_sheets = {c for c, p in (s2_all_keys - s2_misid_keys) if c}
+        n_purged_before_stage3_otus = len(s2_misid_keys)
+        n_purged_before_stage3_sheets = len(s2_misid_sheets - s2_non_misid_sheets)
+
+    for r_sum in summary_rows:
+        if r_sum.get("stage") in {"Stage_2_Complex_Triage", "Stage_3_Intraspecific_Clean"}:
+            r_sum["n_purged_before_stage3_otus"] = n_purged_before_stage3_otus
+            r_sum["n_purged_before_stage3_sheets"] = n_purged_before_stage3_sheets
+        else:
+            r_sum["n_purged_before_stage3_otus"] = ""
+            r_sum["n_purged_before_stage3_sheets"] = ""
+
     fieldnames = list(summary_rows[0].keys())
     csv_out = out_dir / f"{slug}_Four_Stage_Comparison.csv"
     for target_csv in (csv_out, out_dir / f"{slug}_complex_stage_comparison.csv"):
@@ -568,9 +725,6 @@ def compile_complex_resolution_summary(
             fh.flush()
             os.fsync(fh.fileno())
         tmp_csv.replace(target_csv)
-
-    s1, s2, s3, s4 = summary_rows
-    clean_rows = stage_triage_map.get("Stage_3_Intraspecific_Clean", [])
 
     type_controls = [
         r
@@ -625,7 +779,7 @@ def compile_complex_resolution_summary(
     else:
         verdict = (
             f"*{focal_std}* resolves as a single cohesive evolutionary lineage after purging "
-            f"{s2['n_misidentification_reassign']} misidentified congeneric vouchers in Stage 2 "
+            f"{n_purged_before_stage3_otus} misidentified congeneric OTUs ({n_purged_before_stage3_sheets} full sheets) before Stage 3 "
             f"(purified intraspecific optimal K = {s3['gmm_optimal_k'] or 1}; cohesive cryptic OTUs = 0)."
         )
 
@@ -641,7 +795,12 @@ def compile_complex_resolution_summary(
         "",
         f"* **Primary Delimitation Call:** {verdict}",
         f"* **Complex Neighbor Scope (Stages 1 and 2):** {s2['complex_neighbors'] or s1['complex_neighbors'] or 'None above affinity threshold'}",
-        f"* **Interspecific Misidentifications Purged Before Stage 3:** {s2['n_misidentification_reassign']} OTUs",
+        (
+            f"* **Interspecific Misidentifications Purged Before Stage 3:** "
+            f"{n_purged_before_stage3_otus} OTUs (`n_purged_before_stage3_otus`) across "
+            f"{n_purged_before_stage3_sheets} full sheets (`n_purged_before_stage3_sheets`; "
+            f"{len(s2_misid_keys)} Stage 2 flagged OTUs across {len(s2_misid_sheets)} sheets)"
+        ),
         (
             f"* **Sympatric Hybrid / Introgressant Candidates (Stage 2):** {s2['n_hybrid_introgressant']} OTUs "
             f"({s2['hybrid_parent_pairs']})"
@@ -667,13 +826,16 @@ def compile_complex_resolution_summary(
         "",
         "## 2. Cross-Stage Quantitative Summary",
         "",
-        "| Stage | Run ID | Focal OTUs | Optimal K | 2*Delta BIC | Misid. Purged | Hybrids | Ecotypes | Plasticity | Cohesive Cryptic | Min D_edaph | Max abs(Delta DOY) |",
-        "| :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Stage | Run ID | Focal OTUs | Raw K | Optimal K | 2*Delta BIC (Opt K) | Max Unmerged 2*Delta BIC | Delta ICL | Boot LRT p (1v2) | Spatial CV Acc | Misid. Purged | Hybrids | Ecotypes | Plasticity | Cohesive Cryptic | Min D_edaph | Max abs(Delta DOY) |",
+        "| :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for r in summary_rows:
         md_lines.append(
-            f"| {r['stage']} | `{r['run_id']}` | {r['n_focal_otus']} | {r['gmm_optimal_k'] or 'N/A'} | "
-            f"{r['max_two_delta_bic'] or 'N/A'} | {r['n_misidentification_reassign']} | "
+            f"| {r['stage']} | `{r['run_id']}` | {r['n_focal_otus']} | {r['gmm_raw_k'] or 'N/A'} | "
+            f"{r['gmm_optimal_k'] or 'N/A'} | {r['two_delta_bic_at_optimal_k'] or r['max_two_delta_bic'] or 'N/A'} | "
+            f"{r['max_unmerged_two_delta_bic'] or 'N/A'} | {r['delta_icl_vs_null'] or 'N/A'} | "
+            f"{r['boot_lrt_p_k1_vs_k2'] or 'N/A'} | {r['spatial_block_cv_acc'] or 'N/A'} | "
+            f"{r['n_misidentification_reassign']} | "
             f"{r['n_hybrid_introgressant']} | {r['n_subspecies_ecotype']} | "
             f"{r['n_ecophenotypic_plasticity']} | {r['n_cohesive_cryptic_otus']} | "
             f"{r['min_d_edaph'] or 'N/A'} | {r['max_abs_delta_doy_days'] or 'N/A'} |"

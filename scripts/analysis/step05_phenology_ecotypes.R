@@ -397,8 +397,33 @@ compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = 
   raw_anthesis_cand <- valid_doy & valid_lat & pass_dwc &
                        ((has_valid_cv & is_cv_anth_label) | (!has_valid_cv))
 
+  cfg_bounds <- if (exists("load_step05_macroecology_config", mode = "function")) {
+    load_step05_macroecology_config(config_path)
+  } else {
+    read_config_phenology_bounds(config_path)
+  }
+  min_d <- if (!is.null(cfg_bounds$min_flowering_doy) && is.finite(cfg_bounds$min_flowering_doy)) as.numeric(cfg_bounds$min_flowering_doy) else 30.0
+  max_d <- if (!is.null(cfg_bounds$max_flowering_doy) && is.finite(cfg_bounds$max_flowering_doy)) as.numeric(cfg_bounds$max_flowering_doy) else 220.0
+
+  raw_doy_pool <- if (any(raw_anthesis_cand)) df$doy[raw_anthesis_cand] else df$doy[valid_doy]
+  circ_mean_raw <- if (length(raw_doy_pool) > 0L) compute_circular_mean_doy(raw_doy_pool) else compute_circular_mean_doy(c(min_d, max_d))
+  circ_med_doy <- if (length(raw_doy_pool) > 0L && is.finite(circ_mean_raw)) {
+    wrap_doy_365(circ_mean_raw + stats::median(circular_signed_doy_offset(raw_doy_pool, circ_mean_raw), na.rm = TRUE))
+  } else {
+    circ_mean_raw
+  }
+  is_vernal_cohort <- is.finite(circ_med_doy) && (min_d <= max_d) && (circ_med_doy >= min_d) && (circ_med_doy < 170.0)
+  vernal_hi <- min(max_d, 240.0)
+  in_vernal_win <- valid_doy & (df$doy >= min_d) & (df$doy <= vernal_hi)
+  offseason_vernal_mask <- if (is_vernal_cohort) (valid_doy & !in_vernal_win) else rep(FALSE, nrow(df))
+
   # Empirical cohort latitude bounds: [min(lat) - 3.0, max(lat) + 3.0]
-  lat_pool <- if (any(raw_anthesis_cand)) df$decimalLatitude[raw_anthesis_cand] else df$decimalLatitude[valid_lat]
+  lat_cand <- if (is_vernal_cohort && any(raw_anthesis_cand & in_vernal_win)) {
+    raw_anthesis_cand & in_vernal_win
+  } else {
+    raw_anthesis_cand
+  }
+  lat_pool <- if (any(lat_cand)) df$decimalLatitude[lat_cand] else df$decimalLatitude[valid_lat]
   if (length(lat_pool) > 0L) {
     lat_min_gate <- max(-90.0, min(lat_pool, na.rm = TRUE) - 3.0)
     lat_max_gate <- min(90.0, max(lat_pool, na.rm = TRUE) + 3.0)
@@ -407,11 +432,17 @@ compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = 
     lat_max_gate <- 90.0
   }
 
-  # Cohort-adaptive circular DOY gate (99% angular coverage arc +/- 21 days);
-  # fall back to config/config.yaml phenology bounds ONLY when N_verified_anthesis < 5
+  # Enforce vernal bounds [min_flowering_doy, max_flowering_doy] (<= 240) when cohort median < 170;
+  # otherwise use cohort-adaptive circular DOY gate (for winter-wrapping / autumn cohorts)
   n_raw_anthesis <- sum(raw_anthesis_cand)
-  if (n_raw_anthesis >= 5L) {
-    circ_mean_doy <- compute_circular_mean_doy(df$doy[raw_anthesis_cand])
+  if (is_vernal_cohort) {
+    pass_doy_gate <- in_vernal_win
+    vernal_pool <- if (any(raw_anthesis_cand & in_vernal_win)) df$doy[raw_anthesis_cand & in_vernal_win] else raw_doy_pool
+    circ_mean_doy <- if (length(vernal_pool) > 0L) compute_circular_mean_doy(vernal_pool) else circ_mean_raw
+    message(sprintf("[INFO] Vernal anthesis gate (circ_med_doy=%.1f < 170): DOY [%.0f, %.0f] (autumn > 240 excluded; offseason N=%d), lat=[%.2f, %.2f].",
+                    circ_med_doy, min_d, vernal_hi, sum(offseason_vernal_mask), lat_min_gate, lat_max_gate))
+  } else if (n_raw_anthesis >= 5L) {
+    circ_mean_doy <- circ_mean_raw
     cand_offsets <- circular_signed_doy_offset(df$doy[raw_anthesis_cand], circ_mean_doy)
     mad_doy <- stats::mad(cand_offsets, constant = 1.4826, na.rm = TRUE)
     half_arc <- min(120.0, max(45.0, 3.5 * if (is.finite(mad_doy) && mad_doy > 0) mad_doy else 21.0))
@@ -422,21 +453,12 @@ compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = 
     message(sprintf("[INFO] Cohort-adaptive circular anthesis gate: circ_mean_doy=%.1f, arc=[%+.1f, %+.1f] d (half_arc=%.1f d), lat=[%.2f, %.2f] (N_cand=%d).",
                     circ_mean_doy, arc_lo, arc_hi, half_arc, lat_min_gate, lat_max_gate, n_raw_anthesis))
   } else {
-    cfg_bounds <- read_config_phenology_bounds(config_path)
-    min_d <- cfg_bounds$min_flowering_doy
-    max_d <- cfg_bounds$max_flowering_doy
     if (min_d <= max_d) {
       pass_doy_gate <- valid_doy & (df$doy >= min_d) & (df$doy <= max_d)
     } else {
       pass_doy_gate <- valid_doy & (df$doy >= min_d | df$doy <= max_d)
     }
-    circ_mean_doy <- if (any(raw_anthesis_cand)) {
-      compute_circular_mean_doy(df$doy[raw_anthesis_cand])
-    } else if (any(valid_doy)) {
-      compute_circular_mean_doy(df$doy[valid_doy])
-    } else {
-      compute_circular_mean_doy(c(min_d, max_d))
-    }
+    circ_mean_doy <- circ_mean_raw
     message(sprintf("[WARN] Verified anthesis candidates N=%d (< 5); falling back to config phenology bounds DOY [%.0f, %.0f], lat=[%.2f, %.2f].",
                     n_raw_anthesis, min_d, max_d, lat_min_gate, lat_max_gate))
   }
@@ -457,11 +479,18 @@ compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = 
   cv_fruit[missing_cv & dwc_fruit_only] <- TRUE
   cv_sterile[missing_cv & dwc_sterile_only] <- TRUE
 
-  is_verified_anthesis <- pass_calendar & pass_dwc & cv_anthesis
+  is_verified_anthesis <- pass_calendar & pass_dwc & cv_anthesis & !offseason_vernal_mask
   is_fruit_excluded <- pass_calendar & (cv_fruit | dwc_fruit_only) & !is_verified_anthesis
   is_sterile_excluded <- pass_calendar & (cv_sterile | dwc_sterile_only) & !is_verified_anthesis & !is_fruit_excluded
 
   df$is_verified_anthesis <- is_verified_anthesis
+  df$is_active_anthesis <- is_verified_anthesis
+  phen_state <- ifelse(nzchar(v_state) & !(v_state %in% c("unknown", "na")), v_state, "unknown")
+  phen_state[is_verified_anthesis & phen_state %in% c("unknown", "")] <- "anthesis"
+  phen_state[is_sterile_excluded] <- "sterile"
+  phen_state[is_fruit_excluded] <- "fruiting_only"
+  phen_state[!pass_calendar | offseason_vernal_mask] <- "offseason_or_fruiting_flush"
+  df$phenological_state <- phen_state
   df$anthesis_filter_status <- "Excluded_Calendar_Gate"
   df$anthesis_filter_status[pass_calendar] <- "Excluded_Other"
   df$anthesis_filter_status[is_sterile_excluded] <- "Excluded_Sterile"
@@ -536,10 +565,12 @@ compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = 
   }
 
   df$delta_doy <- NA_real_
-  has_both <- valid_doy & df$is_verified_anthesis & is.finite(theta_pred) & is.finite(df$expected_doy)
+  df$delta_doy_resid <- NA_real_
+  has_both <- valid_doy & df$is_verified_anthesis & !offseason_vernal_mask & is.finite(theta_pred) & is.finite(df$expected_doy)
   if (any(has_both)) {
     theta_obs_b <- doy_to_rad(df$doy[has_both])
     df$delta_doy[has_both] <- wrap_rad(theta_obs_b - theta_pred[has_both]) * day_per_rad
+    df$delta_doy_resid[has_both] <- df$delta_doy[has_both]
   }
 
   # Hopkins-adjusted flowering DOY & circular coordinates (sin_doy, cos_doy) standardized to empirical cohort median latitude
@@ -582,9 +613,10 @@ compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = 
   if (!is.null(output_csv) && nzchar(trimws(as.character(output_csv)))) {
     keep_cols <- c("catalogNumber", "plant_individual_id", "institutionCode", "scientificName", "species_raw",
                    "species_standardized", "decimalLatitude", "decimalLongitude",
-                   "eventDate", "year", "month", "day", "doy", "expected_doy", "hopkins_expected", "delta_doy",
-                   "pheno_timing_category", "is_pheno_uniform_null", "is_verified_anthesis", "anthesis_filter_status",
-                   "voucher_phenological_state", "regional_group")
+                   "eventDate", "year", "month", "day", "doy", "expected_doy", "hopkins_expected",
+                   "hopkins_adjusted_doy", "delta_doy", "delta_doy_resid",
+                   "pheno_timing_category", "is_pheno_uniform_null", "is_verified_anthesis", "is_active_anthesis",
+                   "phenological_state", "anthesis_filter_status", "voucher_phenological_state", "regional_group")
     export_df <- df[, intersect(keep_cols, names(df)), drop = FALSE]
     if (.pheno_write_csv(export_df, output_csv, demo_flag = demo)) {
       message(sprintf("Exported %d voucher phenological anomalies to %s.", nrow(export_df), output_csv))
@@ -1116,7 +1148,23 @@ resolve_analysis_group <- function(
     return(df)
   }
 
-  min_cl_n <- if (n_anc >= 60L) max(6L, as.integer(floor(0.045 * n_anc))) else if (n_anc >= 20L) 4L else 3L
+  cfg_s05 <- if (exists("load_step05_macroecology_config", mode = "function")) {
+    load_step05_macroecology_config()
+  } else {
+    list(ecotype_min_silhouette = 0.40, ecotype_min_fold_jaccard = 0.60)
+  }
+  eco_min_sil <- if (!is.null(cfg_s05$ecotype_min_silhouette) && is.finite(cfg_s05$ecotype_min_silhouette)) {
+    as.numeric(cfg_s05$ecotype_min_silhouette)
+  } else {
+    0.40
+  }
+  eco_min_jacc <- if (!is.null(cfg_s05$ecotype_min_fold_jaccard) && is.finite(cfg_s05$ecotype_min_fold_jaccard)) {
+    as.numeric(cfg_s05$ecotype_min_fold_jaccard)
+  } else {
+    0.60
+  }
+
+  min_cl_n <- if (is_intra && n_anc >= 40L) max(15L, as.integer(floor(0.10 * n_anc))) else if (n_anc >= 20L) 4L else 3L
   max_k_cand <- min(4L, as.integer(floor(n_anc / max(min_cl_n, 2L))))
   if (max_k_cand < 2L) {
     df$analysis_group <- rep(base_taxon, n_rows)
@@ -1156,6 +1204,42 @@ resolve_analysis_group <- function(
     list(S_b = S_b, dist_b = as.matrix(stats::dist(S_b)), tot_b = tot_b)
   })
 
+  .compute_subsample_cluster_jaccard <- function(S_mat, ref_cl, k_tr, n_folds = 5L) {
+    n_obs <- nrow(S_mat)
+    if (n_obs < max(6L, k_tr + 2L)) return(0.0)
+    folds_j <- integer(n_obs)
+    for (ck in sort(unique(ref_cl))) {
+      idx_ck <- which(ref_cl == ck)
+      folds_j[idx_ck] <- ((seq_along(idx_ck) - 1L) %% n_folds) + 1L
+    }
+    f_vals <- vapply(seq_len(n_folds), function(fi) {
+      sub_i <- which(folds_j != fi)
+      if (length(sub_i) < max(k_tr + 2L, 6L)) return(NA_real_)
+      km_f <- tryCatch(stats::kmeans(S_mat[sub_i, , drop = FALSE], centers = k_tr, nstart = 15L, iter.max = 40L), error = function(e) NULL)
+      if (is.null(km_f)) return(NA_real_)
+      rc <- ref_cl[sub_i]; sc <- km_f$cluster
+      ur <- sort(unique(rc)); us <- sort(unique(sc))
+      jm <- matrix(0.0, nrow = length(ur), ncol = length(us))
+      for (ri in seq_along(ur)) {
+        a <- rc == ur[ri]
+        for (si in seq_along(us)) {
+          b <- sc == us[si]; u_ab <- sum(a | b)
+          if (u_ab > 0L) jm[ri, si] <- sum(a & b) / u_ab
+        }
+      }
+      used_s <- integer(0); jc_best <- numeric(length(ur))
+      for (ri in order(apply(jm, 1L, max), decreasing = TRUE)) {
+        avail <- setdiff(seq_along(us), used_s)
+        if (length(avail) == 0L) next
+        bs <- avail[which.max(jm[ri, avail])[1L]]
+        used_s <- c(used_s, bs); jc_best[ri] <- jm[ri, bs]
+      }
+      mean(jc_best, na.rm = TRUE)
+    }, numeric(1))
+    fin_f <- f_vals[is.finite(f_vals)]
+    if (length(fin_f) > 0L) mean(fin_f) else 0.0
+  }
+
   active_doms <- unique(dom_vec)
   cand_fits <- list()
   for (k_try in 2L:max_k_cand) {
@@ -1165,6 +1249,7 @@ resolve_analysis_group <- function(
     if (length(cl_tab) < k_try || any(cl_tab < min_cl_n)) next
     sil_k <- calc_mean_sil(km$cluster, d_anc_mat)
     var_red_k <- 1.0 - (km$tot.withinss / max(tot_ss, 1e-9))
+    fold_jacc_k <- .compute_subsample_cluster_jaccard(S_anc, km$cluster, k_try)
 
     null_combos <- vapply(null_draws, function(nd) {
       km_b <- tryCatch(stats::kmeans(nd$S_b, centers = k_try, nstart = 10L, iter.max = 40L), error = function(e) NULL)
@@ -1243,7 +1328,8 @@ resolve_analysis_group <- function(
     req_sig_vars <- if (length(cand_env) >= 4L) 2L else 1L
     req_sig_doms <- min(2L, length(active_doms))
     pass_eco_gate <- (
-      is.finite(sil_k) && sil_k >= 0.26 &&
+      is.finite(sil_k) && sil_k >= eco_min_sil &&
+      is.finite(fold_jacc_k) && fold_jacc_k >= eco_min_jacc &&
       is.finite(var_red_k) && var_red_k >= (0.30 + 0.05 * (k_try - 2L)) &&
       is.finite(pair_min_mahal_d) && pair_min_mahal_d >= 2.05 &&
       is.finite(pair_min_best_d) && pair_min_best_d >= 1.60 &&
@@ -1257,6 +1343,7 @@ resolve_analysis_group <- function(
       k = k_try,
       km = km,
       sil = sil_k,
+      fold_jacc = fold_jacc_k,
       var_red = var_red_k,
       null_q95_combo = null_q95_combo,
       pair_min_mahal_d = pair_min_mahal_d,

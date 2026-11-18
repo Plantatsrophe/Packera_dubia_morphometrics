@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
+from scripts.core.config import resolve_genomics_config
 from scripts.data_prep.step06_voucher_linker_utils import _parse_int_ploidy
 
 logger = logging.getLogger("plantmatics.genomics.ingest")
@@ -99,10 +100,31 @@ def _fit_nquire_em_models(ratios: np.ndarray, max_iter: int = 25) -> Dict[str, A
 
 
 def _infer_sample_cytotype(
-    ref_vec: np.ndarray, alt_vec: np.ndarray, dosage_vec: np.ndarray,
-    user_ploidy: Optional[int], species_modal_ploidy: Optional[int] = None, is_multi_cytotype: bool = False,
+    ref_vec: np.ndarray,
+    alt_vec: np.ndarray,
+    dosage_vec: np.ndarray,
+    user_ploidy: Optional[int],
+    species_modal_ploidy: Optional[int] = None,
+    is_multi_cytotype: bool = False,
+    min_het_loci: Optional[int] = None,
+    strong_delta_bic: Optional[float] = None,
+    min_delta_logl_per_locus: Optional[float] = None,
 ) -> Tuple[str, Optional[float]]:
     """Infer cytotype (`2x`/`3x`/`4x`/`6x`/`8x`/`mixed/uncertain`) and signed nQuire EM BIC score."""
+    gcfg: Dict[str, Any] = {}
+    if min_het_loci is None or strong_delta_bic is None or min_delta_logl_per_locus is None:
+        try:
+            gcfg = dict(resolve_genomics_config() or {})
+        except Exception:
+            gcfg = {}
+    eff_min_het = int(min_het_loci if min_het_loci is not None else gcfg.get("nquire_min_het_loci", 60))
+    eff_strong_bic = float(strong_delta_bic if strong_delta_bic is not None else gcfg.get("nquire_strong_delta_bic", 25.0))
+    eff_min_logl_per_locus = float(
+        min_delta_logl_per_locus
+        if min_delta_logl_per_locus is not None
+        else gcfg.get("nquire_min_delta_logl_per_locus", 0.15)
+    )
+
     valid = np.isfinite(ref_vec) & np.isfinite(alt_vec) & np.isfinite(dosage_vec)
     dp = ref_vec + alt_vec
     het_mask = valid & (dp >= 10.0) & (dosage_vec > 0.05) & (dosage_vec < 0.95)
@@ -119,8 +141,9 @@ def _infer_sample_cytotype(
     best_label = str(fit["best_label"])
     delta_bic_vs_2x = float(fit["delta_bic_vs_2x"])
     bic_gap_2x_vs_poly = float(fit["bic_gap_2x_vs_poly"])
+    has_user_ploidy = user_ploidy in (2, 3, 4, 6, 8)
     prior_p: Optional[int] = (
-        int(user_ploidy) if user_ploidy in (2, 3, 4, 6, 8)
+        int(user_ploidy) if has_user_ploidy
         else (int(species_modal_ploidy) if (species_modal_ploidy in (2, 3, 4, 6, 8) and not is_multi_cytotype) else None)
     )
 
@@ -129,7 +152,19 @@ def _infer_sample_cytotype(
             return f"{prior_p}x", 0.0
         return "2x", round(-bic_gap_2x_vs_poly, 4)
 
-    strong_thresh = 6.0 if ratios.size < 40 else 4.0
+    n_het = int(ratios.size)
+    logl_map = fit.get("logL_map", {})
+    delta_logl_per_locus = (float(logl_map.get(best_label, 0.0)) - float(logl_map.get("2x", 0.0))) / float(max(1, n_het))
+    if not has_user_ploidy and species_modal_ploidy == 2 and not is_multi_cytotype:
+        if (
+            n_het >= eff_min_het
+            and delta_bic_vs_2x >= eff_strong_bic
+            and delta_logl_per_locus >= eff_min_logl_per_locus
+        ):
+            return best_label, round(delta_bic_vs_2x, 4)
+        return "2x", 0.0
+
+    strong_thresh = 6.0 if n_het < 40 else 4.0
     if delta_bic_vs_2x >= strong_thresh:
         return best_label, round(delta_bic_vs_2x, 4)
     if prior_p == 2:

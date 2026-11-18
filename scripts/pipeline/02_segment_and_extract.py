@@ -1623,6 +1623,7 @@ class SegmentAndExtractPipeline:
                 "catalogNumber": catalog_number,
                 "plant_individual_id": 0,
                 "capitula_count": 0,
+                "corymb_head_count_est": 0,
                 "involucre_height_px": np.nan,
                 "involucre_width_px": np.nan,
                 "involucre_height_mm": np.nan,
@@ -1743,6 +1744,7 @@ class SegmentAndExtractPipeline:
                 "catalogNumber": catalog_number,
                 "plant_individual_id": int(pid_val),
                 "capitula_count": int(c_cnt),
+                "corymb_head_count_est": int(extra_cluster_heads),
                 "log1p_capitulum_count": round(math.log1p(int(c_cnt)), 5) if int(c_cnt) >= 1 else np.nan,
                 "involucre_height_px": round(mh_px, 2) if not np.isnan(mh_px) else np.nan,
                 "involucre_width_px": round(mw_px, 2) if not np.isnan(mw_px) else np.nan,
@@ -2039,17 +2041,42 @@ class SegmentAndExtractPipeline:
         for inst in instances:
             if int(np.count_nonzero(inst.mask)) <= 0:
                 continue
-            _vest_l = compute_calibrated_blade_photometry(
-                img_bgr,
-                inst.mask,
-                mask_origin=inst.mask_origin,
-                hole_mask=inst.hole_mask,
-                petiole_mask=inst.petiole_mask,
-                paper_l_ref=_sheet_paper_l_ref,
-                pixels_per_mm=pixels_per_mm if is_calibrated_mm else None,
-            )
-            inst.blade_cie_l_norm = float(_vest_l["blade_cie_l_norm"])
-            inst.blade_cie_l_sd = float(_vest_l["blade_cie_l_sd"])
+            try:
+                _phot = compute_calibrated_blade_photometry(
+                    img_bgr,
+                    inst.mask,
+                    mask_origin=inst.mask_origin,
+                    hole_mask=inst.hole_mask,
+                    petiole_mask=inst.petiole_mask,
+                    paper_l_ref=_sheet_paper_l_ref,
+                    pixels_per_mm=pixels_per_mm if is_calibrated_mm else None,
+                )
+            except Exception:
+                _phot = {}
+            if isinstance(_phot, dict):
+                inst.blade_cie_l_norm = (
+                    float(_phot["blade_cie_l_norm"]) if _phot.get("blade_cie_l_norm") is not None else np.nan
+                )
+                inst.blade_cie_l_sd = (
+                    float(_phot["blade_cie_l_sd"]) if _phot.get("blade_cie_l_sd") is not None else np.nan
+                )
+                inst.blade_cie_l_sheet_delta = (
+                    float(_phot["blade_cie_l_sheet_delta"])
+                    if _phot.get("blade_cie_l_sheet_delta") is not None
+                    else np.nan
+                )
+                inst.blade_cie_a_delta = (
+                    float(_phot["blade_cie_a_delta"]) if _phot.get("blade_cie_a_delta") is not None else np.nan
+                )
+                inst.blade_cie_b_delta = (
+                    float(_phot["blade_cie_b_delta"]) if _phot.get("blade_cie_b_delta") is not None else np.nan
+                )
+            else:
+                inst.blade_cie_l_norm = np.nan
+                inst.blade_cie_l_sd = np.nan
+                inst.blade_cie_l_sheet_delta = np.nan
+                inst.blade_cie_a_delta = np.nan
+                inst.blade_cie_b_delta = np.nan
             _ox_l, _oy_l = inst.mask_origin
             _pid_hint_s = _crown_hints_sheet.get(int(inst.plant_individual_id))
             _crown_local: Optional[Tuple[float, float]] = (
@@ -2671,6 +2698,9 @@ class SegmentAndExtractPipeline:
                 "qc_flag_reason": str(getattr(inst, "qc_flag_reason", "PASS") or "PASS"),
                 "blade_cie_l_norm": getattr(inst, "blade_cie_l_norm", np.nan),
                 "blade_cie_l_sd": getattr(inst, "blade_cie_l_sd", np.nan),
+                "blade_cie_l_sheet_delta": getattr(inst, "blade_cie_l_sheet_delta", np.nan),
+                "blade_cie_a_delta": getattr(inst, "blade_cie_a_delta", np.nan),
+                "blade_cie_b_delta": getattr(inst, "blade_cie_b_delta", np.nan),
                 "midrib_angle_deg": round(float(inst.midrib_angle_deg), 2),
                 "pixels_per_mm": round(float(inst.pixels_per_mm), 4) if inst.pixels_per_mm else np.nan,
                 "is_calibrated_mm": bool(inst.is_calibrated_mm),
@@ -2748,6 +2778,7 @@ class SegmentAndExtractPipeline:
             "n_lamina_components", "detector_class_id", "is_crop_clipped",
             "hole_area_frac", "enclosed_void_frac", "bilateral_lobe_symmetry",
             "efa_qc_pass", "qc_flag_reason", "blade_cie_l_norm", "blade_cie_l_sd",
+            "blade_cie_l_sheet_delta", "blade_cie_a_delta", "blade_cie_b_delta",
             "scale_source", "pixels_per_mm", "is_calibrated_mm",
             "mask_path", "mask_is_upright", "contour_path", "ect_path", "leaf_zone",
         ]
@@ -2811,8 +2842,8 @@ class SegmentAndExtractPipeline:
             ])
 
         repro_cols = [
-            "catalogNumber", "plant_individual_id", "capitula_count", "involucre_height_px",
-            "involucre_width_px", "involucre_height_mm", "involucre_width_mm",
+            "catalogNumber", "plant_individual_id", "capitula_count", "corymb_head_count_est",
+            "involucre_height_px", "involucre_width_px", "involucre_height_mm", "involucre_width_mm",
             "AR_inv", "plant_height_cm",
             "scape_to_basal_leaf_ratio", "is_bent_stem"
         ]
@@ -2833,6 +2864,12 @@ class SegmentAndExtractPipeline:
         else:
             if "plant_individual_id" not in repro_df.columns:
                 repro_df["plant_individual_id"] = 0
+            if "corymb_head_count_est" not in repro_df.columns:
+                repro_df["corymb_head_count_est"] = 0
+            else:
+                repro_df["corymb_head_count_est"] = pd.to_numeric(
+                    repro_df["corymb_head_count_est"], errors="coerce"
+                ).fillna(0).astype(int)
             if "plant_height_cm" not in repro_df.columns:
                 repro_df["plant_height_cm"] = np.nan
             if "scape_to_basal_leaf_ratio" not in repro_df.columns:

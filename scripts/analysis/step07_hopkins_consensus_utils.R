@@ -36,35 +36,60 @@ if (grDevices::dev.cur() == 1L) grDevices::pdf(NULL)
   .step07_safe_bool(df$is_centroid_or_inst_coord) & !.step07_type_mask(df)
 }
 
+.circ_median_doy_step07 <- function(dv) {
+  v <- dv[is.finite(dv) & dv >= 1.0 & dv <= 366.0]; if (length(v) == 0L) return(NA_real_)
+  th <- 2.0 * pi * (v / 365.25); mu <- atan2(mean(sin(th)), mean(cos(th))); if (mu < 0.0) mu <- mu + 2.0 * pi
+  off <- atan2(sin(th - mu), cos(th - mu)) * (365.25 / (2.0 * pi))
+  ((mu * (365.25 / (2.0 * pi)) + stats::median(off) - 1.0) %% 365.25) + 1.0
+}
+
 resolve_active_anthesis_mask <- function(df) {
   n <- nrow(df); if (n == 0L) return(logical(0))
   ver_vec <- if ("is_verified_anthesis" %in% names(df)) suppressWarnings(as.logical(df$is_verified_anthesis)) else rep(NA, n)
   na_cnt <- if ("n_anthesis" %in% names(df)) suppressWarnings(as.numeric(df$n_anthesis)) else if ("n_anthesis_heads" %in% names(df)) suppressWarnings(as.numeric(df$n_anthesis_heads)) else rep(NA_real_, n)
   state_cols <- intersect(c("voucher_phenological_state", "phenological_state", "phenophase", "head_state"), names(df))
-  if (length(state_cols) > 0L) {
+  is_anthesis <- if (length(state_cols) > 0L) {
     st_raw <- tolower(trimws(as.character(df[[state_cols[1L]]])))
     unk_mask <- is.na(st_raw) | !nzchar(st_raw) | st_raw == "unknown"
-    is_anthesis <- (!unk_mask) & (st_raw %in% c("anthesis", "flowering", "active_anthesis", "open_flower") | grepl("anthesis|flower", st_raw))
-    is_anthesis[!is.na(st_raw) & (st_raw %in% c("bud", "fruit", "sterile", "vegetative", "fruiting", "senescent") | grepl("pre[_-]?anthesis|post[_-]?anthesis|non[_-]?anthesis", st_raw))] <- FALSE
+    ia <- (!unk_mask) & (st_raw %in% c("anthesis", "flowering", "active_anthesis", "open_flower") | grepl("anthesis|flower", st_raw))
+    ia[!is.na(st_raw) & (st_raw %in% c("bud", "fruit", "sterile", "vegetative", "fruiting", "senescent") | grepl("pre[_-]?anthesis|post[_-]?anthesis|non[_-]?anthesis", st_raw))] <- FALSE
     if (any(unk_mask)) {
       has_ver <- unk_mask & !is.na(ver_vec)
-      if (any(has_ver)) is_anthesis[has_ver] <- ver_vec[has_ver]
+      if (any(has_ver)) ia[has_ver] <- ver_vec[has_ver]
       rem_unk <- unk_mask & is.na(ver_vec) & is.finite(na_cnt)
-      if (any(rem_unk)) is_anthesis[rem_unk] <- na_cnt[rem_unk] >= 1.0
+      if (any(rem_unk)) ia[rem_unk] <- na_cnt[rem_unk] >= 1.0
     }
-    return(is_anthesis)
-  }
-  if ("is_verified_anthesis" %in% names(df)) {
+    ia
+  } else if ("is_verified_anthesis" %in% names(df)) {
     ia <- ver_vec
     if (any(is.na(ia)) && any(is.finite(na_cnt))) ia[is.na(ia) & is.finite(na_cnt)] <- na_cnt[is.na(ia) & is.finite(na_cnt)] >= 1.0
-    if (all(is.na(ia)) && ("is_active_anthesis" %in% names(df))) { ia_fb <- suppressWarnings(as.logical(df$is_active_anthesis)); ia_fb[is.na(ia_fb)] <- FALSE; return(ia_fb) }
-    ia[is.na(ia)] <- FALSE; return(ia)
+    if (all(is.na(ia)) && ("is_active_anthesis" %in% names(df))) { ia_fb <- suppressWarnings(as.logical(df$is_active_anthesis)); ia_fb[is.na(ia_fb)] <- FALSE; ia_fb } else { ia[is.na(ia)] <- FALSE; ia }
+  } else if ("is_active_anthesis" %in% names(df)) {
+    ia <- suppressWarnings(as.logical(df$is_active_anthesis)); ia[is.na(ia)] <- FALSE; ia
+  } else if ("is_anthesis" %in% names(df)) {
+    ia <- as.logical(df$is_anthesis); ia[is.na(ia)] <- FALSE; ia
+  } else if ("n_anthesis" %in% names(df)) {
+    !is.na(na_cnt) & is.finite(na_cnt) & na_cnt >= 1.0
+  } else if ("n_anthesis_heads" %in% names(df)) {
+    nh <- suppressWarnings(as.numeric(df$n_anthesis_heads)); !is.na(nh) & is.finite(nh) & nh >= 1.0
+  } else rep(TRUE, n)
+  defs <- .load_step07_pheno_config_defaults()
+  doy_v <- .num_col(df, "doy", n)
+  if (all(!is.finite(doy_v)) && ("hopkins_adjusted_doy" %in% names(df))) doy_v <- .num_col(df, "hopkins_adjusted_doy", n)
+  has_d <- is.finite(doy_v) & (doy_v >= 1.0) & (doy_v <= 366.0)
+  if (any(has_d)) {
+    is_anthesis[has_d & (doy_v < defs$min_flowering_doy)] <- FALSE
+    coh_med <- .circ_median_doy_step07(doy_v[is_anthesis & has_d])
+    sp_col <- if ("species_standardized" %in% names(df)) trimws(as.character(df$species_standardized)) else rep("", n)
+    med_by_row <- rep(coh_med, n); ok_sp <- !is.na(sp_col) & nzchar(sp_col) & sp_col != "Unknown"
+    for (tx in unique(sp_col[ok_sp])) {
+      m_tx <- ok_sp & (sp_col == tx) & is_anthesis & has_d
+      if (sum(m_tx) >= 5L && is.finite(tx_med <- .circ_median_doy_step07(doy_v[m_tx]))) med_by_row[ok_sp & (sp_col == tx)] <- tx_med
+    }
+    is_vernal <- is.finite(med_by_row) & (med_by_row < 170.0)
+    is_anthesis[is_vernal & has_d & ((doy_v < defs$min_flowering_doy) | (doy_v > defs$max_flowering_doy) | (doy_v > 240.0))] <- FALSE
   }
-  if ("is_active_anthesis" %in% names(df)) { ia <- suppressWarnings(as.logical(df$is_active_anthesis)); ia[is.na(ia)] <- FALSE; return(ia) }
-  if ("is_anthesis" %in% names(df)) { ia <- as.logical(df$is_anthesis); ia[is.na(ia)] <- FALSE; return(ia) }
-  if ("n_anthesis" %in% names(df)) return(!is.na(na_cnt) & is.finite(na_cnt) & na_cnt >= 1.0)
-  if ("n_anthesis_heads" %in% names(df)) { nh <- suppressWarnings(as.numeric(df$n_anthesis_heads)); return(!is.na(nh) & is.finite(nh) & nh >= 1.0) }
-  rep(TRUE, n)
+  is_anthesis
 }
 
 .num_col <- function(df, col_nm, n = nrow(df), default = NA_real_) if (col_nm %in% names(df)) suppressWarnings(as.numeric(df[[col_nm]])) else rep(default, n)
@@ -97,12 +122,17 @@ resolve_step07_ecological_authority_weights <- function(df, allow_bronze_prior =
 }
 
 .load_step07_pheno_config_defaults <- function(cfg_path = "config/config.yaml") {
-  defs <- list(tau_ecotype = 14.0, tau_cryptic = 18.0)
+  defs <- list(tau_ecotype = 14.0, tau_cryptic = 18.0, min_flowering_doy = 30.0, max_flowering_doy = 220.0)
   if (file.exists(cfg_path) && requireNamespace("yaml", quietly = TRUE)) {
     cfg <- tryCatch(yaml::read_yaml(cfg_path), error = function(e) NULL)
     if (is.list(cfg) && is.list(cfg$synthesis)) {
       if (!is.null(cfg$synthesis$ecotype_ddoy_cutoff_days)) defs$tau_ecotype <- as.numeric(cfg$synthesis$ecotype_ddoy_cutoff_days)
       if (!is.null(cfg$synthesis$cryptic_ddoy_cutoff_days)) defs$tau_cryptic <- as.numeric(cfg$synthesis$cryptic_ddoy_cutoff_days)
+    }
+    ph_c <- if (is.list(cfg) && is.list(cfg$macroecology) && is.list(cfg$macroecology$phenology)) cfg$macroecology$phenology else if (is.list(cfg) && is.list(cfg$phenology)) cfg$phenology else NULL
+    if (is.list(ph_c)) {
+      mn <- suppressWarnings(as.numeric(ph_c$min_flowering_doy)); mx <- suppressWarnings(as.numeric(ph_c$max_flowering_doy))
+      if (length(mn) == 1L && is.finite(mn)) defs$min_flowering_doy <- mn; if (length(mx) == 1L && is.finite(mx)) defs$max_flowering_doy <- mx
     }
   }
   defs

@@ -320,6 +320,42 @@ class TestStep02VisionHygiene(unittest.TestCase):
             _, patches = _run_mocked_voucher(tmp_p, "NCU_NOCROP", sheet, s1_dets, save_debug_crops=False)
             self.assertEqual(patches, [])
 
+    def test_w1_archival_ruler_without_lattice_transposed_tensor_and_sheet_delta(self) -> None:
+        """Verify LM3ScaleCalibrator loads archival_session without ruler_lattice, decodes transposed tensors, and returns blade_cie_l_sheet_delta."""
+        class _FakeInput:
+            name = "images"
+
+        class _FakeArchival:
+            def get_inputs(self):
+                return [_FakeInput()]
+
+            def run(self, _out, _feed):
+                arr = np.zeros((1, 6, 12), dtype=np.float32)
+                arr[0, :4, 0] = [320.0, 200.0, 180.0, 60.0]
+                arr[0, 4, 0] = 0.92
+                arr[0, :4, 1] = [640.0, 400.0, 120.0, 80.0]
+                arr[0, 5, 1] = 0.95
+                return [arr]
+
+        fake_sess = _FakeArchival()
+        with patch.object(LM3ScaleCalibrator, "_init_lm3_scale_models", lambda s: None), \
+             patch("scripts.vision.lm3_inference_engines._load_onnx_session", return_value=(Path("mock.onnx"), "cpu", ["CPUExecutionProvider"], fake_sess)):
+            cal = LM3ScaleCalibrator(device="cpu", use_cf_predicted_by_mp=False)
+        self.assertIsNone(cal.ruler_lattice)
+        self.assertIs(cal.archival_session, fake_sess)
+        boxes = cal._detect_ruler_boxes(np.full((800, 1000, 3), 230, dtype=np.uint8))
+        self.assertEqual(len(boxes), 1)
+        self.assertAlmostEqual(boxes[0][1], 0.92, places=3)
+
+        sheet = np.full((120, 120, 3), 240, dtype=np.uint8)
+        sheet[20:100, 20:100] = (50, 110, 80)
+        mask = np.zeros((120, 120), dtype=np.uint8)
+        mask[25:95, 25:95] = 255
+        phot = compute_calibrated_blade_photometry(sheet, mask, pixels_per_mm=12.0)
+        for k in ("blade_cie_l_norm", "blade_cie_l_sd", "blade_cie_l_sheet_delta", "blade_cie_a_delta", "blade_cie_b_delta"):
+            self.assertTrue(np.isfinite(float(phot[k])), f"Missing/non-finite {k}: {phot}")
+        self.assertLess(float(phot["blade_cie_l_sheet_delta"]), 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

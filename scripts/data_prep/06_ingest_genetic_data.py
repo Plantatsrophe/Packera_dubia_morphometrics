@@ -100,6 +100,7 @@ def _resolve_sample_record(
     marker_platform: str,
     min_hq_reads: int,
     max_missing_rate: float,
+    cyto_ctx_out: Optional[Dict[str, Tuple[Optional[int], Optional[int], bool, bool]]] = None,
 ) -> Tuple[Dict[str, Any], Optional[int]]:
     parsed = parse_sample_code(sid)
     u_meta = direct_user_meta.get(sid)
@@ -159,6 +160,9 @@ def _resolve_sample_record(
 
     inf_cyto = f"{ploidy}x" if ploidy in (2, 3, 4, 6, 8) else (f"{sp_modal}x" if (sp_modal in (2, 3, 4, 6, 8) and not sp_multi) else "mixed/uncertain")
     nq_delta: Optional[float] = None
+    has_user_cyto = bool(str((u_meta or {}).get("inferred_cytotype") or "").strip())
+    if cyto_ctx_out is not None:
+        cyto_ctx_out[sid] = (ploidy, sp_modal, sp_multi, has_user_cyto)
     if sid in sample_idx_map and n_loci_raw > 0:
         sidx = sample_idx_map[sid]
         vec = dosage_mat[sidx, :]
@@ -166,11 +170,6 @@ def _resolve_sample_record(
         n_called = int(np.sum(called_mask))
         miss_rate = float(1.0 - (n_called / float(n_loci_raw)))
         obs_het = float(np.mean((vec[called_mask] > 0.05) & (vec[called_mask] < 0.95))) if n_called > 0 else None
-        if ref_depth_mat.size > 0 and alt_depth_mat.size > 0:
-            inf_cyto, nq_delta = _infer_sample_cytotype(
-                ref_depth_mat[sidx, :], alt_depth_mat[sidx, :], vec, ploidy,
-                species_modal_ploidy=sp_modal, is_multi_cytotype=sp_multi,
-            )
 
     fb_ploidy = ploidy if ploidy in (2, 3, 4, 6, 8) else (sp_modal if sp_modal in (2, 3, 4, 6, 8) else None)
     if hq_reads is not None:
@@ -300,17 +299,23 @@ def run_genomic_ingestion(
         logger.warning("SQLite voucher lookup unavailable (%s); continuing with standalone linking.", exc)
         vouchers, db_priors = [], _load_db_cytology_priors(None)
 
+    gcfg = resolve_genomics_config() or {}
+    min_het_cfg = int(gcfg.get("nquire_min_het_loci", 60))
+    strong_bic_cfg = float(gcfg.get("nquire_strong_delta_bic", 25.0))
+    min_logl_per_locus_cfg = float(gcfg.get("nquire_min_delta_logl_per_locus", 0.15))
+
     sample_idx_map = {sid: i for i, sid in enumerate(dosage_samples)}
     n_loci_raw = int(dosage_mat.shape[1]) if dosage_mat.ndim == 2 else 0
     exsiccatae_index = _build_exsiccatae_index(vouchers)
     ex_prior_lc = {_normalize_exsiccatae_lookup_key(k).lower(): v for k, v in db_priors["by_exsiccatae"].items()}
     fallback_ploidy_by_sid: Dict[str, Optional[int]] = {}
+    cyto_ctx_by_sid: Dict[str, Tuple[Optional[int], Optional[int], bool, bool]] = {}
     records: List[Dict[str, Any]] = []
     for sid in all_sample_ids:
         rec, fb_pl = _resolve_sample_record(
             sid, vouchers, exsiccatae_index, field_rows, direct_user_meta, stats_map, organellar_map,
             db_priors, ex_prior_lc, dosage_mat, ref_depth_mat, alt_depth_mat, sample_idx_map,
-            n_loci_raw, marker_platform, min_hq_reads, max_missing_rate,
+            n_loci_raw, marker_platform, min_hq_reads, max_missing_rate, cyto_ctx_out=cyto_ctx_by_sid,
         )
         records.append(rec)
         fallback_ploidy_by_sid[sid] = fb_pl
@@ -336,6 +341,32 @@ def run_genomic_ingestion(
             n_loci_retained = int(kept_indices.size)
             kept_loci = [locus_ids[int(j)] for j in kept_indices]
             kept_dosage = sub_pass[:, kept_indices]
+            if ref_depth_mat.size > 0 and alt_depth_mat.size > 0 and n_loci_retained > 0:
+                sc_mask = keep_mask & (hd_df["is_paraloss1272_single_copy"].to_numpy(dtype=int) == 1)
+                sc_indices = np.where(sc_mask)[0]
+                for r in pass_recs:
+                    sid = r["genetic_sample_id"]
+                    sidx = sample_idx_map[sid]
+                    use_idx = kept_indices
+                    if sc_indices.size >= min_het_cfg:
+                        rv_sc, av_sc, dv_sc = ref_depth_mat[sidx, sc_indices], alt_depth_mat[sidx, sc_indices], dosage_mat[sidx, sc_indices]
+                        dp_sc = rv_sc + av_sc
+                        hm_sc = np.isfinite(rv_sc) & np.isfinite(av_sc) & np.isfinite(dv_sc) & (dp_sc >= 10.0) & (dv_sc > 0.05) & (dv_sc < 0.95)
+                        if np.any(hm_sc):
+                            rat_sc = av_sc[hm_sc] / np.maximum(1.0, dp_sc[hm_sc])
+                            if int(np.sum((rat_sc >= 0.10) & (rat_sc <= 0.90))) >= min_het_cfg:
+                                use_idx = sc_indices
+                    u_pl, sp_m, sp_mu, has_u_cyto = cyto_ctx_by_sid.get(sid, (r.get("ploidy_level"), None, False, False))
+                    inf_c, nq_d = _infer_sample_cytotype(
+                        ref_depth_mat[sidx, use_idx], alt_depth_mat[sidx, use_idx], dosage_mat[sidx, use_idx], u_pl,
+                        species_modal_ploidy=sp_m, is_multi_cytotype=sp_mu, min_het_loci=min_het_cfg,
+                        strong_delta_bic=strong_bic_cfg, min_delta_logl_per_locus=min_logl_per_locus_cfg,
+                    )
+                    if not has_u_cyto:
+                        r["inferred_cytotype"] = inf_c
+                    r["nquire_delta_logl"] = nq_d
+                    if str(r.get("inferred_cytotype") or "") in _CYTO_TO_PLOIDY:
+                        fallback_ploidy_by_sid[sid] = _CYTO_TO_PLOIDY[str(r["inferred_cytotype"])]
             if not from_precomputed_dosage and ref_depth_mat.size > 0 and n_loci_retained > 0:
                 rd_pass, ad_pass = ref_depth_mat[pass_rows, :][:, kept_indices], alt_depth_mat[pass_rows, :][:, kept_indices]
                 cytos = [str(r["inferred_cytotype"]) for r in pass_recs]

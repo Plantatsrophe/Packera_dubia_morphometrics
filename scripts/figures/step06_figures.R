@@ -250,10 +250,11 @@ render_fig06a_genomic_pcoa_tree_png <- function(out_png, pass_df, assign_df, q_m
   }))
   ord_ids <- plot_df$genetic_sample_id[order(plot_df$is_putative_novel_or_hybrid_query, plot_df$display_taxon, plot_df$genetic_sample_id)]
   q_df_long$genetic_sample_id <- factor(q_df_long$genetic_sample_id, levels = ord_ids)
+  q_df_long <- q_df_long[!is.na(q_df_long$genetic_sample_id) & !is.na(q_df_long$ancestry_taxon) & nzchar(as.character(q_df_long$ancestry_taxon)) & is.finite(q_df_long$q_prop), , drop = FALSE]
   anc_pal <- get_combinatorial_palette_r(sort(unique(c(tx_levels, colnames(q_mat)))))
 
   p_c <- ggplot2::ggplot(q_df_long, ggplot2::aes(x = .data$genetic_sample_id, y = .data$q_prop, fill = .data$ancestry_taxon)) +
-    ggplot2::geom_col(width = 0.82, color = "#ffffff", linewidth = 0.15) +
+    ggplot2::geom_col(color = "#ffffff", linewidth = 0.15, na.rm = TRUE) +
     ggplot2::scale_fill_manual(values = anc_pal, labels = lab_fn, name = "Ancestry") +
     ggplot2::scale_y_continuous(expand = ggplot2::expansion(mult = c(0.0, 0.03))) +
     ggplot2::labs(title = "C. Genomic Ancestry Simplex & Co-ancestry Structure", x = "QC-Passing Samples", y = "Ancestry Proportion (q)") +

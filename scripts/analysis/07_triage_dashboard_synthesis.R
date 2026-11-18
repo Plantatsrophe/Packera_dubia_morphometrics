@@ -169,7 +169,8 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
   doy_num_all <- .num_col(df, "doy", n); valid_raw_doy <- is.finite(doy_num_all) & doy_num_all >= 1.0 & doy_num_all <= 366.0
   hop_in_all <- .num_col(df, "hopkins_adjusted_doy", n); valid_hop <- is.finite(hop_in_all) & hop_in_all >= 1.0 & hop_in_all <= 366.0
   valid_doy_all <- valid_raw_doy | valid_hop; hop_doy_all <- ifelse(valid_hop, hop_in_all, ifelse(valid_raw_doy, doy_num_all, NA_real_))
-  anth_all <- if ("is_active_anthesis" %in% names(df)) { v <- as.logical(df$is_active_anthesis); v[is.na(v)] <- TRUE; v } else rep(TRUE, n)
+  anth_all <- if ("is_active_anthesis" %in% names(df)) { v <- as.logical(df$is_active_anthesis); v[is.na(v)] <- FALSE; v } else resolve_active_anthesis_mask(df)
+  df$is_active_anthesis <- anth_all
   ph_num_all <- if ("fine_soil_ph" %in% names(df)) .num_col(df, "fine_soil_ph", n) else rep(NA_real_, n)
   if ("soil_ph" %in% names(df)) ph_num_all <- ifelse(is.finite(ph_num_all), ph_num_all, .num_col(df, "soil_ph", n))
   sand_num_all <- if ("fine_soil_sand" %in% names(df)) .num_col(df, "fine_soil_sand", n) else rep(NA_real_, n)
@@ -300,6 +301,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
   st_res <- .evaluate_step07_specimen_stages(df, mv, bg_ctx, cl_ctx, org_sig, .eval_five_gate_hybrid_pair, gmm_two_delta_bic = gmm_two_delta_bic, is_intra = is_intra)
   outside_self_morph_95 <- st_res$outside_self_morph_95; tier_authority_gate_ok <- st_res$tier_authority_gate_ok
   df <- .apply_step07_postprocess_and_guards(df, st_res, mv, bg_ctx, cl_ctx, org_sig, opts)
+  df$is_active_anthesis <- anth_all; if ("delta_doy_resid" %in% names(df)) df$delta_doy_resid[!anth_all] <- NA_real_; if ("delta_doy" %in% names(df)) df$delta_doy[!anth_all] <- NA_real_
 
   df$cryptic_non_clinal_pass <- as.logical(df$cryptic_non_clinal_pass)
   df$resurrection_basionym <- as.character(df$resurrection_basionym)

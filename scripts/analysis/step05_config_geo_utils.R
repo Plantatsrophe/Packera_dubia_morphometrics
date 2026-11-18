@@ -6,6 +6,8 @@ if (grDevices::dev.cur() == 1L) grDevices::pdf(NULL)
 load_step05_macroecology_config <- function(cfg_path = "config/config.yaml") {
   defaults <- list(
     cor_threshold = 0.70, vif_threshold = 5.0, cumulative_importance_cutoff = 0.85,
+    min_node_size = 12L, max_depth = 6L, sample_fraction = 0.70,
+    ecotype_min_silhouette = 0.40, ecotype_min_fold_jaccard = 0.60,
     min_flowering_doy = 30.0, max_flowering_doy = 220.0, min_flowering_lat = 24.0, max_flowering_lat = 55.0
   )
   if (is.null(cfg_path) || length(cfg_path) == 0L || is.na(cfg_path[1L])) return(defaults)
@@ -14,8 +16,9 @@ load_step05_macroecology_config <- function(cfg_path = "config/config.yaml") {
 
   is_valid_cfg <- function(k, v) {
     if (length(v) != 1L || !is.finite(v)) return(FALSE)
-    if (k %in% c("cor_threshold", "cumulative_importance_cutoff")) return(v > 0.0 && v <= 1.0)
+    if (k %in% c("cor_threshold", "cumulative_importance_cutoff", "sample_fraction", "ecotype_min_silhouette", "ecotype_min_fold_jaccard")) return(v > 0.0 && v <= 1.0)
     if (identical(k, "vif_threshold")) return(v > 1.0)
+    if (k %in% c("min_node_size", "max_depth")) return(v >= 1.0)
     if (k %in% c("min_flowering_doy", "max_flowering_doy")) return(v >= 1.0 && v <= 366.0)
     if (k %in% c("min_flowering_lat", "max_flowering_lat")) return(v >= -90.0 && v <= 90.0)
     TRUE
@@ -25,12 +28,19 @@ load_step05_macroecology_config <- function(cfg_path = "config/config.yaml") {
   if (requireNamespace("yaml", quietly = TRUE)) {
     cfg <- tryCatch(yaml::read_yaml(cpath), error = function(e) NULL)
     if (is.list(cfg)) {
-      sec_map <- c(cor_threshold = "spatial_rf", vif_threshold = "spatial_rf", cumulative_importance_cutoff = "spatial_rf",
-                   min_flowering_doy = "phenology", max_flowering_doy = "phenology", min_flowering_lat = "phenology", max_flowering_lat = "phenology")
+      sec_map <- c(
+        cor_threshold = "spatial_rf", vif_threshold = "spatial_rf", cumulative_importance_cutoff = "spatial_rf",
+        min_node_size = "spatial_rf", max_depth = "spatial_rf", sample_fraction = "spatial_rf",
+        ecotype_min_silhouette = "spatial_rf", ecotype_min_fold_jaccard = "spatial_rf",
+        min_flowering_doy = "phenology", max_flowering_doy = "phenology", min_flowering_lat = "phenology", max_flowering_lat = "phenology"
+      )
       for (k in names(sec_map)) {
         sec <- sec_map[[k]]
-        cands <- list(if (is.list(cfg$macroecology) && is.list(cfg$macroecology[[sec]])) cfg$macroecology[[sec]][[k]] else NULL,
-                      if (is.list(cfg[[sec]])) cfg[[sec]][[k]] else NULL)
+        cands <- list(
+          if (is.list(cfg$macroecology) && is.list(cfg$macroecology[[sec]])) cfg$macroecology[[sec]][[k]] else NULL,
+          if (is.list(cfg$macroecology)) cfg$macroecology[[k]] else NULL,
+          if (is.list(cfg[[sec]])) cfg[[sec]][[k]] else NULL
+        )
         for (cv in cands) {
           nv <- suppressWarnings(as.numeric(cv))
           if (length(nv) == 1L && is_valid_cfg(k, nv)) { out[[k]] <- nv; found <- c(found, k); break }
@@ -48,6 +58,8 @@ load_step05_macroecology_config <- function(cfg_path = "config/config.yaml") {
       }
     }
   }
+  out$min_node_size <- as.integer(round(out$min_node_size))
+  out$max_depth <- as.integer(round(out$max_depth))
   out
 }
 

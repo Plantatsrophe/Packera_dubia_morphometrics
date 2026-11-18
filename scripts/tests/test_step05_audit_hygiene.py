@@ -21,9 +21,10 @@ SKIP_R_COND = (
 
 
 def _is_finite(val: object) -> bool:
-    """Return True if val is a non-boolean finite scalar."""
-    if val is None or isinstance(val, bool):
-        return False
+    return val is not None and not isinstance(val, bool) and _try_float_finite(val)
+
+
+def _try_float_finite(val: object) -> bool:
     try:
         return math.isfinite(float(val))
     except (TypeError, ValueError):
@@ -31,29 +32,19 @@ def _is_finite(val: object) -> bool:
 
 
 def _seed_step05_db(tmp_p: Path) -> Path:
-    """Create an isolated SQLite DB seeded with 8 clean anthesis vouchers and empty temp subdirs."""
     db_path = tmp_p / "step05_audit.sqlite"
-    conn = sqlite3.connect(str(db_path))
-    init_db_schema(conn)
-    v_rows, p_rows, ph_rows = [], [], []
-    for idx in range(1, 9):
-        cat = f"S05_{idx:02d}"
-        lat, lon = round(32.0 + (idx - 1) * (10.0 / 7.0), 4), round(-84.0 + (idx - 1) * (8.0 / 7.0), 4)
-        doy = round(90.0 + 4.0 * (lat - 32.0), 1)
-        v_rows.append((cat, "NCU", "Packera dubia", "Packera dubia", "Tier_1_Gold", lat, lon, 100.0, doy, 1, 0))
-        p_rows.append((cat, 0))
-        ph_rows.append((cat, 0, "Peak_Anthesis", 3, 5, 1))
-    conn.executemany(
-        "INSERT INTO vouchers (catalogNumber,institutionCode,scientificName,species_standardized,determiner_tier,decimalLatitude,decimalLongitude,coordinateUncertainty,doy,is_primary_duplicate,is_centroid_or_inst_coord) VALUES (?,?,?,?,?,?,?,?,?,?,?);",
-        v_rows,
-    )
-    conn.executemany("INSERT INTO plant_individuals (catalogNumber,plant_individual_id) VALUES (?,?);", p_rows)
-    conn.executemany(
-        "INSERT INTO voucher_reproductive_phenology (catalogNumber,plant_individual_id,voucher_phenological_state,n_anthesis,total_capitula,is_verified_anthesis) VALUES (?,?,?,?,?,?);",
-        ph_rows,
-    )
-    conn.commit()
-    conn.close()
+    with sqlite3.connect(str(db_path)) as conn:
+        init_db_schema(conn)
+        v_rows, p_rows, ph_rows = [], [], []
+        for idx in range(1, 9):
+            cat = f"S05_{idx:02d}"
+            lat, lon = round(32.0 + (idx - 1) * (10.0 / 7.0), 4), round(-84.0 + (idx - 1) * (8.0 / 7.0), 4)
+            v_rows.append((cat, "NCU", "Packera dubia", "Packera dubia", "Tier_1_Gold", lat, lon, 100.0, round(90.0 + 4.0 * (lat - 32.0), 1), 1, 0))
+            p_rows.append((cat, 0)); ph_rows.append((cat, 0, "Peak_Anthesis", 3, 5, 1))
+        conn.executemany("INSERT INTO vouchers (catalogNumber,institutionCode,scientificName,species_standardized,determiner_tier,decimalLatitude,decimalLongitude,coordinateUncertainty,doy,is_primary_duplicate,is_centroid_or_inst_coord) VALUES (?,?,?,?,?,?,?,?,?,?,?);", v_rows)
+        conn.executemany("INSERT INTO plant_individuals (catalogNumber,plant_individual_id) VALUES (?,?);", p_rows)
+        conn.executemany("INSERT INTO voucher_reproductive_phenology (catalogNumber,plant_individual_id,voucher_phenological_state,n_anthesis,total_capitula,is_verified_anthesis) VALUES (?,?,?,?,?,?);", ph_rows)
+        conn.commit()
     for sub in ("sdm_env", "sdm_out", "cache_env", "cache_ssurgo"):
         (tmp_p / sub).mkdir(parents=True, exist_ok=True)
     return db_path
@@ -222,10 +213,13 @@ load_and_update_fine_grain_cache(df_coast, env_dir = file.path(tmp_root, "cache_
 calls_1 <- ss_calls
 load_and_update_fine_grain_cache(df_coast, env_dir = file.path(tmp_root, "cache_env"), ssurgo_cache_dir = file.path(tmp_root, "cache_ssurgo"), demo = FALSE, query_ssurgo_fn = mock_ssurgo, cache_path = c_path)
 calls_2 <- ss_calls - calls_1
+df_ver <- df_ph[1:8, , drop = FALSE]; df_ver <- rbind(df_ver, df_ver[1L, ]); df_ver$catalogNumber[9L] <- "AUT_287"; df_ver$doy[9L] <- 287.0
+ver_df <- compute_phenological_anomalies(df_ver, output_csv = NULL, summary_csv = NULL, demo = FALSE)$df
 res$cfg_cache <- list(
   has_mc = "maritime_continentality_idx" %in% names(res_mc),
   mc_vals = if ("maritime_continentality_idx" %in% names(res_mc)) as.numeric(res_mc$maritime_continentality_idx) else numeric(0),
-  cfg = cfg_s05, calls_1 = as.integer(calls_1), calls_2 = as.integer(calls_2)
+  cfg = cfg_s05, calls_1 = as.integer(calls_1), calls_2 = as.integer(calls_2),
+  aut287_active = isTRUE(ver_df$is_active_anthesis[match("AUT_287", ver_df$catalogNumber)])
 )
 
 jsonlite::write_json(res, out_json, auto_unbox = TRUE, na = "null", digits = 10)
@@ -333,39 +327,28 @@ class TestStep05AuditHygiene(unittest.TestCase):
     @unittest.skipIf(SKIP_R_COND, SKIP_R_REASON)
     def test_bio2_column_fix_yaml_config_and_cache_hit_idempotency(self) -> None:
         cc = self.results["cfg_cache"]
-        self.assertTrue(bool(cc["has_mc"]))
         vals = [float(v) for v in cc["mc_vals"]]
-        self.assertEqual(len(vals), 6)
-        self.assertTrue(all(_is_finite(v) for v in vals))
-        self.assertGreater(abs(vals[0] - vals[3]), 1.0)
+        self.assertTrue(bool(cc["has_mc"]) and len(vals) == 6 and all(_is_finite(v) for v in vals) and abs(vals[0] - vals[3]) > 1.0)
         cfg = cc["cfg"]
-        self.assertAlmostEqual(float(cfg["min_flowering_doy"]), 30.0, places=6)
-        self.assertAlmostEqual(float(cfg["cor_threshold"]), 0.70, places=6)
-        self.assertAlmostEqual(float(cfg["vif_threshold"]), 5.0, places=6)
-        self.assertAlmostEqual(float(cfg["cumulative_importance_cutoff"]), 0.85, places=6)
+        for k, exp in (("min_flowering_doy", 30.0), ("cor_threshold", 0.70), ("vif_threshold", 5.0), ("cumulative_importance_cutoff", 0.85),
+                       ("min_node_size", 12.0), ("max_depth", 6.0), ("sample_fraction", 0.70), ("ecotype_min_silhouette", 0.40), ("ecotype_min_fold_jaccard", 0.60)):
+            self.assertAlmostEqual(float(cfg[k]), exp, places=6)
+        self.assertFalse(bool(cc["aut287_active"]))
         self.assertEqual((int(cc["calls_1"]), int(cc["calls_2"])), (1, 0))
 
     def test_step05_figure_hygiene_and_line_ceilings(self) -> None:
-        ceilings = {
-            PROJECT_ROOT / "scripts" / "figures" / "step05_figures.R": 500,
-            PROJECT_ROOT / "scripts" / "figures" / "step05_sdm_figures.R": 320,
-            PROJECT_ROOT / "scripts" / "analysis" / "step05_config_geo_utils.R": 320,
-            Path(__file__).resolve(): 380,
-        }
+        ceilings = {PROJECT_ROOT / "scripts" / "figures" / "step05_figures.R": 500, PROJECT_ROOT / "scripts" / "figures" / "step05_sdm_figures.R": 320,
+                    PROJECT_ROOT / "scripts" / "analysis" / "step05_config_geo_utils.R": 320, Path(__file__).resolve(): 380}
         for path, cap in ceilings.items():
-            self.assertTrue(path.is_file(), f"Missing expected Step 05 file: {path}")
-            n_lines = len(path.read_text(encoding="utf-8").splitlines())
-            self.assertLess(n_lines, cap, f"{path.name}: {n_lines} lines >= {cap}")
+            self.assertTrue(path.is_file(), f"Missing Step 05 file: {path}")
+            self.assertLess(len(path.read_text(encoding="utf-8").splitlines()), cap, f"{path.name} exceeded {cap}")
         fig_txt = (PROJECT_ROOT / "scripts" / "figures" / "step05_figures.R").read_text(encoding="utf-8")
-        self.assertNotIn("unlink(", fig_txt)
-        self.assertNotIn("POLARIS", fig_txt)
-        sdm_fig_txt = (PROJECT_ROOT / "scripts" / "figures" / "step05_sdm_figures.R").read_text(encoding="utf-8")
-        self.assertNotIn("unlink(", sdm_fig_txt)
+        self.assertNotIn("unlink(", fig_txt); self.assertNotIn("POLARIS", fig_txt)
+        self.assertNotIn("unlink(", (PROJECT_ROOT / "scripts" / "figures" / "step05_sdm_figures.R").read_text(encoding="utf-8"))
         rf_txt = (PROJECT_ROOT / "scripts" / "analysis" / "05_multimodal_spatial_rf.R").read_text(encoding="utf-8")
+        self.assertIn("OOB_Block_Gap", rf_txt)
         m_clim = re.search(r"clim_cand_cv\s*<-.*?(?=\n\s*[A-Za-z_][A-Za-z0-9_]*\s*<-|\n\s*\})", rf_txt, flags=re.DOTALL)
-        self.assertIsNotNone(m_clim, "Missing clim_cand_cv definition in 05_multimodal_spatial_rf.R")
-        self.assertNotIn("sin_doy", m_clim.group(0))
-        self.assertNotIn("cos_doy", m_clim.group(0))
+        self.assertIsNotNone(m_clim); self.assertNotIn("sin_doy", m_clim.group(0)); self.assertNotIn("cos_doy", m_clim.group(0))
 
 
 if __name__ == "__main__":

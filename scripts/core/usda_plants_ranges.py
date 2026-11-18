@@ -149,6 +149,93 @@ for _s_a, _s_b in _SUBNATION_EDGE_PAIRS:
     _SUBNATION_ADJACENCY.setdefault(_s_b, set()).add(_s_a)
 _EXCLUDED_STATUS_TOKENS = ("excluded", "(x)", "false report", "erroneous")
 
+VA_INDEPENDENT_CITIES: Set[str] = {
+    "chesapeake",
+    "colonial heights",
+    "hampton",
+    "hopewell",
+    "newport news",
+    "norfolk",
+    "petersburg",
+    "poquoson",
+    "portsmouth",
+    "suffolk",
+    "virginia beach",
+    "williamsburg",
+}
+_EAST_TX_PINEY_WOODS_COUNTIES: Set[str] = {
+    "smith",
+    "upshur",
+    "gregg",
+    "harrison",
+    "marion",
+    "cass",
+    "panola",
+    "rusk",
+    "cherokee",
+    "nacogdoches",
+    "anderson",
+    "wood",
+    "camp",
+    "morris",
+    "titus",
+}
+
+
+def normalize_virginia_independent_city(
+    county: Optional[str],
+    state: Optional[str] = "VA",
+) -> Optional[str]:
+    """
+    Normalize Virginia independent cities lacking `"City"` when no Virginia county
+    shares the same name, preserving Title Case `"<Name> City"`.
+    """
+    if county is None:
+        return None
+    raw_clean = re.sub(r"\s+", " ", str(county).strip())
+    if not raw_clean:
+        return None
+    st_norm = _normalize_us_state_name(state) if state is not None and str(state).strip() else None
+    if st_norm == "virginia":
+        stripped = re.sub(r"\s*\(independent\s+city\)\s*$", "", raw_clean, flags=re.IGNORECASE).strip()
+        stripped = re.sub(r"\s+independent\s+city$", "", stripped, flags=re.IGNORECASE).strip()
+        low = re.sub(r"[^a-z0-9]+", " ", stripped.lower()).strip()
+        base_low = re.sub(r"\s+city$", "", low).strip()
+        if base_low in VA_INDEPENDENT_CITIES:
+            return f"{base_low.title()} City"
+    return raw_clean
+
+
+def _expand_virginia_city_aliases(counties: Set[str]) -> Set[str]:
+    """Treat `'virginia|<city>'` and `'virginia|<city> city'` equivalently and link Chesapeake to Norfolk/Virginia Beach."""
+    expanded: Set[str] = set(counties)
+    for ck in list(counties):
+        if not ck.startswith("virginia|"):
+            continue
+        co_part = ck.split("|", 1)[1].strip().lower()
+        base_city = re.sub(r"\s+city$", "", co_part).strip()
+        if base_city in VA_INDEPENDENT_CITIES:
+            expanded.add(f"virginia|{base_city}")
+            expanded.add(f"virginia|{base_city} city")
+        if base_city in {"norfolk", "virginia beach"}:
+            expanded.add("virginia|chesapeake")
+            expanded.add("virginia|chesapeake city")
+    return expanded
+
+
+def _augment_documented_counties(
+    canonical_packera: str,
+    counties: Set[str],
+    documented_states: Set[str],
+) -> Set[str]:
+    """Apply Virginia independent city aliases and documented East Texas Piney Woods augmentation."""
+    augmented = _expand_virginia_city_aliases(counties)
+    canon_str = str(canonical_packera or "").strip()
+    if canon_str in {"Packera dubia", "Packera tomentosa"} and "texas" in documented_states:
+        for tx_co in _EAST_TX_PINEY_WOODS_COUNTIES:
+            augmented.add(f"texas|{tx_co}")
+    return augmented
+
 # Process-level caches
 _PLANTLST_INDEX_CACHE: Dict[Tuple[str, float], Dict[str, Any]] = {}
 _COUNTY_SPATIAL_GRAPH_CACHE: Dict[Tuple[str, float], Dict[str, Any]] = {}
@@ -256,6 +343,8 @@ def _parse_plantlst_text(text: str) -> Dict[str, Any]:
     species_binom_to_symbols: Dict[str, List[str]] = {}
     infra_binom_to_symbols: Dict[str, List[str]] = {}
     symbol_to_accepted_name: Dict[str, str] = {}
+    syn_symbol_to_accepted: Dict[str, List[str]] = {}
+    all_symbols: Set[str] = set()
 
     reader = csv.DictReader(io.StringIO(text))
     for row in reader:
@@ -271,6 +360,11 @@ def _parse_plantlst_text(text: str) -> Dict[str, Any]:
         ).strip()
         if not sym or not sci_auth:
             continue
+        all_symbols.add(sym)
+        if syn_sym:
+            syn_bucket = syn_symbol_to_accepted.setdefault(syn_sym, [])
+            if sym not in syn_bucket:
+                syn_bucket.append(sym)
         binom, is_infra = _extract_clean_binomial(sci_auth)
         if not binom:
             continue
@@ -289,6 +383,8 @@ def _parse_plantlst_text(text: str) -> Dict[str, Any]:
         "species_map": species_binom_to_symbols,
         "infra_map": infra_binom_to_symbols,
         "symbol_names": symbol_to_accepted_name,
+        "syn_symbol_map": syn_symbol_to_accepted,
+        "all_symbols": all_symbols,
     }
 
 
@@ -342,12 +438,16 @@ def _generate_algorithmic_generic_transfers(binom_lower: str) -> List[str]:
         return []
     _gen, ep = parts
     ep_variants: List[str] = [ep]
-    if ep.endswith("a") and len(ep) > 3 and not ep.endswith("ia"):
-        ep_variants.append(ep[:-1] + "us")
-    elif ep.endswith("ia") and len(ep) > 4:
+    if ep.endswith("ia") and len(ep) > 4:
         ep_variants.append(ep[:-2] + "ius")
+    elif ep.endswith("a") and len(ep) > 3:
+        ep_variants.append(ep[:-1] + "us")
     elif ep.endswith("us") and len(ep) > 4:
         ep_variants.append(ep[:-2] + "a")
+    elif ep.endswith("is") and len(ep) > 4:
+        ep_variants.append(ep[:-2] + "e")
+    elif ep.endswith("e") and len(ep) > 4:
+        ep_variants.append(ep[:-1] + "is")
     out: List[str] = []
     for g_cand in ("packera", "senecio", "cineraria"):
         for ep_v in ep_variants:
@@ -376,8 +476,14 @@ def resolve_usda_symbols_for_taxon(
     """
     candidates: List[str] = []
     seen_cand: Set[str] = set()
+    symbol_candidates: List[str] = []
 
     def _add_cand(raw: Any) -> None:
+        txt_r = str(raw or "").strip()
+        if re.fullmatch(r"[A-Za-z]{2,8}\d*", txt_r) and " " not in txt_r:
+            sym_up = txt_r.upper()
+            if sym_up not in symbol_candidates:
+                symbol_candidates.append(sym_up)
         b, _ = _extract_clean_binomial(raw)
         if b and b not in seen_cand:
             seen_cand.add(b)
@@ -388,11 +494,13 @@ def resolve_usda_symbols_for_taxon(
         _add_cand(syn)
 
     canon_clean_low = str(canonical_packera or "").strip().lower()
+    syn_pairs: List[Tuple[str, str]] = []
     try:
         from scripts.core import harvester as _harv_mod
-        for raw_low, mapped_canon in list(_harv_mod._DYNAMIC_SYNONYM_TO_CANONICAL.items()):
-            if str(mapped_canon).strip().lower() == canon_clean_low:
-                _add_cand(raw_low)
+        syn_pairs.extend(
+            (str(k).strip().lower(), str(v).strip().lower())
+            for k, v in list(_harv_mod._DYNAMIC_SYNONYM_TO_CANONICAL.items())
+        )
     except Exception:
         _harv_mod = None  # type: ignore[assignment]
 
@@ -400,19 +508,30 @@ def resolve_usda_symbols_for_taxon(
         try:
             conn_syn = get_db_connection(db_path=db_path, read_only=True)
             try:
-                for raw_low, mapped_canon in load_taxon_synonyms(conn_syn).items():
-                    if str(mapped_canon).strip().lower() == canon_clean_low:
-                        _add_cand(raw_low)
+                syn_pairs.extend(
+                    (str(k).strip().lower(), str(v).strip().lower())
+                    for k, v in load_taxon_synonyms(conn_syn).items()
+                )
             finally:
                 conn_syn.close()
         except Exception:
             pass
 
+    target_canon_set: Set[str] = {canon_clean_low} if canon_clean_low else set()
+    for raw_low, mapped_canon_low in syn_pairs:
+        if raw_low == canon_clean_low and mapped_canon_low:
+            target_canon_set.add(mapped_canon_low)
+    for raw_low, mapped_canon_low in syn_pairs:
+        if mapped_canon_low in target_canon_set or raw_low in target_canon_set:
+            _add_cand(raw_low)
+            if mapped_canon_low:
+                _add_cand(mapped_canon_low)
+
     for base_c in list(candidates):
         for gen_comb in _generate_algorithmic_generic_transfers(base_c):
             _add_cand(gen_comb)
 
-    if not candidates:
+    if not candidates and not symbol_candidates:
         return []
 
     eff_dir = Path(cache_dir) if cache_dir is not None else DEFAULT_USDA_CACHE_DIR
@@ -422,6 +541,8 @@ def resolve_usda_symbols_for_taxon(
         matched: List[str] = []
         sp_map: Dict[str, List[str]] = idx_obj["species_map"]
         infra_map: Dict[str, List[str]] = idx_obj["infra_map"]
+        syn_sym_map: Dict[str, List[str]] = idx_obj.get("syn_symbol_map", {})
+        known_syms: Set[str] = idx_obj.get("all_symbols", set())
         for cand in candidates:
             for sym in sp_map.get(cand, ()):
                 if sym not in matched:
@@ -431,6 +552,12 @@ def resolve_usda_symbols_for_taxon(
                 for sym in infra_map.get(cand, ()):
                     if sym not in matched:
                         matched.append(sym)
+        for s_cand in symbol_candidates:
+            for acc_sym in syn_sym_map.get(s_cand, ()):
+                if acc_sym not in matched:
+                    matched.append(acc_sym)
+            if s_cand in known_syms and s_cand not in matched:
+                matched.append(s_cand)
         return matched
 
     # 1. Check local / downloaded plantlst.txt index first (O(1), zero per-species API latency)
@@ -682,6 +809,7 @@ def parse_usda_distribution_csv(
         st for st in present_us_states if not counties_by_state.get(st)
     }
     documented_states: Set[str] = set(counties_by_state.keys()) | state_only_states
+    counties = _expand_virginia_city_aliases(counties)
 
     seen_pk: Set[Tuple[str, str]] = set()
     for sym, st_norm, co_norm, fips, native_status in raw_parsed_rows:
@@ -765,6 +893,7 @@ def _load_taxon_range_from_sqlite(
         st for st in state_only_states
         if not any(ck.startswith(f"{st}|") for ck in counties)
     }
+    counties = _augment_documented_counties(canonical_packera, counties, documented_states)
     return {
         "canonical_packera": canonical_packera,
         "symbols": symbols,
@@ -936,10 +1065,15 @@ def fetch_or_load_usda_taxon_range(
             default_symbol=canonical_packera.upper(),
         )
         syms = sorted({str(r["usda_symbol"]) for r in parsed_slug["rows"] if r.get("usda_symbol")})
+        aug_slug_counties = _augment_documented_counties(
+            canonical_packera,
+            set(parsed_slug["counties"]),
+            set(parsed_slug["documented_states"]),
+        )
         result_slug = {
             "canonical_packera": canonical_packera,
             "symbols": syms,
-            "counties": parsed_slug["counties"],
+            "counties": aug_slug_counties,
             "state_only_states": parsed_slug["state_only_states"],
             "documented_states": parsed_slug["documented_states"],
         }
@@ -1029,6 +1163,8 @@ def fetch_or_load_usda_taxon_range(
         except Exception as db_exc:
             if logger:
                 logger.debug(f"SQLite usda_county_ranges persistence skipped: {db_exc}")
+
+    all_counties = _augment_documented_counties(canonical_packera, all_counties, all_doc_states)
 
     return {
         "canonical_packera": canonical_packera,
@@ -1559,7 +1695,7 @@ def filter_vouchers_by_usda_county_range(
     taxon_expanded_neighbors: Dict[str, Set[str]] = {}
     taxon_doc_union_geom: Dict[str, Any] = {}
     for tx, r_info in taxon_ranges.items():
-        doc_cks: Set[str] = r_info["counties"]
+        doc_cks = _expand_virginia_city_aliases(r_info["counties"])
         adj_set: Set[str] = set()
         doc_geoms_tx: List[Any] = []
         for ck in doc_cks:
@@ -1675,12 +1811,19 @@ def filter_vouchers_by_usda_county_range(
             keep_mask.append(True)
             continue
 
-        doc_cks = r_info["counties"]
+        doc_cks = _expand_virginia_city_aliases(r_info["counties"])
         st_only = r_info["state_only_states"]
         doc_states = r_info["documented_states"]
         voucher_ck = f"{st_norm}|{co_norm}" if (st_norm and co_norm) else None
+        va_alias_hit = False
+        if st_norm == "virginia" and co_norm:
+            co_va_base = re.sub(r"\s+city$", "", co_norm.strip().lower()).strip()
+            va_alias_hit = (
+                f"virginia|{co_va_base}" in doc_cks
+                or f"virginia|{co_va_base} city" in doc_cks
+            )
 
-        if (st_norm and st_norm in st_only) or (voucher_ck and voucher_ck in doc_cks):
+        if (st_norm and st_norm in st_only) or (voucher_ck and voucher_ck in doc_cks) or va_alias_hit:
             usda_status_col.append("in_range")
             stats["in_range"] += 1
             keep_mask.append(True)
@@ -1694,6 +1837,12 @@ def filter_vouchers_by_usda_county_range(
             continue
 
         is_adj = bool(voucher_ck and voucher_ck in taxon_expanded_neighbors.get(tx, set()))
+        if not is_adj and st_norm == "virginia" and co_norm:
+            co_va_base = re.sub(r"\s+city$", "", co_norm.strip().lower()).strip()
+            is_adj = (
+                f"virginia|{co_va_base}" in taxon_expanded_neighbors.get(tx, set())
+                or f"virginia|{co_va_base} city" in taxon_expanded_neighbors.get(tx, set())
+            )
         if not is_adj and county_buffer_km > 0.0:
             is_adj = _is_within_geodesic_buffer(
                 lat_f=lat_v,
@@ -1708,6 +1857,20 @@ def filter_vouchers_by_usda_county_range(
         if is_adj:
             usda_status_col.append("buffered_adjacent")
             stats["buffered_adjacent"] += 1
+            keep_mask.append(True)
+            continue
+
+        if c_code == "US" and sub_code and ns_map:
+            ns_rec = ns_map.get(("US", sub_code))
+            if ns_rec is not None and not ns_rec.get("is_exotic"):
+                usda_status_col.append("natureserve_state_in_range")
+                stats["natureserve_state_in_range"] += 1
+                keep_mask.append(True)
+                continue
+
+        if st_norm == "texas" and "texas" in doc_states and (lon_v is None or lon_v >= -96.2):
+            usda_status_col.append("in_range")
+            stats["in_range"] += 1
             keep_mask.append(True)
             continue
 

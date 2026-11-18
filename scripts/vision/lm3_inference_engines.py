@@ -212,6 +212,9 @@ class DetectedInstance:
     ect_path: Optional[str] = None
     blade_cie_l_norm: float = np.nan
     blade_cie_l_sd: float = np.nan
+    blade_cie_l_sheet_delta: float = np.nan
+    blade_cie_a_delta: float = np.nan
+    blade_cie_b_delta: float = np.nan
 
 
 @dataclass
@@ -3676,7 +3679,7 @@ def solve_ruler_tick_lattice_px_per_mm(
         return None
     sh, sw = int(image_bgr.shape[0]), int(image_bgr.shape[1])
     if verified_ruler_crop:
-        if min(sh, sw) < 24 or max(sh, sw) < 180:
+        if min(sh, sw) < 16 or max(sh, sw) < 180:
             return None
     elif sh < 400 or sw < 400:
         return None
@@ -3767,13 +3770,12 @@ class LM3ScaleCalibrator:
         self.ruler_classifier: Optional[Any] = None
         self.ruler_lattice: Optional[Any] = None
         self._init_lm3_scale_models()
-        if self.ruler_lattice is not None:
-            self.archival_weights_path, _, _, self.archival_session = _load_onnx_session(
-                weights_path=None,
-                default_model_name=self.ARCHIVAL_MODEL_NAME,
-                device=self.device,
-                providers=providers,
-            )
+        self.archival_weights_path, _, _, self.archival_session = _load_onnx_session(
+            weights_path=None,
+            default_model_name=self.ARCHIVAL_MODEL_NAME,
+            device=self.device,
+            providers=providers,
+        )
 
     def _init_lm3_scale_models(self) -> None:
         mp_json = LM3_PACKAGE_ROOT / "models" / "mp_conversion_factor" / "model.json"
@@ -3852,23 +3854,74 @@ class LM3ScaleCalibrator:
             arr = np.asarray(raw_outs[0], dtype=np.float32)
             if arr.ndim == 3:
                 arr = arr[0]
+            if arr.size == 0:
+                return []
             inv_r = 1.0 / max(float(r), 1e-6)
+            conf_thres = float(getattr(self, "archival_conf_thres", 0.25))
+
+            def _to_sheet_box(
+                x1_l: float, y1_l: float, x2_l: float, y2_l: float
+            ) -> Optional[Tuple[int, int, int, int]]:
+                x1_w = max(0.0, min(float(work_w), (x1_l - dw) * inv_r))
+                y1_w = max(0.0, min(float(work_h), (y1_l - dh) * inv_r))
+                x2_w = max(0.0, min(float(work_w), (x2_l - dw) * inv_r))
+                y2_w = max(0.0, min(float(work_h), (y2_l - dh) * inv_r))
+                if y2_w <= y1_w or x2_w <= x1_w:
+                    return None
+                s_bbox = unscale_working_bbox_to_sheet(
+                    (y1_w, x1_w, y2_w, x2_w), w_scale, sheet_shape=(sh, sw)
+                )
+                return s_bbox if (s_bbox[2] > s_bbox[0] and s_bbox[3] > s_bbox[1]) else None
+
             rulers: List[Tuple[Tuple[int, int, int, int], float]] = []
             if arr.ndim == 2 and arr.shape[1] in (6, 7):
                 for row in arr:
                     sc = float(row[4])
                     cls_id = int(round(float(row[5])))
-                    if cls_id != 0 or sc < float(getattr(self, 'archival_conf_thres', 0.25)):
+                    if cls_id != 0 or sc < conf_thres:
                         continue
-                    x1_w = max(0.0, min(float(work_w), (float(row[0]) - dw) * inv_r))
-                    y1_w = max(0.0, min(float(work_h), (float(row[1]) - dh) * inv_r))
-                    x2_w = max(0.0, min(float(work_w), (float(row[2]) - dw) * inv_r))
-                    y2_w = max(0.0, min(float(work_h), (float(row[3]) - dh) * inv_r))
-                    if y2_w <= y1_w or x2_w <= x1_w:
-                        continue
-                    s_bbox = unscale_working_bbox_to_sheet((y1_w, x1_w, y2_w, x2_w), w_scale, sheet_shape=(sh, sw))
-                    if s_bbox[2] > s_bbox[0] and s_bbox[3] > s_bbox[1]:
+                    s_bbox = _to_sheet_box(float(row[0]), float(row[1]), float(row[2]), float(row[3]))
+                    if s_bbox is not None:
                         rulers.append((s_bbox, sc))
+            else:
+                if arr.ndim == 2 and arr.shape[0] < arr.shape[1] and arr.shape[0] >= 5:
+                    arr = arr.T
+                if arr.ndim != 2 or arr.shape[1] < 5:
+                    return []
+                boxes_xywh = arr[:, :4]
+                cls_scores = arr[:, 4:]
+                if cls_scores.size == 0:
+                    return []
+                best_cls = np.argmax(cls_scores, axis=1)
+                best_scores = cls_scores[np.arange(len(arr)), best_cls]
+                keep = (best_cls == 0) & (best_scores >= conf_thres)
+                if not np.any(keep):
+                    return []
+                boxes_xywh = boxes_xywh[keep]
+                best_scores = best_scores[keep]
+                nms_boxes = [
+                    [float(xc - 0.5 * bw), float(yc - 0.5 * bh), float(bw), float(bh)]
+                    for xc, yc, bw, bh in boxes_xywh
+                ]
+                indices = cv2.dnn.NMSBoxes(
+                    bboxes=nms_boxes,
+                    scores=[float(s) for s in best_scores],
+                    score_threshold=conf_thres,
+                    nms_threshold=0.60,
+                )
+                if len(indices) == 0:
+                    return []
+                for idx_raw in np.asarray(indices).reshape(-1):
+                    idx = int(idx_raw)
+                    xc, yc, bw, bh = boxes_xywh[idx]
+                    s_bbox = _to_sheet_box(
+                        float(xc - 0.5 * bw),
+                        float(yc - 0.5 * bh),
+                        float(xc + 0.5 * bw),
+                        float(yc + 0.5 * bh),
+                    )
+                    if s_bbox is not None:
+                        rulers.append((s_bbox, float(best_scores[idx])))
             rulers.sort(key=lambda item: item[1], reverse=True)
             return rulers
         except Exception as exc:
@@ -3905,17 +3958,32 @@ class LM3ScaleCalibrator:
         mp_prior_mm = (self.MP_PRIOR_SLOPE_PX_PER_CM * float(np.sqrt((sh * sw) / 1e6))) / 10.0
         if self.archival_session is not None:
             ruler_boxes = self._detect_ruler_boxes(image_bgr)
+            min_det_sc = min(0.45, float(getattr(self, "archival_conf_thres", 0.25)))
             for (ymin, xmin, ymax, xmax), _det_sc in ruler_boxes:
                 crop = image_bgr[ymin:ymax, xmin:xmax]
                 if crop.size == 0 or min(crop.shape[:2]) < 16:
                     continue
+                ruler_cls_ok = True
+                ruler_cls_confirmed = False
                 try:
-                    crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
                     if self.ruler_classifier is not None:
-                        cls_pred = self.ruler_classifier.predict(crop_rgb)
-                        if not getattr(cls_pred, "is_ruler", True):
-                            continue
+                        cls_pred = self.ruler_classifier.predict(crop)
+                        if isinstance(cls_pred, dict):
+                            lbl_u = str(cls_pred.get("label", "UNKNOWN")).strip().upper()
+                            lbl_conf = float(cls_pred.get("conf", 0.0) or 0.0)
+                            if lbl_u == "MESSY" and lbl_conf >= 0.85 and float(_det_sc) < 0.50:
+                                ruler_cls_ok = False
+                            elif (
+                                lbl_u.startswith("METRIC")
+                                or lbl_u in {"GRID_CM", "STD_IN8_CM", "FP"}
+                            ) and lbl_conf >= 0.35:
+                                ruler_cls_confirmed = True
+                        elif not getattr(cls_pred, "is_ruler", True):
+                            ruler_cls_ok = False
+                    if not ruler_cls_ok:
+                        continue
                     if self.ruler_lattice is not None:
+                        crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
                         lat_res = self.ruler_lattice.predict(crop_rgb)
                         px_per_cm = getattr(lat_res, "px_per_cm", None)
                         conf = float(getattr(lat_res, "confidence", 0.0) or 0.0)
@@ -3929,7 +3997,7 @@ class LM3ScaleCalibrator:
                             }
                 except Exception:
                     pass
-                if float(_det_sc) >= 0.45:
+                if ruler_cls_confirmed or float(_det_sc) >= min_det_sc:
                     crop_ruler_mm = solve_ruler_tick_lattice_px_per_mm(
                         crop,
                         mp_prior_px_per_mm=mp_prior_mm,

@@ -65,7 +65,7 @@ render_step05c_sdm_suitability_png <- function(
     tryCatch({
       m_usa <- maps::map("state", plot = FALSE, fill = TRUE)
       sf_u <- sf::st_as_sf(m_usa)
-      sf::st_crs(sf_u) <- 4326
+      if (is.na(sf::st_crs(sf_u))) sf_u <- sf::st_set_crs(sf_u, 4326) else sf_u <- sf::st_transform(sf_u, 4326)
       sf::st_transform(sf::st_make_valid(sf_u), 5070L)
     }, error = function(e) NULL)
   } else NULL
@@ -73,6 +73,7 @@ render_step05c_sdm_suitability_png <- function(
   # Helper to build a projected Albers Equal Area (EPSG:5070) suitability + hollow occurrence map
   build_suitability_panel <- function(r_info, pts_sub, title_txt, sub_txt = "") {
     r_df <- if (is.list(r_info) && is.data.frame(r_info$df)) r_info$df else data.frame()
+    if (nrow(r_df) > 0L) r_df <- r_df[is.finite(r_df$x) & is.finite(r_df$y) & is.finite(r_df$suitability), , drop = FALSE]
     is_proj <- is.list(r_info) && isTRUE(r_info$projected) && !is.null(states_5070)
     if (nrow(r_df) > 0L) {
       pts_ok_s <- data.frame()
@@ -83,7 +84,7 @@ render_step05c_sdm_suitability_png <- function(
       }
       if (is_proj && requireNamespace("sf", quietly = TRUE)) {
         p_m <- ggplot2::ggplot() +
-          ggplot2::geom_raster(data = r_df, ggplot2::aes(x = .data$x, y = .data$y, fill = .data$suitability), alpha = 0.92) +
+          ggplot2::geom_tile(data = r_df, ggplot2::aes(x = .data$x, y = .data$y, fill = .data$suitability), alpha = 0.92, na.rm = TRUE) +
           ggplot2::scale_fill_viridis_c(option = "cividis", limits = c(0, 1), name = "Suitability") +
           ggplot2::geom_sf(data = states_5070, fill = NA, color = "#E5E7EB", linewidth = 0.28, inherit.aes = FALSE)
         if (nrow(pts_ok_s) > 0L) {
@@ -105,7 +106,7 @@ render_step05c_sdm_suitability_png <- function(
       }
       cos_l <- cos(mean(range(r_df$y, na.rm = TRUE)) * pi / 180.0)
       p_m <- ggplot2::ggplot() +
-        ggplot2::geom_raster(data = r_df, ggplot2::aes(x = .data$x, y = .data$y, fill = .data$suitability), alpha = 0.90) +
+        ggplot2::geom_tile(data = r_df, ggplot2::aes(x = .data$x, y = .data$y, fill = .data$suitability), alpha = 0.90, na.rm = TRUE) +
         ggplot2::scale_fill_viridis_c(option = "cividis", limits = c(0, 1), name = "Suitability")
       if (requireNamespace("maps", quietly = TRUE)) {
         st_d <- tryCatch(ggplot2::map_data("state"), error = function(e) NULL)
@@ -152,6 +153,9 @@ render_step05c_sdm_suitability_png <- function(
     proj_multi_ok <- all(vapply(grid_infos, function(ri) nrow(ri$df) == 0L || isTRUE(ri$projected), logical(1))) && !is.null(states_5070)
     grid_all <- do.call(rbind, lapply(grid_infos, function(ri) ri$df))
     if (!is.null(grid_all) && nrow(grid_all) > 0L) {
+      grid_all <- grid_all[is.finite(grid_all$x) & is.finite(grid_all$y) & is.finite(grid_all$suitability), , drop = FALSE]
+    }
+    if (!is.null(grid_all) && nrow(grid_all) > 0L) {
       pts_ok <- vdf[is.finite(suppressWarnings(as.numeric(vdf$decimalLongitude))) & is.finite(suppressWarnings(as.numeric(vdf$decimalLatitude))), , drop = FALSE]
       pts_ok$lon_num <- suppressWarnings(as.numeric(pts_ok$decimalLongitude))
       pts_ok$lat_num <- suppressWarnings(as.numeric(pts_ok$decimalLatitude))
@@ -170,7 +174,7 @@ render_step05c_sdm_suitability_png <- function(
           }
         }
         p_multi_grid <- ggplot2::ggplot(grid_all, ggplot2::aes(x = .data$x, y = .data$y)) +
-          ggplot2::geom_raster(ggplot2::aes(fill = .data$suitability)) +
+          ggplot2::geom_tile(ggplot2::aes(fill = .data$suitability), na.rm = TRUE) +
           ggplot2::geom_sf(data = states_5070, fill = NA, color = "#E5E7EB", linewidth = 0.22, inherit.aes = FALSE) +
           ggplot2::geom_point(
             data = pts_ok,
@@ -190,7 +194,7 @@ render_step05c_sdm_suitability_png <- function(
       } else {
         cos_m <- cos(mean(range(grid_all$y, na.rm = TRUE)) * pi / 180.0)
         p_multi_grid <- ggplot2::ggplot(grid_all, ggplot2::aes(x = .data$x, y = .data$y)) +
-          ggplot2::geom_raster(ggplot2::aes(fill = .data$suitability)) +
+          ggplot2::geom_tile(ggplot2::aes(fill = .data$suitability), na.rm = TRUE) +
           ggplot2::geom_point(
             data = pts_ok,
             ggplot2::aes(x = .data$lon_num, y = .data$lat_num),

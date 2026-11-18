@@ -159,11 +159,11 @@ render_step07a_integrative_synthesis_png <- function(
   # Panel C: 5-Stage Taxonomic Treatment Proportions by Taxon
   cnt_tx <- table(tdf$plot_group)
   bar_df <- as.data.frame(table(plot_group = tdf$plot_group, treatment_call = tdf$treatment_call), stringsAsFactors = FALSE)
-  bar_df <- bar_df[bar_df$Freq > 0, , drop = FALSE]
   bar_df$treatment_call <- factor(bar_df$treatment_call, levels = names(PACKERA_TREATMENT_PALETTE))
+  bar_df <- bar_df[is.finite(bar_df$Freq) & bar_df$Freq > 0 & !is.na(bar_df$plot_group) & nzchar(as.character(bar_df$plot_group)) & !is.na(bar_df$treatment_call), , drop = FALSE]
 
   p_treat <- ggplot2::ggplot(bar_df, ggplot2::aes(x = .data$Freq, y = .data$plot_group, fill = .data$treatment_call)) +
-    ggplot2::geom_col(position = ggplot2::position_fill(reverse = TRUE), width = 0.65, color = "white", linewidth = 0.25) +
+    ggplot2::geom_col(position = ggplot2::position_fill(reverse = TRUE), color = "white", linewidth = 0.25, na.rm = TRUE) +
     ggplot2::scale_x_continuous(labels = function(x) paste0(round(100 * x), "%"), expand = c(0, 0)) +
     ggplot2::scale_y_discrete(labels = icn_discrete_labeller(abbreviate_genus = TRUE, counts_map = cnt_tx)) +
     ggplot2::scale_fill_manual(values = PACKERA_TREATMENT_PALETTE, labels = function(x) gsub("_", " ", x), name = "5-Stage Call", drop = TRUE) +

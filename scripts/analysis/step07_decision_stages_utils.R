@@ -17,6 +17,12 @@ if (grDevices::dev.cur() == 1L) grDevices::pdf(NULL)
     status_calls[i] <<- st; rec_taxa[i] <<- rc; triage_prios[i] <<- pr; triage_acts[i] <<- ac
     rationales[i] <<- rt; treat_broad[i] <<- tb; treat_sub[i] <<- ts
   }
+  ok_tl <- !is.na(mv$is_type_dv) & mv$is_type_dv & !is.na(mv$sp_all_vec) & nzchar(mv$sp_all_vec) &
+    is.finite(bg_ctx$lat_vec_geo) & is.finite(bg_ctx$lon_vec_geo)
+  n_type_locs_by_sp <- if (any(ok_tl)) {
+    vapply(split(paste(round(bg_ctx$lat_vec_geo[ok_tl], 1), round(bg_ctx$lon_vec_geo[ok_tl], 1), sep = "_"),
+                 mv$sp_all_vec[ok_tl]), function(v) length(unique(v)), integer(1))
+  } else integer(0)
 
   for (i in seq_len(n)) {
     given_sp <- if (!is.na(mv$sp_all_vec[i]) && nzchar(mv$sp_all_vec[i])) mv$sp_all_vec[i] else "Unknown"
@@ -77,7 +83,8 @@ if (grDevices::dev.cur() == 1L) grDevices::pdf(NULL)
       is.finite(edaph_z_i) || is.finite(te_z_i) || !is.na(mv$d_ed1_dv[i]) || !is.na(mv$d_ed2_dv[i]) || !is.na(mv$d_ed3_dv[i])
     has_obs_edaph_chk <- (!is.na(mv$edaph_sp_dv[i]) && nzchar(trimws(mv$edaph_sp_dv[i]))) || (!is.na(mv$rf_pred_dv[i]) && nzchar(trimws(mv$rf_pred_dv[i]))) ||
       is.finite(edaph_z_i) || !is.na(mv$d_ed1_dv[i]) || !is.na(mv$d_ed2_dv[i]) || !is.na(mv$d_ed3_dv[i])
-    in_type_edaphic_env_i <- if (!has_geo_ll_i && is_extralimital_st && !has_obs_edaph_chk) FALSE else if (is.finite(te_z_i)) (te_z_i <= 2.0) else (!is.finite(edaph_z_i) || edaph_z_i <= 2.0)
+    n_type_locs_i <- if (!is.na(given_sp) && (given_sp %in% names(n_type_locs_by_sp))) n_type_locs_by_sp[[given_sp]] else 0L
+    in_type_edaphic_env_i <- if (!has_geo_ll_i && is_extralimital_st && !has_obs_edaph_chk) FALSE else if (n_type_locs_i >= 3L && is.finite(te_z_i)) (te_z_i <= 2.0) else (!is.finite(edaph_z_i) || edaph_z_i <= 2.0)
     bas_i <- if (!is.na(mv$nt_bas_dv[i]) && nzchar(trimws(mv$nt_bas_dv[i]))) trimws(mv$nt_bas_dv[i]) else NA_character_
     is_heterotypic_bas_match_i <- !is.na(bas_i) && exists(".is_homotypic_sensu_stricto_basionym", mode = "function") && !isTRUE(.is_homotypic_sensu_stricto_basionym(bas_i, given_sp)[1L])
     is_sensu_stricto_locked_i <- typ_m_i && in_type_edaphic_env_i && !is_heterotypic_bas_match_i && !is_extralimital_st && !is_exs_conflict_i
@@ -136,12 +143,13 @@ if (grDevices::dev.cur() == 1L) grDevices::pdf(NULL)
     geo_osr_res <- if (!is.na(min_cong_tx_i)) .eval_taxon_geo_plausibility_ctx(i, min_cong_tx_i, bg_ctx, is_intra) else list(plausible = FALSE, weight = 0.0, dist_km = Inf)
     osr_geo_ok <- isTRUE(geo_osr_res$plausible) && (!is_intra || (if (bg_ctx$has_ext_geo_ref) (is.finite(geo_osr_res$dist_km) && geo_osr_res$dist_km <= 250.0) else (!is.finite(geo_osr_res$dist_km) || geo_osr_res$dist_km <= 250.0)))
     osr_d2_ceil <- if (is_intra) stats::qchisq(0.50, df = max(1.0, osr_df_i)) else osr_chisq90
-    osr_gold_eco_lock <- (det_t == "Tier_1_Gold") && has_obs_edaph_i && in_type_edaphic_env_i && !is_extralimital_st && !is_exs_conflict_i &&
+    osr_gold_eco_lock <- (det_t == "Tier_1_Gold") && !is_extralimital_st && !is_exs_conflict_i &&
       !(is.finite(clim_z_i) && clim_z_i > 3.5 && (!is.finite(rf_given_p_i) || rf_given_p_i < 0.25)) &&
-      (is.na(mv$exs_gold_tx_dv[i]) || mv$exs_gold_tx_dv[i] != min_cong_tx_i) && (!edaph_is_taxon || edaph_sp == given_sp)
-    congener_osr_reassign <- !is_type_specimen_i && is_tier1_pure_i && !osr_gold_eco_lock && is.finite(min_cong_d2_i) && !is.na(min_cong_tx_i) && nzchar(min_cong_tx_i) &&
+      (is.na(mv$exs_gold_tx_dv[i]) || mv$exs_gold_tx_dv[i] != min_cong_tx_i) &&
+      ((has_obs_edaph_i && in_type_edaphic_env_i && (!edaph_is_taxon || edaph_sp == given_sp)) ||
+       (!has_geo_ll_i && (!has_obs_edaph_i || in_type_edaphic_env_i) && !(morph_is_taxon && !is.null(morph_sp) && morph_sp != given_sp && is.finite(eff_cda_prob) && eff_cda_prob >= 0.85)))
+    congener_osr_reassign <- !is_intra && !is_type_specimen_i && is_tier1_pure_i && !osr_gold_eco_lock && is.finite(min_cong_d2_i) && !is.na(min_cong_tx_i) && nzchar(min_cong_tx_i) &&
       (min_cong_tx_i != given_sp) && (min_cong_d2_i <= osr_d2_ceil) && osr_self_outlier && osr_strictly_closer && osr_cda_support && osr_geo_ok &&
-      (!is_intra || ((is_mo_flag || (is.finite(edaph_z_i) && edaph_z_i > 1.75)) && (det_t != "Tier_1_Gold" || (is.finite(edaph_z_i) && edaph_z_i > 2.0)))) &&
       (!isTRUE(typ_m_i) || (is.finite(tm_d2_i) && tm_d2_i > tm_chisq95_i))
 
     morph_concordant_self <- (morph_is_taxon && morph_sp == given_sp && is.finite(cda_prob) && cda_prob >= 0.65) || (isTRUE(typ_m_i) && is.finite(tm_d2_i) && tm_d2_i <= tm_chisq95_i)
@@ -208,11 +216,11 @@ if (grDevices::dev.cur() == 1L) grDevices::pdf(NULL)
     any_non_outline_supports_given <- eco_supports_given || sec_organ_supports_given || pheno_supports_given || exs_supports_given || geno_supports_given
 
     exs_conflict_reassign <- !is_type_specimen_i && is_exs_conflict_i && !exs_supports_given
-    extralimital_biogeo_reassign <- !is_type_specimen_i && !is_sensu_stricto_locked_i && !exs_supports_given && !is_marginal_range_extension_i && is_extralimital_st &&
+    extralimital_biogeo_reassign <- if (is_intra) FALSE else !is_type_specimen_i && !is_sensu_stricto_locked_i && !exs_supports_given && !is_marginal_range_extension_i && is_extralimital_st &&
       is.finite(clim_z_i) && (clim_z_i > 3.5) && (!is.finite(rf_given_p_i) || rf_given_p_i < 0.25) && !(morph_is_taxon && !is.null(morph_sp) && morph_sp == given_sp && is.finite(eff_cda_prob) && eff_cda_prob >= 0.75)
-    ungeoref_extralimital_reassign <- !is_type_specimen_i && !is_sensu_stricto_locked_i && !exs_supports_given && !is_marginal_range_extension_i && is_extralimital_st && !has_geo_ll_i &&
+    ungeoref_extralimital_reassign <- if (is_intra) FALSE else !is_type_specimen_i && !is_sensu_stricto_locked_i && !exs_supports_given && !is_marginal_range_extension_i && is_extralimital_st && !has_geo_ll_i &&
       ((!is.null(morph_sp) && morph_is_taxon && morph_sp != given_sp && is.finite(eff_cda_prob) && eff_cda_prob >= 0.80) || (!is.na(min_cong_tx_i) && min_cong_tx_i != given_sp && is.finite(min_cong_d2_i) && min_cong_d2_i <= osr_chisq90 && (!morph_is_taxon || is.null(morph_sp) || morph_sp != given_sp)))
-    portal_lag_reassign <- exs_conflict_reassign || extralimital_biogeo_reassign || ungeoref_extralimital_reassign
+    portal_lag_reassign <- if (is_intra) FALSE else (exs_conflict_reassign || extralimital_biogeo_reassign || ungeoref_extralimital_reassign)
 
     in_edaphic_envelope <- (is.finite(edaph_z_i) && edaph_z_i <= 2.0) || (edaph_is_taxon && edaph_sp == given_sp)
     single_borderline_div <- ((!is.null(morph_sp) && morph_is_taxon && morph_sp != given_sp) || is_mo_flag) && (is.null(morph_sp) || !morph_is_taxon || morph_sp == given_sp || is.na(eff_cda_prob) || eff_cda_prob < cda_cut)
@@ -241,11 +249,16 @@ if (grDevices::dev.cur() == 1L) grDevices::pdf(NULL)
       else outside_self_morph_95 && !exs_supports_given && (!vestiture_supports_given || (eco_supports_alt && pheno_supports_alt))
     tier_auth_ok_v[i] <- tier_authority_gate_ok
 
-    single_morph_reassign <- morph_is_taxon && (morph_sp != given_sp) && !is.na(eff_cda_prob) && (eff_cda_prob >= if (is_tier1_pure_i) cda_cut else max(0.85, cda_cut)) && !edaph_contradicts_morph && tier_authority_gate_ok
-    eff_triple_conflict <- (triage_cat == "Severe_Triple_Stream_Conflict") && outside_self_morph_95 && (both_alt_agree || morph_edaph_alt_agree || single_morph_reassign || congener_osr_reassign) && tier_authority_gate_ok
-    morph_corrupt_cand <- is_mo_flag && morph_is_taxon && (morph_sp != given_sp) && (!is.na(eff_cda_prob) && eff_cda_prob >= (if (is_tier1_pure_i) max(0.68, cda_cut) else 0.85)) && !edaph_contradicts_morph && tier_authority_gate_ok
+    single_morph_reassign <- !is_intra && morph_is_taxon && (morph_sp != given_sp) && !is.na(eff_cda_prob) && (eff_cda_prob >= if (is_tier1_pure_i) cda_cut else max(0.85, cda_cut)) && !edaph_contradicts_morph && tier_authority_gate_ok
+    eff_triple_conflict <- !is_intra && (triage_cat == "Severe_Triple_Stream_Conflict") && outside_self_morph_95 && (both_alt_agree || morph_edaph_alt_agree || single_morph_reassign || congener_osr_reassign) && tier_authority_gate_ok
+    morph_corrupt_cand <- !is_intra && is_mo_flag && morph_is_taxon && (morph_sp != given_sp) && (!is.na(eff_cda_prob) && eff_cda_prob >= (if (is_tier1_pure_i) max(0.68, cda_cut) else 0.85)) && !edaph_contradicts_morph && tier_authority_gate_ok
     geno_uncontradicted_reassign <- !is_type_specimen_i && !is_sensu_stricto_locked_i && geno_unilat_tier_ok && geno_strong_i && (geno_sp_i != given_sp) && (geno_prob_i >= if (geno_g1_direct) 0.85 else 0.92) && !(morph_concordant_self && eco_supports_given)
-    is_misid <- (!morph_concordant_self && ((!is_taphonomic_plasticity && !is_crypt && outside_self_morph_95 && tier_authority_gate_ok && (both_alt_agree || morph_edaph_alt_agree || eff_triple_conflict || single_morph_reassign || morph_corrupt_cand)) || (type_control_reassign && !exs_supports_given) || (congener_osr_reassign && !exs_supports_given))) || portal_lag_reassign || (geno_uncontradicted_reassign && !exs_supports_given)
+    is_misid <- if (is_intra) {
+      (exs_conflict_reassign && .is_valid_packera_taxon_step07(mv$exs_gold_tx_dv[i], bg_ctx$active_taxa) && (mv$exs_gold_tx_dv[i] != given_sp)) ||
+        (geno_uncontradicted_reassign && !exs_supports_given && !is.na(geno_sp_i) && .is_valid_packera_taxon_step07(geno_sp_i, bg_ctx$active_taxa) && (geno_sp_i != given_sp))
+    } else {
+      (!morph_concordant_self && ((!is_taphonomic_plasticity && !is_crypt && outside_self_morph_95 && tier_authority_gate_ok && (both_alt_agree || morph_edaph_alt_agree || eff_triple_conflict || single_morph_reassign || morph_corrupt_cand)) || (type_control_reassign && !exs_supports_given) || (congener_osr_reassign && !exs_supports_given))) || portal_lag_reassign || (geno_uncontradicted_reassign && !exs_supports_given)
+    }
 
     if (is_misid) {
       morph_allo_w <- (!morph_is_taxon || is.null(morph_sp) || !isTRUE(.eval_taxon_geo_plausibility_ctx(i, morph_sp, bg_ctx, is_intra)$plausible) || (morph_sp == given_sp && is_extralimital_st)); rank_pl <- NULL
@@ -292,6 +305,10 @@ if (grDevices::dev.cur() == 1L) grDevices::pdf(NULL)
     res_bas_i <- if (g_cl > 1L && (cl_key_i %in% names(cl_ctx$cluster_resurrect_bas_map))) cl_ctx$cluster_resurrect_bas_map[[cl_key_i]] else if (is_heterotypic_bas_match_i && (!is.finite(mv$bas_d2_dv[i]) || mv$bas_d2_dv[i] <= mv$type_morph_chisq95) && (!is.finite(tm_d2_i) || is.finite(mv$bas_d2_dv[i]) || tm_d2_i <= mv$type_morph_chisq95)) bas_i else NA_character_
 
     if (is_intra) {
+      cong_aud_note <- if (is.finite(min_cong_d2_i) && !is.na(min_cong_tx_i) && nzchar(min_cong_tx_i) && min_cong_d2_i <= mv$osr_chisq85_vec[i]) {
+        sprintf(" [Residual Congener Proximity Audit: min_congener_mahal_d2=%.2f toward %s]", min_cong_d2_i, min_cong_tx_i)
+      } else ""
+      intra_eco_out <- !is_sensu_stricto_locked_i && (is_mo_flag || (is.finite(self_d2_eff) && self_d2_eff > stats::qchisq(0.975, df = self_df_i)))
       has_ep_in <- (is_anth && abs(ddoy) >= tau_cryptic_i) || (is.finite(d_edaph) && d_edaph < 0.30) || (is.finite(edaph_z) && edaph_z > 2.5) || geno_gdi_cryptic_support_i
       cyto_v_in <- has_cytotype_barrier_i && (has_ep_in || (outside_self_morph_95 && morph_exceeds_chisq95_i && osr_cryptic_ok_i && cryptic_cluster_cohesion_pass[i]))
       in_m_ok <- is_tier1_pure_morph && ((is_mo_flag && (!has_cytotype_barrier_i || (outside_self_morph_95 && morph_exceeds_chisq95_i))) || ((g_cl > 1L && bf_val >= 6.0) && (!has_cytotype_barrier_i || (outside_self_morph_95 && morph_exceeds_chisq95_i))) || (geno_gdi_cryptic_support_i && outside_self_morph_95) || (cyto_v_in && outside_self_morph_95 && morph_exceeds_chisq95_i))
@@ -309,10 +326,10 @@ if (grDevices::dev.cur() == 1L) grDevices::pdf(NULL)
       } else if (geno_gdi_oversplit_i && raw_in_c) {
         ot_in <- if (is_cluster_prop_gdi_only_i) sprintf("[Cluster Coalescent Oversplit Block: propagated gdi=%.2f]", eff_gdi_i) else sprintf("[Coalescent Oversplit Block: gdi=%.2f < 0.20]", eff_gdi_i)
         if (has_cytotype_barrier_i) { sc <- .build_stage4_cytotype_decision(given_sp, raw_sp, g_cl, sprintf("Stage 4 Intraspecific Cytotype %s: Conspecific coalescent support retains %s at subspecific rank", ot_in, given_sp)); set_i(i, sc$status, sc$rec, sc$prio, sc$act, sc$rat, sc$broad, sc$sub); next }
-        else if (is_taphonomic_plasticity || is_mo_flag || g_cl > 1L) { set_i(i, "Ecophenotypic_Plasticity", given_sp, "MEDIUM", "Annotate_Taphonomic_Ecophenotype", sprintf("Stage 4 Plasticity %s: Conspecific coalescent support retains %s within intraspecific envelope", ot_in, given_sp), "Variety / Ecotype", "Ecophenotypic_Plasticity"); next }
+        else if (is_taphonomic_plasticity || intra_eco_out || g_cl > 1L) { set_i(i, "Ecophenotypic_Plasticity", given_sp, "MEDIUM", "Annotate_Taphonomic_Ecophenotype", paste0(sprintf("Stage 4 Plasticity %s: Conspecific coalescent support retains %s within intraspecific envelope", ot_in, given_sp), cong_aud_note), "Variety / Ecotype", "Ecophenotypic_Plasticity"); next }
         else { set_i(i, "Species_Confirmed", given_sp, "RESOLVED", "Accept_Current_Determination", sprintf("Stage 5 Confirmed %s: Conspecific coalescent support retains %s", ot_in, given_sp), "Confirmed Species", "Confirmed_Species"); next }
       } else if (!is_tier1_pure_morph && is_mo_flag && !morph_concordant_self && (d_edaph < 0.30 || (is.finite(edaph_z) && edaph_z > 2.5))) {
-        set_i(i, "Ecophenotypic_Plasticity", given_sp, "MEDIUM", "Annotate_Taphonomic_Ecophenotype", "Cauline_Only_Fallback morphology with multimodal discordance retained within Ecophenotypic_Plasticity envelope", "Variety / Ecotype", "Ecophenotypic_Plasticity"); next
+        set_i(i, "Ecophenotypic_Plasticity", given_sp, "MEDIUM", "Annotate_Taphonomic_Ecophenotype", paste0("Cauline_Only_Fallback morphology with multimodal discordance retained within Ecophenotypic_Plasticity envelope", cong_aud_note), "Variety / Ecotype", "Ecophenotypic_Plasticity"); next
       } else if (has_cytotype_barrier_i && !is_sensu_stricto_locked_i) {
         br_c <- if (g_cl > 1L && has_ep_div) paste0(sprintf("Secondary GMM morphotype (K%d) with cytotype barrier and edaphic/phenological divergence (delta_DOY=%.1fd, pH=%s, Sand=%s)", g_cl, ddoy, ph_str, sand_str), if (is_heterotypic_bas_match_i) sprintf(" [Available Heterotypic Basionym: %s]", bas_i) else "", if (!cryptic_non_clinal_pass[i] && is.finite(clinal_r2_i) && clinal_r2_i >= 0.60) sprintf(" [Allopatric Spatial Cline R2=%.2f; Chambers & Hillis 2020]", clinal_r2_i) else "")
           else sprintf("Stage 4 Intraspecific Cytotype Differentiation: Morphologically overlapping or non-disjunct heteroploid cluster (GMM K%d, edaphic_z=%s) retained at subspecific rank", max(1L, g_cl), ifelse(is.finite(edaph_z), sprintf("%.2f", edaph_z), "NA"))
@@ -325,10 +342,16 @@ if (grDevices::dev.cur() == 1L) grDevices::pdf(NULL)
                        if (!cryptic_non_clinal_pass[i] && is.finite(clinal_r2_i) && clinal_r2_i >= 0.60) sprintf(" [Allopatric Spatial Cline R2=%.2f; Chambers & Hillis 2020]", clinal_r2_i) else ""),
                 "Variety / Ecotype", "Subspecies_Ecotype"); next
         } else if (!cryptic_cluster_cohesion_pass[i] && (!is.finite(edaph_z) || edaph_z <= 2.5) && (!is_anth || abs(ddoy) < tau_cryptic_i)) {
-          if (is_taphonomic_plasticity || is_mo_flag) set_i(i, "Ecophenotypic_Plasticity", given_sp, "MEDIUM", "Annotate_Taphonomic_Ecophenotype", sprintf("Stage 4 Plasticity: Secondary shape mode (GMM K%d) within %s ecological/phenological envelope (edaphic_z=%s)", g_cl, given_sp, ifelse(is.finite(edaph_z), sprintf("%.2f", edaph_z), "NA")), "Variety / Ecotype", "Ecophenotypic_Plasticity")
+          if (is_taphonomic_plasticity || intra_eco_out) set_i(i, "Ecophenotypic_Plasticity", given_sp, "MEDIUM", "Annotate_Taphonomic_Ecophenotype", paste0(sprintf("Stage 4 Plasticity: Secondary shape mode (GMM K%d) within %s ecological/phenological envelope (edaphic_z=%s)", g_cl, given_sp, ifelse(is.finite(edaph_z), sprintf("%.2f", edaph_z), "NA")), cong_aud_note), "Variety / Ecotype", "Ecophenotypic_Plasticity")
           else set_i(i, "Species_Confirmed", given_sp, "RESOLVED", "Accept_Current_Determination", sprintf("Stage 5 Confirmed: Secondary unweighted shape mode (GMM K%d) within %s ecological and phenological niche (continuous intraspecific foliar polymorphism / heteroblasty)", g_cl, given_sp), "Confirmed Species", "Confirmed_Species")
           next
         }
+      }
+      if (intra_eco_out) {
+        set_i(i, "Ecophenotypic_Plasticity", given_sp, "MEDIUM", "Annotate_Taphonomic_Ecophenotype",
+              paste0(sprintf("Stage 4 Plasticity: Morphometric outlier retained within %s intraspecific envelope (GMM K%d, self_d2=%s, edaphic_z=%s)", given_sp, g_cl, ifelse(is.finite(self_d2_eff), sprintf("%.2f", self_d2_eff), "NA"), ifelse(is.finite(edaph_z), sprintf("%.2f", edaph_z), "NA")), cong_aud_note),
+              "Variety / Ecotype", "Ecophenotypic_Plasticity")
+        next
       }
     }
 

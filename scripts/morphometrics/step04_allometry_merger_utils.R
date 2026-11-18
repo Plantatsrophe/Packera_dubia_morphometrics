@@ -305,7 +305,8 @@ audit_institutional_batch_effects <- function(morpho_df, output_csv = "outputs/r
     df_i <- as.integer(aov_cmp$Df[2L]); df_r <- as.integer(aov_cmp$Res.Df[2L]); ss_i <- max(0.0, as.numeric(aov_cmp[["Sum of Sq"]][2L])); ss_r <- max(0.0, as.numeric(aov_cmp$RSS[2L]))
     if (is.na(df_i) || df_i <= 0L || is.na(df_r) || df_r <= 0L) next
     f_val <- as.numeric(aov_cmp$F[2L]); pv_f <- as.numeric(aov_cmp[["Pr(>F)"]][2L]); if (!is.finite(f_val)) f_val <- 0.0; if (!is.finite(pv_f)) pv_f <- 1.0
-    r2_f <- ss_i / max(ss_i + ss_r, 1e-12); pre_eta_f <- if (!is.null(pre_eb_map) && feat %in% names(pre_eb_map) && is.finite(pre_eb_map[[feat]])) as.numeric(pre_eb_map[[feat]]) else r2_f
+    r2_f <- ss_i / max(ss_i + ss_r, 1e-12); raw_ft <- sub("_std$", "", feat)
+    pre_eta_f <- if (!is.null(pre_eb_map) && feat %in% names(pre_eb_map) && is.finite(pre_eb_map[[feat]])) as.numeric(pre_eb_map[[feat]]) else if (!is.null(pre_eb_map) && raw_ft %in% names(pre_eb_map) && is.finite(pre_eb_map[[raw_ft]])) as.numeric(pre_eb_map[[raw_ft]]) else r2_f
     fits[[feat]] <- fit_full; raw_ps <- c(raw_ps, pv_f)
     rows_out[[length(rows_out) + 1L]] <- data.frame(
       Response = c(feat, feat), Term = c("institutionCode", "Residuals"), Df = c(df_i, df_r), Sum_Sq = round(c(ss_i, ss_r), 4),
@@ -320,4 +321,55 @@ audit_institutional_batch_effects <- function(morpho_df, output_csv = "outputs/r
   anova_df$Batch_Effect_Status[inst_rows] <- ifelse(anova_df$partial_eta_sq[inst_rows] >= 0.05 & q_bh < 0.05, "Exceeds 0.05 (q_BH < 0.05)", ifelse(anova_df$partial_eta_sq[inst_rows] < 0.05, "Pass (<0.05)", "Pass (q_BH >= 0.05)"))
   if (!is.null(output_csv) && nzchar(output_csv)) { dir.create(dirname(output_csv), recursive = TRUE, showWarnings = FALSE); tmp_ba <- paste0(output_csv, ".", Sys.getpid(), ".tmp"); write.csv(anova_df, file = tmp_ba, row.names = FALSE); file.rename(tmp_ba, output_csv) }
   invisible(list(lm_pc1 = fits[["PC1"]], lm_pc2 = fits[["PC2"]], models = fits, anova_table = anova_df))
+}
+
+.resolve_step04_allometry_cohort <- function(morpho_df, sym_names) {
+  n <- if (is.null(morpho_df) || !is.data.frame(morpho_df)) 0L else nrow(morpho_df)
+  if (n == 0L) return(list(valid_idx = integer(0), scale_tier = "uncalibrated_insufficient", log_centsize_vec = numeric(0), plot_df = data.frame(catalogNumber = "INSUFFICIENT", species_standardized = "Packera", scientificName = "Packera", log_centsize = 0.0, PC1 = 0.0, solidity = 0.85, stringsAsFactors = FALSE)))
+  sym_ok <- if (length(sym_names) >= 4L && all(sym_names %in% names(morpho_df))) stats::complete.cases(morpho_df[, sym_names, drop = FALSE]) else rep(FALSE, n)
+  cal_prim <- is_step04_calibrated_mm(morpho_df); lc_prim <- if ("log_centsize" %in% names(morpho_df)) suppressWarnings(as.numeric(morpho_df$log_centsize)) else rep(NA_real_, n)
+  valid_idx <- which(cal_prim & is.finite(lc_prim) & sym_ok)
+  if (length(valid_idx) >= 10L) return(list(valid_idx = valid_idx, scale_tier = "verified_ruler", log_centsize_vec = lc_prim, plot_df = NULL))
+  ss <- if ("scale_source" %in% names(morpho_df)) tolower(trimws(as.character(morpho_df$scale_source))) else rep("", n); ss[is.na(ss)] <- ""
+  ppm <- if ("pixels_per_mm" %in% names(morpho_df)) suppressWarnings(as.numeric(morpho_df$pixels_per_mm)) else rep(NA_real_, n)
+  num_c <- function(nm) if (nm %in% names(morpho_df)) suppressWarnings(as.numeric(morpho_df[[nm]])) else rep(NA_real_, n)
+  lcu <- num_c("log_centsize_unboxed"); cs_px <- num_c("centroid_size_px"); a_px <- num_c("area_px")
+  lc_cs <- ifelse(is.finite(cs_px) & cs_px > 0 & is.finite(ppm) & ppm > 0, log10(cs_px / ppm), NA_real_)
+  lc_ap <- ifelse(is.finite(a_px) & a_px > 0 & is.finite(ppm) & ppm > 0, log10(sqrt(a_px) / ppm), NA_real_)
+  lc_fb <- ifelse(is.finite(lcu), lcu, ifelse(is.finite(lc_cs), lc_cs, lc_ap))
+  fb_idx <- which((ss == "tick_lattice_unboxed") & is.finite(ppm) & ppm >= 4.0 & ppm <= 45.0 & is.finite(lc_fb) & sym_ok)
+  if (length(fb_idx) >= 10L) {
+    message("[Allometry Fallback] N_verified_ruler < 10; running diagnostic RRPP allometry on tick_lattice_unboxed scale tier.")
+    return(list(valid_idx = fb_idx, scale_tier = "tick_lattice_unboxed", log_centsize_vec = lc_fb, plot_df = NULL))
+  }
+  plot_df <- morpho_df; lc_disp <- ifelse(cal_prim & is.finite(lc_prim), lc_prim, ifelse(is.finite(lc_fb), lc_fb, ifelse(is.finite(a_px) & a_px > 0, log10(sqrt(pmax(a_px, 1.0))), 0.0)))
+  lc_disp[!is.finite(lc_disp)] <- if (any(is.finite(lc_disp))) stats::median(lc_disp[is.finite(lc_disp)]) else 0.0; plot_df$log_centsize <- lc_disp
+  if (!((("PC1_raw" %in% names(plot_df)) && any(is.finite(suppressWarnings(as.numeric(plot_df$PC1_raw))))) || (("PC1" %in% names(plot_df)) && any(is.finite(suppressWarnings(as.numeric(plot_df$PC1))))))) {
+    sol_v <- num_c("solidity"); plot_df$PC1 <- ifelse(is.finite(sol_v), sol_v, 0.0)
+  }
+  list(valid_idx = integer(0), scale_tier = "uncalibrated_insufficient", log_centsize_vec = lc_prim, plot_df = plot_df)
+}
+
+.emit_insufficient_allometry_audit <- function(plot_df, output_report, output_plot, write_csv_fn, plot_fn) {
+  anova_df <- data.frame(Term = "Insufficient_Calibrated_Specimens", Df = 0L, SumOfSqs = NA_real_, R2 = NA_real_, F = NA_real_, p_value = NA_real_, Slopes_Homogeneous = NA, Scale_Tier = "uncalibrated_insufficient", stringsAsFactors = FALSE)
+  if (!is.null(output_report) && nzchar(output_report)) write_csv_fn(anova_df, output_report)
+  if (!is.null(output_plot) && nzchar(output_plot)) plot_fn(plot_df, 0.0, 1.0, 0.0, output_plot, p_int = 1.0)
+  anova_df
+}
+
+.finalize_gmm_bic_table <- function(bic_table, raw_k, best_k, best_name, n_core_g, n_eff_ratio, p_g, bic_raw_mat, did_merge, did_icl_collapse) {
+  n_core_g <- max(2.0, n_core_g); n_eff_g <- max(2.0, n_core_g * min(1.0, max(0.10, n_eff_ratio)))
+  k_par_vec <- .compute_exact_mclust_params(bic_table$K, p_g, bic_mat = bic_raw_mat, default_model = best_name, explicit_n_params = if ("n_params" %in% names(bic_table)) bic_table$n_params else NULL)
+  bic_neff <- bic_table$BIC + k_par_vec * (log(n_core_g) - log(n_eff_g)); bic_table$Delta_BIC_prev <- c(0, diff(bic_table$BIC))
+  bic_table$Two_Delta_BIC <- round(bic_table$BIC - bic_table$BIC[1], 2); bic_table$BayesFactor_vs_Null <- round(bic_neff - bic_neff[1], 2)
+  did_seq_step <- grepl("_SeqBootStepped", best_name, fixed = TRUE)
+  bic_table$Evidence <- vapply(seq_len(nrow(bic_table)), function(idx_b) {
+    if (idx_b == 1L) return("Null Model (G = 1)"); val <- bic_table$Two_Delta_BIC[idx_b]
+    ev_str <- if (is.na(val) || val < 0) "Negative (favors G = 1)" else if (val < 2) "Weak / Inconclusive" else if (val < 6) "Positive Evidence" else if (val < 10) "Strong Evidence" else "Decisive Evidence (Species Boundary)"
+    if (isTRUE(did_merge) && bic_table$K[idx_b] > best_k) ev_str <- paste0(ev_str, sprintf(" [Ridgeline Merged -> K=%d]", best_k))
+    if (isTRUE(did_icl_collapse) && bic_table$K[idx_b] > best_k) ev_str <- paste0(ev_str, " [ICL/Bootstrap Collapsed -> K=1]")
+    if (isTRUE(did_seq_step) && !isTRUE(did_icl_collapse) && bic_table$K[idx_b] > best_k) ev_str <- paste0(ev_str, sprintf(" [SeqBoot Stepped -> K=%d]", best_k))
+    ev_str
+  }, character(1L))
+  bic_table$optimal_K_raw <- as.integer(raw_k); bic_table$optimal_K_merged <- as.integer(best_k); bic_table$selected_model <- as.character(best_name)[1L]; bic_table
 }

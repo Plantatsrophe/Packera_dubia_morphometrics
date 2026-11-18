@@ -221,9 +221,12 @@ class TestPublicCytologyIntegration(unittest.TestCase):
             eb = step06._compute_eb_polyrad_dosage(np.array([[0.3], [0.3]], dtype=np.float32), np.array([[7.0], [7.0]], dtype=np.float32), np.array([[3.0], [3.0]], dtype=np.float32), ["2x", "mixed/uncertain"], fallback_ploidies=[2, 4])
             self.assertGreater(float(eb[0, 0]), float(eb[1, 0]) + 0.05)
 
-            cy_4x, dl_4x = step06._infer_sample_cytotype(np.array([30., 10.] * 12), np.array([10., 30.] * 12), np.full(24, 0.5, dtype=np.float32), None, species_modal_ploidy=2, is_multi_cytotype=False)
+            cy_24_guard, dl_24_guard = step06._infer_sample_cytotype(np.array([30., 10.] * 12), np.array([10., 30.] * 12), np.full(24, 0.5, dtype=np.float32), None, species_modal_ploidy=2, is_multi_cytotype=False)
+            self.assertEqual((cy_24_guard, dl_24_guard), ("2x", 0.0))
+
+            cy_4x, dl_4x = step06._infer_sample_cytotype(np.array([30., 10.] * 40), np.array([10., 30.] * 40), np.full(80, 0.5, dtype=np.float32), None, species_modal_ploidy=2, is_multi_cytotype=False)
             self.assertEqual(cy_4x, "4x")
-            self.assertGreaterEqual(float(dl_4x), 4.0)
+            self.assertGreaterEqual(float(dl_4x), 25.0)
 
             (gen_dir / "user_genetic_metadata.csv").write_text("genetic_sample_id,catalogNumber,species_standardized\nS_MONO_2X,V-MONO-2X,Packera dubia\n", encoding="utf-8")
             vcf_lines = ["##fileformat=VCFv4.2", '##FORMAT=<ID=GT,Number=1,Type=String,Description="GT">', '##FORMAT=<ID=AD,Number=R,Type=Integer,Description="AD">', "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS_MONO_2X\tS_REF_ALT"] + [f"chr1\t{100 + i}\t.\tA\tG\t99\tPASS\t.\tGT:AD\t0/1:6,6\t1/1:0,12" for i in range(1, 6)]

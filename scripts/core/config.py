@@ -246,12 +246,15 @@ def write_run_metadata(
     end_time: Optional[str] = None,
     cli_args: Optional[List[str]] = None,
     workspace_root: Path = PROJECT_ROOT,
+    status: Optional[str] = None,
+    exit_code: Optional[int] = None,
 ) -> Path:
     """
     Atomically write `${RUN_DIR}/outputs/reports/run_metadata.json` recording:
       - run_id
       - run_dir
       - start_timestamp / end_timestamp
+      - status / exit_code
       - git_commit_sha
       - cli_arguments
       - table_row_counts (for all generated CSV tables in data/tables and outputs/reports)
@@ -306,6 +309,22 @@ def write_run_metadata(
         )
     )
     eff_cli = cli_args if cli_args is not None else existing.get("cli_arguments", list(sys.argv))
+    if status is not None:
+        eff_status = str(status)
+    elif exit_code is not None:
+        eff_status = "completed" if int(exit_code) == 0 else "failed"
+    elif end_time is not None:
+        eff_status = "completed"
+    else:
+        eff_status = existing.get("status", "running")
+
+    if exit_code is not None:
+        eff_exit_code: Optional[int] = int(exit_code)
+    elif status == "completed" or (status is None and end_time is not None):
+        eff_exit_code = 0
+    else:
+        raw_existing_exit = existing.get("exit_code")
+        eff_exit_code = int(raw_existing_exit) if raw_existing_exit is not None else None
 
     table_counts: Dict[str, int] = {}
     for search_dir in (run_dir / "data" / "tables", run_dir / "outputs" / "reports"):
@@ -320,6 +339,8 @@ def write_run_metadata(
         "run_dir": str(run_dir),
         "start_timestamp": eff_start,
         "end_timestamp": eff_end,
+        "status": eff_status,
+        "exit_code": eff_exit_code,
         "git_commit_sha": git_sha,
         "cli_arguments": eff_cli,
         "table_row_counts": table_counts,
@@ -1157,8 +1178,9 @@ _DEFAULT_GENOMICS_CONFIG: Dict[str, Any] = {
     "max_missing_rate": 0.80,
     "paralog_ho_threshold": 0.60,
     "hdplot_d_threshold": 4.0,
-    "nquire_min_het_loci": 15,
-    "nquire_strong_delta_bic": 4.0,
+    "nquire_min_het_loci": 60,
+    "nquire_strong_delta_bic": 25.0,
+    "nquire_min_delta_logl_per_locus": 0.15,
     "default_fallback_ploidy": 2,
     "cytonuclear_min_containment": 0.80,
     "cytonuclear_min_shared_kmers": 80,

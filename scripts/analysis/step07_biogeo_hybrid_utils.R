@@ -196,7 +196,9 @@ if (!exists(".sort_numbered_pc_cols", mode = "function")) {
 
 .norm_county_step07 <- function(cv) {
   s <- tolower(trimws(as.character(cv))); s[is.na(s) | s %in% c("", "na", "nan", "none", "null", "unknown")] <- ""
-  s <- gsub("(^|[^A-Za-z0-9_])(county|parish|co\\.|borough)($|[^A-Za-z0-9_])", " ", s)
+  s <- gsub("^[[:space:]]*city[[:space:]]+of[[:space:]]+", "", s)
+  s <- gsub("(^|[^A-Za-z0-9_])(county|parish|co\\.|borough|independent[[:space:]]+city)($|[^A-Za-z0-9_])", " ", s)
+  s <- gsub("[[:space:]]+(independent[[:space:]]+)?city[[:space:]]*$", "", trimws(s))
   trimws(gsub("[^a-z0-9]+", " ", s))
 }
 

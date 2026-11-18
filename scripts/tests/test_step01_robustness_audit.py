@@ -300,6 +300,42 @@ class TestStep01RobustnessAudit(unittest.TestCase):
             self.assertEqual(r_out.returncode, 0, r_out.stderr)
             self.assertIn("R_SPATIAL_OK", r_out.stdout)
 
+    def test_w2_alphanumeric_collection_alias_dedup_va_city_and_east_tx(self) -> None:
+        """Verify alphanumeric collection codes, barcode aliases, VA independent cities, and East TX county ranges."""
+        from scripts.core.harvester import standardize_packera_taxon
+        from scripts.core.usda_plants_ranges import _persist_taxon_range_to_sqlite, filter_vouchers_by_usda_county_range, normalize_virginia_independent_city
+        self.assertEqual(ta.normalize_record_number("PACTOM01-MDC2"), "pactom01-mdc2")
+        self.assertNotEqual(ta.normalize_record_number("PACTOM01-MDC2"), ta.normalize_record_number("PACTOM01-VAC3"))
+        self.assertEqual((ta.normalize_record_number("Coll. No. 1042-A"), ta.normalize_record_number("2022.014")), ("1042a", "2022-014"))
+        df_al = pd.DataFrame([
+            {"catalogNumber": "WILLI_19398", "institutionCode": "WILLI", "recordedBy": "M.T. Strong", "recordNumber": "19398", "eventDate": "2001-05-10", "decimalLatitude": 37.3, "decimalLongitude": -76.7, "scientificName": "Packera dubia", "species_standardized": "Packera dubia", "determiner_tier": "Tier_1_Gold"},
+            {"catalogNumber": "19398", "institutionCode": "WILLI", "recordedBy": "Strong", "recordNumber": "19398", "eventDate": "2001-05-10", "decimalLatitude": 37.3, "decimalLongitude": -76.7, "scientificName": "Packera dubia", "species_standardized": "Packera dubia", "determiner_tier": "Tier_2_Silver"},
+        ])
+        strat = ta.stratify_duplicates(df_al)
+        self.assertEqual(strat["exsiccatae_key"].nunique(), 1)
+        self.assertEqual(int(strat["is_primary_duplicate"].sum()), 1)
+        self.assertEqual(normalize_virginia_independent_city("Chesapeake", "VA"), "Chesapeake City")
+        with tempfile.TemporaryDirectory() as tmp_d:
+            ws = Path(tmp_d); db_p = ws / "usda_w2.sqlite"
+            conn = get_db_connection(db_path=db_p, init_schema=True, workspace_root=ws)
+            try:
+                _persist_taxon_range_to_sqlite(conn, "Packera dubia", [
+                    {"usda_symbol": "PATO4", "state_norm": "texas", "county_norm": "polk", "state_abbr": "TX", "county_raw": "Polk", "is_state_only": 0},
+                    {"usda_symbol": "PATO4", "state_norm": "virginia", "county_norm": "norfolk city", "state_abbr": "VA", "county_raw": "Norfolk City", "is_state_only": 0},
+                ])
+            finally:
+                conn.close()
+            df_u = pd.DataFrame([
+                {"catalogNumber": "VA_CH", "species_standardized": "Packera dubia", "stateProvince": "Virginia", "county": "Chesapeake", "determiner_tier": "Tier_1_Gold"},
+                {"catalogNumber": "TX_SM", "species_standardized": "Packera dubia", "stateProvince": "Texas", "county": "Smith", "determiner_tier": "Tier_2_Silver"},
+                {"catalogNumber": "TX_UP", "species_standardized": "Packera dubia", "stateProvince": "TX", "county": "Upshur", "determiner_tier": "Tier_2_Silver"},
+            ])
+            res_u, _ = filter_vouchers_by_usda_county_range(
+                df_u, standardize_taxon_fn=standardize_packera_taxon, cache_dir=ws / "usda",
+                db_path=db_p, workspace_dir=ws, allow_network=False, drop_out_of_range=True,
+            )
+            self.assertEqual(list(res_u["usda_county_status"]), ["in_range", "in_range", "in_range"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2433,10 +2433,10 @@ run_bounded_clustvarsel <- function(X_mat, core_idx, max_k = 8L, timeout_sec = 2
 
   cvs_res <- if (.Platform$OS.type == "unix") {
     jb <- parallel::mcparallel(tryCatch(run_cvs_inner(), error = function(e) NULL), silent = TRUE)
-    col_res <- parallel::mccollect(jb, wait = FALSE, timeout = timeout_sec)
+    col_res <- suppressWarnings(parallel::mccollect(jb, wait = FALSE, timeout = timeout_sec))
     if (is.null(col_res)) {
       tryCatch(tools::pskill(jb$pid, signal = 9L), error = function(e) NULL)
-      tryCatch(parallel::mccollect(jb, wait = FALSE, timeout = 0.2), error = function(e) NULL)
+      tryCatch(suppressWarnings(parallel::mccollect(jb, wait = FALSE, timeout = 0.2)), error = function(e) NULL)
       NULL
     } else {
       val <- col_res[[1L]]
@@ -3133,8 +3133,11 @@ compute_type_specimen_morph_control <- function(
       con <- connect_packera_db(read_only = TRUE)
       on.exit(tryCatch(DBI::dbDisconnect(con), error = function(e) NULL), add = TRUE)
       if (is.null(con)) return(NULL)
+      has_sheet_delta_inv <- ("blade_cie_l_sheet_delta" %in% names(df)) &&
+        (mean(is.finite(suppressWarnings(as.numeric(df$blade_cie_l_sheet_delta)))) >= 0.50)
       phot_inv_cands <- c(
-        "blade_cie_l_norm", "blade_cie_l_sheet_delta",
+        if (!has_sheet_delta_inv) "blade_cie_l_norm",
+        "blade_cie_l_sheet_delta",
         "blade_cie_a_browning_delta", "blade_cie_b_yellowing_delta"
       )
       if (!("blade_cie_a_browning_delta" %in% names(df))) phot_inv_cands <- c(phot_inv_cands, "blade_cie_a_delta")

@@ -715,7 +715,7 @@ csv_p, focal_raw = sys.argv[1], sys.argv[2]
 target = standardize_packera_taxon(focal_raw)
 if not target:
     sys.exit(1)
-df = pd.read_csv(csv_p, usecols=lambda c: c in ('scientificName', 'species_raw'))
+df = pd.read_csv(csv_p, usecols=lambda c: c in ('scientificName', 'species_raw'), low_memory=False)
 present = set()
 for col in ('scientificName', 'species_raw'):
     if col in df.columns:
@@ -1042,7 +1042,7 @@ if requested_taxa and os.environ.get('PLANTMATICS_DEMO_MODE') != '1' and os.envi
         if n_synced:
             print(f'[Preflight: SQLite Voucher Sync] Restored {n_synced} vouchers for requested taxa {sorted(requested_taxa)} from SQLite vouchers that were missing from curated_vouchers.csv.')
 
-df = pd.read_csv(csv_path)
+df = pd.read_csv(csv_path, low_memory=False)
 initial_voucher_count = len(df)
 
 non_demo_pf = (
@@ -1138,29 +1138,140 @@ from scripts.core.db import (
     query_misidentified_vouchers_from_db,
 )
 
+def _norm_pid(val):
+    if val is None or (isinstance(val, float) and math.isnan(val)):
+        return 0
+    s = str(val).strip()
+    if not s or s.lower() in ('nan', 'none', 'na', 'null'):
+        return 0
+    try:
+        return int(float(s))
+    except (TypeError, ValueError):
+        return 0
+
+g1_dna_cats = set()
+if non_demo_pf and Path(target_db_path).is_file():
+    try:
+        _conn_g1 = get_db_connection(db_path=target_db_path, init_schema=False, read_only=True, workspace_root=root_data.parent)
+        try:
+            _tbls_g1 = {r[0] for r in _conn_g1.execute('SELECT name FROM sqlite_master WHERE type=?', ('table',)).fetchall()}
+            if 'genomic_samples' in _tbls_g1:
+                _g1_cols = {r[1] for r in _conn_g1.execute('PRAGMA table_info(genomic_samples)').fetchall()}
+                if {'catalogNumber', 'linkage_tier', 'geno_quality_pass'}.issubset(_g1_cols):
+                    _q_g1 = (
+                        'SELECT DISTINCT catalogNumber FROM genomic_samples '
+                        'WHERE linkage_tier IN (?, ?) '
+                        'AND COALESCE(geno_quality_pass, 0) = 1 '
+                        'AND TRIM(COALESCE(catalogNumber, ?)) != ?'
+                    )
+                    _direct_g1 = {
+                        str(r[0]).strip()
+                        for r in _conn_g1.execute(
+                            _q_g1,
+                            ('G1_Direct_Voucher', 'G1_Exsiccatae_Isoduplicate', '', ''),
+                        ).fetchall()
+                        if r[0] is not None and str(r[0]).strip()
+                    }
+                    g1_dna_cats.update(_direct_g1)
+                    if _direct_g1 and 'vouchers' in _tbls_g1:
+                        _v_cols_g1 = {r[1] for r in _conn_g1.execute('PRAGMA table_info(vouchers)').fetchall()}
+                        if {'catalogNumber', 'exsiccatae_key'}.issubset(_v_cols_g1):
+                            _ph_g1 = ','.join('?' for _ in _direct_g1)
+                            _exs_g1 = {
+                                str(r[0]).strip()
+                                for r in _conn_g1.execute(
+                                    f'SELECT DISTINCT exsiccatae_key FROM vouchers WHERE catalogNumber IN ({_ph_g1}) AND TRIM(COALESCE(exsiccatae_key, ?)) != ?',
+                                    tuple(sorted(_direct_g1)) + ('', ''),
+                                ).fetchall()
+                                if r[0] is not None and str(r[0]).strip()
+                            }
+                            if _exs_g1:
+                                _ph2_g1 = ','.join('?' for _ in _exs_g1)
+                                _sib_g1 = {
+                                    str(r[0]).strip()
+                                    for r in _conn_g1.execute(
+                                        f'SELECT DISTINCT catalogNumber FROM vouchers WHERE exsiccatae_key IN ({_ph2_g1}) AND TRIM(COALESCE(catalogNumber, ?)) != ?',
+                                        tuple(sorted(_exs_g1)) + ('', ''),
+                                    ).fetchall()
+                                    if r[0] is not None and str(r[0]).strip()
+                                }
+                                g1_dna_cats.update(_sib_g1)
+        finally:
+            _conn_g1.close()
+    except Exception:
+        pass
+if g1_dna_cats and 'exsiccatae_key' in df.columns and 'catalogNumber' in df.columns:
+    _df_cats = df['catalogNumber'].astype(str).str.strip()
+    _df_exs = df['exsiccatae_key'].fillna('').astype(str).str.strip()
+    _g1_exs_local = set(_df_exs[_df_cats.isin(g1_dna_cats)]) - {''}
+    if _g1_exs_local:
+        g1_dna_cats.update(c for c in _df_cats[_df_exs.isin(_g1_exs_local)] if c)
+
 misidentified_cats = set()
+flagged_ramets = set()
+triaged_pids_by_cat = {}
+misid_pids_by_cat = {}
 if exclude_misidentified:
     tokens = [t.strip() for t in (triage_source_raw or 'ALL').split(',') if t.strip()]
     if not tokens:
         tokens = ['ALL']
 
+    self_run_id = resolve_canonical_run_id(
+        run_dir=run_dir,
+        explicit_run_id=os.environ.get('RUN_ID') or None,
+        workspace_root=root_data.parent,
+    )
     db_run_count = 0
-    if os.environ.get('PLANTMATICS_DEMO_MODE') != '1' and os.environ.get('PACKERA_DEMO_MODE') != '1':
+    if non_demo_pf and Path(target_db_path).is_file():
         try:
             conn_mis = get_db_connection(db_path=target_db_path, init_schema=True, workspace_root=root_data.parent)
             try:
-                db_flagged, db_run_count = query_misidentified_vouchers_from_db(
-                    conn_mis,
-                    triage_sources=tokens,
-                    exclude_run_id=resolve_canonical_run_id(
-                        run_dir=run_dir,
-                        explicit_run_id=os.environ.get('RUN_ID') or None,
-                        workspace_root=root_data.parent,
-                    ),
-                    allowed_subtypes=ALLOWED_TREATMENT_SUBTYPES,
-                    workspace_root=root_data.parent,
-                )
-                misidentified_cats.update(db_flagged)
+                _db_tbls = {r[0] for r in conn_mis.execute('SELECT name FROM sqlite_master WHERE type=?', ('table',)).fetchall()}
+                if 'curation_triage' in _db_tbls:
+                    _tri_cols = {r[1] for r in conn_mis.execute('PRAGMA table_info(curation_triage)').fetchall()}
+                    if {'run_id', 'catalogNumber', 'taxonomic_treatment_subtype'}.issubset(_tri_cols):
+                        _all_rids = [
+                            str(r[0]).strip()
+                            for r in conn_mis.execute('SELECT DISTINCT run_id FROM curation_triage WHERE TRIM(COALESCE(run_id, ?)) != ?', ('', '')).fetchall()
+                            if r[0] is not None and str(r[0]).strip()
+                        ]
+                        _is_all_tok = any(t.upper() in ('ALL', '*') for t in tokens)
+                        _tok_cands = set()
+                        if not _is_all_tok:
+                            for tok in tokens:
+                                _tok_cands.add(tok)
+                                _tok_cands.add(Path(tok).name)
+                                _tn = resolve_canonical_run_id(explicit_run_id=tok, workspace_root=root_data.parent)
+                                if _tn:
+                                    _tok_cands.add(_tn)
+                                _tp = Path(tok)
+                                if _tp.name == 'triage_queue.csv' and len(_tp.parts) >= 4:
+                                    _tok_cands.add(_tp.parents[2].name)
+                        _matched_rids = []
+                        for _rid in _all_rids:
+                            if self_run_id and (_rid == self_run_id or _rid.startswith(self_run_id + '/')):
+                                continue
+                            if _is_all_tok:
+                                _matched_rids.append(_rid)
+                            elif any(_rid == _tc or _rid.startswith(_tc + '/') or _rid.endswith('/' + _tc) for _tc in _tok_cands if _tc):
+                                _matched_rids.append(_rid)
+                        db_run_count = len(_matched_rids)
+                        if _matched_rids:
+                            _pid_expr = 'COALESCE(plant_individual_id, 0)' if 'plant_individual_id' in _tri_cols else '0'
+                            _ph_rids = ','.join('?' for _ in _matched_rids)
+                            for _cat_r, _pid_r, _sub_r in conn_mis.execute(
+                                f'SELECT catalogNumber, {_pid_expr}, taxonomic_treatment_subtype FROM curation_triage WHERE run_id IN ({_ph_rids})',
+                                tuple(_matched_rids),
+                            ).fetchall():
+                                _cs = '' if _cat_r is None else str(_cat_r).strip()
+                                if not _cs:
+                                    continue
+                                _pi = _norm_pid(_pid_r)
+                                _ss = '' if _sub_r is None else str(_sub_r).strip()
+                                triaged_pids_by_cat.setdefault(_cs, set()).add(_pi)
+                                if _ss == 'Misidentification_Reassign' or (_ss != '' and _ss not in ALLOWED_TREATMENT_SUBTYPES):
+                                    misid_pids_by_cat.setdefault(_cs, set()).add(_pi)
+                                    flagged_ramets.add((_cs, _pi))
             finally:
                 conn_mis.close()
         except Exception:
@@ -1231,31 +1342,51 @@ if exclude_misidentified:
             sys.exit(1)
         sub_series = tdf_tri[sub_col].fillna('').astype(str).str.strip()
         cat_series = tdf_tri['catalogNumber'].fillna('').astype(str).str.strip()
+        pid_series = (
+            tdf_tri['plant_individual_id'].map(_norm_pid)
+            if 'plant_individual_id' in tdf_tri.columns
+            else pd.Series(0, index=tdf_tri.index)
+        )
         is_misid = (sub_series == 'Misidentification_Reassign') | (
             ~sub_series.isin(ALLOWED_TREATMENT_SUBTYPES) & (sub_series != '')
         )
-        for c_val in cat_series[is_misid]:
-            if c_val:
-                misidentified_cats.add(c_val)
+        for c_val, p_val, bad_flag in zip(cat_series, pid_series, is_misid):
+            if not c_val:
+                continue
+            triaged_pids_by_cat.setdefault(c_val, set()).add(int(p_val))
+            if bool(bad_flag):
+                misid_pids_by_cat.setdefault(c_val, set()).add(int(p_val))
+                flagged_ramets.add((c_val, int(p_val)))
+
+    # Evict a sheet from curated_vouchers.csv ONLY when 100% of its triaged ramets were misidentified
+    for c_val, flagged_pids in misid_pids_by_cat.items():
+        if flagged_pids and not (triaged_pids_by_cat.get(c_val, set()) - flagged_pids):
+            misidentified_cats.add(c_val)
 
     before_misid_n = len(df)
     df = df[~df['catalogNumber'].astype(str).str.strip().isin(misidentified_cats)].copy()
     print(
         f'[Preflight: Exclude Misidentified] Source={triage_source_raw!r} (SQLite runs={db_run_count}, CSV reports={len(triage_files)}): '
-        f'excluded {before_misid_n - len(df)} vouchers with taxonomic_treatment_subtype == \'Misidentification_Reassign\' '
-        f'({len(misidentified_cats)} unique flagged catalogNumbers; retaining only {sorted(ALLOWED_TREATMENT_SUBTYPES)}): '
-        f'retained {len(df)} / {before_misid_n} vouchers.'
+        f'evicted {before_misid_n - len(df)} sheets where 100% of triaged ramets were flagged '
+        f'({len(misidentified_cats)} full sheets, {len(flagged_ramets)} flagged (catalogNumber, plant_individual_id) ramets; '
+        f'retaining mixed multi-ramet sheets and filtering only flagged ramets downstream): '
+        f'retained {len(df)} / {before_misid_n} sheets.'
     )
 
 if target_tier and 'determiner_tier' in df.columns:
     before_tier_n = len(df)
     tier_vals = df['determiner_tier'].astype(str).str.strip()
+    is_g1_df = (
+        df['catalogNumber'].astype(str).str.strip().isin(g1_dna_cats)
+        if (g1_dna_cats and 'catalogNumber' in df.columns)
+        else False
+    )
     if target_tier == 'Tier_1_Gold':
         is_type_col = df['is_type_specimen'].fillna(False).astype(bool) if 'is_type_specimen' in df.columns else False
-        df = df[tier_vals.isin(['Tier_1_Gold', 'Tier_0_Type']) | is_type_col].copy()
+        df = df[tier_vals.isin(['Tier_1_Gold', 'Tier_0_Type']) | is_type_col | is_g1_df].copy()
     else:
         df = df[tier_vals == target_tier].copy()
-    print(f'[Preflight: Determiner Tier] Filtered to determiner_tier == {target_tier!r} (+ types when Tier_1_Gold): retained {len(df)} / {before_tier_n} vouchers.')
+    print(f'[Preflight: Determiner Tier] Filtered to determiner_tier == {target_tier!r} (+ types and G1 DNA vouchers when Tier_1_Gold): retained {len(df)} / {before_tier_n} vouchers.')
 
 if exclude_taxa:
     before_n = len(df)
@@ -1409,7 +1540,7 @@ if focal_raw:
             comp_file = next((p for p in comp_candidates if p.is_file() and p.stat().st_size > 0), None)
             aff_file = next((p for p in aff_candidates if p.is_file() and p.stat().st_size > 0), None)
             if comp_file is not None:
-                cdf = pd.read_csv(comp_file)
+                cdf = pd.read_csv(comp_file, low_memory=False)
                 sp_c_col = 'species_standardized' if 'species_standardized' in cdf.columns else ('taxon' if 'taxon' in cdf.columns else None)
                 if sp_c_col is not None and 'consensus_complex_id' in cdf.columns:
                     cdf['taxon_std'] = cdf[sp_c_col].apply(standardize_packera_taxon)
@@ -1422,7 +1553,7 @@ if focal_raw:
                         ]
                         discovered_neighbors.extend(same_c)
             if aff_file is not None:
-                adf = pd.read_csv(aff_file)
+                adf = pd.read_csv(aff_file, low_memory=False)
                 sp_a_col = 'species_standardized' if 'species_standardized' in adf.columns else ('taxon' if 'taxon' in adf.columns else None)
                 if sp_a_col is not None:
                     adf['taxon_std'] = adf[sp_a_col].apply(standardize_packera_taxon)
@@ -1473,16 +1604,26 @@ else:
 
 if target_tier and 'determiner_tier' in subset_df.columns:
     sub_tiers = subset_df['determiner_tier'].astype(str).str.strip()
+    is_g1_sub = (
+        subset_df['catalogNumber'].astype(str).str.strip().isin(g1_dna_cats)
+        if (g1_dna_cats and 'catalogNumber' in subset_df.columns)
+        else False
+    )
     if target_tier == 'Tier_1_Gold':
         sub_types = subset_df['is_type_specimen'].fillna(False).astype(bool) if 'is_type_specimen' in subset_df.columns else False
-        subset_df = subset_df[sub_tiers.isin(['Tier_1_Gold', 'Tier_0_Type']) | sub_types].copy()
+        subset_df = subset_df[sub_tiers.isin(['Tier_1_Gold', 'Tier_0_Type']) | sub_types | is_g1_sub].copy()
     else:
         subset_df = subset_df[sub_tiers == target_tier].copy()
 if exclude_misidentified and misidentified_cats:
     subset_df = subset_df[~subset_df['catalogNumber'].astype(str).str.strip().isin(misidentified_cats)].copy()
 
 manifest_path = tables_dir / 'extracted_leaf_manifest.csv'
-manifest_df = pd.read_csv(manifest_path) if manifest_path.exists() and manifest_path.stat().st_size > 0 else None
+manifest_df = pd.read_csv(manifest_path, low_memory=False) if manifest_path.exists() and manifest_path.stat().st_size > 0 else None
+if manifest_df is not None and flagged_ramets and {'catalogNumber', 'plant_individual_id'}.issubset(manifest_df.columns):
+    _mc = manifest_df['catalogNumber'].fillna('').astype(str).str.strip()
+    _mp = manifest_df['plant_individual_id'].map(_norm_pid)
+    _keep_m = [((c_m, p_m) not in flagged_ramets) for c_m, p_m in zip(_mc, _mp)]
+    manifest_df = manifest_df.loc[_keep_m].copy()
 
 pre_balance_n = len(subset_df)
 subset_df = spatially_balance_and_thin_vouchers(
@@ -1491,7 +1632,8 @@ subset_df = spatially_balance_and_thin_vouchers(
     max_per_state=max_per_state,
     max_per_region=max_per_region,
     primary_duplicates_only=True,
-    preserve_all_gold=True,
+    preserve_all_gold=(not (target_tier == 'Tier_1_Gold' and spatial_thin_km > 0.0)),
+    preserve_catalog_numbers=sorted(g1_dna_cats) if g1_dna_cats else None,
     manifest_df=manifest_df,
     workspace_dir=root_data.parent,
 )
@@ -1532,13 +1674,33 @@ has_subset_filter = bool(
 )
 
 if has_subset_filter:
-    # Filter all Step 02 tables in ${RUN_DIR}/data/tables/ to retained catalogNumbers
-    for tbl_name in ('extracted_leaf_manifest.csv', 'failed_qc_vouchers.csv', 'voucher_reproductive_metrics.csv', 'voucher_phenological_states.csv'):
+    # Filter Step 02 and Stage 3 run-scoped tables in ${RUN_DIR}/data/tables/ by retained catalogNumbers
+    # and strictly prune flagged (catalogNumber, plant_individual_id) ramets when present.
+    _core_tbls = [
+        'extracted_leaf_manifest.csv',
+        'failed_qc_vouchers.csv',
+        'voucher_reproductive_metrics.csv',
+        'voucher_phenological_states.csv',
+    ]
+    _extra_tbls = sorted(
+        p.name for p in tables_dir.glob('*.csv')
+        if p.name not in _core_tbls and p.name != 'curated_vouchers.csv'
+    )
+    for tbl_name in (_core_tbls + _extra_tbls):
         tp = tables_dir / tbl_name
         if tp.exists() and tp.stat().st_size > 0:
-            tdf = pd.read_csv(tp)
+            tdf = pd.read_csv(tp, low_memory=False)
             if 'catalogNumber' in tdf.columns:
-                tdf_sub = tdf[tdf['catalogNumber'].astype(str).str.strip().isin(keep_cats)].copy()
+                _t_cats = tdf['catalogNumber'].fillna('').astype(str).str.strip()
+                keep_row_mask = _t_cats.isin(keep_cats)
+                if flagged_ramets and 'plant_individual_id' in tdf.columns:
+                    _t_pids = tdf['plant_individual_id'].map(_norm_pid)
+                    _ramet_keep = pd.Series(
+                        [((c_r, p_r) not in flagged_ramets) for c_r, p_r in zip(_t_cats, _t_pids)],
+                        index=tdf.index,
+                    )
+                    keep_row_mask = keep_row_mask & _ramet_keep
+                tdf_sub = tdf.loc[keep_row_mask].copy()
                 _write_atomic(tdf_sub, tp)
                 print(f'  Filtered {tbl_name}: {len(tdf_sub)} / {len(tdf)} rows')
 
@@ -1564,6 +1726,22 @@ if os.environ.get('PLANTMATICS_DEMO_MODE') != '1' and os.environ.get('PACKERA_DE
             voucher_rows=subset_df.to_dict(orient='records'),
             clear_existing=True,
         )
+        if exclude_misidentified and flagged_ramets:
+            _del_params = [(run_id_val, c_d, int(p_d)) for (c_d, p_d) in sorted(flagged_ramets)]
+            _coh_tbls = {r[0] for r in conn_coh.execute('SELECT name FROM sqlite_master WHERE type=?', ('table',)).fetchall()}
+            for _tier_b_tbl in ('run_active_cohort', 'leaf_efa_harmonics', 'otu_morphometrics', 'spatial_rf_predictions', 'curation_triage'):
+                if _tier_b_tbl in _coh_tbls:
+                    _tb_cols = {r[1] for r in conn_coh.execute(f'PRAGMA table_info({_tier_b_tbl})').fetchall()}
+                    if {'run_id', 'catalogNumber', 'plant_individual_id'}.issubset(_tb_cols):
+                        conn_coh.executemany(
+                            f'DELETE FROM {_tier_b_tbl} WHERE run_id = ? AND catalogNumber = ? AND COALESCE(plant_individual_id, 0) = ?',
+                            _del_params,
+                        )
+            conn_coh.commit()
+            n_cohort = conn_coh.execute(
+                'SELECT COUNT(*) FROM run_active_cohort WHERE run_id = ?',
+                (run_id_val,),
+            ).fetchone()[0]
         print(f'[Preflight: SQLite Cohort] Registered run_id={run_id_val!r} with {n_cohort} active (catalogNumber, plant_individual_id) rows.')
     finally:
         conn_coh.close()
@@ -1934,6 +2112,8 @@ write_run_metadata(
     start_time='${START_TIME}',
     end_time='${END_TIME}',
     cli_args=sys.argv[1:],
+    status='completed',
+    exit_code=0,
 )
 if os.environ.get('PLANTMATICS_DEMO_MODE') != '1' and os.environ.get('PACKERA_DEMO_MODE') != '1':
     conn = get_db_connection(init_schema=True, workspace_root=Path('${PROJECT_ROOT}').resolve())

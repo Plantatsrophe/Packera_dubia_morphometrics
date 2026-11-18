@@ -135,6 +135,11 @@ def normalize_record_number(record_number: Optional[Any]) -> str:
     if not s or s.lower() in {"none", "nan", "null", "s.n.", "sn", "s. n.", "unnumbered", "sine numero"}:
         return ""
     s_clean = re.sub(r"^(?:coll(?:ection)?\.?\s*)?(?:no\.?|nr\.?|num(?:ber)?\.?|#)\s*", "", s, flags=re.IGNORECASE).strip()
+    if re.fullmatch(
+        r"[A-Za-z]{2,}\d+(?:[-_./][A-Za-z0-9]+)+|[A-Za-z]{2,}\d+[A-Za-z]{2,}[A-Za-z0-9_./-]*",
+        s_clean,
+    ):
+        return re.sub(r"[./\s_]+", "-", s_clean).lower()
     match = re.search(r"(\d+(?:[-./]\d+)*)(?:[-\s]*([a-zA-Z])(?![a-zA-Z0-9]))?", s_clean)
     if not match:
         return ""
@@ -351,7 +356,8 @@ def stratify_duplicates(
         df["exsiccatae_gold_taxon"] = pd.Series(dtype=str)
         return df
 
-    df = df.copy()
+    orig_index = df.index
+    df = df.reset_index(drop=True).copy()
 
     # Ensure metadata columns exist
     if "recordedBy" not in df.columns:
@@ -511,6 +517,86 @@ def stratify_duplicates(
             for act_i in actual_indices:
                 group_labels[act_i] = cluster_key
 
+    # Pass 2.5: Merge same-institution portal barcode aliases (e.g., 19398 vs WILLI_19398)
+    # when stripped catalog suffixes match and collection metadata is compatible.
+    alias_groups: Dict[str, List[int]] = {}
+    row_cat_prefixes: List[str] = [""] * n_rows
+    row_inst_codes: List[str] = [""] * n_rows
+    for idx in range(n_rows):
+        row = df.iloc[idx]
+        raw_inst = row.get("institutionCode", "")
+        inst_clean = "" if (raw_inst is None or pd.isna(raw_inst)) else str(raw_inst).strip().upper()
+        row_inst_codes[idx] = inst_clean
+        raw_cat = row.get("catalogNumber", "")
+        cat_clean = "" if (raw_cat is None or pd.isna(raw_cat)) else str(raw_cat).strip()
+        m_pref = re.match(r"^([A-Za-z]{2,12})[-_ ]+(.+)$", cat_clean)
+        if m_pref:
+            row_cat_prefixes[idx] = m_pref.group(1).strip().upper()
+            stripped_cat = m_pref.group(2).strip().upper()
+        else:
+            stripped_cat = cat_clean.upper()
+        if len(stripped_cat) >= 3:
+            alias_groups.setdefault(stripped_cat, []).append(idx)
+
+    for _stripped_cat, cand_idxs in alias_groups.items():
+        if len(cand_idxs) < 2:
+            continue
+        for pos_a in range(len(cand_idxs)):
+            i = cand_idxs[pos_a]
+            for pos_b in range(pos_a + 1, len(cand_idxs)):
+                j = cand_idxs[pos_b]
+                if group_labels[i] == group_labels[j]:
+                    continue
+                inst_i = row_inst_codes[i]
+                inst_j = row_inst_codes[j]
+                pref_i = row_cat_prefixes[i]
+                pref_j = row_cat_prefixes[j]
+                same_portal = (
+                    (inst_i != "" and inst_i == inst_j)
+                    or (pref_i != "" and pref_i == inst_j)
+                    or (pref_j != "" and pref_j == inst_i)
+                    or (pref_i != "" and pref_i == pref_j)
+                )
+                if not same_portal:
+                    continue
+                coll_ok = (
+                    norm_collectors[i] == norm_collectors[j]
+                    or norm_collectors[i] == "unknown"
+                    or norm_collectors[j] == "unknown"
+                )
+                num_ok = (
+                    norm_numbers[i] == norm_numbers[j]
+                    or not norm_numbers[i]
+                    or not norm_numbers[j]
+                )
+                date_ok = (
+                    norm_dates[i] == norm_dates[j]
+                    or norm_dates[i] == "unknown_date"
+                    or norm_dates[j] == "unknown_date"
+                )
+                coords_ok = True
+                if has_coords[i] and has_coords[j]:
+                    dist_ij = haversine_distance_meters(lats[i], lons[i], lats[j], lons[j])
+                    coords_ok = dist_ij <= max(float(max_distance_meters), 5000.0)
+                if coll_ok and num_ok and date_ok and coords_ok:
+                    lbl_i = group_labels[i] or ""
+                    lbl_j = group_labels[j] or ""
+                    if ("_sn_" in lbl_i and "_sn_" not in lbl_j) or (
+                        ("_sn_" in lbl_i) == ("_sn_" in lbl_j) and len(lbl_j) < len(lbl_i)
+                    ):
+                        canon_lbl, old_lbl = lbl_j, lbl_i
+                    else:
+                        canon_lbl, old_lbl = lbl_i, lbl_j
+                    if canon_lbl and old_lbl and canon_lbl != old_lbl:
+                        for k_idx in range(n_rows):
+                            if group_labels[k_idx] == old_lbl:
+                                group_labels[k_idx] = canon_lbl
+
+    for idx in range(n_rows):
+        if group_labels[idx] is None:
+            cat = sanitize_filename(str(df.iloc[idx].get("catalogNumber", idx)))
+            group_labels[idx] = f"{norm_collectors[idx]}_sn_{cat}_{norm_dates[idx]}"
+
     df["exsiccatae_key"] = group_labels
 
     # Pass 3: Cross-duplicate taxonomic conflict auditing and authority-first duplicate ranking
@@ -639,6 +725,7 @@ def stratify_duplicates(
     df["is_primary_duplicate"] = is_primary_list
     df["exsiccatae_taxonomic_conflict"] = conflict_list
     df["exsiccatae_gold_taxon"] = gold_taxon_list
+    df.index = orig_index
 
     if logger:
         n_prim = sum(is_primary_list)
@@ -847,6 +934,7 @@ def spatially_balance_and_thin_vouchers(
     preserve_all_gold: bool = True,
     manifest_df: Optional[pd.DataFrame] = None,
     workspace_dir: Optional[Path] = None,
+    preserve_catalog_numbers: Optional[Iterable[str]] = None,
 ) -> pd.DataFrame:
     """
     Stratifies, deduplicates, spatially thins, and computes continuous inverse
@@ -890,7 +978,12 @@ def spatially_balance_and_thin_vouchers(
             return "Unknown"
         out_df["species_standardized"] = out_df.apply(_fill_sp, axis=1)
 
-    # Step A: Exsiccatae Deduplication (unconditionally retaining all nomenclatural type specimens)
+    preserve_cats_set: Set[str] = {
+        str(c).strip() for c in (preserve_catalog_numbers or [])
+        if c is not None and str(c).strip()
+    }
+
+    # Step A: Exsiccatae Deduplication (unconditionally retaining all nomenclatural type specimens and preserved vouchers)
     if primary_duplicates_only:
         if "is_primary_duplicate" not in out_df.columns:
             if any(c in out_df.columns for c in ("recordedBy", "recordNumber", "exsiccatae_key")):
@@ -900,14 +993,19 @@ def spatially_balance_and_thin_vouchers(
         prim_mask = out_df["is_primary_duplicate"].map(
             lambda v: v is True or str(v).strip().lower() in {"true", "1", "t", "yes"}
         )
+        pres_mask_a = (
+            out_df["catalogNumber"].astype(str).str.strip().isin(preserve_cats_set)
+            if (preserve_cats_set and "catalogNumber" in out_df.columns)
+            else pd.Series(False, index=out_df.index)
+        )
         ts_col_a = "type_status" if "type_status" in out_df.columns else (
             "typeStatus" if "typeStatus" in out_df.columns else None
         )
         if ts_col_a is not None:
             type_mask_a = out_df[ts_col_a].map(lambda t: classify_nomenclatural_type_rank(t)[0] >= 1)
-            keep_mask = prim_mask | type_mask_a
+            keep_mask = prim_mask | type_mask_a | pres_mask_a
         else:
-            keep_mask = prim_mask
+            keep_mask = prim_mask | pres_mask_a
         out_df = out_df.loc[keep_mask].reset_index(drop=True)
         if out_df.empty:
             out_df["spatial_balance_weight"] = pd.Series(dtype=float)
@@ -928,10 +1026,12 @@ def spatially_balance_and_thin_vouchers(
     priority_tuples: List[Tuple[int, float, int, int, float, float, str]] = []
     is_gold_flags: List[bool] = []
     is_type_flags: List[bool] = []
+    is_preserved_flags: List[bool] = []
 
     for i in range(n_rows):
         row = out_df.iloc[i]
         cat_str = str(row.get("catalogNumber", i))
+        is_preserved_flags.append(cat_str.strip() in preserve_cats_set)
 
         # 1. Nomenclatural type rank (2 = Primary Type, 1 = Secondary Type, 0 = Non-type) + ICN Art. 9.6 sub-rank
         raw_ts = row.get("type_status")
@@ -1012,7 +1112,7 @@ def spatially_balance_and_thin_vouchers(
             sp_sorted = sorted(sp_idxs, key=lambda i: priority_tuples[i], reverse=True)
             kept_sp: List[int] = []
             for cand_i in sp_sorted:
-                if is_type_flags[cand_i] or (preserve_all_gold and is_gold_flags[cand_i]):
+                if is_type_flags[cand_i] or is_preserved_flags[cand_i] or (preserve_all_gold and is_gold_flags[cand_i]):
                     kept_sp.append(cand_i)
                     continue
                 c_lat = lats[cand_i]
@@ -1043,16 +1143,20 @@ def spatially_balance_and_thin_vouchers(
             return sorted(cand_pool)
 
         if preserve_all_gold:
-            gold_idxs = [i for i in cand_pool if is_gold_flags[i]]
-            rem_pool = [i for i in cand_pool if not is_gold_flags[i]]
+            gold_idxs = [i for i in cand_pool if is_gold_flags[i] or is_preserved_flags[i]]
+            rem_pool = [i for i in cand_pool if not (is_gold_flags[i] or is_preserved_flags[i])]
         else:
-            gold_idxs = [i for i in cand_pool if is_type_flags[i]]
-            rem_pool = [i for i in cand_pool if not is_type_flags[i]]
+            gold_idxs = [i for i in cand_pool if is_type_flags[i] or is_preserved_flags[i]]
+            rem_pool = [i for i in cand_pool if not (is_type_flags[i] or is_preserved_flags[i])]
 
         rem_pool.sort(key=lambda i: priority_tuples[i], reverse=True)
         selected: List[int] = list(gold_idxs)
         if len(selected) >= quota:
-            return sorted(selected) if (preserve_all_gold or any(is_type_flags[i] for i in selected)) else sorted(selected[:quota])
+            return (
+                sorted(selected)
+                if (preserve_all_gold or any(is_type_flags[i] or is_preserved_flags[i] for i in selected))
+                else sorted(selected[:quota])
+            )
 
         stratum_counts: Dict[str, int] = {}
         for i in selected:

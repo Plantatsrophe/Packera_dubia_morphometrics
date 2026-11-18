@@ -65,10 +65,12 @@ generate_allometry_diagnostic_plot <- function(sub_df, r2_size, p_size, r2_int, 
 test_and_correct_allometry <- function(morpho_df, correct_mode = "auto", permutations = 999, seed = 42, r2_threshold = 0.10, output_report = "outputs/reports/allometry_significance_audit.csv", output_plot = "outputs/figures/fig04a_foliar_allometry_audit.png", output_pairwise = "outputs/reports/allometry_pairwise_trajectories.csv") {
   message("=== Foliar Allometry Assessment (Multivariate Size vs. Shape Covariation) ===")
   sym_names <- c(discover_sorted_morph_cols(morpho_df, "^A[0-9]+$"), discover_sorted_morph_cols(morpho_df, "^D[0-9]+$"))
-  if (!"log_centsize" %in% names(morpho_df) || length(sym_names) < 4) { message("Warning: log_centsize or symmetric harmonics not available. Skipping allometry test."); return(list(morpho_matrix = NULL, corrected = FALSE, anova_table = NULL, df = morpho_df)) }
-  valid_idx <- which(is_step04_calibrated_mm(morpho_df) & !is.na(morpho_df$log_centsize) & is.finite(morpho_df$log_centsize) & complete.cases(morpho_df[, sym_names]))
-  if (length(valid_idx) < 10) return(list(morpho_matrix = NULL, corrected = FALSE, anova_table = NULL, df = morpho_df))
-  sub_df <- morpho_df[valid_idx, , drop = FALSE]; sub_df$scientificName <- factor(standardize_packera_taxon(as.character(if ("species_standardized" %in% names(sub_df)) sub_df$species_standardized else sub_df$scientificName)))
+  coh_res <- .resolve_step04_allometry_cohort(morpho_df, sym_names); valid_idx <- coh_res$valid_idx; scale_tier <- coh_res$scale_tier
+  if (length(valid_idx) < 10L) {
+    anova_df <- .emit_insufficient_allometry_audit(coh_res$plot_df, output_report, output_plot, .write_atomic_csv_s04, generate_allometry_diagnostic_plot)
+    return(list(morpho_matrix = NULL, corrected = FALSE, anova_table = anova_df, df = morpho_df))
+  }
+  sub_df <- morpho_df[valid_idx, , drop = FALSE]; sub_df$log_centsize <- coh_res$log_centsize_vec[valid_idx]; sub_df$scientificName <- factor(standardize_packera_taxon(as.character(if ("species_standardized" %in% names(sub_df)) sub_df$species_standardized else sub_df$scientificName)))
   is_basal_primary <- .basal_primary_mask(sub_df)
   anc_allom <- select_adaptive_reference_anchors(sub_df, feature_matrix = as.matrix(sub_df[, sym_names[seq_len(min(4L, length(sym_names)))], drop = FALSE]), taxon_col = "scientificName")
   sub_df$is_promoted_bronze <- anc_allom$is_promoted_bronze; sub_df$authority_weight <- compute_authority_precision_weights(sub_df)
@@ -116,10 +118,10 @@ test_and_correct_allometry <- function(morpho_df, correct_mode = "auto", permuta
     pf <- tryCatch(stats::lm(PC1 ~ log_centsize * scientificName, data = gold_df, weights = eff_weight), error = function(e) NULL); if (!is.null(pf)) { ap <- stats::anova(pf); p_int <- ap[["Pr(>F)"]][grep(":", rownames(ap))[1]]; used_pc1_fb <- TRUE }
   }
   if (is.na(p_int) || !is.finite(p_int)) p_int <- 1.0; correct_flag <- tolower(trimws(as.character(correct_mode))); slopes_homogeneous <- p_int > 0.05
-  anova_df$Slopes_Homogeneous <- ifelse(grepl("log_centsize:scientificName|scientificName:log_centsize", anova_df$Term, ignore.case = TRUE), slopes_homogeneous, NA)
+  anova_df$Slopes_Homogeneous <- ifelse(grepl("log_centsize:scientificName|scientificName:log_centsize", anova_df$Term, ignore.case = TRUE), slopes_homogeneous, NA); anova_df$Scale_Tier <- scale_tier
   if (!is.null(output_report) && nzchar(output_report)) { .write_atomic_csv_s04(anova_df, output_report); message("Allometry significance audit report exported -> ", output_report) }
   message(sprintf("Klingenberg (2016) Homogeneity of Allometric Slopes (%s): R2_int = %.4f, p_int = %.4f (homogeneous = %s)", ifelse(used_pc1_fb, "PC1 ~ log_centsize * taxon fallback", "Y ~ log_centsize * taxon"), r2_int, p_int, slopes_homogeneous))
-  should_correct <- (correct_flag %in% c("true", "1", "yes", "force")) || (correct_flag == "auto" && !is.na(r2_size) && r2_size >= r2_threshold && !is.na(p_size) && p_size < 0.05 && (nlevels(gold_df$scientificName) < 2L || isTRUE(slopes_homogeneous)))
+  should_correct <- (correct_flag %in% c("true", "1", "yes", "force")) || (correct_flag == "auto" && identical(scale_tier, "verified_ruler") && !is.na(r2_size) && r2_size >= r2_threshold && !is.na(p_size) && p_size < 0.05 && (nlevels(gold_df$scientificName) < 2L || isTRUE(slopes_homogeneous)))
   fit_within <- if (nlevels(gold_df$scientificName) >= 2) stats::lm(Y ~ log_centsize + scientificName, data = gold_df, weights = eff_weight) else stats::lm(Y ~ log_centsize, data = gold_df, weights = eff_weight)
   beta_within <- stats::coef(fit_within)["log_centsize", ]; beta_within[is.na(beta_within)] <- 0.0; ref_mean_cs <- stats::weighted.mean(gold_df$log_centsize, w = eff_weight, na.rm = TRUE)
   Y_ref_adj <- Y - outer(gold_df$log_centsize - ref_mean_cs, beta_within); active_cols <- which(apply(Y_ref_adj, 2, stats::var, na.rm = TRUE) > 1e-8); if (length(active_cols) == 0L) active_cols <- seq_len(ncol(Y_ref_adj))
@@ -134,7 +136,9 @@ test_and_correct_allometry <- function(morpho_df, correct_mode = "auto", permuta
     morpho_df <- .update_step04_allometry_pcs(morpho_df, sub_df, gold_df, valid_idx, sym_names, active_cols, pca_resids, ref_mean_cs, eff_weight)
     morpho_df <- .update_step04_allometry_scalars(morpho_df, sub_df, gold_df, valid_idx, ref_mean_cs)
   } else {
-    if (correct_flag == "auto" && nlevels(gold_df$scientificName) >= 2L && !isTRUE(slopes_homogeneous) && !is.na(r2_size) && r2_size >= r2_threshold && !is.na(p_size) && p_size < 0.05) {
+    if (correct_flag == "auto" && !identical(scale_tier, "verified_ruler")) {
+      message(sprintf("[INFO] Diagnostic allometry ran on %s tier (R2 = %.2f, p = %.4f); 'auto' mode retains raw symmetric harmonics.", scale_tier, r2_size, p_size))
+    } else if (correct_flag == "auto" && nlevels(gold_df$scientificName) >= 2L && !isTRUE(slopes_homogeneous) && !is.na(r2_size) && r2_size >= r2_threshold && !is.na(p_size) && p_size < 0.05) {
       message(sprintf("[INFO] Interspecific allometric slopes diverge (p_int = %.4f <= 0.05); 'auto' mode retains raw symmetric harmonics without pooled residualization.", p_int))
     } else message(sprintf("[INFO] Foliar allometry negligible (R2 = %.2f). Analyzing raw symmetric harmonics.", r2_size))
     morpho_matrix_for_gmm <- Y_all
@@ -148,7 +152,7 @@ run_gmm_cluster_analysis <- function(df, feature_cols, max_k = 8, use_clustvarse
   feature_cols <- intersect(as.character(feature_cols), names(df)); pc_guard_cols <- grep("^PC[0-9]+$", feature_cols, value = TRUE)
   req_cols <- if (length(pc_guard_cols) > 0) pc_guard_cols else feature_cols; valid_rows <- which(complete.cases(df[, req_cols, drop = FALSE])); N_valid <- length(valid_rows)
   if (N_valid < 3) return(list(classification = rep(NA_integer_, nrow(df)), uncertainty = rep(NA_real_, nrow(df)), best_k = 1, model_name = "None", selected_features = feature_cols,
-                               bic_table = data.frame(K = seq_len(max_k), BIC = NA_real_, Two_Delta_BIC = NA_real_, ICL = NA_real_, Delta_ICL_vs_Null = NA_real_, Boot_LRT_Stat_K1_vs_K2 = NA_real_, Boot_LRT_P_K1_vs_K2 = NA_real_, Boot_LRT_Stat_prev = NA_real_, Boot_LRT_P_prev = NA_real_, Evidence = "Inconclusive", stringsAsFactors = FALSE)))
+                               bic_table = data.frame(K = seq_len(max_k), BIC = NA_real_, Two_Delta_BIC = NA_real_, ICL = NA_real_, Delta_ICL_vs_Null = NA_real_, Boot_LRT_Stat_K1_vs_K2 = NA_real_, Boot_LRT_P_K1_vs_K2 = NA_real_, Boot_LRT_Stat_prev = NA_real_, Boot_LRT_P_prev = NA_real_, Evidence = "Inconclusive", optimal_K_raw = 1L, optimal_K_merged = 1L, selected_model = "None", stringsAsFactors = FALSE)))
   sub_v <- df[valid_rows, , drop = FALSE]; is_basal_primary <- .basal_primary_mask(sub_v)
   anc_gmm <- select_adaptive_reference_anchors(sub_v, feature_matrix = as.matrix(sub_v[, req_cols, drop = FALSE]), taxon_col = "species_standardized")
   ref_cand <- anc_gmm$active_mask & !anc_gmm$is_confident_label_noise & is_basal_primary
@@ -181,6 +185,7 @@ run_gmm_cluster_analysis <- function(df, feature_cols, max_k = 8, use_clustvarse
     }
   }
   if (is.null(bic_table)) { pure_res <- fit_gmm_em_pure(X_core, max_k = eff_k, X_eval = X_pcs, seed = seed_i); bic_table <- pure_res$bic_table; best_k <- pure_res$best$k; cls_sub <- pure_res$best$classification; unc_sub <- pure_res$best$uncertainty; z_eval_mat <- pure_res$best$z }
+  raw_k <- as.integer(best_k)
   if (!is.null(z_eval_mat) && ncol(z_eval_mat) >= 2L && exists("merge_plastic_gmm_components_ridgeline", mode = "function")) {
     mrg <- merge_plastic_gmm_components_ridgeline(X_pcs, X_core, z_eval_mat, z_eval_mat[core_idx, , drop = FALSE], intraspecific_mode = is_intra_gmm)
     if (isTRUE(mrg$merged_any)) { did_merge <- TRUE; message(sprintf("[Plasticity Gate] Morphological ridgeline unimodality test merged GMM K=%d -> K=%d.", best_k, mrg$best_k)); best_k <- mrg$best_k; cls_sub <- mrg$classification; unc_sub <- mrg$uncertainty; best_name <- paste0(best_name, "_RidgelineMerged") }
@@ -191,19 +196,7 @@ run_gmm_cluster_analysis <- function(df, feature_cols, max_k = 8, use_clustvarse
   }
   if (is.null(cls_sub)) { best_k <- 1L; best_name <- "Unimodal_G1_Null"; cls_sub <- rep(1L, nrow(X_pcs)); unc_sub <- rep(0.0, nrow(X_pcs)) }
   relab <- .canonical_relabel_gmm_clusters(sub_v, cls_sub, best_k, ref_cand, core_idx); cls_sub <- relab$cls_sub; cls <- rep(NA_integer_, nrow(df)); unc <- rep(NA_real_, nrow(df)); cls[valid_rows] <- cls_sub; unc[valid_rows] <- unc_sub
-  n_core_g <- max(2.0, nrow(X_core)); n_eff_g <- max(2.0, n_core_g * min(1.0, max(0.10, relab$n_eff_ratio))); p_g <- ncol(X_pcs)
-  k_par_vec <- if (exists(".compute_exact_mclust_params", mode = "function")) .compute_exact_mclust_params(bic_table$K, p_g, bic_mat = bic_raw_mat, default_model = best_name, explicit_n_params = if ("n_params" %in% names(bic_table)) bic_table$n_params else NULL) else (bic_table$K * p_g + (bic_table$K - 1L) + bic_table$K * p_g)
-  bic_neff <- bic_table$BIC + k_par_vec * (log(n_core_g) - log(n_eff_g))
-  bic_table$Delta_BIC_prev <- c(0, diff(bic_table$BIC)); bic_table$Two_Delta_BIC <- round(bic_table$BIC - bic_table$BIC[1], 2); bic_table$BayesFactor_vs_Null <- round(bic_neff - bic_neff[1], 2)
-  did_seq_step <- grepl("_SeqBootStepped", best_name, fixed = TRUE)
-  bic_table$Evidence <- sapply(seq_len(nrow(bic_table)), function(idx_b) {
-    if (idx_b == 1L) return("Null Model (G = 1)"); val <- bic_table$Two_Delta_BIC[idx_b]
-    ev_str <- if (is.na(val) || val < 0) "Negative (favors G = 1)" else if (val < 2) "Weak / Inconclusive" else if (val < 6) "Positive Evidence" else if (val < 10) "Strong Evidence" else "Decisive Evidence (Species Boundary)"
-    if (did_merge && bic_table$K[idx_b] > best_k) ev_str <- paste0(ev_str, sprintf(" [Ridgeline Merged -> K=%d]", best_k))
-    if (did_icl_collapse && bic_table$K[idx_b] > best_k) ev_str <- paste0(ev_str, " [ICL/Bootstrap Collapsed -> K=1]")
-    if (did_seq_step && !did_icl_collapse && bic_table$K[idx_b] > best_k) ev_str <- paste0(ev_str, sprintf(" [SeqBoot Stepped -> K=%d]", best_k))
-    ev_str
-  })
+  bic_table <- .finalize_gmm_bic_table(bic_table, raw_k, best_k, best_name, nrow(X_core), relab$n_eff_ratio, ncol(X_pcs), bic_raw_mat, did_merge, did_icl_collapse)
   list(classification = cls, uncertainty = unc, best_k = best_k, model_name = best_name, selected_features = selected_cols, bic_table = bic_table)
 }
 
@@ -444,6 +437,8 @@ run_gmm_morphotools_pipeline <- function(opts) {
   }
   caul_het_raw <- c("basal_vs_cauline_length_ratio", "basal_vs_cauline_solidity_delta", "heteroblasty_efa_distance", "heteroblasty_ect_distance", "cauline_dissection_index_med", "cauline_solidity_med", "cauline_ect_lobe_complexity", "Cauline_PC1", "Cauline_ECT_PC1")
   phot_raw <- c("blade_cie_l_norm", "blade_cie_l_sd", "blade_cie_l_sheet_delta", "blade_cie_a_delta", "blade_cie_b_delta", "blade_cie_a_browning_delta", "blade_cie_b_yellowing_delta")
+  phot_eb_cols <- grep("^blade_cie_", names(closed_df), value = TRUE)
+  if (length(phot_eb_cols) > 0L && exists("apply_eb_institution_batch_centering", mode = "function")) closed_df <- apply_eb_institution_batch_centering(closed_df, target_cols = phot_eb_cols, min_inst_n = 10L)
   veg_all <- intersect(c("log_centsize", "aspect_ratio", "solidity", "q25_solidity", "dissection_index", "within_rosette_efa_dispersion", phot_raw, "ECT_PC1", "ECT_PC2", "ECT_PC3", "ect_lobe_complexity", caul_het_raw), names(closed_df))
   ref_std_idx <- which(closed_df$authority_weight > 0); if (length(ref_std_idx) < 3L) ref_std_idx <- seq_len(nrow(closed_df)); cal_ok_s04 <- is_step04_calibrated_mm(closed_df)
   for (vc in veg_all) {
@@ -452,7 +447,9 @@ run_gmm_morphotools_pipeline <- function(opts) {
     if (length(vr) >= mreq && is.finite(stats::sd(vv[vr])) && stats::sd(vv[vr]) > 1e-6) { closed_df[[paste0(vc, "_std")]] <- NA_real_; closed_df[[paste0(vc, "_std")]][vf] <- round((vv[vf] - mean(vv[vr])) / stats::sd(vv[vr]), 5) }
   }
   if (!isTRUE(opts$outline_only)) {
-    phot_std <- c("blade_cie_l_norm_std", "blade_cie_l_sheet_delta_std", "blade_cie_a_delta_std", "blade_cie_b_delta_std", "blade_cie_a_browning_delta_std", "blade_cie_b_yellowing_delta_std")
+    aw_chk <- if (any(!is.na(closed_df$authority_weight) & closed_df$authority_weight > 0)) (!is.na(closed_df$authority_weight) & closed_df$authority_weight > 0) else rep(TRUE, nrow(closed_df))
+    has_sheet_l <- ("blade_cie_l_sheet_delta_std" %in% names(closed_df)) && (mean(is.finite(suppressWarnings(as.numeric(closed_df$blade_cie_l_sheet_delta_std[aw_chk])))) >= 0.70)
+    phot_std <- c(if (!has_sheet_l) "blade_cie_l_norm_std", "blade_cie_l_sheet_delta_std", "blade_cie_a_delta_std", "blade_cie_b_delta_std", "blade_cie_a_browning_delta_std", "blade_cie_b_yellowing_delta_std")
     dis_cands <- filter_biologically_variable_dissection_scalars(closed_df, intersect(c("solidity_std", "q25_solidity_std", "dissection_index_std", "within_rosette_efa_dispersion_std", phot_std, "ECT_PC1_std", "ECT_PC2_std", "ECT_PC3_std", "ect_lobe_complexity_std", paste0(caul_het_raw, "_std")), names(closed_df)), active_mask = (closed_df$authority_weight > 0))
     kept_dis <- prune_collinear_dissection_scalars(closed_df, base_cols = feature_cols, cand_scalars = dis_cands, active_mask = (closed_df$authority_weight > 0), group_vec = NULL, max_r = 0.75)
     if (length(kept_dis) > 0L) feature_cols <- unique(c(feature_cols, kept_dis))
@@ -462,11 +459,10 @@ run_gmm_morphotools_pipeline <- function(opts) {
   is_intra_mode <- isTRUE(opts$intraspecific_mode) || (length(target_taxa) < 2L)
   if (exists("merge_voucher_phenophase_covariates", mode = "function")) closed_df <- merge_voucher_phenophase_covariates(closed_df, opts$harmonics, opts$vouchers)
   std_plast_cols <- setdiff(grep("_std$", names(closed_df), value = TRUE), c("log_centsize_std", "petiole_length_mm_std", "plant_height_cm_std"))
-  phot_eb_cols <- grep("^blade_cie_", names(closed_df), value = TRUE)
-  if (length(phot_eb_cols) > 0L && exists("apply_eb_institution_batch_centering", mode = "function")) closed_df <- apply_eb_institution_batch_centering(closed_df, target_cols = phot_eb_cols, min_inst_n = 10L)
   if (exists("residualize_ontogenetic_phenophase_plasticity", mode = "function")) closed_df <- residualize_ontogenetic_phenophase_plasticity(closed_df, target_cols = unique(c(if (is_intra_mode) pca_cols else character(0), std_plast_cols)), ref_mask = (closed_df$authority_weight > 0) & .basal_primary_mask(closed_df), intraspecific_mode = is_intra_mode)
   gmm_res <- run_gmm_cluster_analysis(closed_df, feature_cols, max_k = opts$max_k, use_clustvarsel = isTRUE(opts$use_clustvarsel), intraspecific_mode = is_intra_mode, seed = opts$seed)
   .write_atomic_csv_s04(gmm_res$bic_table, opts$output_report)
+  if (!is.null(opts$output_flags) && nzchar(opts$output_flags)) .write_atomic_csv_s04(gmm_res$bic_table, file.path(dirname(opts$output_flags), "gmm_bic_model_selection.csv"))
   veg_cda <- if (!isTRUE(opts$outline_only)) prune_collinear_dissection_scalars(closed_df, base_cols = feature_cols, cand_scalars = intersect(c("aspect_ratio_std"), names(closed_df)), active_mask = (closed_df$authority_weight > 0), group_vec = NULL, max_r = 0.75) else character(0)
   cda_cols <- unique(c(feature_cols, veg_cda)); cda_res <- run_canonical_discriminant_analysis(closed_df, cda_cols, target_taxa, gmm_res = gmm_res, intraspecific_mode = is_intra_mode)
   if (exists(".project_shared_topology_rows_step04", mode = "function")) { tp_proj <- .project_shared_topology_rows_step04(closed_df, cda_res, gmm_res, pca_cols); cda_res <- tp_proj$cda_res; gmm_res <- tp_proj$gmm_res }

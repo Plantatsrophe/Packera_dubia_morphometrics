@@ -3,9 +3,18 @@
 # Step 03 Config Loading, Calibration Provenance, Photometry Discovery & CLI
 # ==============================================================================
 
+STEP03_PRIMARY_CALIBRATED_SOURCES <- c("ruler_calibrated", "measured_from_ruler", "measured_from_fieldprism")
 STEP03_UNCALIBRATED_SOURCES <- c(
   "mp_estimated", "predicted_from_megapixels", "tick_lattice_unboxed", "uncalibrated"
 )
+
+is_step03_plausible_unboxed_mm <- function(ppm, ss) {
+  n <- max(length(ppm), length(ss))
+  if (n == 0L) return(logical(0))
+  ppm_n <- suppressWarnings(as.numeric(rep_len(if (is.null(ppm) || length(ppm) == 0L) NA_real_ else ppm, n)))
+  ss_c <- tolower(trimws(as.character(rep_len(if (is.null(ss) || length(ss) == 0L) "" else ss, n))))
+  !is.na(ss_c) & ss_c == "tick_lattice_unboxed" & is.finite(ppm_n) & ppm_n >= 4.0 & ppm_n <= 45.0
+}
 
 .step03_coerce_bool <- function(v) {
   if (is.null(v) || length(v) == 0L) return(NA)
@@ -158,7 +167,7 @@ resolve_step03_calibration_provenance <- function(pixels_per_mm, is_calibrated_m
   is_cal <- !is.na(ppm) & is.finite(ppm) & (ppm > 0) & !uncal_src & ifelse(is.na(cal_in), !uncal_src, cal_in)
   ss_out <- ifelse(
     is_cal,
-    ifelse(nzchar(ss_raw), ss_raw, "ruler_calibrated"),
+    ifelse(ss_raw %in% STEP03_PRIMARY_CALIBRATED_SOURCES, ss_raw, ifelse(nzchar(ss_raw), ss_raw, "ruler_calibrated")),
     ifelse(
       ss_raw == "tick_lattice_unboxed", "tick_lattice_unboxed",
       ifelse(
@@ -168,6 +177,25 @@ resolve_step03_calibration_provenance <- function(pixels_per_mm, is_calibrated_m
     )
   )
   list(is_calibrated_mm = as.logical(is_cal), scale_source = as.character(ss_out))
+}
+
+.populate_step03_unboxed_scale <- function(df, coo_list = NULL, cs_px_override = NULL, centsize_fn = NULL) {
+  if (is.null(df) || !is.data.frame(df) || nrow(df) == 0L) return(df)
+  n <- nrow(df); ppm <- if ("pixels_per_mm" %in% names(df)) suppressWarnings(as.numeric(df$pixels_per_mm)) else rep(NA_real_, n)
+  ss <- if ("scale_source" %in% names(df)) as.character(df$scale_source) else rep("", n)
+  cal_v <- if ("is_calibrated_mm" %in% names(df)) (!is.na(df$is_calibrated_mm) & as.logical(df$is_calibrated_mm)) else rep(FALSE, n)
+  unb_ok <- is_step03_plausible_unboxed_mm(ppm, ss) & !cal_v
+  lcu <- if ("log_centsize_unboxed" %in% names(df)) suppressWarnings(as.numeric(df$log_centsize_unboxed)) else rep(NA_real_, n)
+  cs_px <- if (!is.null(cs_px_override) && length(cs_px_override) == n) suppressWarnings(as.numeric(cs_px_override)) else if ("centroid_size_px" %in% names(df)) suppressWarnings(as.numeric(df$centroid_size_px)) else rep(NA_real_, n)
+  for (i in which(unb_ok & !is.finite(lcu))) {
+    if (!is.finite(cs_px[i]) && !is.null(coo_list) && i <= length(coo_list) && !is.null(coo_list[[i]])) {
+      xy <- coo_list[[i]]; cs_px[i] <- if (!is.null(centsize_fn)) centsize_fn(xy) else sqrt(sum((xy[, 1L] - mean(xy[, 1L], na.rm = TRUE))^2 + (xy[, 2L] - mean(xy[, 2L], na.rm = TRUE))^2, na.rm = TRUE))
+    }
+    if (is.finite(cs_px[i]) && cs_px[i] > 0.0) lcu[i] <- round(log10(cs_px[i] / ppm[i]), 6)
+  }
+  lcu[!unb_ok] <- NA_real_; df$log_centsize_unboxed <- lcu
+  df$allometry_scale_tier <- ifelse(cal_v, "verified_ruler", if (sum(cal_v, na.rm = TRUE) < 10L) ifelse(unb_ok, "tick_lattice_fallback", "uncalibrated") else "uncalibrated")
+  df
 }
 
 discover_step03_photometry_cols <- function(col_names) {
