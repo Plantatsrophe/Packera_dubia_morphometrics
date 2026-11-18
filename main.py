@@ -46,9 +46,14 @@ import yaml
 PROJECT_ROOT = Path(__file__).resolve().parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+_existing_py_path = os.environ.get("PYTHONPATH", "")
+if str(PROJECT_ROOT) not in _existing_py_path.split(os.pathsep):
+    os.environ["PYTHONPATH"] = f"{PROJECT_ROOT}{os.pathsep}{_existing_py_path}" if _existing_py_path else str(PROJECT_ROOT)
 
 from scripts.core.artifact_manager import ensure_model_weights
 from scripts.core.config import (
+    VALID_GROWTH_FORM_PRESETS,
+    VALID_INFRASPECIFIC_RANK_POLICIES,
     PipelineConfig,
     _count_csv_rows,
     ensure_run_curated_vouchers_snapshot,
@@ -56,6 +61,8 @@ from scripts.core.config import (
     get_active_run_dir,
     initialize_run_directory,
     resolve_canonical_run_id,
+    resolve_growth_form_preset,
+    resolve_infraspecific_rank_policy,
     resolve_python_executable,
     resolve_target_genus,
     write_run_metadata,
@@ -74,8 +81,12 @@ from scripts.core.logger import StepETATracker, emit_progress, setup_logging
 logger = setup_logging(name="PackeraPipeline")
 
 
-def _apply_explicit_db_arg(args: Optional[argparse.Namespace], run_dir: Optional[Path] = None) -> None:
-    """Export optional `--db`, `--demo`, `--threads`, `--gpu-batch-size`, Python bin, and target genus overrides."""
+def _apply_explicit_db_arg(
+    args: Optional[argparse.Namespace],
+    run_dir: Optional[Path] = None,
+    cfg: Optional[Union[PipelineConfig, Dict[str, Any]]] = None,
+) -> None:
+    """Export optional `--db`, `--demo`, `--threads`, `--gpu-batch-size`, Python bin, genus, and policy overrides."""
     os.environ["PLANTMATICS_PYTHON_BIN"] = resolve_python_executable()
     explicit_genus = (
         (getattr(args, "target_genus", None) or getattr(args, "genus", None))
@@ -83,6 +94,31 @@ def _apply_explicit_db_arg(args: Optional[argparse.Namespace], run_dir: Optional
         else None
     )
     os.environ["PLANTMATICS_TARGET_GENUS"] = resolve_target_genus(explicit_genus=explicit_genus)
+    cfg_obj = cfg if isinstance(cfg, PipelineConfig) else None
+    explicit_policy = getattr(args, "infraspecific_policy", None) if args is not None else None
+    explicit_growth = getattr(args, "growth_form", None) if args is not None else None
+    has_custom_cfg = args is not None and getattr(args, "config", None) is not None and cfg_obj is None
+    if explicit_policy is not None:
+        os.environ["PLANTMATICS_INFRASPECIFIC_POLICY"] = resolve_infraspecific_rank_policy(
+            cfg=cfg_obj, explicit_policy=explicit_policy
+        )
+    elif not has_custom_cfg and (cfg_obj is not None or not os.environ.get("PLANTMATICS_INFRASPECIFIC_POLICY", "").strip()):
+        os.environ["PLANTMATICS_INFRASPECIFIC_POLICY"] = resolve_infraspecific_rank_policy(cfg=cfg_obj)
+    if explicit_growth is not None:
+        os.environ["PLANTMATICS_GROWTH_FORM_PRESET"] = resolve_growth_form_preset(
+            cfg=cfg_obj, explicit_preset=explicit_growth
+        )
+    elif not has_custom_cfg and (cfg_obj is not None or not os.environ.get("PLANTMATICS_GROWTH_FORM_PRESET", "").strip()):
+        os.environ["PLANTMATICS_GROWTH_FORM_PRESET"] = resolve_growth_form_preset(cfg=cfg_obj)
+    if args is not None and getattr(args, "portal_sources", None):
+        raw_portals = getattr(args, "portal_sources", None)
+        p_items = (
+            [tok.strip().lower() for tok in raw_portals.split(",") if tok.strip()]
+            if isinstance(raw_portals, str)
+            else [tok.strip().lower() for elem in raw_portals for tok in str(elem).split(",") if tok.strip()]
+        )
+        if p_items:
+            os.environ["PLANTMATICS_PORTAL_SOURCES"] = ",".join(dict.fromkeys(p_items))
     if run_dir is not None:
         resolved_rd = str(Path(run_dir).resolve())
         os.environ["PLANTMATICS_RUN_DIR"] = resolved_rd
@@ -134,6 +170,13 @@ def _db_has_extracted_contours(contours_dir: Path) -> bool:
             conn.close()
     except Exception:
         return False
+
+
+def _contours_exist(contours_dir: Path) -> bool:
+    """Return True if extracted planar contours exist in SQLite or as CSVs in `contours_dir`."""
+    return _db_has_extracted_contours(contours_dir) or (
+        contours_dir.is_dir() and any(contours_dir.glob("*.csv"))
+    )
 
 
 _COHORT_SYNC_CACHE: Dict[str, Tuple[str, int, int, int, int]] = {}
@@ -217,14 +260,14 @@ def _resolve_active_run_context(
     `(run_dir, run_scoped_cfg)`. Otherwise return `(None, cfg)` for backward-compatible
     direct unit-test invocations.
     """
-    _apply_explicit_db_arg(args)
+    _apply_explicit_db_arg(args, cfg=cfg)
     explicit_run_id = getattr(args, "run_id", None)
     active_run_dir = get_active_run_dir(run_id=explicit_run_id, workspace_root=PROJECT_ROOT)
     if active_run_dir is None:
         return None, cfg
 
     run_dir = initialize_run_directory(run_id=explicit_run_id, workspace_root=PROJECT_ROOT)
-    _apply_explicit_db_arg(args, run_dir=run_dir)
+    _apply_explicit_db_arg(args, run_dir=run_dir, cfg=cfg)
     _attach_run_log_handler(run_dir)
     if isinstance(cfg, PipelineConfig):
         cfg = cfg.with_run_dir(run_dir)
@@ -700,6 +743,11 @@ def run_harvest(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         cmd.append("--force")
     if args.verbose:
         cmd.append("--verbose")
+    harv_src = script_path.read_text(encoding="utf-8", errors="ignore") if script_path.is_file() else ""
+    if getattr(args, "infraspecific_policy", None) and "--infraspecific-policy" in harv_src:
+        cmd.extend(["--infraspecific-policy", str(args.infraspecific_policy)])
+    if getattr(args, "portal_sources", None) and "--portal-sources" in harv_src:
+        cmd.extend(["--portal-sources", *[str(s) for s in args.portal_sources]])
 
     logger.info(f"Running command: {' '.join(cmd)}")
     t01 = StepETATracker(1, "harvest", total=1, unit="vouchers", run_dir=run_dir)
@@ -802,6 +850,18 @@ def run_segment(args: argparse.Namespace, cfg: PipelineConfig) -> None:
                 model_weights = Path(
                     cfg.get("paths", {}).get("model_weights", default_seg_weights)
                 )
+    growth_form = resolve_growth_form_preset(
+        cfg if isinstance(cfg, PipelineConfig) else None,
+        explicit_preset=getattr(args, "growth_form", None),
+    )
+    contours_dir = (run_dir / "data" / "contours") if run_dir is not None else Path(cfg["paths"]["contours_dir"])
+    if growth_form == "non_laminate_bypass" and not model_weights.exists() and not _contours_exist(contours_dir):
+        emit_progress(2, "segment", 0, 0, unit="vouchers", status="skipped_cached", run_dir=run_dir)
+        if run_dir is not None:
+            _sync_run_cohort_in_db(run_dir, args=args, cfg=cfg)
+            write_run_metadata(run_dir, start_time=start_ts)
+        logger.info("Phase 2 bypassed under growth_form='non_laminate_bypass' (zero planar contours).")
+        return
     verify_file_exists(model_weights, "LeafMachine3 model weights checkpoint")
 
     device = args.device or cfg.get("segmentation", {}).get("device", "cuda")
@@ -843,6 +903,8 @@ def run_segment(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         cmd.append("--purge-segments")
     if getattr(args, "force", False):
         cmd.append("--force")
+    if getattr(args, "growth_form", None) and script_path.is_file() and "--growth-form" in script_path.read_text(encoding="utf-8", errors="ignore"):
+        cmd.extend(["--growth-form", str(args.growth_form)])
 
     logger.info(f"Running command: {' '.join(cmd)}")
     n_v02 = max(1, _count_csv_rows(vouchers_csv)) if vouchers_csv.is_file() else 1
@@ -858,8 +920,14 @@ def run_segment(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         emit_progress(2, "segment", 0, n_v02, unit="vouchers", status="failed", run_dir=run_dir)
         raise
 
-    contours_dir = (run_dir / "data" / "contours") if run_dir is not None else Path(cfg["paths"]["contours_dir"])
-    if not _db_has_extracted_contours(contours_dir):
+    if not _contours_exist(contours_dir):
+        if growth_form == "non_laminate_bypass":
+            emit_progress(2, "segment", 0, 0, unit="vouchers", status="skipped_cached", run_dir=run_dir)
+            if run_dir is not None:
+                _sync_run_cohort_in_db(run_dir, args=args, cfg=cfg)
+                write_run_metadata(run_dir, start_time=start_ts)
+            logger.info("Phase 2 bypassed planar contour gate under growth_form='non_laminate_bypass'.")
+            return
         verify_dir_has_files(contours_dir, "*.csv", "extracted leaf contours")
     t02.finish(done=n_v02, status="completed")
     if run_dir is not None:
@@ -874,23 +942,12 @@ def run_morphometrics(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     start_ts = datetime.now().astimezone().isoformat()
     run_dir, cfg = _resolve_active_run_context(args, cfg)
 
-    rscript_bin = shutil.which("Rscript")
-    if not rscript_bin:
-        logger.error(
-            "Rscript binary not found in system PATH.\n"
-            "Phase 3 requires R (>= 4.3) with Momocs, MorphoTools2, and mclust installed."
-        )
-        sys.exit(1)
-
     default_contours = (
         (run_dir / "data" / "contours")
         if run_dir is not None
         else cfg.get("paths", {}).get("contours_dir", "data/contours")
     )
     contours_dir = Path(getattr(args, "input", None) or args.contours_dir or default_contours)
-    if not _db_has_extracted_contours(contours_dir):
-        verify_dir_has_files(contours_dir, "*.csv", "leaf contours", "python main.py segment")
-
     default_vouchers = (
         run_dir / "data" / "tables" / "curated_vouchers.csv"
         if run_dir is not None
@@ -898,6 +955,28 @@ def run_morphometrics(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     )
     vouchers_csv = Path(args.vouchers or default_vouchers)
     verify_file_exists(vouchers_csv, "curated vouchers table", "python main.py harvest")
+
+    growth_form = resolve_growth_form_preset(
+        cfg if isinstance(cfg, PipelineConfig) else None,
+        explicit_preset=getattr(args, "growth_form", None),
+    )
+    if not _contours_exist(contours_dir):
+        if growth_form == "non_laminate_bypass":
+            emit_progress(3, "efa", 0, 0, unit="vouchers", status="skipped_cached", run_dir=run_dir)
+            emit_progress(4, "gmm_cda", 0, 0, unit="otus", status="skipped_cached", run_dir=run_dir)
+            if run_dir is not None:
+                write_run_metadata(run_dir, start_time=start_ts)
+            logger.info("Phase 3 bypassed under growth_form='non_laminate_bypass' (zero planar contours).")
+            return
+        verify_dir_has_files(contours_dir, "*.csv", "leaf contours", "python main.py segment")
+
+    rscript_bin = shutil.which("Rscript")
+    if not rscript_bin:
+        logger.error(
+            "Rscript binary not found in system PATH.\n"
+            "Phase 3 requires R (>= 4.3) with Momocs, MorphoTools2, and mclust installed."
+        )
+        sys.exit(1)
 
     default_manifest = (
         run_dir / "data" / "tables" / "extracted_leaf_manifest.csv"
@@ -1774,6 +1853,37 @@ def _add_common_subparser_args(
         )
 
 
+def _add_taxon_policy_args(
+    subparser: argparse.ArgumentParser,
+    include_harvest_portal: bool = False,
+) -> None:
+    """Attach v1.6.0 growth-form, infraspecific-rank, and portal flags."""
+    subparser.add_argument(
+        "--growth-form",
+        dest="growth_form",
+        type=str,
+        choices=list(VALID_GROWTH_FORM_PRESETS),
+        default=None,
+        help="Growth-form morphology preset for Step 02-07 routing.",
+    )
+    if include_harvest_portal:
+        subparser.add_argument(
+            "--infraspecific-policy",
+            dest="infraspecific_policy",
+            type=str,
+            choices=list(VALID_INFRASPECIFIC_RANK_POLICIES),
+            default=None,
+            help="Infraspecific taxonomy policy during harvesting and backbone staging.",
+        )
+        subparser.add_argument(
+            "--portal-sources",
+            dest="portal_sources",
+            nargs="+",
+            default=None,
+            help="Occurrence portal sources to query during Step 01 harvesting (e.g. gbif idigbio symbiota).",
+        )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="main.py",
@@ -1954,6 +2064,7 @@ def build_parser() -> argparse.ArgumentParser:
     # Subcommand: harvest
     p_harvest = subparsers.add_parser("harvest", help="Phase 1: Ingest GBIF occurrences & download images")
     _add_common_subparser_args(p_harvest, include_gpu=False)
+    _add_taxon_policy_args(p_harvest, include_harvest_portal=True)
     p_harvest.add_argument(
         "--taxon",
         dest="taxa",
@@ -2050,6 +2161,7 @@ def build_parser() -> argparse.ArgumentParser:
     # Subcommand: segment
     p_segment = subparsers.add_parser("segment", help="Phase 2: Segment leaves & export contours")
     _add_common_subparser_args(p_segment, include_gpu=True)
+    _add_taxon_policy_args(p_segment)
     p_segment.add_argument("--vouchers", type=Path, default=None, help="Input curated vouchers CSV")
     p_segment.add_argument("--weights", type=Path, default=None, help="LeafMachine3 model weights checkpoint (.onnx / .pt)")
     p_segment.add_argument("--output-dir", type=Path, default=None, help="Root output directory")
@@ -2082,6 +2194,7 @@ def build_parser() -> argparse.ArgumentParser:
     # Subcommand: morphometrics
     p_morph = subparsers.add_parser("morphometrics", help="Phase 3: Fourier EFA, GMM, & passive CDA in R")
     _add_common_subparser_args(p_morph, include_gpu=False)
+    _add_taxon_policy_args(p_morph)
     p_morph.add_argument("--input", type=Path, default=None, help=argparse.SUPPRESS)
     p_morph.add_argument("--manifest", type=Path, default=None, help="Extracted leaf manifest CSV")
     p_morph.add_argument("--contours-dir", type=Path, default=None, help="Input contours directory")
@@ -2147,6 +2260,7 @@ def build_parser() -> argparse.ArgumentParser:
     # Subcommand: synthesis
     p_synth = subparsers.add_parser("synthesis", aliases=["analyze"], help="Steps 05-07: Spatial RF, Phylogenomics, & Triage Dashboard")
     _add_common_subparser_args(p_synth, include_gpu=True)
+    _add_taxon_policy_args(p_synth)
     p_synth.add_argument("--vouchers", type=Path, default=None, help="Curated vouchers CSV")
     p_synth.add_argument("--manifest", dest="manifest_csv", type=Path, default=None, help="Extracted leaf manifest CSV")
     p_synth.add_argument("--manifest-csv", dest="manifest_csv", type=Path, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
@@ -2189,6 +2303,7 @@ def build_parser() -> argparse.ArgumentParser:
     # Subcommand: run-all
     p_all = subparsers.add_parser("run-all", help="Execute complete pipeline (harvest -> segment -> morphometrics -> synthesis)")
     _add_common_subparser_args(p_all, include_gpu=True)
+    _add_taxon_policy_args(p_all, include_harvest_portal=True)
     p_all.add_argument(
         "--taxon",
         dest="taxa",

@@ -743,3 +743,168 @@ def classify_voucher_phenology(
         "voucher_phenological_state": voucher_state,
         "dominant_pappus_ratio": float(dominant_pappus_ratio),
     })
+
+
+def _extract_item_crop_rgb(
+    item: Any,
+    sheet_rgb: Optional[np.ndarray],
+    bbox: Optional[Tuple[int, int, int, int]],
+) -> Optional[np.ndarray]:
+    """Resolve an RGB crop array from an item dict/object/array or by slicing `sheet_rgb`."""
+    if isinstance(item, np.ndarray):
+        return item
+    crop_rgb = item.get("crop_rgb") if isinstance(item, dict) else getattr(item, "crop_rgb", None)
+    if crop_rgb is None:
+        crop_rgb = item.get("crop") if isinstance(item, dict) else getattr(item, "crop", None)
+    if crop_rgb is None:
+        crop_rgb = item.get("image") if isinstance(item, dict) else getattr(item, "image", None)
+    if isinstance(crop_rgb, np.ndarray):
+        return crop_rgb
+    crop_bgr = item.get("crop_bgr") if isinstance(item, dict) else getattr(item, "crop_bgr", None)
+    if isinstance(crop_bgr, np.ndarray) and crop_bgr.size > 0 and crop_bgr.ndim >= 3 and crop_bgr.shape[2] >= 3:
+        return cv2.cvtColor(crop_bgr[:, :, :3], cv2.COLOR_BGR2RGB)
+    if (
+        isinstance(sheet_rgb, np.ndarray)
+        and sheet_rgb.ndim >= 3
+        and bbox is not None
+        and len(bbox) >= 4
+    ):
+        sh, sw = sheet_rgb.shape[:2]
+        y0 = max(0, min(sh, int(round(float(bbox[0])))))
+        x0 = max(0, min(sw, int(round(float(bbox[1])))))
+        y1 = max(0, min(sh, int(round(float(bbox[2])))))
+        x1 = max(0, min(sw, int(round(float(bbox[3])))))
+        if y1 > y0 and x1 > x0:
+            return sheet_rgb[y0:y1, x0:x1, :3]
+    return None
+
+
+def classify_asteraceae_voucher_crops(
+    items: List[Any],
+    sheet_rgb: Optional[np.ndarray] = None,
+    catalog_number: str = "",
+    min_anthesis_heads_for_flowering: int = 1,
+    capitulum_kwargs: Optional[Dict[str, Any]] = None,
+) -> VoucherPhenologyResult:
+    """
+    Delegate helper classifying Asteraceae capitulum crops/boxes into voucher phenology
+    using `classify_single_capitulum` and `classify_voucher_phenology`.
+    """
+    cap_kw = dict(capitulum_kwargs or {})
+    head_results: List[Dict[str, Any]] = []
+    confs: List[float] = []
+
+    for item in items:
+        if isinstance(item, dict):
+            hp = item.get("head_pheno")
+            if isinstance(hp, dict) and "head_state" in hp:
+                head_results.append(hp)
+                sc = item.get("confidence", item.get("score"))
+                if sc is not None and np.isfinite(float(sc)):
+                    confs.append(float(np.clip(float(sc), 0.0, 1.0)))
+                continue
+            if "head_state" in item:
+                head_results.append(item)
+                sc = item.get("confidence", item.get("score"))
+                if sc is not None and np.isfinite(float(sc)):
+                    confs.append(float(np.clip(float(sc), 0.0, 1.0)))
+                continue
+
+        bbox: Optional[Tuple[int, int, int, int]] = None
+        cls_id: Optional[int] = None
+        ped_dir: Optional[Tuple[float, float]] = None
+        score_val: Optional[float] = None
+        lbl_str: Optional[str] = None
+
+        if isinstance(item, dict):
+            bbox = item.get("bbox")
+            raw_cid = item.get("class_id", item.get("cls_id", item.get("cls")))
+            if raw_cid is not None:
+                try:
+                    cls_id = int(raw_cid)
+                except (TypeError, ValueError):
+                    cls_id = None
+            ped_dir = item.get("peduncle_dir_xy")
+            score_val = item.get("confidence", item.get("score", item.get("conf")))
+            lbl_str = item.get("label", item.get("class_name", item.get("name")))
+        elif isinstance(item, (tuple, list)) and len(item) >= 2:
+            if isinstance(item[0], np.ndarray):
+                if isinstance(item[1], (int, np.integer)):
+                    cls_id = int(item[1])
+                elif isinstance(item[1], str):
+                    lbl_str = item[1]
+            elif len(item) == 4 and all(isinstance(v, (int, float, np.number)) for v in item):
+                bbox = (int(item[0]), int(item[1]), int(item[2]), int(item[3]))
+            elif len(item) == 3 and isinstance(item[0], (tuple, list, np.ndarray)):
+                bbox = tuple(int(v) for v in item[0][:4])  # type: ignore[assignment]
+                score_val = float(item[1]) if isinstance(item[1], (int, float, np.number)) else None
+                if isinstance(item[2], (int, np.integer)):
+                    cls_id = int(item[2])
+                elif isinstance(item[2], str):
+                    lbl_str = item[2]
+            elif len(item) == 4 and isinstance(item[0], (tuple, list, np.ndarray)):
+                bbox = tuple(int(v) for v in item[0][:4])  # type: ignore[assignment]
+                score_val = float(item[2]) if isinstance(item[2], (int, float, np.number)) else None
+                if isinstance(item[3], (int, np.integer)):
+                    cls_id = int(item[3])
+                elif isinstance(item[3], str):
+                    lbl_str = item[3]
+        elif not isinstance(item, np.ndarray):
+            bbox = getattr(item, "bbox", None)
+            raw_cid = getattr(item, "class_id", getattr(item, "cls_id", None))
+            if raw_cid is not None:
+                try:
+                    cls_id = int(raw_cid)
+                except (TypeError, ValueError):
+                    cls_id = None
+            ped_dir = getattr(item, "peduncle_dir_xy", None)
+            score_val = getattr(item, "confidence", getattr(item, "score", None))
+            lbl_str = getattr(item, "label", getattr(item, "class_name", None))
+
+        if cls_id is not None and cls_id not in (2, 3, 4, 5, 6):
+            continue
+
+        crop_rgb = _extract_item_crop_rgb(item, sheet_rgb=sheet_rgb, bbox=bbox)
+        if crop_rgb is not None:
+            head_res = classify_single_capitulum(
+                crop_rgb,
+                class_id=cls_id,
+                peduncle_dir_xy=ped_dir,
+                **cap_kw,
+            )
+            head_results.append(head_res)
+        elif cls_id in (2, 3, 4, 5, 6) or (lbl_str and str(lbl_str).strip()):
+            low_l = str(lbl_str or "").strip().lower()
+            if cls_id == 6 or "bud" in low_l:
+                fb_state = HEAD_BUD
+            elif cls_id in (4, 5) or "flower" in low_l or "anthesis" in low_l:
+                fb_state = HEAD_ANTHESIS
+            elif cls_id in (2, 3) or "fruit" in low_l or "seed" in low_l:
+                fb_state = HEAD_FRUIT
+            else:
+                continue
+            head_results.append(CapitulumResult({"head_state": fb_state, "white_fibrous_ratio": 0.0}))
+        else:
+            continue
+
+        if score_val is not None and np.isfinite(float(score_val)):
+            confs.append(float(np.clip(float(score_val), 0.0, 1.0)))
+
+    base = classify_voucher_phenology(
+        catalog_number,
+        head_results,
+        min_anthesis_heads_for_flowering=min_anthesis_heads_for_flowering,
+    )
+    out = VoucherPhenologyResult(dict(base))
+    out["total_reproductive_organs"] = int(base["total_capitula"])
+    out["n_senescent"] = 0
+    out["is_verified_anthesis"] = bool(
+        int(base["n_anthesis"]) >= max(1, int(min_anthesis_heads_for_flowering))
+    )
+    out["reproductive_stage_confidence"] = (
+        round(float(np.mean(confs)), 4)
+        if confs
+        else (1.0 if int(base["total_capitula"]) > 0 else 0.0)
+    )
+    out["phenology_plugin"] = "asteraceae_radiate"
+    return out

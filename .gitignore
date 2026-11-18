@@ -512,3 +512,9 @@ data/environmental/usgs_ds801_soils.csv
 data/environmental/nwi_point_cache.jsonl
 data/environmental/usace_nwpl_ratings.csv
 
+# 17. Worktree virtualenvs & LeafMachine3 submodule symlinks
+/.venv
+/.venv_LM3
+/LeafMachine3
+
+

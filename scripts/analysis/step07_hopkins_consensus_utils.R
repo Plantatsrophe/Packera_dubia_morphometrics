@@ -189,11 +189,13 @@ resolve_step07_ecological_authority_weights <- function(df, allow_bronze_prior =
 
 compute_hopkins_adjusted_phenology <- function(df) {
   n <- nrow(df); if (n == 0L) return(df)
-  is_anthesis <- resolve_active_anthesis_mask(df); df$is_active_anthesis <- is_anthesis
+  if (exists("pool_hysteranthous_deme_phenology_r", mode = "function")) df <- pool_hysteranthous_deme_phenology_r(df)
+  is_pooled_h <- .lgl_col(df, "phenology_hysteranthous_pooled", n)
+  is_anthesis <- resolve_active_anthesis_mask(df) | is_pooled_h; df$is_active_anthesis <- is_anthesis
   doy_raw <- .num_col(df, "doy", n); has_valid_doy <- is.finite(doy_raw) & (doy_raw >= 1.0) & (doy_raw <= 366.0)
   anchor_mask <- .resolve_step07_anchor_mask(df); mo_m <- .lgl_col(df, "morphometric_outlier_flag", n); noise_m <- .lgl_col(df, "is_confident_label_noise", n)
-  clean_anth_doy <- is_anthesis & has_valid_doy & anchor_mask & !mo_m & !noise_m
-  doy_pool <- doy_raw[clean_anth_doy]; if (length(doy_pool) == 0L) doy_pool <- doy_raw[is_anthesis & has_valid_doy & !noise_m]; if (length(doy_pool) == 0L) doy_pool <- doy_raw[has_valid_doy]
+  clean_anth_doy <- is_anthesis & !is_pooled_h & has_valid_doy & anchor_mask & !mo_m & !noise_m
+  doy_pool <- doy_raw[clean_anth_doy]; if (length(doy_pool) == 0L) doy_pool <- doy_raw[is_anthesis & !is_pooled_h & has_valid_doy & !noise_m]; if (length(doy_pool) == 0L) doy_pool <- doy_raw[is_anthesis & has_valid_doy & !noise_m]; if (length(doy_pool) == 0L) doy_pool <- doy_raw[has_valid_doy]
   if (length(doy_pool) > 0L) {
     th_pool <- 2.0 * pi * (doy_pool / 365.25); ref_theta <- atan2(mean(sin(th_pool)), mean(cos(th_pool)))
     if (ref_theta < 0.0) ref_theta <- ref_theta + 2.0 * pi; ref_doy <- ref_theta * (365.25 / (2.0 * pi))
@@ -214,8 +216,8 @@ compute_hopkins_adjusted_phenology <- function(df) {
   has_geo_cov <- is.finite(lat_vec) | is.finite(elev_vec); has_mat_cov <- is.finite(mat_vec); has_any_cov <- has_geo_cov | has_mat_cov
   theo_shift <- ifelse(has_geo_cov & has_mat_cov, 0.70 * (lat_shift + elev_shift) + 0.30 * mat_shift, ifelse(has_geo_cov, lat_shift + elev_shift, ifelse(has_mat_cov, mat_shift, 0.0)))
   theta_obs <- 2.0 * pi * (doy_vec / 365.25); theta_theo <- ref_theta + 2.0 * pi * (theo_shift / 365.25); sin_theo <- sin(theta_theo); cos_theo <- cos(theta_theo)
-  fit_mask <- is_anthesis & has_valid_doy & has_any_cov & anchor_mask & !mo_m & !noise_m
-  if (sum(fit_mask) < 5L) fit_mask <- is_anthesis & has_valid_doy & has_any_cov & anchor_mask & !noise_m
+  fit_mask <- is_anthesis & !is_pooled_h & has_valid_doy & has_any_cov & anchor_mask & !mo_m & !noise_m
+  if (sum(fit_mask) < 5L) fit_mask <- is_anthesis & !is_pooled_h & has_valid_doy & has_any_cov & anchor_mask & !noise_m
   if (sum(fit_mask) < 5L) fit_mask <- is_anthesis & has_valid_doy & has_any_cov & !noise_m
   cov_raw <- list(decimalLatitude = lat_vec, elevation = elev_vec, bio1_temp_mean = mat_vec)
   cov_terms <- names(cov_raw)[vapply(cov_raw, function(v) { vf <- v[fit_mask & is.finite(v)]; length(vf) >= 3L && is.finite(stats::sd(vf)) && stats::sd(vf) > 1e-6 }, logical(1))]
@@ -260,14 +262,14 @@ compute_hopkins_adjusted_phenology <- function(df) {
       if (!is.null(t0_hop)) {
         ev_tx <- t0_hop$evict_from_given_anchor & (!t0_hop$is_tier0_dna_anchor | t0_hop$rectified_taxon != tx)
         rect_tx <- which(t0_hop$is_tier0_dna_anchor & !is.na(t0_hop$rectified_taxon) & (t0_hop$rectified_taxon == tx) & is_anthesis & has_pheno_doy & !noise_m)
-        anth_tx <- unique(c(idx_tx[is_anthesis[idx_tx] & has_pheno_doy[idx_tx] & anchor_mask[idx_tx] & !mo_m[idx_tx] & !noise_m[idx_tx] & !ev_tx[idx_tx]], rect_tx))
-        if (length(anth_tx) < 2L) anth_tx <- unique(c(idx_tx[is_anthesis[idx_tx] & has_pheno_doy[idx_tx] & !noise_m[idx_tx] & !ev_tx[idx_tx]], rect_tx))
+        anth_tx <- unique(c(idx_tx[is_anthesis[idx_tx] & !is_pooled_h[idx_tx] & has_pheno_doy[idx_tx] & anchor_mask[idx_tx] & !mo_m[idx_tx] & !noise_m[idx_tx] & !ev_tx[idx_tx]], rect_tx))
+        if (length(anth_tx) < 2L) anth_tx <- unique(c(idx_tx[is_anthesis[idx_tx] & !is_pooled_h[idx_tx] & has_pheno_doy[idx_tx] & !noise_m[idx_tx] & !ev_tx[idx_tx]], rect_tx))
         if (length(anth_tx) == 0L) anth_tx <- idx_tx[is_anthesis[idx_tx] & has_pheno_doy[idx_tx]]
         w_h <- if (length(anth_tx) > 0L) ifelse(t0_hop$is_tier0_dna_anchor[anth_tx] & (t0_hop$rectified_taxon[anth_tx] == tx), ifelse(is.finite(t0_hop$tier0_weight[anth_tx]), t0_hop$tier0_weight[anth_tx], 4.0), 1.0) else numeric(0)
         theta_tx_c <- if (length(anth_tx) > 0L) atan2(sum(w_h * sin(theta_adj_use[anth_tx]), na.rm = TRUE), sum(w_h * cos(theta_adj_use[anth_tx]), na.rm = TRUE)) else ref_theta
       } else {
-        anth_tx <- idx_tx[is_anthesis[idx_tx] & has_pheno_doy[idx_tx] & anchor_mask[idx_tx] & !mo_m[idx_tx] & !noise_m[idx_tx]]
-        if (length(anth_tx) < 2L) anth_tx <- idx_tx[is_anthesis[idx_tx] & has_pheno_doy[idx_tx] & !noise_m[idx_tx]]
+        anth_tx <- idx_tx[is_anthesis[idx_tx] & !is_pooled_h[idx_tx] & has_pheno_doy[idx_tx] & anchor_mask[idx_tx] & !mo_m[idx_tx] & !noise_m[idx_tx]]
+        if (length(anth_tx) < 2L) anth_tx <- idx_tx[is_anthesis[idx_tx] & !is_pooled_h[idx_tx] & has_pheno_doy[idx_tx] & !noise_m[idx_tx]]
         if (length(anth_tx) == 0L) anth_tx <- idx_tx[is_anthesis[idx_tx] & has_pheno_doy[idx_tx]]
         theta_tx_c <- if (length(anth_tx) > 0L) atan2(mean(sin(theta_adj_use[anth_tx]), na.rm = TRUE), mean(cos(theta_adj_use[anth_tx]), na.rm = TRUE)) else ref_theta
       }

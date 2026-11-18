@@ -510,6 +510,44 @@ def migrate_20261127_to_20261128(conn: sqlite3.Connection) -> None:
     migrate_database_schema(conn)
 
 
+def migrate_20261128_to_20261129(conn: sqlite3.Connection) -> None:
+    """Idempotently upgrade SQLite schema 20261128 -> 20261129 (`taxonomic_specialists` + `vouchers` v1.6 columns)."""
+    v_cols = set(get_table_columns(conn, "vouchers"))
+    if v_cols:
+        for col_name, col_ddl in (
+            ("portal_source", "TEXT DEFAULT 'GBIF'"),
+            ("specimen_sex", "TEXT"),
+            ("seasonal_shoot_phase", "TEXT"),
+            ("infraspecific_rank", "TEXT"),
+            ("infraspecific_epithet", "TEXT"),
+        ):
+            if col_name not in v_cols:
+                conn.execute(f"ALTER TABLE vouchers ADD COLUMN {col_name} {col_ddl};")
+                v_cols.add(col_name)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS taxonomic_specialists (
+            specialist_id TEXT PRIMARY KEY,
+            scope_type TEXT NOT NULL,
+            scope_taxon TEXT NOT NULL,
+            canonical_name TEXT NOT NULL,
+            qualified_regex TEXT NOT NULL,
+            ipni_abbr TEXT,
+            orcid TEXT,
+            wikidata_qid TEXT,
+            openalex_works_count INTEGER NOT NULL DEFAULT 0,
+            bionomia_det_count INTEGER NOT NULL DEFAULT 0,
+            tier_cap TEXT NOT NULL DEFAULT 'Tier_1_Gold',
+            source TEXT NOT NULL,
+            user_verified INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL
+        );
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_taxonomic_specialists_scope ON taxonomic_specialists(scope_taxon);")
+    migrate_database_schema(conn)
+
+
 # =============================================================================
 # Atomic CSV Export & Generic Upsert Utilities
 # =============================================================================
@@ -721,6 +759,15 @@ def upsert_vouchers_records(
             row_dict["usda_county_status"] = _to_str(rec.get("usda_county_status"))
         if "infraspecific_taxon" in rec and not _is_missing(rec.get("infraspecific_taxon")):
             row_dict["infraspecific_taxon"] = _to_str(rec.get("infraspecific_taxon"))
+        for extra_str_col in (
+            "portal_source",
+            "specimen_sex",
+            "seasonal_shoot_phase",
+            "infraspecific_rank",
+            "infraspecific_epithet",
+        ):
+            if extra_str_col in rec and not _is_missing(rec.get(extra_str_col)):
+                row_dict[extra_str_col] = _to_str(rec.get(extra_str_col))
         if "georef_qc_status" in rec and not _is_missing(rec.get("georef_qc_status")):
             row_dict["georef_qc_status"] = _to_str(rec.get("georef_qc_status"))
         if "is_centroid_or_inst_coord" in rec and not _is_missing(rec.get("is_centroid_or_inst_coord")):
@@ -3053,6 +3100,96 @@ def upsert_natureserve_subnational_ranges(
     )
 
 
+def upsert_taxonomic_specialists(
+    conn: sqlite3.Connection,
+    rows: Sequence[Mapping[str, Any]],
+    demo: bool = False,
+    *,
+    preserve_existing_on_null: bool = True,
+) -> int:
+    """Upsert Tier A non-circular taxonomic specialist records into `taxonomic_specialists`."""
+    if demo or not rows:
+        return 0
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS taxonomic_specialists (
+            specialist_id TEXT PRIMARY KEY,
+            scope_type TEXT NOT NULL,
+            scope_taxon TEXT NOT NULL,
+            canonical_name TEXT NOT NULL,
+            qualified_regex TEXT NOT NULL,
+            ipni_abbr TEXT,
+            orcid TEXT,
+            wikidata_qid TEXT,
+            openalex_works_count INTEGER NOT NULL DEFAULT 0,
+            bionomia_det_count INTEGER NOT NULL DEFAULT 0,
+            tier_cap TEXT NOT NULL DEFAULT 'Tier_1_Gold',
+            source TEXT NOT NULL,
+            user_verified INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL
+        );
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_taxonomic_specialists_scope ON taxonomic_specialists(scope_taxon);")
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    norm_rows: List[Dict[str, Any]] = []
+    for raw in rows:
+        sid = _to_str(raw.get("specialist_id"))
+        cname = _to_str(raw.get("canonical_name"))
+        qreg = _to_str(raw.get("qualified_regex"))
+        if not sid or not cname or not qreg:
+            continue
+        norm_rows.append({
+            "specialist_id": sid,
+            "scope_type": (_to_str(raw.get("scope_type")) or "genus").lower(),
+            "scope_taxon": _to_str(raw.get("scope_taxon")) or _resolve_target_genus_safe(),
+            "canonical_name": cname,
+            "qualified_regex": qreg,
+            "ipni_abbr": _to_str(raw.get("ipni_abbr")),
+            "orcid": _to_str(raw.get("orcid")),
+            "wikidata_qid": _to_str(raw.get("wikidata_qid")),
+            "openalex_works_count": max(0, _to_int(raw.get("openalex_works_count"), default=0) or 0),
+            "bionomia_det_count": max(0, _to_int(raw.get("bionomia_det_count"), default=0) or 0),
+            "tier_cap": _to_str(raw.get("tier_cap")) or "Tier_1_Gold",
+            "source": _to_str(raw.get("source")) or "manual",
+            "user_verified": _to_int(raw.get("user_verified"), default=0) or 0,
+            "updated_at": _to_str(raw.get("updated_at")) or now_iso,
+        })
+    if not norm_rows:
+        return 0
+    return upsert_rows_generic(
+        conn,
+        "taxonomic_specialists",
+        norm_rows,
+        ("specialist_id",),
+        preserve_existing_on_null=preserve_existing_on_null,
+    )
+
+
+def load_taxonomic_specialists(
+    conn: sqlite3.Connection,
+    scope_taxon: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Load Tier A `taxonomic_specialists` rows, optionally filtered by `scope_taxon`."""
+    tbl_ok = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'taxonomic_specialists';"
+    ).fetchone()
+    if not tbl_ok:
+        return []
+    if scope_taxon is not None and str(scope_taxon).strip():
+        cur = conn.execute(
+            "SELECT * FROM taxonomic_specialists WHERE LOWER(scope_taxon) = LOWER(?) "
+            "ORDER BY user_verified DESC, tier_cap ASC, canonical_name ASC;",
+            (str(scope_taxon).strip(),),
+        )
+    else:
+        cur = conn.execute(
+            "SELECT * FROM taxonomic_specialists "
+            "ORDER BY user_verified DESC, tier_cap ASC, canonical_name ASC;"
+        )
+    return [dict(r) for r in cur.fetchall()]
+
+
 def persist_genetic_lineage_assignments(
     conn: sqlite3.Connection,
     run_id: str,
@@ -3325,7 +3462,7 @@ def purge_segments_and_runs(
     Purges all Step 02 to 07 segmentation artifacts (masks, contours, ECT matrices,
     cropped patches, non-Step-01 tables, figures, reports, and run directories) and
     clears Step 02 to 07 SQLite tables while preserving Step 01 harvested vouchers,
-    raw voucher imagery, taxon synonyms, `taxon_backbone_profiles`,
+    raw voucher imagery, taxon synonyms, `taxonomic_specialists`, `taxon_backbone_profiles`,
     `natureserve_subnational_ranges`, `cytological_records`,
     `taxon_cytology_summary`, `data/taxonomy/`, `data/cytology/`, and `environmental_cache`.
     """
@@ -3446,7 +3583,7 @@ def purge_runs_only(
     `extracted_leaf_manifest.csv`, `voucher_reproductive_metrics.csv`,
     `voucher_phenological_states.csv`, `failed_qc_vouchers.csv`, `data/taxonomy/`, `data/cytology/`,
     and SQLite `vouchers`, `plant_individuals`, `extracted_leaves`,
-    `voucher_reproductive_phenology`, `taxon_backbone_profiles`,
+    `voucher_reproductive_phenology`, `taxonomic_specialists`, `taxon_backbone_profiles`,
     `natureserve_subnational_ranges`, `cytological_records`, and `taxon_cytology_summary`).
 
     When `refresh_env_buffers=True`, resets cached `min_bedrock_depth_buffer_cm` to NULL/NA

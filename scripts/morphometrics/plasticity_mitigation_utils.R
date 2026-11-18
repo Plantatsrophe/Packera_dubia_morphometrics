@@ -128,7 +128,10 @@ residualize_ontogenetic_phenophase_plasticity <- function(
     }
   }
 
-  if (length(cov_list) == 0L && !has_log_cs) return(df)
+  if (!exists("build_sex_and_shoot_phase_covariates_r", mode = "function") && file.exists("scripts/morphometrics/dimorphism_blocking_utils.R")) source("scripts/morphometrics/dimorphism_blocking_utils.R")
+  if (exists("merge_sex_and_shoot_phase_columns_r", mode = "function")) df <- merge_sex_and_shoot_phase_columns_r(df)
+  dim_covs <- if (exists("build_sex_and_shoot_phase_covariates_r", mode = "function")) build_sex_and_shoot_phase_covariates_r(df, ref_idx) else list()
+  if (length(cov_list) == 0L && !has_log_cs && length(dim_covs) == 0L) return(df)
 
   fb_sp <- paste0(if (exists("resolve_r_target_genus", mode = "function")) resolve_r_target_genus() else "Packera", "_sp")
   sp_raw <- if ("species_standardized" %in% names(df)) as.character(df$species_standardized) else rep(fb_sp, n)
@@ -138,9 +141,9 @@ residualize_ontogenetic_phenophase_plasticity <- function(
     yv <- suppressWarnings(as.numeric(df[[col_nm]]))
     if (sum(is.finite(yv[ref_idx])) < 12L) next
     is_pc_col <- grepl("^PC[0-9]+$", col_nm)
-    if (is_pc_col && !isTRUE(intraspecific_mode)) next
+    if (is_pc_col && !isTRUE(intraspecific_mode) && length(dim_covs) == 0L) next
 
-    use_covs <- cov_list
+    use_covs <- if (is_pc_col && !isTRUE(intraspecific_mode)) dim_covs else c(cov_list, dim_covs)
     if (!is_pc_col && has_log_cs && !isTRUE(attr(df, "allometry_corrected_scalars"))) {
       use_covs[["log_centsize_dev"]] <- log_cs_v
     }

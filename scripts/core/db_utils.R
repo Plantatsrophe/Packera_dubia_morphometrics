@@ -16,7 +16,7 @@
 #       with seamless CSV fallback merging.
 # ==============================================================================
 
-PLANTMATICS_SCHEMA_USER_VERSION <- 20261128L
+PLANTMATICS_SCHEMA_USER_VERSION <- 20261129L
 PACKERA_SCHEMA_USER_VERSION <- PLANTMATICS_SCHEMA_USER_VERSION
 
 UNASSIGNED_TAXON_SENTINEL <- "Unassigned_Taxon"
@@ -165,7 +165,7 @@ is_active_genus_binomial <- function(x, genus = resolve_r_target_genus()) {
   g <- trimws(as.character(genus)[1L])
   if (is.na(g) || !nzchar(g)) g <- "Packera"
   g_esc <- gsub("([][{}()+*^$|\\\\.?])", "\\\\\\1", g)
-  pat <- paste0("^", g_esc, "[[:space:]]+([x\u00d7][[:space:]]*)?[a-z][a-z-]+$")
+  pat <- paste0("^", g_esc, "[[:space:]]+([x\u00d7][[:space:]]*)?[a-z][a-z-]+([[:space:]]+(subsp|var|nothosubsp|nothovar)\\.[[:space:]]+[a-z][a-z-]+)?$")
   s <- trimws(as.character(x))
   out <- rep(FALSE, length(s))
   ok <- !is.na(s) & nzchar(s)
@@ -181,9 +181,49 @@ abbreviate_binomial <- function(x) {
   out <- rep(NA_character_, length(s))
   ok <- !is.na(s)
   if (any(ok)) {
-    out[ok] <- sub("^([A-Z])[a-z-]+[[:space:]]+", "\\1. ", s[ok])
+    out[ok] <- sub("^[[:space:]]*([A-Z])[a-z-]+[[:space:]]+", "\\1. ", trimws(s[ok]))
   }
   out
+}
+
+resolve_r_growth_form_preset <- function(cfg_path = NULL) {
+  valid_presets <- c("rosette_herb", "cauline_herb", "woody_branch", "compound_leaf", "graminoid_linear", "non_laminate_bypass")
+  env_p <- tolower(trimws(env_plantmatics_or_packera("PLANTMATICS_GROWTH_FORM_PRESET", "PACKERA_GROWTH_FORM_PRESET")))
+  if (nzchar(env_p) && (env_p %in% valid_presets)) return(env_p)
+  cands <- unique(c(
+    if (!is.null(cfg_path) && length(cfg_path) >= 1L && !is.na(cfg_path[1L]) && nzchar(trimws(as.character(cfg_path[1L])))) trimws(as.character(cfg_path[1L])) else character(0),
+    trimws(env_plantmatics_or_packera("PLANTMATICS_CONFIG_PATH", "PACKERA_CONFIG_PATH")),
+    "config/config.yaml"
+  ))
+  cands <- cands[nzchar(cands)]
+  for (cp in cands) {
+    if (!file.exists(cp)) next
+    if (requireNamespace("yaml", quietly = TRUE)) {
+      y <- tryCatch(yaml::read_yaml(cp), error = function(e) NULL)
+      if (is.list(y) && is.list(y$taxa) && !is.null(y$taxa$growth_form_preset)) {
+        val <- tolower(trimws(as.character(y$taxa$growth_form_preset)[1L]))
+        if (!is.na(val) && (val %in% valid_presets)) return(val)
+      }
+    }
+    lines <- tryCatch(readLines(cp, warn = FALSE, encoding = "UTF-8"), error = function(e) character(0))
+    in_taxa <- FALSE
+    for (ln in lines) {
+      if (grepl("^[[:space:]]*(#|$)", ln)) next
+      cln <- sub("[[:space:]]+#.*$", "", ln)
+      if (!grepl("^[[:space:]]*[A-Za-z0-9_]+:", cln)) next
+      ind <- nchar(sub("^([[:space:]]*).*$", "\\1", cln))
+      key <- trimws(sub(":.*$", "", cln))
+      if (ind == 0L) {
+        if (key == "taxa") { in_taxa <- TRUE; next }
+        if (in_taxa) break else next
+      }
+      if (in_taxa && key == "growth_form_preset") {
+        val <- tolower(trimws(gsub("^[\"']|[\"']$", "", trimws(sub("^[^:]+:", "", cln)))))
+        if (val %in% valid_presets) return(val)
+      }
+    }
+  }
+  "rosette_herb"
 }
 
 .r_progress_state_env <- new.env(parent = emptyenv())
@@ -564,6 +604,11 @@ PACKERA_DB_WC_BIO_COLS <- c(
 .dynamic_sqlite_table_specs_r <- function(table_name) {
   if (identical(table_name, "vouchers")) {
     return(c(
+      portal_source = "TEXT DEFAULT 'GBIF'",
+      specimen_sex = "TEXT",
+      seasonal_shoot_phase = "TEXT",
+      infraspecific_rank = "TEXT",
+      infraspecific_epithet = "TEXT",
       is_centroid_or_inst_coord = "INTEGER DEFAULT 0",
       coord_quarantine_reason = "TEXT"
     ))
@@ -900,7 +945,42 @@ PACKERA_DB_WC_BIO_COLS <- c(
       is_historical_or_extirpated = "INTEGER DEFAULT 0"
     ))
   }
+  if (identical(table_name, "taxonomic_specialists")) {
+    return(c(
+      scope_type = "TEXT NOT NULL DEFAULT 'genus'",
+      scope_taxon = "TEXT NOT NULL DEFAULT ''",
+      canonical_name = "TEXT NOT NULL DEFAULT ''",
+      qualified_regex = "TEXT NOT NULL DEFAULT ''",
+      ipni_abbr = "TEXT",
+      orcid = "TEXT",
+      wikidata_qid = "TEXT",
+      openalex_works_count = "INTEGER NOT NULL DEFAULT 0",
+      bionomia_det_count = "INTEGER NOT NULL DEFAULT 0",
+      tier_cap = "TEXT NOT NULL DEFAULT 'Tier_1_Gold'",
+      source = "TEXT NOT NULL DEFAULT 'OpenAlex'",
+      user_verified = "INTEGER NOT NULL DEFAULT 0",
+      updated_at = "TEXT NOT NULL DEFAULT ''"
+    ))
+  }
   character(0)
+}
+
+.ensure_v20261129_r_tables_r <- function(conn) {
+  if (is.null(conn)) return(FALSE)
+  had_ts <- db_table_exists_safe(conn, "taxonomic_specialists")
+  ok <- tryCatch({
+    DBI::dbExecute(conn, paste0(
+      "CREATE TABLE IF NOT EXISTS taxonomic_specialists (",
+      "specialist_id TEXT PRIMARY KEY, scope_type TEXT NOT NULL, scope_taxon TEXT NOT NULL, ",
+      "canonical_name TEXT NOT NULL, qualified_regex TEXT NOT NULL, ipni_abbr TEXT, orcid TEXT, ",
+      "wikidata_qid TEXT, openalex_works_count INTEGER NOT NULL DEFAULT 0, ",
+      "bionomia_det_count INTEGER NOT NULL DEFAULT 0, tier_cap TEXT NOT NULL DEFAULT 'Tier_1_Gold', ",
+      "source TEXT NOT NULL, user_verified INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL);"
+    ))
+    DBI::dbExecute(conn, "CREATE INDEX IF NOT EXISTS idx_taxonomic_specialists_scope ON taxonomic_specialists(scope_taxon);")
+    TRUE
+  }, error = function(e) FALSE)
+  isTRUE(ok) && !isTRUE(had_ts)
 }
 
 .migrate_v20261128_renames_r <- function(conn) {
@@ -971,8 +1051,8 @@ PACKERA_DB_WC_BIO_COLS <- c(
   if (is.null(conn)) {
     return(FALSE)
   }
-  changed <- FALSE
-  for (tbl in c("vouchers", "extracted_leaves", "run_active_cohort", "leaf_efa_harmonics", "otu_morphometrics", "spatial_rf_predictions", "curation_triage", "environmental_cache", "genomic_samples", "genetic_lineage_assignments", "cytological_records", "taxon_cytology_summary", "taxon_backbone_profiles", "natureserve_subnational_ranges")) {
+  changed <- isTRUE(.ensure_v20261129_r_tables_r(conn))
+  for (tbl in c("vouchers", "extracted_leaves", "run_active_cohort", "leaf_efa_harmonics", "otu_morphometrics", "spatial_rf_predictions", "curation_triage", "environmental_cache", "genomic_samples", "genetic_lineage_assignments", "cytological_records", "taxon_cytology_summary", "taxon_backbone_profiles", "natureserve_subnational_ranges", "taxonomic_specialists")) {
     if (isTRUE(.migrate_dynamic_sqlite_table_r(conn, tbl))) {
       changed <- TRUE
     }
@@ -1199,11 +1279,13 @@ connect_packera_db <- function(
   om_fields_chk <- if (db_table_exists_safe(conn, "otu_morphometrics")) tryCatch(DBI::dbListFields(conn, "otu_morphometrics"), error = function(e) character(0)) else c("cauline_leaf_count", "ECT_PC1", "scale_source")
   syn_fields_chk <- if (db_table_exists_safe(conn, "taxon_synonyms")) tryCatch(DBI::dbListFields(conn, "taxon_synonyms"), error = function(e) character(0)) else c("canonical_taxon")
   usda_fields_chk <- if (db_table_exists_safe(conn, "usda_county_ranges")) tryCatch(DBI::dbListFields(conn, "usda_county_ranges"), error = function(e) character(0)) else c("canonical_taxon")
+  v_fields_chk <- if (db_table_exists_safe(conn, "vouchers")) tryCatch(DBI::dbListFields(conn, "vouchers"), error = function(e) character(0)) else c("portal_source", "specimen_sex", "seasonal_shoot_phase", "infraspecific_rank", "infraspecific_epithet")
   mv_fields_chk <- if (db_table_exists_safe(conn, "v_integrative_triage_master")) tryCatch(DBI::dbListFields(conn, "v_integrative_triage_master"), error = function(e) character(0)) else character(0)
   el_has_zone <- all(c("leaf_zone", "ect_path") %in% el_fields_chk)
   om_has_cauline <- all(c("cauline_leaf_count", "ECT_PC1", "scale_source") %in% om_fields_chk)
   syn_has_canon <- ("canonical_taxon" %in% syn_fields_chk)
   usda_has_canon <- ("canonical_taxon" %in% usda_fields_chk)
+  v_has_m1b <- all(c("portal_source", "specimen_sex", "seasonal_shoot_phase", "infraspecific_rank", "infraspecific_epithet") %in% v_fields_chk)
   mv_has_latest <- identical(eff_path, ":memory:") || all(c(
     "is_passive", "scale_source", "AR_inv_std", "reproductive_trait_status",
     "ecoregion_can1", "ecoregion_can2", "w_geno_kappa",
@@ -1219,10 +1301,11 @@ connect_packera_db <- function(
     "hydro_edaphic_niche_regime", "wetland_fidelity_concordance", "basionym_synonymy_type",
     "backbone_basionym_name", "protologue_url", "natureserve_global_rank",
     "nwpl_indicator_code", "nwpl_wetland_score",
-    "is_centroid_or_inst_coord", "coord_quarantine_reason", "env_mahal_d2", "env_mcd_outlier_flag"
+    "is_centroid_or_inst_coord", "coord_quarantine_reason", "env_mahal_d2", "env_mcd_outlier_flag",
+    "portal_source", "specimen_sex", "seasonal_shoot_phase", "infraspecific_rank", "infraspecific_epithet"
   ) %in% mv_fields_chk)
   if (cur_ver >= PLANTMATICS_SCHEMA_USER_VERSION &&
-    el_has_zone && om_has_cauline && syn_has_canon && usda_has_canon && mv_has_latest &&
+    el_has_zone && om_has_cauline && syn_has_canon && usda_has_canon && v_has_m1b && mv_has_latest &&
     (identical(eff_path, ":memory:") || (
       db_table_exists_safe(conn, "v_integrative_triage_master") &&
         db_table_exists_safe(conn, "genomic_samples") &&
@@ -1231,7 +1314,8 @@ connect_packera_db <- function(
         db_table_exists_safe(conn, "taxon_cytology_summary") &&
         db_table_exists_safe(conn, "taxon_backbone_profiles") &&
         db_table_exists_safe(conn, "natureserve_subnational_ranges") &&
-        db_table_exists_safe(conn, "step_telemetry_benchmarks")
+        db_table_exists_safe(conn, "step_telemetry_benchmarks") &&
+        db_table_exists_safe(conn, "taxonomic_specialists")
     ))) {
     return(conn)
   }
@@ -1241,14 +1325,15 @@ connect_packera_db <- function(
     .migrate_v20261128_renames_r(conn)
   } else {
     view_needs_refresh <- schema_migrated || (cur_ver < PLANTMATICS_SCHEMA_USER_VERSION) ||
-      !syn_has_canon || !usda_has_canon ||
+      !syn_has_canon || !usda_has_canon || !v_has_m1b ||
       !db_table_exists_safe(conn, "genomic_samples") ||
       !db_table_exists_safe(conn, "genetic_lineage_assignments") ||
       !db_table_exists_safe(conn, "cytological_records") ||
       !db_table_exists_safe(conn, "taxon_cytology_summary") ||
       !db_table_exists_safe(conn, "taxon_backbone_profiles") ||
       !db_table_exists_safe(conn, "natureserve_subnational_ranges") ||
-      !db_table_exists_safe(conn, "step_telemetry_benchmarks")
+      !db_table_exists_safe(conn, "step_telemetry_benchmarks") ||
+      !db_table_exists_safe(conn, "taxonomic_specialists")
     if (!view_needs_refresh && db_table_exists_safe(conn, "v_integrative_triage_master")) {
       v_cols <- tryCatch(DBI::dbListFields(conn, "v_integrative_triage_master"), error = function(e) character(0))
       req_v_cols <- c(
@@ -1278,7 +1363,8 @@ connect_packera_db <- function(
         "hydro_edaphic_niche_regime", "wetland_fidelity_concordance", "basionym_synonymy_type",
         "backbone_basionym_name", "protologue_url", "natureserve_global_rank",
         "nwpl_indicator_code", "nwpl_wetland_score",
-        "is_centroid_or_inst_coord", "coord_quarantine_reason", "env_mahal_d2", "env_mcd_outlier_flag"
+        "is_centroid_or_inst_coord", "coord_quarantine_reason", "env_mahal_d2", "env_mcd_outlier_flag",
+        "portal_source", "specimen_sex", "seasonal_shoot_phase", "infraspecific_rank", "infraspecific_epithet"
       )
       if (length(v_cols) > 0L && !all(req_v_cols %in% v_cols)) {
         view_needs_refresh <- TRUE
@@ -2715,7 +2801,8 @@ fetch_step04_morphometrics_from_db <- function(
   v_cols <- if (db_table_exists_safe(conn, "vouchers")) tryCatch(DBI::dbListFields(conn, "vouchers"), error = function(e) character(0)) else character(0)
 
   extra_v_cols <- intersect(
-    c("usda_symbol", "usda_county_status", "exsiccatae_key", "exsiccatae_taxonomic_conflict", "exsiccatae_gold_taxon", "is_centroid_or_inst_coord", "coord_quarantine_reason"),
+    c("usda_symbol", "usda_county_status", "exsiccatae_key", "exsiccatae_taxonomic_conflict", "exsiccatae_gold_taxon", "is_centroid_or_inst_coord", "coord_quarantine_reason",
+      "portal_source", "specimen_sex", "seasonal_shoot_phase", "infraspecific_rank", "infraspecific_epithet"),
     v_cols
   )
 

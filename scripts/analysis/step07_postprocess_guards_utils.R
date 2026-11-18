@@ -189,3 +189,108 @@ if (grDevices::dev.cur() == 1L) grDevices::pdf(NULL)
   df
 }
 
+pool_hysteranthous_deme_phenology_r <- function(df) {
+  if (is.null(df) || !is.data.frame(df) || nrow(df) == 0L) return(df)
+  n <- nrow(df)
+  prev_pooled <- if ("phenology_hysteranthous_pooled" %in% names(df)) (!is.na(df$phenology_hysteranthous_pooled) & as.logical(df$phenology_hysteranthous_pooled)) else rep(FALSE, n)
+  df$phenology_hysteranthous_pooled <- rep(FALSE, n)
+  gf_preset <- if (exists("resolve_r_growth_form_preset", mode = "function")) resolve_r_growth_form_preset() else "rosette_herb"
+
+  orig_anth <- if (exists("resolve_active_anthesis_mask", mode = "function")) {
+    resolve_active_anthesis_mask(df)
+  } else if ("is_verified_anthesis" %in% names(df)) {
+    v <- suppressWarnings(as.logical(df$is_verified_anthesis)); v[is.na(v)] <- FALSE; v
+  } else if ("is_active_anthesis" %in% names(df)) {
+    v <- suppressWarnings(as.logical(df$is_active_anthesis)); v[is.na(v)] <- FALSE; v
+  } else rep(FALSE, n)
+  orig_anth[is.na(orig_anth)] <- FALSE
+  orig_anth <- orig_anth & !prev_pooled
+
+  has_morph <- if ("PC1" %in% names(df)) is.finite(suppressWarnings(as.numeric(df$PC1))) else rep(FALSE, n)
+  doy_raw <- if ("doy" %in% names(df)) suppressWarnings(as.numeric(df$doy)) else rep(NA_real_, n)
+  has_doy <- is.finite(doy_raw) & (doy_raw >= 1.0) & (doy_raw <= 366.0)
+  adj_raw <- if ("hopkins_adjusted_doy" %in% names(df)) suppressWarnings(as.numeric(df$hopkins_adjusted_doy)) else rep(NA_real_, n)
+  has_adj <- is.finite(adj_raw) & (adj_raw >= 1.0) & (adj_raw <= 366.0)
+
+  lat_v <- if ("decimalLatitude" %in% names(df)) suppressWarnings(as.numeric(df$decimalLatitude)) else rep(NA_real_, n)
+  lon_v <- if ("decimalLongitude" %in% names(df)) suppressWarnings(as.numeric(df$decimalLongitude)) else rep(NA_real_, n)
+  is_cent <- if (exists(".is_step07_centroid_coord", mode = "function")) .is_step07_centroid_coord(df) else rep(FALSE, n)
+  has_geo <- is.finite(lat_v) & is.finite(lon_v) & (abs(lat_v) <= 90.0) & (abs(lon_v) <= 180.0) & !is_cent
+  st_v <- if ("stateProvince" %in% names(df)) tolower(trimws(as.character(df$stateProvince))) else rep("", n)
+  cty_v <- if ("county" %in% names(df)) tolower(trimws(as.character(df$county))) else rep("", n)
+  st_v[is.na(st_v)] <- ""; cty_v[is.na(cty_v)] <- ""
+  has_cnty <- nzchar(st_v) & nzchar(cty_v)
+
+  sp_vec <- if ("species_standardized" %in% names(df)) as.character(df$species_standardized) else if ("scientificName" %in% names(df)) as.character(df$scientificName) else rep("Cohort", n)
+  sp_vec[is.na(sp_vec) | !nzchar(trimws(sp_vec))] <- "Unknown"
+
+  circ_wmean <- function(vals, w) {
+    th <- 2.0 * pi * (vals / 365.25)
+    mu <- atan2(sum(w * sin(th)), sum(w * cos(th)))
+    if (mu < 0.0) mu <- mu + 2.0 * pi
+    ((mu * (365.25 / (2.0 * pi)) - 1.0) %% 365.25) + 1.0
+  }
+  circ_med <- function(vals) {
+    if (length(vals) == 1L) return(vals[1L])
+    th <- 2.0 * pi * (vals / 365.25)
+    mu <- atan2(mean(sin(th)), mean(cos(th)))
+    dev <- atan2(sin(th - mu), cos(th - mu))
+    m_th <- mu + stats::median(dev)
+    if (m_th < 0.0) m_th <- m_th + 2.0 * pi
+    ((m_th * (365.25 / (2.0 * pi)) - 1.0) %% 365.25) + 1.0
+  }
+  hav_vec <- function(lat1, lon1, lat2_v, lon2_v) {
+    rad <- pi / 180.0
+    dlat <- (lat2_v - lat1) * rad; dlon <- (lon2_v - lon1) * rad
+    a <- sin(dlat / 2.0)^2 + cos(lat1 * rad) * cos(lat2_v * rad) * sin(dlon / 2.0)^2
+    2.0 * 6371.0 * asin(pmin(1.0, sqrt(pmax(0.0, a))))
+  }
+
+  if (!("doy" %in% names(df))) df$doy <- doy_raw
+  if (!("is_active_anthesis" %in% names(df))) df$is_active_anthesis <- orig_anth
+  if (!("pooled_anthesis_doy" %in% names(df))) df$pooled_anthesis_doy <- rep(NA_real_, n)
+
+  for (tx in unique(sp_vec[sp_vec != "Unknown"])) {
+    idx_tx <- which(sp_vec == tx)
+    anth_all <- idx_tx[orig_anth[idx_tx]]
+    leaf_all <- idx_tx[has_morph[idx_tx]]
+    don_idx <- idx_tx[orig_anth[idx_tx] & has_doy[idx_tx]]
+    if (length(don_idx) == 0L) next
+    f_anth_nl <- if (length(anth_all) > 0L) mean(!has_morph[anth_all]) else 0.0
+    f_leaf_st <- if (length(leaf_all) > 0L) mean(!orig_anth[leaf_all]) else 0.0
+    is_disj <- identical(gf_preset, "non_laminate_bypass") ||
+      (length(anth_all) > 0L && length(leaf_all) > 0L && f_anth_nl >= 0.60 && f_leaf_st >= 0.60)
+    if (!is_disj) next
+
+    targ_idx <- if (identical(gf_preset, "non_laminate_bypass")) idx_tx[!orig_anth[idx_tx]] else idx_tx[has_morph[idx_tx] & !orig_anth[idx_tx]]
+    for (j in targ_idx) {
+      d_km <- if (has_geo[j]) ifelse(has_geo[don_idx], hav_vec(lat_v[j], lon_v[j], lat_v[don_idx], lon_v[don_idx]), NA_real_) else rep(NA_real_, length(don_idx))
+      geo_hit <- is.finite(d_km) & (d_km <= 25.0)
+      cnty_hit <- (!has_geo[j] | !has_geo[don_idx]) & has_cnty[j] & has_cnty[don_idx] & (st_v[don_idx] == st_v[j]) & (cty_v[don_idx] == cty_v[j])
+      loc_pos <- which(geo_hit | cnty_hit)
+      if (length(loc_pos) >= 1L) {
+        loc_d <- don_idx[loc_pos]
+        w_d <- ifelse(is.finite(d_km[loc_pos]), 1.0 / pmax(1.0, d_km[loc_pos]), 1.0 / 12.5)
+        p_doy <- round(circ_wmean(doy_raw[loc_d], w_d), 2)
+        df$doy[j] <- p_doy; df$pooled_anthesis_doy[j] <- p_doy
+        df$is_active_anthesis[j] <- TRUE; df$phenology_hysteranthous_pooled[j] <- TRUE
+        adj_ok <- has_adj[loc_d]
+        if (any(adj_ok) && !has_adj[j]) {
+          if (!("hopkins_adjusted_doy" %in% names(df))) df$hopkins_adjusted_doy <- adj_raw
+          df$hopkins_adjusted_doy[j] <- round(circ_wmean(adj_raw[loc_d[adj_ok]], w_d[adj_ok]), 2)
+        }
+      } else if (length(don_idx) >= 3L) {
+        p_doy <- round(circ_med(doy_raw[don_idx]), 2)
+        df$doy[j] <- p_doy; df$pooled_anthesis_doy[j] <- p_doy
+        df$is_active_anthesis[j] <- TRUE; df$phenology_hysteranthous_pooled[j] <- TRUE
+        adj_ok <- has_adj[don_idx]
+        if (any(adj_ok) && !has_adj[j]) {
+          if (!("hopkins_adjusted_doy" %in% names(df))) df$hopkins_adjusted_doy <- adj_raw
+          df$hopkins_adjusted_doy[j] <- round(circ_med(adj_raw[don_idx[adj_ok]]), 2)
+        }
+      }
+    }
+  }
+  df
+}
+

@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 import cv2
 import numpy as np
 from scripts.vision.lm3_compat import DBSCAN
+from scripts.vision.growth_form_presets import get_growth_form_spec
 
 def _mask_basal_apical_fallback(mask: np.ndarray) -> Tuple[Tuple[int, int], Tuple[int, int]]:
     """Minimal contour endpoint fallback `(p_apex, p_base)` when bare 2D masks lack LM3 pose keypoints."""
@@ -60,6 +61,7 @@ def cluster_plant_individuals(
     specimen_mask: Optional[np.ndarray] = None,
     root_boxes: Optional[Sequence[Any]] = None,
     pixels_per_mm: Optional[float] = None,
+    growth_form_preset: Optional[str] = None,
 ) -> List[Any]:
     """
     Stem-aware spatial clustering across detected leaves on a herbarium sheet.
@@ -220,12 +222,15 @@ def cluster_plant_individuals(
                 elif abs(xa - xb) <= 0.12 * sw and abs(ya - yb) <= 0.60 * sh:
                     _union(ck_a, ck_b)
 
+        gf_spec = get_growth_form_spec(growth_form_preset)
+        rosette_mm = gf_spec.consolidate_rosette_mm
+
         # 3. Absorb isolated 1-leaf outliers within rosette/petiole reach of a multi-leaf cluster
         merged_members: Dict[int, List[int]] = {}
         for idx_i, cid_i in enumerate(inst_clusters):
             merged_members.setdefault(_find(cid_i), []).append(idx_i)
         multi_clusters = [ck for ck, idxs in merged_members.items() if len(idxs) >= 2]
-        if multi_clusters:
+        if multi_clusters and rosette_mm is not None:
             has_cal_px = False
             cal_ppm = 0.0
             if pixels_per_mm is not None:
@@ -234,7 +239,7 @@ def cluster_plant_individuals(
                     has_cal_px = bool(np.isfinite(cal_ppm) and cal_ppm > 0.0)
                 except (TypeError, ValueError):
                     has_cal_px = False
-            absorb_rad = (35.0 * cal_ppm) if has_cal_px else (0.12 * max_dim)
+            absorb_rad = (float(rosette_mm) * cal_ppm) if has_cal_px else (0.12 * max_dim)
 
             def _leaf_attach_pt(idx_leaf: int) -> Tuple[float, float]:
                 inst = instances[idx_leaf]

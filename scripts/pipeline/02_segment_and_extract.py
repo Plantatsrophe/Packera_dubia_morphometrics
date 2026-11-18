@@ -59,12 +59,12 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 import cv2
 import numpy as np
 import pandas as pd
-from scripts.vision.lm3_compat import DBSCAN
 
 # Ensure project root is in sys.path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+from scripts.vision.lm3_compat import DBSCAN
 
 from scripts.core.config import (
     PipelineConfig,
@@ -109,6 +109,16 @@ from scripts.vision.leaf_geometry_utils import (
 from scripts.vision.capitulum_phenology_classifier import (
     classify_single_capitulum,
     classify_voucher_phenology,
+)
+from scripts.vision.growth_form_presets import (
+    GROWTH_FORM_PRESETS,
+    GrowthFormSpec,
+    get_growth_form_spec,
+    resolve_effective_target_family,
+)
+from scripts.vision.reproductive_phenology_engine import (
+    classify_voucher_reproductive_phenology,
+    resolve_phenology_plugin,
 )
 from scripts.vision.organ_crown_metrics import classify_leaf_zone_anatomical
 from scripts.vision.step02_photometry_corymb_utils import (
@@ -486,6 +496,8 @@ class SegmentAndExtractPipeline:
         prep_workers: Optional[int] = None,
         post_workers: Optional[int] = None,
         save_debug_crops: Optional[bool] = None,
+        growth_form_preset: Optional[str] = None,
+        target_family: Optional[str] = None,
     ) -> None:
         self.db_path = db_path
         self.vouchers_csv = Path(vouchers_csv)
@@ -495,6 +507,15 @@ class SegmentAndExtractPipeline:
             self.output_dir = self.output_dir / "data"
         self.device = device
         self.config = config or PipelineConfig.from_yaml()
+        self.growth_form_spec: GrowthFormSpec = get_growth_form_spec(
+            growth_form_preset,
+            cfg=self.config,
+        )
+        self.growth_form_preset: str = self.growth_form_spec.name
+        self.target_family: str = resolve_effective_target_family(
+            target_family=target_family,
+            cfg=self.config,
+        )
 
         self.score_thresh = score_thresh
         self.threads: Optional[int] = resolve_cpu_threads(threads, self.config)
@@ -591,6 +612,16 @@ class SegmentAndExtractPipeline:
 
         _ect_cfg = _mod_section("ect")
         _seg_cfg = getattr(self.config, "segmentation", None)
+        self.treat_leaflet_as_leaf_whole: bool = bool(
+            self.growth_form_spec.treat_leaflet_as_leaf_whole
+            or (getattr(_seg_cfg, "treat_leaflet_as_leaf_whole", False) if _seg_cfg is not None else False)
+        )
+        if isinstance(self.lm3_settings, dict):
+            _mods_w = self.lm3_settings.setdefault("modules", {})
+            if isinstance(_mods_w, dict):
+                _ls_w = _mods_w.setdefault("leaf_segmenter", {})
+                if isinstance(_ls_w, dict):
+                    _ls_w["treat_leaflet_as_leaf_whole"] = self.treat_leaflet_as_leaf_whole
         self.save_debug_crops: bool = (
             bool(save_debug_crops)
             if save_debug_crops is not None
@@ -920,6 +951,70 @@ class SegmentAndExtractPipeline:
                     pass
             raise
 
+    def _is_asteraceae_phenology(self) -> bool:
+        return (
+            resolve_phenology_plugin(
+                self.growth_form_spec.phenology_plugin,
+                target_family=self.target_family,
+            )
+            == "asteraceae_radiate"
+        )
+
+    def _classify_voucher_pheno(
+        self,
+        catalog_number: str,
+        items: Sequence[Any],
+        min_anthesis_heads: int = 1,
+        cap_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        return dict(
+            classify_voucher_reproductive_phenology(
+                list(items),
+                phenology_plugin=self.growth_form_spec.phenology_plugin,
+                target_family=self.target_family,
+                catalog_number=catalog_number,
+                min_anthesis_heads_for_flowering=min_anthesis_heads,
+                capitulum_kwargs=cap_kwargs,
+            )
+        )
+
+    def _coerce_s1_class(self, raw_cls: Any) -> Tuple[Optional[int], bool]:
+        """Resolve an LM3 integer class ID or label string, promoting leaflets when configured."""
+        if isinstance(raw_cls, str):
+            low = raw_cls.strip().lower().replace("-", "_")
+            if low in ("leaflet", "leaflet_whole", "leaflet_one"):
+                return (0, True) if self.treat_leaflet_as_leaf_whole else (None, True)
+            if low == "leaflet_partial":
+                return (1, True) if self.treat_leaflet_as_leaf_whole else (None, True)
+            label_map = {
+                "leaf_whole": 0,
+                "leaf": 0,
+                "leaf_partial": 1,
+                "seed_fruit_one": 2,
+                "fruit_one": 2,
+                "fruit_whole": 2,
+                "fruit": 2,
+                "seed_fruit_many": 3,
+                "fruit_many": 3,
+                "flower_one": 4,
+                "flower_whole": 4,
+                "flower": 4,
+                "catkin": 4,
+                "flower_many": 5,
+                "bud": 6,
+                "bud_whole": 6,
+                "bud_one": 6,
+                "roots": 7,
+                "root": 7,
+                "wood": 8,
+                "stem": 8,
+            }
+            return label_map.get(low), False
+        try:
+            return int(raw_cls), False
+        except (TypeError, ValueError):
+            return None, False
+
     def _unpack_stage1_candidates(
         self,
         catalog_number: str,
@@ -983,11 +1078,22 @@ class SegmentAndExtractPipeline:
         c0_items: List[Tuple[Tuple[int, int, int, int], float, int]] = []
         c1_items: List[Tuple[Tuple[int, int, int, int], float, int]] = []
         for s1_item in stage1_detections:
-            if len(s1_item) == 4:
-                s1_bbox, s1_mask, s1_score, s1_cls = s1_item
+            if isinstance(s1_item, dict):
+                s1_bbox = tuple(int(v) for v in s1_item["bbox"][:4])  # type: ignore[assignment]
+                s1_mask = s1_item.get("mask")
+                s1_score = float(s1_item.get("score", s1_item.get("confidence", 1.0)))
+                raw_cls = s1_item.get("label", s1_item.get("class_name", s1_item.get("class_id")))
+            elif len(s1_item) == 4:
+                s1_bbox, s1_mask, s1_score, raw_cls = s1_item
             else:
-                s1_bbox, s1_score, s1_cls = s1_item
+                s1_bbox, s1_score, raw_cls = s1_item
                 s1_mask = None
+
+            s1_cls, is_leaflet_lbl = self._coerce_s1_class(raw_cls)
+            if s1_cls is None:
+                if is_leaflet_lbl:
+                    rejected_leaflet_delta += 1
+                continue
 
             if s1_cls in LM3_REPRODUCTIVE_CLASS_IDS:
                 capitulum_detections.append((s1_bbox, s1_mask, float(s1_score), int(s1_cls)))
@@ -1146,7 +1252,7 @@ class SegmentAndExtractPipeline:
                     "failure_reason": "image_not_found",
                     "details": f"File does not exist at {image_path}"
                 }
-                return _finish([], failure_record, pheno_rec=classify_voucher_phenology(catalog_number, []))
+                return _finish([], failure_record, pheno_rec=self._classify_voucher_pheno(catalog_number, []))
 
             img_bgr = cv2.imread(str(image_path))
             if img_bgr is None:
@@ -1156,7 +1262,7 @@ class SegmentAndExtractPipeline:
                     "failure_reason": "corrupted_image",
                     "details": "Failed to decode image with OpenCV"
                 }
-                return _finish([], failure_record, pheno_rec=classify_voucher_phenology(catalog_number, []))
+                return _finish([], failure_record, pheno_rec=self._classify_voucher_pheno(catalog_number, []))
 
         if self.force:
             self._purge_voucher_disk_artifacts(catalog_number)
@@ -1543,7 +1649,10 @@ class SegmentAndExtractPipeline:
                 raw_detections = self.model_engine.predict(img_bgr)
             raw_s2_leaves: List[Tuple[Tuple[int, int, int, int], np.ndarray, float, int]] = []
             raw_s2_petioles: List[Tuple[Tuple[int, int, int, int], np.ndarray, float]] = []
-            for bbox, mask, score, cls_id in raw_detections:
+            for bbox, mask, score, raw_cls_id in raw_detections:
+                cls_id, _ = self._coerce_s1_class(raw_cls_id)
+                if cls_id is None:
+                    continue
                 if cls_id in LM3_REPRODUCTIVE_CLASS_IDS:
                     capitulum_detections.append((bbox, mask, float(score), int(cls_id)))
                 elif int(cls_id) in (7, 9):
@@ -1616,14 +1725,6 @@ class SegmentAndExtractPipeline:
         )
 
         if not leaf_detections and not capitulum_detections:
-            failure_record = {
-                "catalogNumber": catalog_number,
-                "image_path": str(image_path),
-                "failure_reason": "no_leaves_detected",
-                "details": "Model produced 0 candidate leaf segmentations",
-                "pixels_per_mm": round(float(pixels_per_mm), 4) if is_calibrated_mm else np.nan,
-                "is_calibrated_mm": bool(is_calibrated_mm),
-            }
             empty_repro = {
                 "catalogNumber": catalog_number,
                 "plant_individual_id": 0,
@@ -1639,11 +1740,28 @@ class SegmentAndExtractPipeline:
             }
             _pheno_cfg = getattr(getattr(self.config, "thresholds", None), "capitulum_phenology", None)
             _min_anth_heads = int(getattr(_pheno_cfg, "min_anthesis_heads_for_flowering", 1) or 1)
-            empty_pheno = classify_voucher_phenology(
+            empty_pheno = self._classify_voucher_pheno(
                 catalog_number,
                 [],
-                min_anthesis_heads_for_flowering=_min_anth_heads,
+                min_anthesis_heads=_min_anth_heads,
             )
+            if self.growth_form_spec.bypass_planar_leaf_gate:
+                return _finish(
+                    [],
+                    None,
+                    repro_rec=empty_repro,
+                    pheno_rec=empty_pheno,
+                    repro_pid_out={0: empty_repro},
+                    pheno_pid_out={0: empty_pheno},
+                )
+            failure_record = {
+                "catalogNumber": catalog_number,
+                "image_path": str(image_path),
+                "failure_reason": "no_leaves_detected",
+                "details": "Model produced 0 candidate leaf segmentations",
+                "pixels_per_mm": round(float(pixels_per_mm), 4) if is_calibrated_mm else np.nan,
+                "is_calibrated_mm": bool(is_calibrated_mm),
+            }
             return _finish([], failure_record, repro_rec=empty_repro, pheno_rec=empty_pheno)
 
         # 3. Route Reproductive Detections (seed_fruit_one/many, flower_one/many, bud) to Phenology Classifier
@@ -1654,6 +1772,14 @@ class SegmentAndExtractPipeline:
         _min_floret_sat = float(getattr(_pheno_cfg, "min_floret_yellow_saturation", 0.32) if _pheno_cfg is not None else 0.32)
         _min_floret_rat = float(getattr(_pheno_cfg, "min_floret_yellow_ratio", 0.12) if _pheno_cfg is not None else 0.12)
         _min_anth_heads = int(getattr(_pheno_cfg, "min_anthesis_heads_for_flowering", 1) or 1) if _pheno_cfg is not None else 1
+        _cap_kw = {
+            "min_pappus_luminance": _min_pappus_lum,
+            "max_pappus_saturation": _max_pappus_sat,
+            "min_pappus_area_ratio": _min_pappus_area,
+            "min_floret_yellow_saturation": _min_floret_sat,
+            "min_floret_yellow_ratio": _min_floret_rat,
+        }
+        _is_aster_pheno = self._is_asteraceae_phenology()
         valid_capitula: List[Dict[str, Any]] = []
         head_pheno_results: List[Dict[str, Any]] = []
         raw_cap_items: List[Dict[str, Any]] = []
@@ -1679,7 +1805,7 @@ class SegmentAndExtractPipeline:
                     except TypeError:
                         cv2.imwrite(str(cap_patch_path), crop_bgr)
 
-                if crop_bgr.shape[0] >= 5 and crop_bgr.shape[1] >= 5:
+                if _is_aster_pheno and crop_bgr.shape[0] >= 5 and crop_bgr.shape[1] >= 5:
                     crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
                     head_pheno_item = classify_single_capitulum(
                         crop_rgb,
@@ -1762,15 +1888,27 @@ class SegmentAndExtractPipeline:
 
         repro_summary, _voucher_extra_heads = _summarize_repro_subset(raw_cap_items, pid_val=0)
         capitula_count = int(repro_summary["capitula_count"])
-        _pheno_rec = dict(classify_voucher_phenology(
+        _pheno_rec = self._classify_voucher_pheno(
             catalog_number,
-            head_pheno_results,
-            min_anthesis_heads_for_flowering=_min_anth_heads,
-        ))
+            raw_cap_items,
+            min_anthesis_heads=_min_anth_heads,
+            cap_kwargs=_cap_kw,
+        )
         _pheno_rec["plant_individual_id"] = 0
         _pheno_rec["total_capitula"] = int(_pheno_rec.get("total_capitula", 0)) + int(_voucher_extra_heads)
+        if "total_reproductive_organs" in _pheno_rec:
+            _pheno_rec["total_reproductive_organs"] = int(_pheno_rec["total_capitula"])
 
         if not leaf_detections:
+            if self.growth_form_spec.bypass_planar_leaf_gate:
+                return _finish(
+                    [],
+                    None,
+                    repro_rec=repro_summary,
+                    pheno_rec=_pheno_rec,
+                    repro_pid_out={0: repro_summary},
+                    pheno_pid_out={0: _pheno_rec},
+                )
             failure_record = {
                 "catalogNumber": catalog_number,
                 "image_path": str(image_path),
@@ -1826,6 +1964,7 @@ class SegmentAndExtractPipeline:
             specimen_mask=_spec_mask_sheet,
             root_boxes=root_detections,
             pixels_per_mm=pixels_per_mm if is_calibrated_mm else None,
+            growth_form_preset=self.growth_form_preset,
         )
 
         # 5. Basal Rosette Zone Statistics per plant_individual_id
@@ -2313,8 +2452,9 @@ class SegmentAndExtractPipeline:
                 m_ref["score"] = c_it["score"]
                 m_ref["class_id"] = c_it["class_id"]
             c_it["metrics"] = m_ref
+            c_it["peduncle_dir_xy"] = ped_dir
             c_bgr_r = c_it.get("crop_bgr")
-            if c_bgr_r is not None and c_bgr_r.size > 0 and c_bgr_r.shape[0] >= 5 and c_bgr_r.shape[1] >= 5:
+            if _is_aster_pheno and c_bgr_r is not None and c_bgr_r.size > 0 and c_bgr_r.shape[0] >= 5 and c_bgr_r.shape[1] >= 5:
                 c_it["head_pheno"] = classify_single_capitulum(
                     cv2.cvtColor(c_bgr_r, cv2.COLOR_BGR2RGB),
                     min_pappus_luminance=_min_pappus_lum,
@@ -2398,13 +2538,16 @@ class SegmentAndExtractPipeline:
             capitula_count = int(repro_summary["capitula_count"])
             _pheno_pid_v = 0
 
-        _pheno_rec = dict(classify_voucher_phenology(
+        _pheno_rec = self._classify_voucher_pheno(
             catalog_number,
-            [it["head_pheno"] for it in raw_cap_items if it.get("head_pheno") is not None],
-            min_anthesis_heads_for_flowering=_min_anth_heads,
-        ))
+            raw_cap_items,
+            min_anthesis_heads=_min_anth_heads,
+            cap_kwargs=_cap_kw,
+        )
         _pheno_rec["plant_individual_id"] = _pheno_pid_v
         _pheno_rec["total_capitula"] = int(_pheno_rec.get("total_capitula", 0)) + int(_voucher_extra_heads)
+        if "total_reproductive_organs" in _pheno_rec:
+            _pheno_rec["total_reproductive_organs"] = int(_pheno_rec["total_capitula"])
 
         petiole_scape_res = approximate_petiole_and_scape_metrics(
             basal_leaves=pose_inputs,
@@ -2495,13 +2638,16 @@ class SegmentAndExtractPipeline:
                 _r_sub["scape_to_basal_leaf_ratio"] = _pet_sub.get("scape_to_basal_leaf_ratio", np.nan)
                 _r_sub["is_bent_stem"] = bool(_pet_sub.get("is_bent_stem", False))
             _repro_by_pid_out[_pid_r] = _r_sub
-            _ph_sub = dict(classify_voucher_phenology(
+            _ph_sub = self._classify_voucher_pheno(
                 catalog_number,
-                _p_heads_ph,
-                min_anthesis_heads_for_flowering=_min_anth_heads,
-            ))
+                _p_caps,
+                min_anthesis_heads=_min_anth_heads,
+                cap_kwargs=_cap_kw,
+            )
             _ph_sub["plant_individual_id"] = int(_pid_r)
             _ph_sub["total_capitula"] = int(_ph_sub.get("total_capitula", 0)) + int(_sub_extra_heads)
+            if "total_reproductive_organs" in _ph_sub:
+                _ph_sub["total_reproductive_organs"] = int(_ph_sub["total_capitula"])
             _pheno_by_pid_out[_pid_r] = _ph_sub
 
         # Screen basal rosettes (>= 3 basal leaves) for half-folded blades (`AR > 1.85 * sibling_median` + straight fold edge)
@@ -2713,7 +2859,7 @@ class SegmentAndExtractPipeline:
             })
 
         failure_record = None
-        if not extracted_records:
+        if not extracted_records and not self.growth_form_spec.bypass_planar_leaf_gate:
             failure_record = {
                 "catalogNumber": catalog_number,
                 "image_path": str(image_path),
@@ -2850,6 +2996,10 @@ class SegmentAndExtractPipeline:
             "catalogNumber", "plant_individual_id", "total_capitula", "n_anthesis", "n_fruiting",
             "n_bud", "voucher_phenological_state", "dominant_pappus_ratio"
         ]
+        optional_pheno_cols = [
+            "n_senescent", "is_verified_anthesis", "reproductive_stage_confidence",
+            "total_reproductive_organs", "phenology_plugin",
+        ]
         pheno_rows_all: List[Dict[str, Any]] = []
         for c_k, base_phe in self.voucher_pheno_records.items():
             pid_map_p = self.voucher_pheno_by_pid.get(c_k)
@@ -2867,7 +3017,10 @@ class SegmentAndExtractPipeline:
         else:
             if "plant_individual_id" not in pheno_df.columns:
                 pheno_df["plant_individual_id"] = 0
-            pheno_df = pheno_df[[c for c in pheno_cols if c in pheno_df.columns]]
+            keep_pheno_cols = [c for c in pheno_cols if c in pheno_df.columns] + [
+                c for c in optional_pheno_cols if c in pheno_df.columns
+            ]
+            pheno_df = pheno_df[keep_pheno_cols]
 
         self._atomic_save_csv(extracted_df, manifest_path)
         self._atomic_save_csv(failed_df, failed_qc_path)
@@ -3628,6 +3781,23 @@ class SegmentAndExtractPipeline:
 
         logger.info("==================================================================")
 
+        if self.growth_form_spec.bypass_planar_leaf_gate and len(extracted_df) == 0:
+            curated_out = self.tables_dir / "curated_vouchers.csv"
+            if not curated_out.exists():
+                self._atomic_save_csv(df_vouchers, curated_out)
+            emit_progress(
+                2,
+                "non_laminate_bypass",
+                total_vouchers,
+                total_vouchers,
+                unit="vouchers",
+                status="skipped_cached",
+            )
+            logger.info(
+                f"Non-laminate bypass active ({self.growth_form_preset}): 0 planar leaves across "
+                f"{total_vouchers} vouchers; exported reproductive/phenology tables and metadata cleanly."
+            )
+
         if len(extracted_df) > 0:
             try:
                 env_run_dir = (
@@ -3808,6 +3978,21 @@ def parse_args() -> argparse.Namespace:
         default=bool(getattr(cfg.segmentation, "save_debug_crops", False)),
         help="Save per-capitulum RGB debug crop JPEGs under data/cropped_patches/capitula/.",
     )
+    parser.add_argument(
+        "--growth-form-preset",
+        dest="growth_form_preset",
+        type=str,
+        default=None,
+        choices=sorted(GROWTH_FORM_PRESETS.keys()),
+        help="Optional growth-form preset overriding config/env (e.g. rosette_herb, woody_branch, compound_leaf, non_laminate_bypass).",
+    )
+    parser.add_argument(
+        "--target-family",
+        dest="target_family",
+        type=str,
+        default=None,
+        help="Optional target botanical family overriding config/env for optical phenology routing.",
+    )
     return parser.parse_args()
 
 
@@ -3843,6 +4028,8 @@ def main() -> None:
         prep_workers=getattr(args, "prep_workers", None),
         post_workers=getattr(args, "post_workers", None),
         save_debug_crops=bool(getattr(args, "save_debug_crops", False)),
+        growth_form_preset=getattr(args, "growth_form_preset", None),
+        target_family=getattr(args, "target_family", None),
     )
     pipeline.run(limit=args.limit)
 

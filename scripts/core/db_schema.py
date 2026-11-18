@@ -216,6 +216,11 @@ def _build_master_view_ddl() -> str:
         v.usda_symbol AS usda_symbol,
         v.usda_county_status AS usda_county_status,
         v.infraspecific_taxon AS infraspecific_taxon,
+        v.portal_source AS portal_source,
+        v.specimen_sex AS specimen_sex,
+        v.seasonal_shoot_phase AS seasonal_shoot_phase,
+        v.infraspecific_rank AS infraspecific_rank,
+        v.infraspecific_epithet AS infraspecific_epithet,
         v.georef_qc_status AS georef_qc_status,
         v.is_centroid_or_inst_coord AS is_centroid_or_inst_coord,
         v.coord_quarantine_reason AS coord_quarantine_reason,
@@ -743,6 +748,11 @@ def _build_schema_ddl() -> str:
         usda_symbol TEXT,
         usda_county_status TEXT,
         infraspecific_taxon TEXT,
+        portal_source TEXT DEFAULT 'GBIF',
+        specimen_sex TEXT,
+        seasonal_shoot_phase TEXT,
+        infraspecific_rank TEXT,
+        infraspecific_epithet TEXT,
         georef_qc_status TEXT,
         is_centroid_or_inst_coord INTEGER DEFAULT 0,
         coord_quarantine_reason TEXT,
@@ -1042,6 +1052,25 @@ def _build_schema_ddl() -> str:
         updated_at TEXT NOT NULL,
         PRIMARY KEY (step_id, substage, accelerator_provider, cpu_threads)
     );
+
+    -- 12. Dynamic Non-Circular Taxonomic Specialists (OpenAlex / WCVP / Wikidata / Bionomia)
+    CREATE TABLE IF NOT EXISTS taxonomic_specialists (
+        specialist_id TEXT PRIMARY KEY,
+        scope_type TEXT NOT NULL,
+        scope_taxon TEXT NOT NULL,
+        canonical_name TEXT NOT NULL,
+        qualified_regex TEXT NOT NULL,
+        ipni_abbr TEXT,
+        orcid TEXT,
+        wikidata_qid TEXT,
+        openalex_works_count INTEGER NOT NULL DEFAULT 0,
+        bionomia_det_count INTEGER NOT NULL DEFAULT 0,
+        tier_cap TEXT NOT NULL DEFAULT 'Tier_1_Gold',
+        source TEXT NOT NULL,
+        user_verified INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_taxonomic_specialists_scope ON taxonomic_specialists(scope_taxon);
 
     -- =========================================================================
     -- TIER B: RUN-SCOPED ANALYTICAL TABLES & MASTER VIEW
@@ -1417,6 +1446,11 @@ _VOUCHERS_MIGRATION_COLUMNS: Tuple[Tuple[str, str], ...] = (
     ("usda_symbol", "TEXT"),
     ("usda_county_status", "TEXT"),
     ("infraspecific_taxon", "TEXT"),
+    ("portal_source", "TEXT DEFAULT 'GBIF'"),
+    ("specimen_sex", "TEXT"),
+    ("seasonal_shoot_phase", "TEXT"),
+    ("infraspecific_rank", "TEXT"),
+    ("infraspecific_epithet", "TEXT"),
     ("georef_qc_status", "TEXT"),
     ("is_centroid_or_inst_coord", "INTEGER DEFAULT 0"),
     ("coord_quarantine_reason", "TEXT"),
@@ -1735,7 +1769,7 @@ def _migrate_vouchers_schema_columns(conn: sqlite3.Connection) -> None:
             existing_cols.add(col_name)
 
 
-PLANTMATICS_SCHEMA_USER_VERSION: int = 20261128
+PLANTMATICS_SCHEMA_USER_VERSION: int = 20261129
 PACKERA_SCHEMA_USER_VERSION: int = PLANTMATICS_SCHEMA_USER_VERSION
 
 
@@ -2129,6 +2163,7 @@ def _migrate_dynamic_schema_columns(
         or "taxon_backbone_profiles" not in existing_tables
         or "natureserve_subnational_ranges" not in existing_tables
         or "step_telemetry_benchmarks" not in existing_tables
+        or "taxonomic_specialists" not in existing_tables
     ):
         conn.executescript(SCHEMA_DDL)
         # Ensure master view stays dropped until subsequent table rebuilds finish.
@@ -2142,6 +2177,7 @@ def _migrate_dynamic_schema_columns(
                 "taxon_backbone_profiles",
                 "natureserve_subnational_ranges",
                 "step_telemetry_benchmarks",
+                "taxonomic_specialists",
             }
         )
 
@@ -2278,6 +2314,7 @@ def init_db_schema(conn: sqlite3.Connection) -> None:
             "taxon_backbone_profiles",
             "natureserve_subnational_ranges",
             "step_telemetry_benchmarks",
+            "taxonomic_specialists",
             "pipeline_runs",
             "leaf_efa_harmonics",
             "taxon_complexes",
@@ -2292,13 +2329,18 @@ def init_db_schema(conn: sqlite3.Connection) -> None:
                 or "usda_county_status" not in v_cols
                 or "is_centroid_or_inst_coord" not in v_cols
                 or "coord_quarantine_reason" not in v_cols
+                or "portal_source" not in v_cols
+                or "specimen_sex" not in v_cols
+                or "seasonal_shoot_phase" not in v_cols
+                or "infraspecific_rank" not in v_cols
+                or "infraspecific_epithet" not in v_cols
             ):
                 _migrate_vouchers_schema_columns(conn)
             el_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(extracted_leaves);").fetchall()}
             om_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(otu_morphometrics);").fetchall()}
             srf_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(spatial_rf_predictions);").fetchall()}
             mv_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(v_integrative_triage_master);").fetchall()}
-            req_mv_cols = {"is_passive", "scale_source", "AR_inv_std", "log1p_capitulum_count", "blade_cie_l_norm", "blade_cie_l_sheet_delta", "blade_cie_a_delta", "blade_cie_b_delta", "nearest_type_basionym", "reproductive_trait_status", "ecoregion_can1", "ecoregion_can2", "hybrid_zone_cohesion_pass", "hybrid_parent_1", "hybrid_parent_2", "cda_oof_posterior_prob", "self_morph_mahal_d2", "open_set_df", "cryptic_non_clinal_pass", "resurrection_basionym", "w_geno_kappa", "geno_predicted_taxon", "geno_linkage_tier", "is_geno_admixed", "coalescent_gdi", "hybrid_generation_class", "cytonuclear_discordant", "public_plastome_match", "public_its_match", "waxy_lineage_match", "public_backbone_clade", "public_phytop_ils_index", "public_phytop_ih_index", "genomic_propagation_tier", "cluster_propagated_gdi", "cytology_linkage_tier", "voucher_sporophytic_2n", "voucher_ploidy_level", "taxon_reported_cytotypes", "is_multi_cytotype_taxon", "cytotype_reproductive_barrier_pass", "soil_ca_mg_molar_ratio", "soil_ultramafic_ni_cr_index", "soil_carbonate_c_pct", "is_nwi_wetland", "nwi_wetland_system", "nwi_wetland_dist_m", "hydro_edaphic_niche_regime", "wetland_fidelity_concordance", "basionym_synonymy_type", "backbone_basionym_name", "protologue_url", "natureserve_global_rank", "nwpl_indicator_code", "nwpl_wetland_score", "is_centroid_or_inst_coord", "coord_quarantine_reason", "env_mahal_d2", "env_mcd_outlier_flag"}
+            req_mv_cols = {"is_passive", "scale_source", "AR_inv_std", "log1p_capitulum_count", "blade_cie_l_norm", "blade_cie_l_sheet_delta", "blade_cie_a_delta", "blade_cie_b_delta", "nearest_type_basionym", "reproductive_trait_status", "ecoregion_can1", "ecoregion_can2", "hybrid_zone_cohesion_pass", "hybrid_parent_1", "hybrid_parent_2", "cda_oof_posterior_prob", "self_morph_mahal_d2", "open_set_df", "cryptic_non_clinal_pass", "resurrection_basionym", "w_geno_kappa", "geno_predicted_taxon", "geno_linkage_tier", "is_geno_admixed", "coalescent_gdi", "hybrid_generation_class", "cytonuclear_discordant", "public_plastome_match", "public_its_match", "waxy_lineage_match", "public_backbone_clade", "public_phytop_ils_index", "public_phytop_ih_index", "genomic_propagation_tier", "cluster_propagated_gdi", "cytology_linkage_tier", "voucher_sporophytic_2n", "voucher_ploidy_level", "taxon_reported_cytotypes", "is_multi_cytotype_taxon", "cytotype_reproductive_barrier_pass", "soil_ca_mg_molar_ratio", "soil_ultramafic_ni_cr_index", "soil_carbonate_c_pct", "is_nwi_wetland", "nwi_wetland_system", "nwi_wetland_dist_m", "hydro_edaphic_niche_regime", "wetland_fidelity_concordance", "basionym_synonymy_type", "backbone_basionym_name", "protologue_url", "natureserve_global_rank", "nwpl_indicator_code", "nwpl_wetland_score", "is_centroid_or_inst_coord", "coord_quarantine_reason", "env_mahal_d2", "env_mcd_outlier_flag", "portal_source", "specimen_sex", "seasonal_shoot_phase", "infraspecific_rank", "infraspecific_epithet"}
             if (
                 ("canonical_packera" in ts_cols and "canonical_taxon" not in ts_cols)
                 or ("canonical_packera" in ucr_cols and "canonical_taxon" not in ucr_cols)

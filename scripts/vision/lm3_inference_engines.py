@@ -29,12 +29,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import cv2
-import scripts.vision.lm3_compat  # noqa: F401
 import numpy as np
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+import scripts.vision.lm3_compat  # noqa: F401
 LM3_PACKAGE_ROOT = PROJECT_ROOT / "LeafMachine3"
 if LM3_PACKAGE_ROOT.is_dir() and str(LM3_PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(LM3_PACKAGE_ROOT))

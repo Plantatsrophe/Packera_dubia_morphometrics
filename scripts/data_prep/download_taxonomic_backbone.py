@@ -17,13 +17,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.core.config import load_dotenv_defaults, resolve_target_genus
+from scripts.core.config import load_dotenv_defaults, resolve_infraspecific_rank_policy, resolve_target_genus
 from scripts.core.db import (
     get_db_connection, is_canonical_or_explicit_db_context, resolve_db_path,
     upsert_natureserve_subnational_ranges, upsert_taxon_backbone_profiles,
 )
 from scripts.core.epa_ecoregions import _CANADIAN_PROV_ABBR_TO_FULL, _US_STATE_ABBR_TO_FULL, _normalize_us_state_name
 from scripts.core.io_utils import atomic_write_csv_rows, atomic_write_text, default_http_get, to_text
+from scripts.core.specialist_discovery_utils import discover_and_sync_specialists
 
 PROFILE_CSV_NAME = "public_taxon_backbone_profiles.csv"
 RANGE_CSV_NAME = "public_natureserve_subnational_ranges.csv"
@@ -80,20 +81,27 @@ def _http_request_json(url: str, *, http_get_fn: Optional[Callable[[str], Any]] 
         return None
 
 
-def _parse_species_name(raw_name: Any, target_genus: str) -> Tuple[Optional[str], str, bool]:
-    """Normalize a botanical binomial into `(species_standardized, display_name, is_hybrid)`."""
+def _parse_species_name(raw_name: Any, target_genus: str, infraspecific_policy: Optional[str] = None) -> Tuple[Optional[str], str, bool]:
+    """Normalize a botanical binomial (or accepted trinomial when enabled) into `(species_standardized, display_name, is_hybrid)`."""
     if not raw_name:
         return None, "", False
     txt = re.sub(r"\s+", " ", str(raw_name).strip())
-    if re.search(r"\b(?:var|subsp|ssp|f|cv)\.?\s+", txt, flags=re.IGNORECASE):
-        return None, "", False
-    m = re.match(r"^([A-Za-z-]+)(?:\s*(×)\s*|\s+[xX]\s+|\s+)([a-z][a-z-]+)\b", txt)
-    if not m:
+    policy = infraspecific_policy or resolve_infraspecific_rank_policy()
+    has_infra = re.search(r"\b(?:var|subsp|ssp|f|cv)\.?\s+", txt, flags=re.IGNORECASE)
+    if (has_infra and policy != "preserve_accepted_trinomials") or not (m := re.match(r"^([A-Za-z-]+)(?:\s*(×)\s*|\s+[xX]\s+|\s+)([a-z][a-z-]+)\b", txt)):
         return None, "", False
     genus, epithet = m.group(1).capitalize(), m.group(3).lower()
     if genus.lower() != target_genus.strip().lower() or epithet in {"sp", "spp", "cf", "aff", "x"}:
         return None, "", False
     is_hybrid = bool(m.group(2) or re.match(r"^[A-Za-z-]+\s+[xX×]\s*[a-z]", txt))
+    if has_infra:
+        mi = re.search(r"\b(var|subsp|ssp|f|cv)\.?\s+([a-z][a-z-]+)\b", txt[m.end():], flags=re.IGNORECASE)
+        if not mi or mi.group(1).lower() in {"f", "cv"} or (inf_ep := mi.group(2).lower()) in {"sp", "spp", "cf", "aff", "x"}:
+            return None, "", False
+        if inf_ep != epithet:
+            rk = "subsp." if mi.group(1).lower() in {"subsp", "ssp"} else "var."
+            sp_std = f"{genus} {epithet} {rk} {inf_ep}"
+            return sp_std, (f"{genus} × {epithet} {rk} {inf_ep}" if is_hybrid else sp_std), is_hybrid
     sp_std = f"{genus} {epithet}"
     return sp_std, (f"{genus} × {epithet}" if is_hybrid else sp_std), is_hybrid
 
@@ -167,7 +175,7 @@ def _parse_col_entries(entries: Sequence[Mapping[str, Any]], target_genus: str, 
             if acc_std and (full_lbl := f"{sci} {auth}".strip() if auth else str(sci).strip()):
                 syn_queue.append((acc_std, full_lbl, ("homotypic" in status) or bool(usage.get("homotypic") or item.get("homotypic"))))
             continue
-        if rank and rank not in {"species", "nothospecies"}:
+        if rank and rank not in ({"species", "nothospecies", "subspecies", "variety"} if resolve_infraspecific_rank_policy() == "preserve_accepted_trinomials" else {"species", "nothospecies"}):
             continue
         sp_std, disp_name, is_hyb = _parse_species_name(sci, target_genus)
         if not sp_std:
@@ -397,6 +405,7 @@ def download_taxonomic_backbone(
     eff_db = resolve_db_path(db_path=db_path, workspace_root=PROJECT_ROOT)
     prof_csv, range_csv, manifest_json = eff_dir / PROFILE_CSV_NAME, eff_dir / RANGE_CSV_NAME, eff_dir / MANIFEST_JSON_NAME
     prof_rows_existing = _read_csv_safe(prof_csv)
+    profiles: Optional[Dict[str, Dict[str, Any]]] = None
     need_full = force or not prof_rows_existing
     need_ns = need_full or not _read_csv_safe(range_csv)
     if not sync_only and (need_full or need_ns):
@@ -414,7 +423,9 @@ def download_taxonomic_backbone(
     if not sync_ok:
         print("[WARN] Standalone taxonomy dir without explicit --db; skipping canonical DB sync.")
     counts = sync_backbone_csvs_to_db(eff_dir, eff_db) if sync_ok else {"taxon_backbone_profiles": 0, "natureserve_subnational_ranges": 0}
-    return {"taxonomy_dir": str(eff_dir), "target_genus": eff_genus, "db_path": str(eff_db), **counts}
+    spec_sync = sync_only or any(fn is not None for fn in (col_http_fn, bhl_http_fn, natureserve_http_fn))
+    spec_rows = discover_and_sync_specialists(eff_genus, taxonomy_dir=eff_dir, db_path=eff_db if sync_ok else None, wcvp_profiles=profiles, force=force, sync_only=spec_sync)
+    return {"taxonomy_dir": str(eff_dir), "target_genus": eff_genus, "db_path": str(eff_db), **counts, "taxonomic_specialists": len(spec_rows)}
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

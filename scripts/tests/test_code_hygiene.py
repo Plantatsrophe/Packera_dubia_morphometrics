@@ -324,6 +324,13 @@ class TestCodeHygiene(unittest.TestCase):
             PROJECT_ROOT / "scripts" / "tests" / "test_step07_audit_hygiene.py": 400,
             PROJECT_ROOT / "scripts" / "core" / "progress_telemetry.py": 350,
             PROJECT_ROOT / "scripts" / "tests" / "test_v15_taxon_and_telemetry.py": 380,
+            PROJECT_ROOT / "scripts" / "core" / "specialist_discovery_utils.py": 360,
+            PROJECT_ROOT / "scripts" / "core" / "idigbio_symbiota_harvester.py": 360,
+            PROJECT_ROOT / "scripts" / "vision" / "growth_form_presets.py": 280,
+            PROJECT_ROOT / "scripts" / "vision" / "reproductive_phenology_engine.py": 320,
+            PROJECT_ROOT / "scripts" / "morphometrics" / "dimorphism_blocking_utils.R": 240,
+            PROJECT_ROOT / "scripts" / "tests" / "test_m1b_specialists_and_portals.py": 380,
+            PROJECT_ROOT / "scripts" / "tests" / "test_m1b_presets_dimorphism_hysteranthous.py": 360,
         }
         bounded_paths = (
             *strict_ceilings.keys(),

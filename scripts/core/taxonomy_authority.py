@@ -1393,11 +1393,20 @@ _COLLECTOR_REFERENCE_REGEX = re.compile(
 
 
 def _has_core_monographer_match(text: str) -> bool:
-    """Return True if `text` matches a core Packera / Senecioneae monographer."""
+    """Return True if `text` matches a core Packera / Senecioneae monographer (when active genus is Packera)."""
     if not text or not str(text).strip():
         return False
     s_str = str(text).strip()
     if _has_non_person_determination_token(s_str):
+        return False
+    from scripts.core.config import resolve_target_genus
+    from scripts.core.specialist_discovery_utils import load_specialist_pattern_sets
+
+    eff_genus = (resolve_target_genus() or "Packera").strip()
+    if eff_genus.lower() != "packera":
+        return False
+    _, excluded_pats = load_specialist_pattern_sets(target_genus=eff_genus)
+    if any(ex_pat and re.search(ex_pat, s_str, re.IGNORECASE) for ex_pat in excluded_pats):
         return False
     surnames = set(normalize_determiner_surnames(s_str))
     if surnames & CORE_PACKERA_MONOGRAPHERS:
@@ -1407,24 +1416,30 @@ def _has_core_monographer_match(text: str) -> bool:
 
 def _has_specialist_match(text: str, extra_patterns: Optional[Iterable[str]] = None) -> bool:
     """
-    Returns True if `text` matches a recognized North American Packera / Senecioneae
-    taxonomic specialist via normalized surnames (`PACKERA_SPECIALISTS`), initial-qualified
-    specialist regexes (`_QUALIFIED_SPECIALIST_REGEXES`), `SPECIALIST_PATTERNS`, or optional
-    `extra_patterns`.
+    Returns True if `text` matches an active taxonomic specialist for the active genus
+    via `load_specialist_pattern_sets()` (with Packera monographer fallback when target_genus
+    is Packera), or optional `extra_patterns`, while enforcing user exclusions (`user_verified == -1`).
     """
     if not text or not str(text).strip():
         return False
     s_str = str(text).strip()
     if _has_non_person_determination_token(s_str):
         return False
-    surnames = set(normalize_determiner_surnames(s_str))
-    if surnames & PACKERA_SPECIALISTS:
-        return True
-    for q_rx in _QUALIFIED_SPECIALIST_REGEXES:
-        if q_rx.search(s_str):
+    from scripts.core.config import resolve_target_genus
+    from scripts.core.specialist_discovery_utils import load_specialist_pattern_sets
+
+    eff_genus = (resolve_target_genus() or "Packera").strip()
+    active_pats, excluded_pats = load_specialist_pattern_sets(target_genus=eff_genus)
+    if any(ex_pat and re.search(ex_pat, s_str, re.IGNORECASE) for ex_pat in excluded_pats):
+        return False
+    if eff_genus.lower() == "packera":
+        surnames = set(normalize_determiner_surnames(s_str))
+        if surnames & PACKERA_SPECIALISTS:
             return True
-    for pat in SPECIALIST_PATTERNS:
-        if re.search(pat, s_str, re.IGNORECASE):
+        if any(q_rx.search(s_str) for q_rx in _QUALIFIED_SPECIALIST_REGEXES):
+            return True
+    for pat in active_pats:
+        if pat and re.search(pat, s_str, re.IGNORECASE):
             return True
     if extra_patterns:
         for pat in extra_patterns:
@@ -2024,7 +2039,10 @@ def apply_corpus_authority_tiers(
         eff_specs = set(dynamic_specialists)
         eff_herbs = set(dynamic_herbaria)
 
+    from scripts.core.config import resolve_target_genus
     from scripts.core.harvester import standardize_taxon_name
+
+    eff_genus_corp = (resolve_target_genus() or "Packera").strip().lower()
 
     # Tally (institutionCode, identifiedBy) batch statistics to detect undated institutional batch transfers
     batch_voucher_counts: Dict[Tuple[str, str], int] = {}
@@ -2085,9 +2103,10 @@ def apply_corpus_authority_tiers(
         _inst_k, _id_k = b_key
         if _has_specialist_match(_id_k):
             inst_set_for_det = set(det_institutions.get(_id_k, set()))
-            for _sn in normalize_determiner_surnames(_id_k):
-                if _sn in PACKERA_SPECIALISTS:
-                    inst_set_for_det |= surname_institutions.get(_sn, set())
+            if eff_genus_corp == "packera":
+                for _sn in normalize_determiner_surnames(_id_k):
+                    if _sn in PACKERA_SPECIALISTS:
+                        inst_set_for_det |= surname_institutions.get(_sn, set())
             n_inst_for_det = len(inst_set_for_det)
             sp_counts = key_species_counts.get(b_key, {})
             n_species_in_batch = len(sp_counts)

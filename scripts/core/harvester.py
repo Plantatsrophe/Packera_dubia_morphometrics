@@ -28,7 +28,7 @@ import tempfile
 import time
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple, Union
 
 try:
     import aiohttp
@@ -120,6 +120,11 @@ from scripts.core.db import (
     upsert_taxon_synonyms,
     upsert_vouchers_records,
 )
+from scripts.core import config as _core_config
+from scripts.core.idigbio_symbiota_harvester import (
+    _normalize_portal_sources,
+    fetch_and_deduplicate_portal_records,
+)
 from scripts.core.progress_telemetry import StepETATracker, emit_progress
 from scripts.core.step01_biogeography_utils import (
     normalize_packera_orthography,
@@ -202,6 +207,171 @@ def _extract_infraspecific_taxon(raw_name: Any) -> str:
         "nothovar": "nothovar.",
     }
     return f"{rk_map.get(rk_raw, rk_raw + '.')} {ep}"
+
+
+_VALID_INFRASPECIFIC_POLICIES: Set[str] = {
+    "collapse_to_species",
+    "preserve_accepted_trinomials",
+}
+
+
+def _resolve_infraspecific_policy(
+    explicit_policy: Optional[str] = None,
+    cfg: Optional[Any] = None,
+) -> str:
+    """Resolve infraspecific rank policy via explicit arg, config.py resolver, env, or default."""
+    if explicit_policy is not None and str(explicit_policy).strip():
+        cand = str(explicit_policy).strip().lower()
+        return cand if cand in _VALID_INFRASPECIFIC_POLICIES else "collapse_to_species"
+    fn = getattr(_core_config, "resolve_infraspecific_rank_policy", None)
+    if callable(fn):
+        try:
+            cand = str(fn(cfg) if cfg is not None else fn()).strip().lower()
+            if cand in _VALID_INFRASPECIFIC_POLICIES:
+                return cand
+        except Exception:
+            pass
+    env_pol = (
+        os.environ.get("PLANTMATICS_INFRASPECIFIC_POLICY", "").strip().lower()
+        or os.environ.get("PLANTMATICS_INFRASPECIFIC_RANK_POLICY", "").strip().lower()
+    )
+    if env_pol in _VALID_INFRASPECIFIC_POLICIES:
+        return env_pol
+    active_cfg = cfg if cfg is not None else _DEFAULT_CONFIG
+    for section_name in ("taxa", "harvesting"):
+        sec = getattr(active_cfg, section_name, None)
+        val = str(getattr(sec, "infraspecific_rank_policy", "") or "").strip().lower()
+        if val in _VALID_INFRASPECIFIC_POLICIES:
+            return val
+    return "collapse_to_species"
+
+
+def _parse_accepted_infraspecific_parts(
+    raw_name: Any,
+    species_epithet: Optional[str] = None,
+) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Extract accepted `(rank, epithet)` for `subsp.` / `ssp.` -> `'subsp.'` and `var.` -> `'var.'`.
+    Collapses autonyms (`infraspecific_epithet == species_epithet`) and rejects `f.` / `forma` / `cv.`.
+    """
+    if raw_name is None or (isinstance(raw_name, float) and math.isnan(raw_name)):
+        return None, None
+    txt = re.sub(r"\s+", " ", str(raw_name).strip())
+    if not txt:
+        return None, None
+    m_bin = re.match(r"^[A-Za-z]+(?:\s*×\s*|\s+[xX×]\s+|\s+)([a-zA-Z][a-zA-Z-]*)(.*)$", txt)
+    if not m_bin:
+        return None, None
+    sp_ep = (species_epithet or m_bin.group(1)).lower().strip("-")
+    tail = m_bin.group(2) or ""
+    if not tail.strip():
+        return None, None
+    m_acc = re.search(
+        r"(?<!sub)(?<!notho)\b(subsp|ssp|var)\.?\s+([a-z][a-z-]{1,})\b",
+        tail,
+        flags=re.IGNORECASE,
+    )
+    if not m_acc:
+        return None, None
+    if re.search(r"\bcv\.?\b", tail[:m_acc.start()], flags=re.IGNORECASE):
+        return None, None
+    rk_raw = m_acc.group(1).lower()
+    ep = m_acc.group(2).lower().strip("-")
+    if ep in _OPEN_NOMENCLATURE_EPITHETS or ep in {"subsp", "ssp", "var", "forma", "cv"}:
+        return None, None
+    if sp_ep and ep == sp_ep:
+        return None, None
+    return ("subsp." if rk_raw in {"subsp", "ssp"} else "var."), ep
+
+
+_SEX_FIELD_STAMINATE_RE = re.compile(
+    r"(?<!\bnot\s)(?<!\bno\s)(?<!\bnon-)\b(?:staminate|androecious|male)\b",
+    re.IGNORECASE,
+)
+_SEX_FIELD_PISTILLATE_RE = re.compile(
+    r"(?<!\bnot\s)(?<!\bno\s)(?<!\bnon-)\b(?:pistillate|carpellate|gynoecious|female)\b",
+    re.IGNORECASE,
+)
+_TEXT_STAMINATE_RE = re.compile(
+    r"(?<!\bnot\s)(?<!\bno\s)(?<!\bnon-)\b(?:staminate|androecious|"
+    r"male\s+(?:catkins?|aments?|flowers?|florets?|plants?|cones?|strobili|inflorescences?))\b",
+    re.IGNORECASE,
+)
+_TEXT_PISTILLATE_RE = re.compile(
+    r"(?<!\bnot\s)(?<!\bno\s)(?<!\bnon-)\b(?:pistillate|carpellate|gynoecious|"
+    r"female\s+(?:catkins?|aments?|flowers?|florets?|plants?|cones?|strobili|inflorescences?))\b",
+    re.IGNORECASE,
+)
+_HERMAPHRODITE_RE = re.compile(
+    r"(?<!\bnot\s)(?<!\bno\s)(?<!\bnon-)\b(?:hermaphrodit(?:e|ic)|bisexual|monoecious|perfect(?:\s+flowers?)?)\b",
+    re.IGNORECASE,
+)
+_HERMAPHRODITE_TEXT_RE = re.compile(
+    r"(?<!\bnot\s)(?<!\bno\s)(?<!\bnon-)\b(?:hermaphrodit(?:e|ic)|bisexual|monoecious|perfect\s+flowers?)\b",
+    re.IGNORECASE,
+)
+_SHOOT_PHASE_RULES: Tuple[Tuple[str, re.Pattern[str]], ...] = (
+    ("cleistogamous", re.compile(r"(?<!\bnot\s)(?<!\bno\s)(?<!\bwithout\s)(?<!\bnon-)\bcleistogam(?:ous|y|ic)?\b", re.IGNORECASE)),
+    ("chasmogamous", re.compile(r"(?<!\bnot\s)(?<!\bno\s)(?<!\bwithout\s)(?<!\bnon-)\bchasmogam(?:ous|y|ic)?\b", re.IGNORECASE)),
+    ("vernal", re.compile(r"(?<!\bnot\s)(?<!\bno\s)(?<!\bwithout\s)(?<!\bnon-)\bvernal(?:\s+(?:phase|culms?|shoots?|rosettes?|leaves|leaf|growth|stage|form))?\b", re.IGNORECASE)),
+    ("autumnal", re.compile(r"(?<!\bnot\s)(?<!\bno\s)(?<!\bwithout\s)(?<!\bnon-)\bautumnal(?:\s+(?:phase|culms?|shoots?|leaves|leaf|growth|stage|form))?\b", re.IGNORECASE)),
+    ("sterile_frond", re.compile(r"(?<!\bnot\s)(?<!\bno\s)(?<!\bwithout\s)(?<!\bnon-)\b(?:sterile|vegetative)\s+fronds?\b", re.IGNORECASE)),
+    ("fertile_frond", re.compile(r"(?<!\bnot\s)(?<!\bno\s)(?<!\bwithout\s)(?<!\bnon-)\b(?:fertile\s+fronds?|sporophylls?)\b", re.IGNORECASE)),
+)
+
+
+def parse_specimen_sex_and_shoot_phase(record: Mapping[str, Any]) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Extract `(specimen_sex, seasonal_shoot_phase)` from Darwin Core sex and phenology remarks.
+    Returns `specimen_sex` in `{'staminate', 'pistillate', 'hermaphrodite', None}` and
+    `seasonal_shoot_phase` in `{'chasmogamous', 'cleistogamous', 'vernal', 'autumnal', 'sterile_frond', 'fertile_frond', None}`.
+    """
+    if not isinstance(record, Mapping):
+        return None, None
+
+    def _field_str(key: str) -> str:
+        val = record.get(key)
+        if val is None or (isinstance(val, float) and math.isnan(val)):
+            return ""
+        txt = str(val).strip()
+        return "" if txt.lower() in {"none", "nan", "null"} else txt
+
+    specimen_sex: Optional[str] = None
+    for fld in ("sex", "reproductiveCondition", "dynamicProperties", "occurrenceRemarks", "fieldNotes"):
+        txt = _field_str(fld)
+        if not txt:
+            continue
+        if fld == "sex":
+            stam_hit = bool(_SEX_FIELD_STAMINATE_RE.search(txt))
+            pist_hit = bool(_SEX_FIELD_PISTILLATE_RE.search(txt))
+            herm_hit = bool(_HERMAPHRODITE_RE.search(txt))
+        else:
+            stam_hit = bool(_TEXT_STAMINATE_RE.search(txt))
+            pist_hit = bool(_TEXT_PISTILLATE_RE.search(txt))
+            herm_hit = bool(_HERMAPHRODITE_TEXT_RE.search(txt))
+        if herm_hit or (stam_hit and pist_hit):
+            specimen_sex = "hermaphrodite"
+            break
+        if stam_hit:
+            specimen_sex = "staminate"
+            break
+        if pist_hit:
+            specimen_sex = "pistillate"
+            break
+
+    shoot_phase: Optional[str] = None
+    for fld in ("reproductiveCondition", "dynamicProperties", "sex", "occurrenceRemarks", "fieldNotes"):
+        txt = _field_str(fld)
+        if not txt:
+            continue
+        for label, pat in _SHOOT_PHASE_RULES:
+            if pat.search(txt):
+                shoot_phase = label
+                break
+        if shoot_phase is not None:
+            break
+
+    return specimen_sex, shoot_phase
 
 
 _CULTIVATED_STATUS_TOKENS: Set[str] = {
@@ -945,7 +1115,11 @@ def expand_taxon_synonyms_gbif(
     return expanded
 
 
-def standardize_taxon_name(raw_name: Any, target_genus: Optional[str] = None) -> Optional[str]:
+def standardize_taxon_name(
+    raw_name: Any,
+    target_genus: Optional[str] = None,
+    infraspecific_policy: Optional[str] = None,
+) -> Optional[str]:
     """
     Dynamically standardize raw Darwin Core scientific names, infraspecific ranks,
     unaccepted synonyms, and historical basionyms for the active `target_genus`.
@@ -959,6 +1133,7 @@ def standardize_taxon_name(raw_name: Any, target_genus: Optional[str] = None) ->
     eff_genus_low = eff_genus.lower()
     genus_prefix = f"{eff_genus} "
     eff_syn_genera = _effective_synonym_genera(eff_genus)
+    eff_policy = _resolve_infraspecific_policy(infraspecific_policy)
 
     s_compact = re.sub(r"\s+", " ", s_orig.lower())
     if s_compact in {"none", "nan", "null", "na", "unknown", eff_genus_low}:
@@ -966,6 +1141,19 @@ def standardize_taxon_name(raw_name: Any, target_genus: Optional[str] = None) ->
 
     cand_bin = _extract_canonical_binomial(s_orig, eff_syn_genera)
     is_non_target_syn_genus = bool(cand_bin and cand_bin.split(" ", 1)[0] in (eff_syn_genera - {eff_genus}))
+
+    def _apply_infraspecific_policy(base_taxon: Optional[str], allow_preserve: bool = True) -> Optional[str]:
+        if not base_taxon:
+            return None
+        if eff_policy != "preserve_accepted_trinomials" or not allow_preserve:
+            return base_taxon
+        if not base_taxon.startswith(genus_prefix) or " " not in base_taxon:
+            return base_taxon
+        base_ep = base_taxon.split(" ", 1)[1].split(" ", 1)[0]
+        rk, ep = _parse_accepted_infraspecific_parts(s_orig, species_epithet=base_ep)
+        if rk and ep:
+            return f"{base_taxon} {rk} {ep}"
+        return base_taxon
 
     # When pygbif.species is mocked in a unit test, allow mocked basionym or exact-synonym
     # lookups to resolve directly without being shadowed by earlier cache state.
@@ -980,13 +1168,17 @@ def standardize_taxon_name(raw_name: Any, target_genus: Optional[str] = None) ->
                 allow_packera_species_remap=is_exact_syn,
                 target_genus=eff_genus,
             )
-            return gbif_acc
+            return _apply_infraspecific_policy(
+                gbif_acc,
+                allow_preserve=(not is_non_target_syn_genus and bool(cand_bin and gbif_acc.lower() == cand_bin.lower())),
+            )
 
     # 1. Dynamic GBIF Backbone & runtime/SQLite synonym dictionary lookup
     if s_compact in _DYNAMIC_SYNONYM_TO_CANONICAL:
         mapped = _DYNAMIC_SYNONYM_TO_CANONICAL[s_compact]
         if mapped.startswith(genus_prefix):
-            return mapped
+            same_species = bool(cand_bin and mapped.lower() == cand_bin.lower())
+            return _apply_infraspecific_policy(mapped, allow_preserve=same_species)
 
     var_m = re.match(r"^([a-z]+\s+[a-z-]+\s+(?:var\.?|subsp\.?|ssp\.?|f\.?)\s+[a-z-]+)", s_compact)
     if var_m:
@@ -994,17 +1186,20 @@ def standardize_taxon_name(raw_name: Any, target_genus: Optional[str] = None) ->
         if var_raw in _DYNAMIC_SYNONYM_TO_CANONICAL:
             mapped = _DYNAMIC_SYNONYM_TO_CANONICAL[var_raw]
             if mapped.startswith(genus_prefix):
-                return mapped
+                same_species = bool(cand_bin and mapped.lower() == cand_bin.lower())
+                return _apply_infraspecific_policy(mapped, allow_preserve=same_species)
         var_dot = re.sub(r"\b(var|subsp|ssp|f)\b\.?", r"\1.", var_raw)
         if var_dot in _DYNAMIC_SYNONYM_TO_CANONICAL:
             mapped = _DYNAMIC_SYNONYM_TO_CANONICAL[var_dot]
             if mapped.startswith(genus_prefix):
-                return mapped
+                same_species = bool(cand_bin and mapped.lower() == cand_bin.lower())
+                return _apply_infraspecific_policy(mapped, allow_preserve=same_species)
 
     if cand_bin and cand_bin.lower() in _DYNAMIC_SYNONYM_TO_CANONICAL:
         mapped = _DYNAMIC_SYNONYM_TO_CANONICAL[cand_bin.lower()]
         if mapped.startswith(genus_prefix):
-            return mapped
+            same_species = mapped.lower() == cand_bin.lower()
+            return _apply_infraspecific_policy(mapped, allow_preserve=same_species)
 
     # 2. General genus-wide botanical regex for any valid target-genus binomial
     m = re.match(
@@ -1016,7 +1211,8 @@ def standardize_taxon_name(raw_name: Any, target_genus: Optional[str] = None) ->
         epithet = m.group(1).lower().strip("-")
         if len(epithet) >= 2 and epithet not in _OPEN_NOMENCLATURE_EPITHETS:
             cand_norm = f"{eff_genus} {epithet}"
-            return normalize_packera_orthography(cand_norm) if eff_genus_low == "packera" else cand_norm
+            base_out = normalize_packera_orthography(cand_norm) if eff_genus_low == "packera" else cand_norm
+            return _apply_infraspecific_policy(base_out, allow_preserve=True)
         return None
 
     # 3. Dynamic GBIF Backbone resolution for configured non-target synonym genera
@@ -1030,9 +1226,17 @@ def standardize_taxon_name(raw_name: Any, target_genus: Optional[str] = None) ->
     return None
 
 
-def standardize_packera_taxon(raw_name: Any, target_genus: Optional[str] = None) -> Optional[str]:
+def standardize_packera_taxon(
+    raw_name: Any,
+    target_genus: Optional[str] = None,
+    infraspecific_policy: Optional[str] = None,
+) -> Optional[str]:
     """Backward-compatible alias for `standardize_taxon_name()`."""
-    return standardize_taxon_name(raw_name, target_genus=target_genus)
+    return standardize_taxon_name(
+        raw_name,
+        target_genus=target_genus,
+        infraspecific_policy=infraspecific_policy,
+    )
 
 from scripts.core.taxonomy_authority import (
     EXPORT_COLUMNS,
@@ -1616,6 +1820,7 @@ def export_curated_table(
     logger: Optional[logging.Logger] = None,
     home_herbarium: str = DEFAULT_HOME_HERBARIUM,
     db_path: Optional[Union[str, Path]] = None,
+    infraspecific_policy: Optional[str] = None,
 ) -> Path:
     """
     Atomically exports the 23-column Darwin Core `EXPORT_COLUMNS` voucher table to `output_path`
@@ -1695,6 +1900,11 @@ def export_curated_table(
         "locality",
         "doy",
         "species_standardized",
+        "portal_source",
+        "specimen_sex",
+        "seasonal_shoot_phase",
+        "infraspecific_rank",
+        "infraspecific_epithet",
         "is_centroid_or_inst_coord",
         "coord_quarantine_reason",
         "pixels_per_mm",
@@ -1761,9 +1971,45 @@ def export_curated_table(
                         for rec in db_records:
                             if not rec.get("species_standardized"):
                                 rec["species_standardized"] = standardize_taxon_name(
-                                    rec.get("scientificName") or rec.get("species_raw")
+                                    rec.get("scientificName") or rec.get("species_raw"),
+                                    infraspecific_policy=infraspecific_policy,
                                 )
                         upsert_vouchers_records(conn, db_records)
+                        extra_m1b_cols = (
+                            "portal_source",
+                            "specimen_sex",
+                            "seasonal_shoot_phase",
+                            "infraspecific_rank",
+                            "infraspecific_epithet",
+                        )
+                        present_m1b = [c for c in extra_m1b_cols if c in df.columns]
+                        if present_m1b:
+                            tbl_cols = {
+                                r[1] for r in conn.execute("PRAGMA table_info(vouchers);").fetchall()
+                            }
+                            sync_cols = [c for c in present_m1b if c in tbl_cols]
+                            if sync_cols:
+                                set_exprs = ", ".join(f"{c} = COALESCE(?, {c})" for c in sync_cols)
+                                update_rows = []
+                                for rec in db_records:
+                                    cat_v = rec.get("catalogNumber")
+                                    if cat_v is None or (isinstance(cat_v, float) and math.isnan(cat_v)) or not str(cat_v).strip():
+                                        continue
+                                    vals = []
+                                    for c in sync_cols:
+                                        v = rec.get(c)
+                                        if v is None or (isinstance(v, float) and math.isnan(v)) or str(v).strip() == "":
+                                            vals.append(None)
+                                        else:
+                                            vals.append(str(v).strip())
+                                    vals.append(str(cat_v).strip())
+                                    update_rows.append(tuple(vals))
+                                if update_rows:
+                                    with conn:
+                                        conn.executemany(
+                                            f"UPDATE vouchers SET {set_exprs} WHERE catalogNumber = ?;",
+                                            update_rows,
+                                        )
                 finally:
                     conn.close()
             except Exception as db_exc:
@@ -2075,6 +2321,11 @@ class VoucherHarvester:
         cis_mississippi_longitude_threshold: float = DEFAULT_CIS_MISSISSIPPI_LON,
         min_cis_mississippi_fraction: float = DEFAULT_MIN_CIS_MISSISSIPPI_FRAC,
         webp_quality: int = 92,
+        portal_sources: Optional[Sequence[str]] = None,
+        symbiota_api_urls: Optional[Sequence[str]] = None,
+        infraspecific_policy: Optional[str] = None,
+        idigbio_http_fn: Optional[Any] = None,
+        symbiota_http_fn: Optional[Any] = None,
         **_unused_kwargs: Any,
     ):
         self.logger = logger or logging.getLogger("VoucherHarvester")
@@ -2325,6 +2576,21 @@ class VoucherHarvester:
         self.cis_mississippi_longitude_threshold = float(cis_mississippi_longitude_threshold)
         self.min_cis_mississippi_fraction = float(min_cis_mississippi_fraction)
         self.webp_quality = max(1, min(100, int(webp_quality)))
+        cfg_portals = getattr(_DEFAULT_CONFIG.harvesting, "portal_sources", ["gbif"])
+        cfg_symbiota = getattr(_DEFAULT_CONFIG.harvesting, "symbiota_api_urls", [])
+        self.portal_sources = _normalize_portal_sources(
+            portal_sources if portal_sources is not None else cfg_portals
+        )
+        raw_sym = symbiota_api_urls if symbiota_api_urls is not None else cfg_symbiota
+        self.symbiota_api_urls = [
+            str(u).strip()
+            for u in ([raw_sym] if isinstance(raw_sym, str) else list(raw_sym or ()))
+            if str(u).strip()
+        ]
+        self.infraspecific_policy = _resolve_infraspecific_policy(infraspecific_policy)
+        self.idigbio_http_fn = idigbio_http_fn
+        self.symbiota_http_fn = symbiota_http_fn
+        self.last_portal_stats: Optional[Dict[str, int]] = None
         self.last_usda_filter_stats: Optional[Dict[str, Any]] = None
         self._secondary_duplicate_pool: Optional[pd.DataFrame] = None
         self._pre_thin_curated_pool: Optional[pd.DataFrame] = None
@@ -2335,6 +2601,7 @@ class VoucherHarvester:
 
         all_curated_records: List[Dict[str, Any]] = []
         seen_catalog_keys: set = set()
+        seen_inst_catalogs: Set[Tuple[str, str]] = set()
         catalog_to_inst: Dict[str, str] = {}
         country_targets: List[Optional[str]] = list(self.countries) if self.countries else [None]
         current_year = datetime.date.today().year + 1
@@ -2347,498 +2614,615 @@ class VoucherHarvester:
         except Exception:
             us_spatial_graph = {}
 
-        for taxon in self.taxa:
-            is_direct_genus_query = taxon.strip().lower() == self.target_genus.lower()
-            genus_key = _get_packera_genus_key_gbif(target_genus=self.target_genus) if is_direct_genus_query else None
-            country_desc = ",".join(self.countries) if self.countries else "GLOBAL"
-            self.logger.info(
-                f"Querying GBIF API for taxon: '{taxon}' "
-                f"(scope={self.geographic_scope}, country={country_desc}, basisOfRecord=PRESERVED_SPECIMEN)..."
+        def _ingest_occurrence_record(
+            rec: Dict[str, Any],
+            require_type: bool = False,
+            fallback_taxon: str = "",
+            direct_genus_q: bool = False,
+            from_extra_portal: bool = False,
+        ) -> Tuple[int, int, int]:
+            rec_type_rank, _ = classify_nomenclatural_type_rank(rec.get("typeStatus"))
+            is_rec_type = rec_type_rank >= 1
+            if require_type and not is_rec_type:
+                return 0, 0, 0
+
+            # 0. Cultivated / Captive / Greenhouse Filter (exempting nomenclatural types)
+            if not is_rec_type and _is_cultivated_occurrence(rec):
+                return 1, 0, 0
+
+            # 1. Geographic Coordinate, CoordinateCleaner Hygiene & Uncertainty Validation
+            raw_issues = rec.get("issues") or []
+            issue_set = {
+                str(iss).strip().upper()
+                for iss in (raw_issues if isinstance(raw_issues, (list, tuple, set)) else [raw_issues])
+                if iss
+            }
+            georef_qc_status = "valid"
+            lat = rec.get("decimalLatitude")
+            lon = rec.get("decimalLongitude")
+            lat_val: Optional[float] = None
+            lon_val: Optional[float] = None
+            if lat is not None and lon is not None:
+                try:
+                    lf = float(lat)
+                    lnf = float(lon)
+                    if math.isfinite(lf) and math.isfinite(lnf):
+                        lat_val, lon_val = lf, lnf
+                except (ValueError, TypeError):
+                    pass
+
+            state_prov = rec.get("stateProvince")
+            rec_country = str(rec.get("countryCode") or "").strip().upper()
+            hit_cks: List[str] = []
+
+            if lat_val is not None and lon_val is not None:
+                if issue_set & _FATAL_GBIF_GEO_ISSUES:
+                    lat_val, lon_val = None, None
+                    hit_cks = []
+                    georef_qc_status = "gbif_geo_issue_nullified"
+                elif not (-90.0 <= lat_val <= 90.0 and -180.0 <= lon_val <= 180.0):
+                    lat_val, lon_val = None, None
+                    hit_cks = []
+                    georef_qc_status = "out_of_bounds_nullified"
+                elif abs(lat_val) < 0.01 and abs(lon_val) < 0.01:
+                    lat_val, lon_val = None, None
+                    hit_cks = []
+                    georef_qc_status = "zero_coord_nullified"
+                elif (
+                    lon_val > 0.0
+                    and (rec_country in {"US", "CA", "MX"} or (not rec_country and self.geographic_scope in {"eastern_na", "north_america"}))
+                ):
+                    lat_val, lon_val = None, None
+                    hit_cks = []
+                    georef_qc_status = "hemisphere_sign_mismatch_nullified"
+                elif state_prov:
+                    st_dwc_norm = _normalize_us_state_name(state_prov)
+                    checked_by_poly = False
+                    if st_dwc_norm and st_dwc_norm in _US_STATE_ABBR_TO_FULL.values() and Point is not None and us_spatial_graph.get("tree") is not None:
+                        pt_chk = Point(lon_val, lat_val)
+                        tree_c = us_spatial_graph["tree"]
+                        geoms_c = us_spatial_graph["geoms"]
+                        cks_c = us_spatial_graph["ck_list"]
+                        gid_c = us_spatial_graph["geom_id_map"]
+                        neigh_c = us_spatial_graph.get("neighbors") or {}
+                        hit_cks = []
+                        for h_it in tree_c.query(pt_chk):
+                            h_idx = int(h_it) if (np is not None and isinstance(h_it, (int, np.integer))) or isinstance(h_it, int) else gid_c.get(id(h_it), -1)
+                            if h_idx >= 0 and geoms_c[h_idx].covers(pt_chk):
+                                hit_cks.append(cks_c[h_idx])
+                        if hit_cks:
+                            checked_by_poly = True
+                            ok_state = any(
+                                ck_h.split("|", 1)[0] == st_dwc_norm
+                                or any(nb.split("|", 1)[0] == st_dwc_norm for nb in neigh_c.get(ck_h, ()))
+                                for ck_h in hit_cks
+                            )
+                            if not ok_state:
+                                lat_val, lon_val = None, None
+                                hit_cks = []
+                                georef_qc_status = "state_polygon_mismatch_nullified"
+                    if not checked_by_poly and lat_val is not None and lon_val is not None:
+                        bbox_key = st_dwc_norm if (st_dwc_norm and st_dwc_norm in _NA_STATE_PROVINCE_BBOXES) else _normalize_ca_province_bbox_key(state_prov)
+                        if bbox_key and bbox_key in _NA_STATE_PROVINCE_BBOXES:
+                            b_lat_min, b_lat_max, b_lon_min, b_lon_max = _NA_STATE_PROVINCE_BBOXES[bbox_key]
+                            margin_deg = 0.5
+                            if not (
+                                (b_lat_min - margin_deg) <= lat_val <= (b_lat_max + margin_deg)
+                                and (b_lon_min - margin_deg) <= lon_val <= (b_lon_max + margin_deg)
+                            ):
+                                lat_val, lon_val = None, None
+                                hit_cks = []
+                                georef_qc_status = "state_polygon_mismatch_nullified"
+            else:
+                georef_qc_status = "ungeoreferenced"
+
+            is_west_rec = is_excluded_western_region(
+                state_prov,
+                lat=lat_val,
+                lon=lon_val,
+                western_longitude_threshold=self.western_longitude_threshold,
+                exclude_western=True,
+                is_type_specimen=is_rec_type,
             )
-            taxon_harvested = 0
-            taxon_retained = 0
-            taxon_western_excluded = 0
+            has_any_state = bool(
+                state_prov is not None
+                and str(state_prov).strip()
+                and str(state_prov).strip().upper() not in {"NONE", "NAN", "NA", "N/A", "NULL", "UNKNOWN", "UNSPECIFIED", "UNRECORDED"}
+            )
+            if self.exclude_western:
+                if not self.harvest_full_continental_range and is_west_rec:
+                    return 1, 0, 1
+                # Un-georeferenced non-types lacking any stateProvince cannot be placed biogeographically
+                if lat_val is None and lon_val is None and not has_any_state and not is_rec_type:
+                    return 1, 0, 1
 
-            def _ingest_occurrence_record(rec: Dict[str, Any], require_type: bool = False) -> None:
-                nonlocal taxon_harvested, taxon_retained, taxon_western_excluded
-
-                rec_type_rank, _ = classify_nomenclatural_type_rank(rec.get("typeStatus"))
-                is_rec_type = rec_type_rank >= 1
-                if require_type and not is_rec_type:
-                    return
-
-                taxon_harvested += 1
-
-                # 0. Cultivated / Captive / Greenhouse Filter (exempting nomenclatural types)
-                if not is_rec_type and _is_cultivated_occurrence(rec):
-                    return
-
-                # 1. Geographic Coordinate, CoordinateCleaner Hygiene & Uncertainty Validation
-                raw_issues = rec.get("issues") or []
-                issue_set = {
-                    str(iss).strip().upper()
-                    for iss in (raw_issues if isinstance(raw_issues, (list, tuple, set)) else [raw_issues])
-                    if iss
-                }
-                georef_qc_status = "valid"
-                lat = rec.get("decimalLatitude")
-                lon = rec.get("decimalLongitude")
-                lat_val: Optional[float] = None
-                lon_val: Optional[float] = None
-                if lat is not None and lon is not None:
+            # Preserve missing coordinateUncertaintyInMeters as None (NA) rather than fabricating 5000 m
+            uncertainty_val: Optional[float] = None
+            if lat_val is not None and lon_val is not None:
+                uncertainty_raw = rec.get("coordinateUncertaintyInMeters")
+                if uncertainty_raw is not None and str(uncertainty_raw).strip() != "":
                     try:
-                        lf = float(lat)
-                        lnf = float(lon)
-                        if math.isfinite(lf) and math.isfinite(lnf):
-                            lat_val, lon_val = lf, lnf
+                        parsed_unc = float(uncertainty_raw)
+                        if math.isfinite(parsed_unc) and parsed_unc >= 0.0:
+                            if parsed_unc > self.max_uncertainty_meters and not is_rec_type:
+                                return 1, 0, 0
+                            uncertainty_val = parsed_unc
                     except (ValueError, TypeError):
                         pass
 
-                state_prov = rec.get("stateProvince")
-                rec_country = str(rec.get("countryCode") or "").strip().upper()
-                hit_cks: List[str] = []
+            # 2. Darwin Core Temporal Validation (retaining month/year historical sheets for morphometrics
+            #    with day=None -> doy=NA, and masking YYYY-01-01 digitization placeholders)
+            raw_year = rec.get("year")
+            raw_month = rec.get("month")
+            raw_day = rec.get("day")
+            raw_ev_str = str(rec.get("eventDate") or "").strip()
 
-                if lat_val is not None and lon_val is not None:
-                    if issue_set & _FATAL_GBIF_GEO_ISSUES:
-                        lat_val, lon_val = None, None
-                        hit_cks = []
-                        georef_qc_status = "gbif_geo_issue_nullified"
-                    elif not (-90.0 <= lat_val <= 90.0 and -180.0 <= lon_val <= 180.0):
-                        lat_val, lon_val = None, None
-                        hit_cks = []
-                        georef_qc_status = "out_of_bounds_nullified"
-                    elif abs(lat_val) < 0.01 and abs(lon_val) < 0.01:
-                        lat_val, lon_val = None, None
-                        hit_cks = []
-                        georef_qc_status = "zero_coord_nullified"
-                    elif (
-                        lon_val > 0.0
-                        and (rec_country in {"US", "CA", "MX"} or (not rec_country and self.geographic_scope in {"eastern_na", "north_america"}))
-                    ):
-                        lat_val, lon_val = None, None
-                        hit_cks = []
-                        georef_qc_status = "hemisphere_sign_mismatch_nullified"
-                    elif state_prov:
-                        st_dwc_norm = _normalize_us_state_name(state_prov)
-                        checked_by_poly = False
-                        if st_dwc_norm and st_dwc_norm in _US_STATE_ABBR_TO_FULL.values() and Point is not None and us_spatial_graph.get("tree") is not None:
-                            pt_chk = Point(lon_val, lat_val)
-                            tree_c = us_spatial_graph["tree"]
-                            geoms_c = us_spatial_graph["geoms"]
-                            cks_c = us_spatial_graph["ck_list"]
-                            gid_c = us_spatial_graph["geom_id_map"]
-                            neigh_c = us_spatial_graph.get("neighbors") or {}
-                            hit_cks = []
-                            for h_it in tree_c.query(pt_chk):
-                                h_idx = int(h_it) if (np is not None and isinstance(h_it, (int, np.integer))) or isinstance(h_it, int) else gid_c.get(id(h_it), -1)
-                                if h_idx >= 0 and geoms_c[h_idx].covers(pt_chk):
-                                    hit_cks.append(cks_c[h_idx])
-                            if hit_cks:
-                                checked_by_poly = True
-                                ok_state = any(
-                                    ck_h.split("|", 1)[0] == st_dwc_norm
-                                    or any(nb.split("|", 1)[0] == st_dwc_norm for nb in neigh_c.get(ck_h, ()))
-                                    for ck_h in hit_cks
-                                )
-                                if not ok_state:
-                                    lat_val, lon_val = None, None
-                                    hit_cks = []
-                                    georef_qc_status = "state_polygon_mismatch_nullified"
-                        if not checked_by_poly and lat_val is not None and lon_val is not None:
-                            bbox_key = st_dwc_norm if (st_dwc_norm and st_dwc_norm in _NA_STATE_PROVINCE_BBOXES) else _normalize_ca_province_bbox_key(state_prov)
-                            if bbox_key and bbox_key in _NA_STATE_PROVINCE_BBOXES:
-                                b_lat_min, b_lat_max, b_lon_min, b_lon_max = _NA_STATE_PROVINCE_BBOXES[bbox_key]
-                                margin_deg = 0.5
-                                if not (
-                                    (b_lat_min - margin_deg) <= lat_val <= (b_lat_max + margin_deg)
-                                    and (b_lon_min - margin_deg) <= lon_val <= (b_lon_max + margin_deg)
-                                ):
-                                    lat_val, lon_val = None, None
-                                    hit_cks = []
-                                    georef_qc_status = "state_polygon_mismatch_nullified"
-                else:
-                    georef_qc_status = "ungeoreferenced"
+            year_val: Optional[int] = None
+            month_val: Optional[int] = None
+            day_val: Optional[int] = None
+            try:
+                if raw_year is not None and str(raw_year).strip() != "":
+                    year_val = int(float(raw_year))
+            except (ValueError, TypeError):
+                year_val = None
+            if year_val is None and raw_ev_str:
+                m_yr = re.match(r"^(\d{4})\b", raw_ev_str)
+                if m_yr:
+                    year_val = int(m_yr.group(1))
 
-                is_west_rec = is_excluded_western_region(
-                    state_prov,
-                    lat=lat_val,
-                    lon=lon_val,
-                    western_longitude_threshold=self.western_longitude_threshold,
-                    exclude_western=True,
-                    is_type_specimen=is_rec_type,
-                )
-                has_any_state = bool(
-                    state_prov is not None
-                    and str(state_prov).strip()
-                    and str(state_prov).strip().upper() not in {"NONE", "NAN", "NA", "N/A", "NULL", "UNKNOWN", "UNSPECIFIED", "UNRECORDED"}
-                )
-                if self.exclude_western:
-                    if not self.harvest_full_continental_range and is_west_rec:
-                        taxon_western_excluded += 1
-                        return
-                    # Un-georeferenced non-types lacking any stateProvince cannot be placed biogeographically
-                    if lat_val is None and lon_val is None and not has_any_state and not is_rec_type:
-                        taxon_western_excluded += 1
-                        return
+            if year_val is not None and not (1700 <= year_val <= current_year):
+                year_val = None
+            if year_val is None and not is_rec_type:
+                return 1, 0, 0
 
-                # Preserve missing coordinateUncertaintyInMeters as None (NA) rather than fabricating 5000 m
-                uncertainty_val: Optional[float] = None
-                if lat_val is not None and lon_val is not None:
-                    uncertainty_raw = rec.get("coordinateUncertaintyInMeters")
-                    if uncertainty_raw is not None and str(uncertainty_raw).strip() != "":
-                        try:
-                            parsed_unc = float(uncertainty_raw)
-                            if math.isfinite(parsed_unc) and parsed_unc >= 0.0:
-                                if parsed_unc > self.max_uncertainty_meters and not is_rec_type:
-                                    return
-                                uncertainty_val = parsed_unc
-                        except (ValueError, TypeError):
-                            pass
+            try:
+                if raw_month is not None and str(raw_month).strip() != "":
+                    m_cand = int(float(raw_month))
+                    if 1 <= m_cand <= 12:
+                        month_val = m_cand
+            except (ValueError, TypeError):
+                month_val = None
+            try:
+                if raw_day is not None and str(raw_day).strip() != "":
+                    d_cand = int(float(raw_day))
+                    if 1 <= d_cand <= 31:
+                        day_val = d_cand
+            except (ValueError, TypeError):
+                day_val = None
 
-                # 2. Darwin Core Temporal Validation (retaining month/year historical sheets for morphometrics
-                #    with day=None -> doy=NA, and masking YYYY-01-01 digitization placeholders)
-                raw_year = rec.get("year")
-                raw_month = rec.get("month")
-                raw_day = rec.get("day")
-                raw_ev_str = str(rec.get("eventDate") or "").strip()
-
-                year_val: Optional[int] = None
-                month_val: Optional[int] = None
-                day_val: Optional[int] = None
+            if year_val is not None and month_val is not None and day_val is not None:
                 try:
-                    if raw_year is not None and str(raw_year).strip() != "":
-                        year_val = int(float(raw_year))
-                except (ValueError, TypeError):
-                    year_val = None
-                if year_val is None and raw_ev_str:
-                    m_yr = re.match(r"^(\d{4})\b", raw_ev_str)
-                    if m_yr:
-                        year_val = int(m_yr.group(1))
-
-                if year_val is not None and not (1700 <= year_val <= current_year):
-                    year_val = None
-                if year_val is None and not is_rec_type:
-                    return
-
-                try:
-                    if raw_month is not None and str(raw_month).strip() != "":
-                        m_cand = int(float(raw_month))
-                        if 1 <= m_cand <= 12:
-                            month_val = m_cand
-                except (ValueError, TypeError):
-                    month_val = None
-                try:
-                    if raw_day is not None and str(raw_day).strip() != "":
-                        d_cand = int(float(raw_day))
-                        if 1 <= d_cand <= 31:
-                            day_val = d_cand
-                except (ValueError, TypeError):
-                    day_val = None
-
-                if year_val is not None and month_val is not None and day_val is not None:
-                    try:
-                        valid_date = datetime.date(year_val, month_val, day_val)
-                        # Guard against YYYY-01-01 Symbiota/GBIF digitization placeholders unless verbatimEventDate explicitly names January
-                        verbatim_ev = str(rec.get("verbatimEventDate") or "").strip().lower()
-                        explicit_jan = bool(re.search(r"\bjan(?:uary)?\b", verbatim_ev))
-                        is_jan1_placeholder = (
-                            month_val == 1
-                            and day_val == 1
-                            and not explicit_jan
-                            and (
-                                "RECORDED_DATE_UNLIKELY" in issue_set
-                                or bool(re.fullmatch(r"\d{4}(?:-01-01(?:T00:00:00Z?)?)?", raw_ev_str))
-                                or not raw_ev_str
-                            )
+                    valid_date = datetime.date(year_val, month_val, day_val)
+                    # Guard against YYYY-01-01 Symbiota/GBIF digitization placeholders unless verbatimEventDate explicitly names January
+                    verbatim_ev = str(rec.get("verbatimEventDate") or "").strip().lower()
+                    explicit_jan = bool(re.search(r"\bjan(?:uary)?\b", verbatim_ev))
+                    is_jan1_placeholder = (
+                        month_val == 1
+                        and day_val == 1
+                        and not explicit_jan
+                        and (
+                            "RECORDED_DATE_UNLIKELY" in issue_set
+                            or bool(re.fullmatch(r"\d{4}(?:-01-01(?:T00:00:00Z?)?)?", raw_ev_str))
+                            or not raw_ev_str
                         )
-                        if is_jan1_placeholder:
-                            month_val, day_val = None, None
-                            event_date = f"{year_val:04d}"
-                        else:
-                            event_date = raw_ev_str or valid_date.isoformat()
-                    except ValueError:
-                        if not is_rec_type:
-                            return
-                        day_val = None
-                        event_date = raw_ev_str or f"{year_val:04d}-{month_val:02d}"
-                elif year_val is not None and month_val is not None:
+                    )
+                    if is_jan1_placeholder:
+                        month_val, day_val = None, None
+                        event_date = f"{year_val:04d}"
+                    else:
+                        event_date = raw_ev_str or valid_date.isoformat()
+                except ValueError:
+                    if not is_rec_type:
+                        return 1, 0, 0
                     day_val = None
                     event_date = raw_ev_str or f"{year_val:04d}-{month_val:02d}"
+            elif year_val is not None and month_val is not None:
+                day_val = None
+                event_date = raw_ev_str or f"{year_val:04d}-{month_val:02d}"
+            else:
+                month_val, day_val = None, None
+                event_date = raw_ev_str or (f"{year_val:04d}" if year_val is not None else "")
+
+            # 3. High-Resolution Media Image Validation
+            media_list = rec.get("media", [])
+            image_url = extract_high_res_image_url(media_list)
+            if not image_url and rec.get("image_url"):
+                cand_direct = str(rec.get("image_url") or "").strip()
+                if cand_direct.startswith(("http://", "https://")):
+                    image_url = optimize_herbarium_image_url(cand_direct)
+            if not image_url:
+                return 1, 0, 0
+
+            # 4. Catalog Number & Herbarium Institution Namespace Protection
+            raw_catalog = rec.get("catalogNumber")
+            inst_code = str(rec.get("institutionCode") or rec.get("collectionCode") or "UNKNOWN_INST").strip() or "UNKNOWN_INST"
+            inst_norm_up = inst_code.upper()
+            gbif_key = str(rec.get("key", ""))
+
+            if raw_catalog and str(raw_catalog).strip():
+                raw_cat_str = str(raw_catalog).strip()
+                clean_cat = sanitize_filename(raw_cat_str)
+                # Prefix institutionCode onto bare numeric/non-alphabetic accession numbers (e.g. '12345' -> 'GA_12345')
+                if not re.search(r"[A-Za-z]", raw_cat_str) and inst_norm_up not in _INVALID_INSTITUTION_CODES:
+                    catalog_number = f"{sanitize_filename(inst_code)}_{clean_cat}"
                 else:
-                    month_val, day_val = None, None
-                    event_date = raw_ev_str or (f"{year_val:04d}" if year_val is not None else "")
+                    catalog_number = clean_cat
+            else:
+                catalog_number = f"{sanitize_filename(inst_code)}_{gbif_key}"
 
-                # 3. High-Resolution Media Image Validation
-                media_list = rec.get("media", [])
-                image_url = extract_high_res_image_url(media_list)
-                if not image_url:
-                    return
+            prev_inst = catalog_to_inst.get(catalog_number)
+            if prev_inst is not None and prev_inst != inst_norm_up and inst_norm_up not in _INVALID_INSTITUTION_CODES:
+                catalog_number = f"{sanitize_filename(inst_code)}_{catalog_number}"
 
-                # 4. Catalog Number & Herbarium Institution Namespace Protection
-                raw_catalog = rec.get("catalogNumber")
-                inst_code = str(rec.get("institutionCode") or rec.get("collectionCode") or "UNKNOWN_INST").strip() or "UNKNOWN_INST"
-                inst_norm_up = inst_code.upper()
-                gbif_key = str(rec.get("key", ""))
+            if from_extra_portal and inst_norm_up not in _INVALID_INSTITUTION_CODES and (inst_norm_up, catalog_number) in seen_inst_catalogs:
+                return 1, 0, 0
 
-                if raw_catalog and str(raw_catalog).strip():
-                    raw_cat_str = str(raw_catalog).strip()
-                    clean_cat = sanitize_filename(raw_cat_str)
-                    # Prefix institutionCode onto bare numeric/non-alphabetic accession numbers (e.g. '12345' -> 'GA_12345')
-                    if not re.search(r"[A-Za-z]", raw_cat_str) and inst_norm_up not in _INVALID_INSTITUTION_CODES:
-                        catalog_number = f"{sanitize_filename(inst_code)}_{clean_cat}"
-                    else:
-                        catalog_number = clean_cat
-                else:
-                    catalog_number = f"{sanitize_filename(inst_code)}_{gbif_key}"
+            unique_key = (catalog_number, gbif_key)
+            if unique_key in seen_catalog_keys:
+                return 1, 0, 0
+            seen_catalog_keys.add(unique_key)
+            if inst_norm_up not in _INVALID_INSTITUTION_CODES:
+                seen_inst_catalogs.add((inst_norm_up, catalog_number))
+            catalog_to_inst[catalog_number] = inst_norm_up
 
-                prev_inst = catalog_to_inst.get(catalog_number)
-                if prev_inst is not None and prev_inst != inst_norm_up and inst_norm_up not in _INVALID_INSTITUTION_CODES:
-                    catalog_number = f"{sanitize_filename(inst_code)}_{catalog_number}"
+            relative_image_path = f"data/raw_vouchers/{catalog_number}.webp"
+            raw_sci_val = str(rec.get("scientificName") or rec.get("species") or fallback_taxon).strip()
+            infraspecific_val = _extract_infraspecific_taxon(raw_sci_val)
 
-                unique_key = (catalog_number, gbif_key)
-                if unique_key in seen_catalog_keys:
-                    return
-                seen_catalog_keys.add(unique_key)
-                catalog_to_inst[catalog_number] = inst_norm_up
+            # Dynamically map historical non-Packera genera (Senecio / Cineraria) AND occurrence records
+            # explicitly flagged by GBIF as unaccepted synonyms (e.g. Packera tomentosa -> Packera dubia),
+            # while protecting explicitly requested accepted Packera segregates.
+            raw_target_bin = _extract_canonical_binomial(raw_sci_val, {self.target_genus})
+            rec_tax_status = str(rec.get("taxonomicStatus") or rec.get("status") or "").strip().upper()
+            is_rec_synonym = rec_tax_status in _GBIF_SYNONYM_STATUSES
+            is_protected_raw = bool(
+                raw_target_bin
+                and raw_target_bin.lower() in self._protected_packera_taxa
+                and not (self.expand_synonyms and is_rec_synonym)
+            )
+            acc_from_rec: Optional[str] = None
+            if raw_target_bin is None or (is_rec_synonym and not is_protected_raw):
+                for acc_fld in ("acceptedScientificName", "species"):
+                    cand_acc = _extract_canonical_binomial(rec.get(acc_fld), {self.target_genus})
+                    if cand_acc:
+                        acc_from_rec = cand_acc
+                        break
+                if acc_from_rec and (raw_target_bin is None or acc_from_rec.lower() != raw_target_bin.lower()):
+                    if acc_from_rec.lower() not in (self._protected_packera_taxa - {acc_from_rec.lower()}) or not is_protected_raw:
+                        syn_items_to_reg = [raw_sci_val] + ([raw_target_bin] if raw_target_bin else [])
+                        _register_dynamic_synonyms(
+                            acc_from_rec,
+                            syn_items_to_reg,
+                            [raw_sci_val],
+                            allow_packera_species_remap=is_rec_synonym,
+                            target_genus=self.target_genus,
+                        )
 
-                relative_image_path = f"data/raw_vouchers/{catalog_number}.webp"
-                raw_sci_val = str(rec.get("scientificName") or rec.get("species") or taxon).strip()
-                infraspecific_val = _extract_infraspecific_taxon(raw_sci_val)
-
-                # Dynamically map historical non-Packera genera (Senecio / Cineraria) AND occurrence records
-                # explicitly flagged by GBIF as unaccepted synonyms (e.g. Packera tomentosa -> Packera dubia),
-                # while protecting explicitly requested accepted Packera segregates.
-                raw_target_bin = _extract_canonical_binomial(raw_sci_val, {self.target_genus})
-                rec_tax_status = str(rec.get("taxonomicStatus") or rec.get("status") or "").strip().upper()
-                is_rec_synonym = rec_tax_status in _GBIF_SYNONYM_STATUSES
-                is_protected_raw = bool(
-                    raw_target_bin
-                    and raw_target_bin.lower() in self._protected_packera_taxa
-                    and not (self.expand_synonyms and is_rec_synonym)
-                )
-                acc_from_rec: Optional[str] = None
-                if raw_target_bin is None or (is_rec_synonym and not is_protected_raw):
-                    for acc_fld in ("acceptedScientificName", "species"):
-                        cand_acc = _extract_canonical_binomial(rec.get(acc_fld), {self.target_genus})
-                        if cand_acc:
-                            acc_from_rec = cand_acc
-                            break
-                    if acc_from_rec and (raw_target_bin is None or acc_from_rec.lower() != raw_target_bin.lower()):
-                        if acc_from_rec.lower() not in (self._protected_packera_taxa - {acc_from_rec.lower()}) or not is_protected_raw:
-                            syn_items_to_reg = [raw_sci_val] + ([raw_target_bin] if raw_target_bin else [])
-                            _register_dynamic_synonyms(
-                                acc_from_rec,
-                                syn_items_to_reg,
-                                [raw_sci_val],
-                                allow_packera_species_remap=is_rec_synonym,
-                                target_genus=self.target_genus,
-                            )
-
-                resolved_taxon = standardize_taxon_name(raw_sci_val, target_genus=self.target_genus) or acc_from_rec
-                if is_direct_genus_query or self.is_genus_wide:
-                    if not resolved_taxon or not re.match(
-                        rf"^{re.escape(self.target_genus)}\s+(?:[x×]\s*)?[a-z-]+$",
-                        resolved_taxon,
+            resolved_taxon = standardize_taxon_name(
+                raw_sci_val,
+                target_genus=self.target_genus,
+                infraspecific_policy=self.infraspecific_policy,
+            ) or acc_from_rec
+            sp_ep_for_infra = (
+                resolved_taxon.split(" ", 1)[1].split(" ", 1)[0]
+                if resolved_taxon and " " in resolved_taxon
+                else (raw_target_bin.split(" ", 1)[1] if raw_target_bin and " " in raw_target_bin else None)
+            )
+            infra_rank, infra_epithet = _parse_accepted_infraspecific_parts(
+                raw_sci_val, species_epithet=sp_ep_for_infra
+            )
+            if infra_rank is None and infra_epithet is None:
+                raw_rank = str(rec.get("taxonRank") or "").strip().upper()
+                raw_ie = str(rec.get("infraspecificEpithet") or "").strip().lower()
+                if (
+                    raw_rank in {"VARIETY", "SUBSPECIES"}
+                    and re.fullmatch(r"[a-z][a-z-]{1,}", raw_ie)
+                    and raw_ie not in _OPEN_NOMENCLATURE_EPITHETS
+                    and raw_ie != (sp_ep_for_infra or "")
+                    and not re.search(r"\b(?:forma|f|cv)\.?\s+", raw_sci_val, re.IGNORECASE)
+                ):
+                    infra_rank = "var." if raw_rank == "VARIETY" else "subsp."
+                    infra_epithet = raw_ie
+                    if (
+                        self.infraspecific_policy == "preserve_accepted_trinomials"
+                        and resolved_taxon
+                        and len(resolved_taxon.split()) == 2
                     ):
-                        seen_catalog_keys.discard(unique_key)
-                        return
-                if resolved_taxon and not raw_sci_val.lower().startswith(resolved_taxon.lower()):
-                    sci_name_val = resolved_taxon
-                else:
-                    sci_name_val = raw_sci_val
+                        resolved_taxon = f"{resolved_taxon} {infra_rank} {infra_epithet}"
 
-                raw_loc_val = rec.get("locality") or rec.get("verbatimLocality")
-                raw_hab_val = rec.get("habitat")
-
-                # 5. Initial Layer 1 + Layer 2 Determiner Tier Stratification
-                determiner_tier, type_status, identified_by_clean = parse_determiner_tier(
-                    type_status_raw=rec.get("typeStatus"),
-                    identified_by_raw=rec.get("identifiedBy"),
-                    recorded_by_raw=rec.get("recordedBy"),
-                    history_raw=rec.get("verbatimIdentificationHistory"),
-                    institution_code_raw=inst_code,
-                    locality_raw=raw_loc_val,
-                    habitat_raw=raw_hab_val,
-                    dynamic_specialists=None,
+            if direct_genus_q or self.is_genus_wide:
+                allowed_pat = (
+                    rf"^{re.escape(self.target_genus)}\s+(?:[x×]\s*)?[a-z-]+(?:\s+(?:subsp\.|var\.)\s+[a-z-]+)?$"
+                    if self.infraspecific_policy == "preserve_accepted_trinomials"
+                    else rf"^{re.escape(self.target_genus)}\s+(?:[x×]\s*)?[a-z-]+$"
                 )
+                if not resolved_taxon or not re.match(allowed_pat, resolved_taxon):
+                    seen_catalog_keys.discard(unique_key)
+                    if inst_norm_up not in _INVALID_INSTITUTION_CODES:
+                        seen_inst_catalogs.discard((inst_norm_up, catalog_number))
+                    return 1, 0, 0
+            if resolved_taxon and not raw_sci_val.lower().startswith(resolved_taxon.lower()):
+                sci_name_val = resolved_taxon
+            else:
+                sci_name_val = raw_sci_val
 
-                # 6. North American (CEC / US EPA) Level III Ecoregion Polygon Assignment
-                regional_group = infer_regional_group(
-                    lat=lat_val,
-                    lon=lon_val,
-                    state_province=state_prov,
-                    habitat=raw_hab_val,
-                    locality=raw_loc_val,
-                    county=rec.get("county"),
+            raw_loc_val = rec.get("locality") or rec.get("verbatimLocality")
+            raw_hab_val = rec.get("habitat")
+            specimen_sex, seasonal_shoot_phase = parse_specimen_sex_and_shoot_phase(rec)
+            portal_source = str(rec.get("portal_source") or "GBIF").strip() or "GBIF"
+
+            # 5. Initial Layer 1 + Layer 2 Determiner Tier Stratification
+            determiner_tier, type_status, identified_by_clean = parse_determiner_tier(
+                type_status_raw=rec.get("typeStatus"),
+                identified_by_raw=rec.get("identifiedBy"),
+                recorded_by_raw=rec.get("recordedBy"),
+                history_raw=rec.get("verbatimIdentificationHistory"),
+                institution_code_raw=inst_code,
+                locality_raw=raw_loc_val,
+                habitat_raw=raw_hab_val,
+                dynamic_specialists=None,
+            )
+
+            # 6. North American (CEC / US EPA) Level III Ecoregion Polygon Assignment
+            regional_group = infer_regional_group(
+                lat=lat_val,
+                lon=lon_val,
+                state_province=state_prov,
+                habitat=raw_hab_val,
+                locality=raw_loc_val,
+                county=rec.get("county"),
+            )
+
+            verbatim_conflict, verbatim_gold_taxon = _detect_verbatim_identification_conflict(
+                rec=rec,
+                resolved_canonical=(resolved_taxon or sci_name_val),
+                determiner_tier=determiner_tier,
+            )
+            is_cent_q, coord_q_reason = evaluate_coordinate_centroid_quarantine(
+                lat=lat_val,
+                lon=lon_val,
+                locality=str(raw_loc_val or ""),
+                habitat=str(raw_hab_val or ""),
+                county=str(rec.get("county") or ""),
+                state_prov=str(state_prov or ""),
+                uncertainty_m=uncertainty_val,
+                issues=issue_set,
+                is_type_specimen=bool(is_rec_type or classify_nomenclatural_type_rank(type_status)[0] >= 1),
+                us_spatial_graph=us_spatial_graph,
+                hit_county_keys=hit_cks,
+            )
+            curated_record = {
+                "catalogNumber": catalog_number,
+                "institutionCode": inst_code,
+                "scientificName": sci_name_val,
+                "species_raw": raw_sci_val,
+                "infraspecific_taxon": infraspecific_val,
+                "infraspecific_rank": infra_rank,
+                "infraspecific_epithet": infra_epithet,
+                "portal_source": portal_source,
+                "specimen_sex": specimen_sex,
+                "seasonal_shoot_phase": seasonal_shoot_phase,
+                "georef_qc_status": georef_qc_status,
+                "is_centroid_or_inst_coord": bool(is_cent_q),
+                "coord_quarantine_reason": str(coord_q_reason or ""),
+                "recordedBy": str(rec.get("recordedBy") or "").strip(),
+                "recordNumber": str(rec.get("recordNumber") or "").strip(),
+                "identifiedBy": identified_by_clean,
+                "determiner_tier": determiner_tier,
+                "type_status": type_status,
+                "county": rec.get("county") or "",
+                "stateProvince": state_prov or "",
+                "decimalLatitude": lat_val,
+                "decimalLongitude": lon_val,
+                "coordinateUncertainty": uncertainty_val,
+                "year": year_val,
+                "month": month_val,
+                "day": day_val,
+                "eventDate": event_date,
+                "regional_group": regional_group,
+                "image_path": relative_image_path,
+                "exsiccatae_taxonomic_conflict": bool(verbatim_conflict),
+                "exsiccatae_gold_taxon": verbatim_gold_taxon,
+                "_image_url": image_url,
+                "_is_western_rec": bool(is_west_rec),
+                "_is_type_rec": bool(is_rec_type),
+                "_raw_identified_by": str(rec.get("identifiedBy") or "").strip(),
+                "_raw_history": str(rec.get("verbatimIdentificationHistory") or "").strip(),
+                "_raw_type_status": str(rec.get("typeStatus") or "").strip(),
+                "_raw_locality": str(raw_loc_val or "").strip(),
+                "_raw_habitat": str(raw_hab_val or "").strip(),
+            }
+            all_curated_records.append(curated_record)
+            return 1, 1, 0
+
+        use_gbif = "gbif" in self.portal_sources
+        use_extra_portals = any(p in {"idigbio", "symbiota"} for p in self.portal_sources)
+        gbif_raw_records: List[Dict[str, Any]] = []
+        gbif_had_media: List[bool] = []
+
+        if use_gbif:
+            for taxon in self.taxa:
+                is_direct_genus_query = taxon.strip().lower() == self.target_genus.lower()
+                genus_key = _get_packera_genus_key_gbif(target_genus=self.target_genus) if is_direct_genus_query else None
+                country_desc = ",".join(self.countries) if self.countries else "GLOBAL"
+                self.logger.info(
+                    f"Querying GBIF API for taxon: '{taxon}' "
+                    f"(scope={self.geographic_scope}, country={country_desc}, basisOfRecord=PRESERVED_SPECIMEN)..."
                 )
+                taxon_harvested = 0
+                taxon_retained = 0
+                taxon_western_excluded = 0
 
-                verbatim_conflict, verbatim_gold_taxon = _detect_verbatim_identification_conflict(
-                    rec=rec,
-                    resolved_canonical=(resolved_taxon or sci_name_val),
-                    determiner_tier=determiner_tier,
-                )
-                is_cent_q, coord_q_reason = evaluate_coordinate_centroid_quarantine(
-                    lat=lat_val,
-                    lon=lon_val,
-                    locality=str(raw_loc_val or ""),
-                    habitat=str(raw_hab_val or ""),
-                    county=str(rec.get("county") or ""),
-                    state_prov=str(state_prov or ""),
-                    uncertainty_m=uncertainty_val,
-                    issues=issue_set,
-                    is_type_specimen=bool(is_rec_type or classify_nomenclatural_type_rank(type_status)[0] >= 1),
-                    us_spatial_graph=us_spatial_graph,
-                    hit_county_keys=hit_cks,
-                )
-                curated_record = {
-                    "catalogNumber": catalog_number,
-                    "institutionCode": inst_code,
-                    "scientificName": sci_name_val,
-                    "species_raw": raw_sci_val,
-                    "infraspecific_taxon": infraspecific_val,
-                    "georef_qc_status": georef_qc_status,
-                    "is_centroid_or_inst_coord": bool(is_cent_q),
-                    "coord_quarantine_reason": str(coord_q_reason or ""),
-                    "recordedBy": str(rec.get("recordedBy") or "").strip(),
-                    "recordNumber": str(rec.get("recordNumber") or "").strip(),
-                    "identifiedBy": identified_by_clean,
-                    "determiner_tier": determiner_tier,
-                    "type_status": type_status,
-                    "county": rec.get("county") or "",
-                    "stateProvince": state_prov or "",
-                    "decimalLatitude": lat_val,
-                    "decimalLongitude": lon_val,
-                    "coordinateUncertainty": uncertainty_val,
-                    "year": year_val,
-                    "month": month_val,
-                    "day": day_val,
-                    "eventDate": event_date,
-                    "regional_group": regional_group,
-                    "image_path": relative_image_path,
-                    "exsiccatae_taxonomic_conflict": bool(verbatim_conflict),
-                    "exsiccatae_gold_taxon": verbatim_gold_taxon,
-                    "_image_url": image_url,
-                    "_is_western_rec": bool(is_west_rec),
-                    "_is_type_rec": bool(is_rec_type),
-                    "_raw_identified_by": str(rec.get("identifiedBy") or "").strip(),
-                    "_raw_history": str(rec.get("verbatimIdentificationHistory") or "").strip(),
-                    "_raw_type_status": str(rec.get("typeStatus") or "").strip(),
-                    "_raw_locality": str(raw_loc_val or "").strip(),
-                    "_raw_habitat": str(raw_hab_val or "").strip(),
-                }
-                all_curated_records.append(curated_record)
-                taxon_retained += 1
+                use_server_lon_filter = bool(self.exclude_western and not self.harvest_full_continental_range)
+                eff_query_west_lon = self.western_longitude_threshold
+                limit = 300
+                n_countries = max(1, len(country_targets))
+                pass1_quota = max(1, math.ceil(self.max_records_per_taxon / n_countries))
+                country_offsets: Dict[Optional[str], int] = {c: 0 for c in country_targets}
+                country_retained: Dict[Optional[str], int] = {c: 0 for c in country_targets}
+                country_exhausted: Dict[Optional[str], bool] = {c: False for c in country_targets}
 
-            use_server_lon_filter = bool(self.exclude_western and not self.harvest_full_continental_range)
-            eff_query_west_lon = self.western_longitude_threshold
-            limit = 300
-            n_countries = max(1, len(country_targets))
-            pass1_quota = max(1, math.ceil(self.max_records_per_taxon / n_countries))
-            country_offsets: Dict[Optional[str], int] = {c: 0 for c in country_targets}
-            country_retained: Dict[Optional[str], int] = {c: 0 for c in country_targets}
-            country_exhausted: Dict[Optional[str], bool] = {c: False for c in country_targets}
-
-            def _run_country_pages(country_code: Optional[str], stop_at_country_quota: Optional[int]) -> None:
-                while taxon_retained < self.max_records_per_taxon and not country_exhausted[country_code]:
-                    if stop_at_country_quota is not None and country_retained[country_code] >= stop_at_country_quota:
-                        break
-                    offset = country_offsets[country_code]
-                    search_kwargs: Dict[str, Any] = {
-                        "basisOfRecord": "PRESERVED_SPECIMEN",
-                        "mediaType": "StillImage",
-                        "limit": limit,
-                        "offset": offset,
-                    }
-                    if is_direct_genus_query and genus_key is not None:
-                        search_kwargs["taxonKey"] = genus_key
-                    else:
-                        search_kwargs["scientificName"] = taxon
-                    if country_code:
-                        search_kwargs["country"] = country_code
-                    if use_server_lon_filter:
-                        search_kwargs["decimalLongitude"] = f"{eff_query_west_lon},-50.0"
-                    try:
-                        response = occ.search(**search_kwargs)
-                    except Exception as e:
-                        self.logger.error(f"GBIF API query error for '{taxon}' (country={country_code}) at offset {offset}: {e}")
-                        country_exhausted[country_code] = True
-                        break
-
-                    if not isinstance(response, dict):
-                        country_exhausted[country_code] = True
-                        break
-                    results = response.get("results", [])
-                    raw_count = response.get("count")
-                    if not results:
-                        country_exhausted[country_code] = True
-                        break
-
-                    eff_count = int(raw_count) if raw_count is not None else (offset + len(results))
-                    page_processed = 0
-                    for rec in results:
-                        if taxon_retained >= self.max_records_per_taxon:
-                            break
+                def _run_country_pages(country_code: Optional[str], stop_at_country_quota: Optional[int]) -> None:
+                    nonlocal taxon_harvested, taxon_retained, taxon_western_excluded
+                    while taxon_retained < self.max_records_per_taxon and not country_exhausted[country_code]:
                         if stop_at_country_quota is not None and country_retained[country_code] >= stop_at_country_quota:
                             break
-                        pre_ret = taxon_retained
-                        _ingest_occurrence_record(rec, require_type=False)
-                        page_processed += 1
-                        if taxon_retained > pre_ret:
-                            country_retained[country_code] += (taxon_retained - pre_ret)
+                        offset = country_offsets[country_code]
+                        search_kwargs: Dict[str, Any] = {
+                            "basisOfRecord": "PRESERVED_SPECIMEN",
+                            "mediaType": "StillImage",
+                            "limit": limit,
+                            "offset": offset,
+                        }
+                        if is_direct_genus_query and genus_key is not None:
+                            search_kwargs["taxonKey"] = genus_key
+                        else:
+                            search_kwargs["scientificName"] = taxon
+                        if country_code:
+                            search_kwargs["country"] = country_code
+                        if use_server_lon_filter:
+                            search_kwargs["decimalLongitude"] = f"{eff_query_west_lon},-50.0"
+                        try:
+                            response = occ.search(**search_kwargs)
+                        except Exception as e:
+                            self.logger.error(f"GBIF API query error for '{taxon}' (country={country_code}) at offset {offset}: {e}")
+                            country_exhausted[country_code] = True
+                            break
 
-                    country_offsets[country_code] = offset + page_processed
-                    if (page_processed == len(results) and country_offsets[country_code] >= eff_count) or page_processed == 0:
-                        country_exhausted[country_code] = True
-                    time.sleep(0.1)
+                        if not isinstance(response, dict):
+                            country_exhausted[country_code] = True
+                            break
+                        results = response.get("results", [])
+                        raw_count = response.get("count")
+                        if not results:
+                            country_exhausted[country_code] = True
+                            break
 
-            for country_code in country_targets:
-                if taxon_retained >= self.max_records_per_taxon:
-                    break
-                _run_country_pages(country_code, pass1_quota)
+                        eff_count = int(raw_count) if raw_count is not None else (offset + len(results))
+                        page_processed = 0
+                        for rec in results:
+                            if taxon_retained >= self.max_records_per_taxon:
+                                break
+                            if stop_at_country_quota is not None and country_retained[country_code] >= stop_at_country_quota:
+                                break
+                            if use_extra_portals:
+                                gbif_raw_records.append(dict(rec, portal_source=rec.get("portal_source") or "GBIF"))
+                                gbif_had_media.append(bool(extract_high_res_image_url(rec.get("media", []))))
+                            pre_ret = taxon_retained
+                            h_inc, r_inc, w_inc = _ingest_occurrence_record(
+                                rec,
+                                require_type=False,
+                                fallback_taxon=taxon,
+                                direct_genus_q=is_direct_genus_query,
+                            )
+                            taxon_harvested += h_inc
+                            taxon_retained += r_inc
+                            taxon_western_excluded += w_inc
+                            page_processed += 1
+                            if taxon_retained > pre_ret:
+                                country_retained[country_code] += (taxon_retained - pre_ret)
 
-            if taxon_retained < self.max_records_per_taxon:
+                        country_offsets[country_code] = offset + page_processed
+                        if (page_processed == len(results) and country_offsets[country_code] >= eff_count) or page_processed == 0:
+                            country_exhausted[country_code] = True
+                        time.sleep(0.1)
+
                 for country_code in country_targets:
                     if taxon_retained >= self.max_records_per_taxon:
                         break
-                    if not country_exhausted[country_code]:
-                        _run_country_pages(country_code, None)
+                    _run_country_pages(country_code, pass1_quota)
 
-            # Secondary Type-Specimen Rescue Query ensuring nomenclatural types are always captured
-            if self.exclude_western and taxon_retained < self.max_records_per_taxon:
-                for country_code in country_targets:
-                    if taxon_retained >= self.max_records_per_taxon:
-                        break
-                    type_search_kwargs: Dict[str, Any] = {
-                        "basisOfRecord": "PRESERVED_SPECIMEN",
-                        "typeStatus": "*",
-                        "limit": 300,
-                        "offset": 0,
-                    }
-                    if is_direct_genus_query and genus_key is not None:
-                        type_search_kwargs["taxonKey"] = genus_key
-                    else:
-                        type_search_kwargs["scientificName"] = taxon
-                    if country_code:
-                        type_search_kwargs["country"] = country_code
-                    try:
-                        type_resp = occ.search(**type_search_kwargs)
-                        type_results = type_resp.get("results", []) if isinstance(type_resp, dict) else []
-                    except Exception:
-                        type_results = []
-                    for t_rec in type_results:
+                if taxon_retained < self.max_records_per_taxon:
+                    for country_code in country_targets:
                         if taxon_retained >= self.max_records_per_taxon:
                             break
-                        _ingest_occurrence_record(t_rec, require_type=True)
+                        if not country_exhausted[country_code]:
+                            _run_country_pages(country_code, None)
 
-            self.logger.info(
-                f"Taxon '{taxon}': Processed {taxon_harvested} occurrences -> "
-                f"Retained {taxon_retained} candidate records "
-                f"(Immediate exclusions: {taxon_western_excluded})."
+                # Secondary Type-Specimen Rescue Query ensuring nomenclatural types are always captured
+                if self.exclude_western and taxon_retained < self.max_records_per_taxon:
+                    for country_code in country_targets:
+                        if taxon_retained >= self.max_records_per_taxon:
+                            break
+                        type_search_kwargs: Dict[str, Any] = {
+                            "basisOfRecord": "PRESERVED_SPECIMEN",
+                            "typeStatus": "*",
+                            "limit": 300,
+                            "offset": 0,
+                        }
+                        if is_direct_genus_query and genus_key is not None:
+                            type_search_kwargs["taxonKey"] = genus_key
+                        else:
+                            type_search_kwargs["scientificName"] = taxon
+                        if country_code:
+                            type_search_kwargs["country"] = country_code
+                        try:
+                            type_resp = occ.search(**type_search_kwargs)
+                            type_results = type_resp.get("results", []) if isinstance(type_resp, dict) else []
+                        except Exception:
+                            type_results = []
+                        for t_rec in type_results:
+                            if taxon_retained >= self.max_records_per_taxon:
+                                break
+                            if use_extra_portals and classify_nomenclatural_type_rank(t_rec.get("typeStatus"))[0] >= 1:
+                                gbif_raw_records.append(dict(t_rec, portal_source=t_rec.get("portal_source") or "GBIF"))
+                                gbif_had_media.append(bool(extract_high_res_image_url(t_rec.get("media", []))))
+                            h_inc, r_inc, w_inc = _ingest_occurrence_record(
+                                t_rec,
+                                require_type=True,
+                                fallback_taxon=taxon,
+                                direct_genus_q=is_direct_genus_query,
+                            )
+                            taxon_harvested += h_inc
+                            taxon_retained += r_inc
+                            taxon_western_excluded += w_inc
+
+                self.logger.info(
+                    f"Taxon '{taxon}': Processed {taxon_harvested} occurrences -> "
+                    f"Retained {taxon_retained} candidate records "
+                    f"(Immediate exclusions: {taxon_western_excluded})."
+                )
+
+        if use_extra_portals:
+            portal_queries = self.taxa if self.taxa else [self.target_genus]
+            merged_portal_recs, portal_stats = fetch_and_deduplicate_portal_records(
+                taxa_queries=portal_queries,
+                gbif_records=gbif_raw_records,
+                portal_sources=self.portal_sources,
+                symbiota_api_urls=self.symbiota_api_urls,
+                max_records_per_taxon=self.max_records_per_taxon,
+                countries=tuple(self.countries) if self.countries else ("US", "CA"),
+                idigbio_http_fn=self.idigbio_http_fn,
+                symbiota_http_fn=self.symbiota_http_fn,
             )
+            self.last_portal_stats = portal_stats
+            self.logger.info(
+                f"Multi-Portal Merge: gbif={portal_stats['gbif_input']}, "
+                f"idigbio={portal_stats['idigbio_fetched']}, symbiota={portal_stats['symbiota_fetched']}, "
+                f"dedup_skipped={portal_stats['deduplicated_skipped']}, "
+                f"media_backfilled={portal_stats['media_backfilled']}, "
+                f"net_new={portal_stats['net_new_added']}"
+            )
+            fb_tx = portal_queries[0]
+            for idx_m, p_rec in enumerate(merged_portal_recs):
+                if idx_m < len(gbif_raw_records):
+                    if gbif_had_media[idx_m] or not extract_high_res_image_url(p_rec.get("media", [])):
+                        continue
+                _ingest_occurrence_record(
+                    p_rec,
+                    require_type=False,
+                    fallback_taxon=fb_tx,
+                    direct_genus_q=(fb_tx.strip().lower() == self.target_genus.lower()),
+                    from_extra_portal=True,
+                )
 
         df = pd.DataFrame(all_curated_records)
         if not df.empty:
-            _std_fn = lambda x: standardize_taxon_name(x, target_genus=self.target_genus)
+            _std_fn = lambda x: standardize_taxon_name(
+                x,
+                target_genus=self.target_genus,
+                infraspecific_policy=self.infraspecific_policy,
+            )
             # Eastern NA Biogeographic Residency Screen + Full US+CA Continental Range Retention for Residents
             is_direct_single_genus_tiny_mock = (
                 len(self.taxa) == 1
@@ -3209,6 +3593,7 @@ class VoucherHarvester:
             logger=self.logger,
             home_herbarium=self.home_herbarium,
             db_path=self.db_path,
+            infraspecific_policy=self.infraspecific_policy,
         )
 
     def run(
@@ -3267,6 +3652,9 @@ def harvest_taxa_occurrences(
     usda_county_filter: bool = DEFAULT_USDA_COUNTY_FILTER,
     usda_county_buffer_km: float = DEFAULT_USDA_COUNTY_BUFFER_KM,
     usda_exempt_gold: bool = DEFAULT_USDA_EXEMPT_GOLD,
+    portal_sources: Optional[Sequence[str]] = None,
+    symbiota_api_urls: Optional[Sequence[str]] = None,
+    infraspecific_policy: Optional[str] = None,
 ) -> pd.DataFrame:
     """
     Functional entry point for occurrence harvesting (defaults to `expand_synonyms=False`
@@ -3286,6 +3674,9 @@ def harvest_taxa_occurrences(
         usda_county_filter=usda_county_filter,
         usda_county_buffer_km=usda_county_buffer_km,
         usda_exempt_gold=usda_exempt_gold,
+        portal_sources=portal_sources,
+        symbiota_api_urls=symbiota_api_urls,
+        infraspecific_policy=infraspecific_policy,
     )
     return harvester.harvest()
 

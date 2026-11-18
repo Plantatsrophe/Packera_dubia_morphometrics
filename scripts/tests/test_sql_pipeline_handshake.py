@@ -1297,7 +1297,7 @@ class TestSQLPipelineHandshake(unittest.TestCase):
             "cluster_propagated_gdi",
         }
 
-        # 1. Python db.py atomic migration + WAL replay + 20261128 schema upgrade
+        # 1. Python db.py atomic migration + WAL replay + 20261129 schema upgrade
         with tempfile.TemporaryDirectory() as td_py:
             ws_py = Path(td_py)
             legacy_db, target_db = _seed_legacy_wal_workspace(
@@ -1314,7 +1314,7 @@ class TestSQLPipelineHandshake(unittest.TestCase):
                     self.assertFalse(Path(f"{legacy_db}-shm").exists())
                     self.assertTrue(target_db.is_file())
                     uv = int(conn.execute("PRAGMA user_version;").fetchone()[0])
-                    self.assertEqual(uv, 20261128)
+                    self.assertEqual(uv, 20261129)
 
                     gs_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(genomic_samples);").fetchall()}
                     gla_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(genetic_lineage_assignments);").fetchall()}
@@ -1350,7 +1350,7 @@ local({{
   on.exit(disconnect_packera_db(conn), add = TRUE)
   stopifnot(!is.null(conn))
   uv <- as.integer(DBI::dbGetQuery(conn, "PRAGMA user_version;")[[1L]][1L])
-  stopifnot(uv == 20261128L)
+  stopifnot(uv == 20261129L)
   gs_cols <- DBI::dbListFields(conn, "genomic_samples")
   gla_cols <- DBI::dbListFields(conn, "genetic_lineage_assignments")
   ct_cols <- DBI::dbListFields(conn, "curation_triage")
@@ -1385,12 +1385,12 @@ local({{
                 self.assertTrue(target_r.is_file())
 
     def test_curation_triage_genomic_propagation_columns_and_migration(self) -> None:
-        """Verify schema 20261128 migrates from previous schema version and exposes the 6 genomic propagation columns."""
+        """Verify schema 20261129 migrates from previous schema version and exposes the 6 genomic propagation columns."""
         from scripts.core.db import ensure_pipeline_run, populate_run_active_cohort
         from scripts.core.db_schema import PACKERA_SCHEMA_USER_VERSION, PLANTMATICS_SCHEMA_USER_VERSION
 
-        self.assertEqual(PLANTMATICS_SCHEMA_USER_VERSION, 20261128)
-        self.assertEqual(PACKERA_SCHEMA_USER_VERSION, 20261128)
+        self.assertEqual(PLANTMATICS_SCHEMA_USER_VERSION, 20261129)
+        self.assertEqual(PACKERA_SCHEMA_USER_VERSION, 20261129)
         prev_ver = PLANTMATICS_SCHEMA_USER_VERSION - 1
         prop_cols = (
             "genomic_propagation_tier",
@@ -1506,7 +1506,7 @@ local({{
                 conn.close()
 
     def test_cytology_schema_migration_and_purge_runs_only_preservation(self) -> None:
-        """Verify schema 20261125 -> 20261128 creates cytology tables/columns and purge_runs_only preserves them."""
+        """Verify schema 20261125 -> 20261129 creates cytology tables/columns and purge_runs_only preserves them."""
         from scripts.core.db import (
             ensure_pipeline_run,
             populate_run_active_cohort,
@@ -1516,7 +1516,7 @@ local({{
         )
         from scripts.core.db_schema import PLANTMATICS_SCHEMA_USER_VERSION
 
-        self.assertEqual(PLANTMATICS_SCHEMA_USER_VERSION, 20261128)
+        self.assertEqual(PLANTMATICS_SCHEMA_USER_VERSION, 20261129)
         cyto_ct_cols = (
             "cytology_linkage_tier",
             "voucher_sporophytic_2n",
@@ -1568,7 +1568,7 @@ local({{
 
             conn = get_db_connection(db_p, init_schema=True)
             try:
-                self.assertEqual(int(conn.execute("PRAGMA user_version;").fetchone()[0]), 20261128)
+                self.assertEqual(int(conn.execute("PRAGMA user_version;").fetchone()[0]), 20261129)
                 tables = {str(r[0]) for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table';").fetchall()}
                 self.assertIn("cytological_records", tables)
                 self.assertIn("taxon_cytology_summary", tables)
@@ -1675,7 +1675,7 @@ local({{
                 conn2.close()
 
     def test_backbone_geochem_wetland_schema_20261127_roundtrip(self) -> None:
-        """Verify 20261126 -> 20261128 migration creates backbone/wetland/geochem tables/cols and master view aliases."""
+        """Verify 20261126 -> 20261129 migration creates backbone/wetland/geochem tables/cols and master view aliases."""
         from scripts.core.db import (
             ensure_pipeline_run,
             get_db_connection,
@@ -1685,7 +1685,7 @@ local({{
         )
         from scripts.core.db_schema import PLANTMATICS_SCHEMA_USER_VERSION
 
-        self.assertEqual(PLANTMATICS_SCHEMA_USER_VERSION, 20261128)
+        self.assertEqual(PLANTMATICS_SCHEMA_USER_VERSION, 20261129)
         expected_backbone_cols = {
             "species_standardized",
             "target_genus",
@@ -1778,7 +1778,7 @@ local({{
 
             conn = get_db_connection(db_p, init_schema=True)
             try:
-                self.assertEqual(int(conn.execute("PRAGMA user_version;").fetchone()[0]), 20261128)
+                self.assertEqual(int(conn.execute("PRAGMA user_version;").fetchone()[0]), 20261129)
                 tbp_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(taxon_backbone_profiles);").fetchall()}
                 ns_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(natureserve_subnational_ranges);").fetchall()}
                 env_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(environmental_cache);").fetchall()}
@@ -1934,7 +1934,7 @@ local({{
         from scripts.core.db import get_db_connection
         from scripts.core.db_schema import PLANTMATICS_SCHEMA_USER_VERSION
 
-        self.assertEqual(PLANTMATICS_SCHEMA_USER_VERSION, 20261128)
+        self.assertEqual(PLANTMATICS_SCHEMA_USER_VERSION, 20261129)
         with tempfile.TemporaryDirectory() as tmp:
             db_p = Path(tmp) / "legacy_20261127.sqlite"
             raw_conn = sqlite3.connect(db_p)
@@ -1972,7 +1972,7 @@ local({{
 
             conn = get_db_connection(db_p, init_schema=True)
             try:
-                self.assertEqual(int(conn.execute("PRAGMA user_version;").fetchone()[0]), 20261128)
+                self.assertEqual(int(conn.execute("PRAGMA user_version;").fetchone()[0]), 20261129)
                 syn_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(taxon_synonyms);").fetchall()}
                 usda_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(usda_county_ranges);").fetchall()}
                 self.assertIn("canonical_taxon", syn_cols)
@@ -1996,6 +1996,132 @@ local({{
                 self.assertGreaterEqual(len(bm_cols), 3)
             finally:
                 conn.close()
+
+    def test_schema_20261128_to_20261129_specialists_and_voucher_columns_migration(self) -> None:
+        """Verify 20261128 -> 20261129 migration creates taxonomic_specialists and 5 vouchers cols and survives purge_runs_only."""
+        from scripts.core.db import ensure_pipeline_run, get_db_connection, populate_run_active_cohort, purge_runs_only, upsert_rows_generic, upsert_vouchers_records
+        from scripts.core.db_schema import PLANTMATICS_SCHEMA_USER_VERSION
+
+        self.assertEqual(PLANTMATICS_SCHEMA_USER_VERSION, 20261129)
+        new_v_cols = ("portal_source", "specimen_sex", "seasonal_shoot_phase", "infraspecific_rank", "infraspecific_epithet")
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Path(tmp)
+            db_p = ws / "data" / "plantmatics.sqlite"
+            db_p.parent.mkdir(parents=True, exist_ok=True)
+            raw = sqlite3.connect(db_p)
+            raw.executescript(
+                """
+                PRAGMA user_version = 20261128;
+                CREATE TABLE vouchers (
+                    catalogNumber TEXT PRIMARY KEY,
+                    institutionCode TEXT,
+                    scientificName TEXT,
+                    species_raw TEXT,
+                    recordedBy TEXT,
+                    recordNumber TEXT,
+                    identifiedBy TEXT,
+                    determiner_tier TEXT,
+                    type_status TEXT,
+                    county TEXT,
+                    stateProvince TEXT,
+                    locality TEXT,
+                    decimalLatitude REAL,
+                    decimalLongitude REAL,
+                    coordinateUncertainty REAL,
+                    year INTEGER,
+                    month INTEGER,
+                    day INTEGER,
+                    eventDate TEXT,
+                    doy REAL,
+                    regional_group TEXT,
+                    image_path TEXT,
+                    exsiccatae_key TEXT,
+                    is_primary_duplicate INTEGER,
+                    duplicate_count INTEGER,
+                    exsiccatae_taxonomic_conflict INTEGER DEFAULT 0,
+                    exsiccatae_gold_taxon TEXT,
+                    usda_symbol TEXT,
+                    usda_county_status TEXT,
+                    infraspecific_taxon TEXT,
+                    georef_qc_status TEXT,
+                    is_centroid_or_inst_coord INTEGER DEFAULT 0,
+                    coord_quarantine_reason TEXT,
+                    spatial_balance_weight REAL,
+                    species_standardized TEXT,
+                    pixels_per_mm REAL,
+                    is_calibrated_mm INTEGER,
+                    qc_status TEXT DEFAULT 'PENDING',
+                    failure_reason TEXT,
+                    failure_details TEXT
+                );
+                INSERT INTO vouchers (catalogNumber, institutionCode, scientificName, species_raw, determiner_tier, species_standardized, qc_status)
+                VALUES ('NCU-OLD-28', 'NCU', 'Salix nigra', 'Salix nigra', 'Tier_1_Gold', 'Salix nigra', 'PASS');
+                """
+            )
+            raw.commit()
+            raw.close()
+
+            conn = get_db_connection(db_p, init_schema=True)
+            try:
+                self.assertEqual(int(conn.execute("PRAGMA user_version;").fetchone()[0]), 20261129)
+                tbls = {str(r[0]) for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table';").fetchall()}
+                self.assertIn("taxonomic_specialists", tbls)
+                v_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(vouchers);").fetchall()}
+                mv_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(v_integrative_triage_master);").fetchall()}
+                ts_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(taxonomic_specialists);").fetchall()}
+                for c in new_v_cols:
+                    self.assertIn(c, v_cols)
+                    self.assertIn(c, mv_cols)
+                self.assertTrue({"specialist_id", "scope_type", "scope_taxon", "canonical_name", "qualified_regex", "tier_cap", "source"}.issubset(ts_cols))
+
+                upsert_rows_generic(
+                    conn,
+                    table_name="taxonomic_specialists",
+                    rows=[{
+                        "specialist_id": "SPEC-SALIX-01",
+                        "scope_type": "genus",
+                        "scope_taxon": "Salix",
+                        "canonical_name": "George W. Argus",
+                        "qualified_regex": "argus",
+                        "tier_cap": "Tier_1_Gold",
+                        "source": "OpenAlex",
+                        "user_verified": 1,
+                        "updated_at": "2026-11-18T00:00:00Z",
+                    }],
+                    pk_cols=("specialist_id",),
+                )
+                v_new = [{
+                    "catalogNumber": "NCU-NEW-29",
+                    "institutionCode": "NCU",
+                    "scientificName": "Pinus ponderosa var. scopulorum",
+                    "species_standardized": "Pinus ponderosa var. scopulorum",
+                    "determiner_tier": "Tier_1_Gold",
+                    "qc_status": "PASS",
+                    "portal_source": "iDigBio",
+                    "specimen_sex": "pistillate",
+                    "seasonal_shoot_phase": "vernal",
+                    "infraspecific_rank": "var.",
+                    "infraspecific_epithet": "scopulorum",
+                }]
+                upsert_vouchers_records(conn, v_new)
+                ensure_pipeline_run(conn, run_id="r_29")
+                populate_run_active_cohort(conn, run_id="r_29", voucher_rows=v_new, clear_existing=False)
+                mv_r = conn.execute(
+                    "SELECT portal_source, specimen_sex, seasonal_shoot_phase, infraspecific_rank, infraspecific_epithet "
+                    "FROM v_integrative_triage_master WHERE run_id='r_29' AND catalogNumber='NCU-NEW-29';"
+                ).fetchone()
+                self.assertEqual(tuple(mv_r), ("iDigBio", "pistillate", "vernal", "var.", "scopulorum"))
+            finally:
+                conn.close()
+
+            purge_runs_only(workspace_root=ws, db_path=db_p, vacuum=False)
+            conn2 = get_db_connection(db_p, init_schema=False)
+            try:
+                self.assertEqual(conn2.execute("SELECT COUNT(*) FROM taxonomic_specialists;").fetchone()[0], 1)
+                self.assertEqual(conn2.execute("SELECT COUNT(*) FROM vouchers;").fetchone()[0], 2)
+                self.assertEqual(conn2.execute("SELECT COUNT(*) FROM run_active_cohort;").fetchone()[0], 0)
+            finally:
+                conn2.close()
 
 
 if __name__ == "__main__":

@@ -18,12 +18,13 @@ suppressPackageStartupMessages({
 .src_s04("morphometrics/pub_figures_utils.R", "compute_spatial_balance_weights")
 .src_s04("morphometrics/authority_weighting_utils.R", "compute_empirical_bayes_authority_weights")
 .src_s04("morphometrics/plasticity_mitigation_utils.R", "merge_plastic_gmm_components_ridgeline")
+.src_s04("morphometrics/dimorphism_blocking_utils.R", "build_sex_and_shoot_phase_covariates_r")
 .src_s04("morphometrics/gmm_icl_bootstrap_utils.R", "apply_gmm_icl_bootstrap_gate")
 .src_s04("core/db_utils.R", "fetch_step04_morphometrics_from_db")
 .src_s04("morphometrics/step04_allometry_merger_utils.R", force = TRUE)
 
 .basal_primary_mask <- function(df) {
-  if ("morph_tier_source" %in% names(df)) is.na(df$morph_tier_source) | !(df$morph_tier_source %in% c("Cauline_Only_Fallback", "Transitional_Passive")) else rep(TRUE, nrow(df))
+  if ("morph_tier_source" %in% names(df) && !(exists("resolve_r_growth_form_preset", mode = "function") && resolve_r_growth_form_preset() %in% c("cauline_herb", "woody_branch", "compound_leaf", "graminoid_linear"))) is.na(df$morph_tier_source) | !(df$morph_tier_source %in% c("Cauline_Only_Fallback", "Transitional_Passive")) else rep(TRUE, nrow(df))
 }
 .write_atomic_csv_s04 <- function(d, path, use_dt = FALSE, na = "NA") {
   if (is.null(path) || !nzchar(path)) return(invisible(NULL))
@@ -402,7 +403,7 @@ run_gmm_morphotools_pipeline <- function(opts) {
   if (!is.null(vouchers_df)) {
     v_sub <- vouchers_df[!duplicated(vouchers_df$catalogNumber), , drop = FALSE]; v_idx <- match(as.character(closed_df$catalogNumber), as.character(v_sub$catalogNumber))
     ow_v <- c("scientificName", "species_standardized", "species_raw", "determiner_tier", "type_status", "is_type_specimen", "regional_group", "usda_symbol", "usda_county_status", "exsiccatae_key", "exsiccatae_taxonomic_conflict", "exsiccatae_gold_taxon")
-    v_cols <- c(ow_v, "identifiedBy", "institutionCode", "county", "stateProvince", "decimalLatitude", "decimalLongitude", "doy", "spatial_balance_weight", "scale_source", "is_calibrated_mm", "corymb_head_count_est", "anthesis_head_count", "fruiting_head_count", "Flower_MANY", "Seed_Fruit_MANY")
+    v_cols <- c(ow_v, "identifiedBy", "institutionCode", "county", "stateProvince", "decimalLatitude", "decimalLongitude", "doy", "spatial_balance_weight", "scale_source", "is_calibrated_mm", "corymb_head_count_est", "anthesis_head_count", "fruiting_head_count", "Flower_MANY", "Seed_Fruit_MANY", "specimen_sex", "seasonal_shoot_phase", "sex", "reproductiveCondition", "occurrenceRemarks", "fieldNotes", "dynamicProperties")
     for (col in intersect(names(v_sub), v_cols)) { vv <- v_sub[[col]][v_idx]; if (!col %in% names(closed_df)) closed_df[[col]] <- vv else { mv <- !is.na(vv) & nzchar(trimws(as.character(vv))) & (col %in% ow_v | is.na(closed_df[[col]])); closed_df[[col]][mv] <- vv[mv] } }
   }
   sp_cand <- rep("Unknown", nrow(closed_df)); for (sc in intersect(c("species_standardized", "scientificName", "species_raw"), names(closed_df))) { v <- standardize_packera_taxon(closed_df[[sc]]); m <- sp_cand == "Unknown" & !is.na(v) & v != "Unknown"; sp_cand[m] <- v[m] }
@@ -464,7 +465,8 @@ run_gmm_morphotools_pipeline <- function(opts) {
   std_plast_cols <- setdiff(grep("_std$", names(closed_df), value = TRUE), c("log_centsize_std", "petiole_length_mm_std", "plant_height_cm_std"))
   phot_eb_cols <- grep("^blade_cie_", names(closed_df), value = TRUE)
   if (length(phot_eb_cols) > 0L && exists("apply_eb_institution_batch_centering", mode = "function")) closed_df <- apply_eb_institution_batch_centering(closed_df, target_cols = phot_eb_cols, min_inst_n = 10L)
-  if (exists("residualize_ontogenetic_phenophase_plasticity", mode = "function")) closed_df <- residualize_ontogenetic_phenophase_plasticity(closed_df, target_cols = unique(c(if (is_intra_mode) pca_cols else character(0), std_plast_cols)), ref_mask = (closed_df$authority_weight > 0) & .basal_primary_mask(closed_df), intraspecific_mode = is_intra_mode)
+  if (exists("merge_sex_and_shoot_phase_columns_r", mode = "function")) closed_df <- merge_sex_and_shoot_phase_columns_r(closed_df, vouchers_df)
+  if (exists("residualize_ontogenetic_phenophase_plasticity", mode = "function")) closed_df <- residualize_ontogenetic_phenophase_plasticity(closed_df, target_cols = unique(c(pca_cols, std_plast_cols)), ref_mask = (closed_df$authority_weight > 0) & .basal_primary_mask(closed_df), intraspecific_mode = is_intra_mode)
   gmm_res <- run_gmm_cluster_analysis(closed_df, feature_cols, max_k = opts$max_k, use_clustvarsel = isTRUE(opts$use_clustvarsel), intraspecific_mode = is_intra_mode, seed = opts$seed)
   .write_atomic_csv_s04(gmm_res$bic_table, opts$output_report)
   veg_cda <- if (!isTRUE(opts$outline_only)) prune_collinear_dissection_scalars(closed_df, base_cols = feature_cols, cand_scalars = intersect(c("aspect_ratio_std"), names(closed_df)), active_mask = (closed_df$authority_weight > 0), group_vec = NULL, max_r = 0.75) else character(0)

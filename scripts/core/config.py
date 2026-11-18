@@ -290,6 +290,8 @@ def initialize_run_directory(
         os.environ["RUN_ID"] = canon_run_id
         os.environ["PLANTMATICS_PYTHON_BIN"] = resolve_python_executable(workspace_root=workspace_root)
         os.environ["PLANTMATICS_TARGET_GENUS"] = resolve_target_genus()
+        os.environ["PLANTMATICS_INFRASPECIFIC_POLICY"] = resolve_infraspecific_rank_policy()
+        os.environ["PLANTMATICS_GROWTH_FORM_PRESET"] = resolve_growth_form_preset()
 
     return run_dir
 
@@ -453,6 +455,20 @@ class PathsConfig:
     figures_dir: Path = PROJECT_ROOT / "outputs" / "figures"
 
 
+VALID_INFRASPECIFIC_RANK_POLICIES: Set[str] = {
+    "collapse_to_species",
+    "preserve_accepted_trinomials",
+}
+VALID_GROWTH_FORM_PRESETS: Set[str] = {
+    "rosette_herb",
+    "cauline_herb",
+    "woody_branch",
+    "compound_leaf",
+    "graminoid_linear",
+    "non_laminate_bypass",
+}
+
+
 @dataclass(frozen=True)
 class TaxaConfig:
     """Target focal taxa, synonymy mappings, and outgroup query sets."""
@@ -461,6 +477,8 @@ class TaxaConfig:
     outgroups: List[str] = field(default_factory=list)
     target_genus: str = "Packera"
     target_family: str = "Asteraceae"
+    infraspecific_rank_policy: str = "collapse_to_species"
+    growth_form_preset: str = "rosette_herb"
     synonym_genera: List[str] = field(default_factory=lambda: ["Packera", "Senecio", "Cineraria"])
     eastern_resident_whitelist: List[str] = field(default_factory=list)
     transcontinental_boreal_taxa: List[str] = field(
@@ -582,6 +600,8 @@ class MacroecologyConfig:
 @dataclass(frozen=True)
 class HarvestingConfig:
     """Phase 1 GBIF query, download, and filtration hyperparameters."""
+    portal_sources: List[str] = field(default_factory=lambda: ["gbif"])
+    symbiota_api_urls: List[str] = field(default_factory=list)
     max_records_per_taxon: int = 5000
     max_uncertainty_meters: float = 5000.0
     geographic_scope: str = "eastern_na"
@@ -787,12 +807,22 @@ class PipelineConfig:
             )
         )
         raw_tc = [str(s).strip() for s in raw_tc_src if str(s).strip()]
+        raw_infra_policy = str(taxa_dict.get("infraspecific_rank_policy", "collapse_to_species") or "").strip().lower()
+        eff_infra_policy = (
+            raw_infra_policy if raw_infra_policy in VALID_INFRASPECIFIC_RANK_POLICIES else "collapse_to_species"
+        )
+        raw_growth_preset = str(taxa_dict.get("growth_form_preset", "rosette_herb") or "").strip().lower()
+        eff_growth_preset = (
+            raw_growth_preset if raw_growth_preset in VALID_GROWTH_FORM_PRESETS else "rosette_herb"
+        )
         taxa = TaxaConfig(
             target_species=list(taxa_dict.get("target_species", legacy_taxa) or []),
             synonyms=dict(taxa_dict.get("synonyms", {}) or {}),
             outgroups=list(taxa_dict.get("outgroups", []) or []),
             target_genus=target_genus_val,
             target_family=target_family_val,
+            infraspecific_rank_policy=eff_infra_policy,
+            growth_form_preset=eff_growth_preset,
             synonym_genera=raw_syn_gen,
             eastern_resident_whitelist=raw_wl,
             transcontinental_boreal_taxa=raw_tc,
@@ -884,6 +914,22 @@ class PipelineConfig:
             harv_kwargs["usda_exempt_gold"] = bool(harv_kwargs["usda_exempt_gold"])
         if "transcontinental_ecoregion_gate" in harv_kwargs:
             harv_kwargs["transcontinental_ecoregion_gate"] = bool(harv_kwargs["transcontinental_ecoregion_gate"])
+        if "portal_sources" in harv_kwargs:
+            raw_ps = harv_kwargs["portal_sources"]
+            ps_items = (
+                [tok.strip().lower() for part in raw_ps.split(",") for tok in part.strip().split()]
+                if isinstance(raw_ps, str)
+                else [str(x).strip().lower() for x in (raw_ps or [])]
+            )
+            harv_kwargs["portal_sources"] = [p for p in ps_items if p] or ["gbif"]
+        if "symbiota_api_urls" in harv_kwargs:
+            raw_su = harv_kwargs["symbiota_api_urls"]
+            su_items = (
+                [raw_su.strip()]
+                if isinstance(raw_su, str)
+                else [str(x).strip() for x in (raw_su or [])]
+            )
+            harv_kwargs["symbiota_api_urls"] = [u for u in su_items if u]
         harvesting = HarvestingConfig(**harv_kwargs)
 
         vision_lm3_fallback = (raw_cfg.get("vision") or {}).get("leafmachine3", {}) or {}
@@ -1246,6 +1292,66 @@ def resolve_target_family(
         cfg=cfg,
         attr_name="target_family",
         default="Asteraceae",
+    )
+
+
+def _resolve_validated_taxa_choice(
+    explicit: Optional[str],
+    env_key: str,
+    cfg: Optional[PipelineConfig],
+    attr_name: str,
+    valid_choices: Set[str],
+    default: str,
+) -> str:
+    """Resolve a validated taxa choice via explicit -> env -> config/YAML -> default."""
+    for cand in (explicit, os.environ.get(env_key, "")):
+        norm = str(cand or "").strip().lower()
+        if norm in valid_choices:
+            return norm
+    if cfg is not None:
+        cfg_val = str(getattr(cfg.taxa, attr_name, "") or "").strip().lower()
+        if cfg_val in valid_choices:
+            return cfg_val
+    if DEFAULT_CONFIG_PATH.is_file():
+        try:
+            with DEFAULT_CONFIG_PATH.open("r", encoding="utf-8") as fh:
+                raw_cfg = yaml.safe_load(fh) or {}
+            yaml_val = str(((raw_cfg.get("taxa") or {}).get(attr_name, "")) or "").strip().lower()
+            if yaml_val in valid_choices:
+                return yaml_val
+        except (OSError, yaml.YAMLError):
+            pass
+    default_cfg_val = str(getattr(_DEFAULT_CONFIG.taxa, attr_name, "") or "").strip().lower()
+    return default_cfg_val if default_cfg_val in valid_choices else default
+
+
+def resolve_infraspecific_rank_policy(
+    cfg: Optional[PipelineConfig] = None,
+    explicit_policy: Optional[str] = None,
+) -> str:
+    """Resolve the active infraspecific rank policy (`collapse_to_species` or `preserve_accepted_trinomials`)."""
+    return _resolve_validated_taxa_choice(
+        explicit=explicit_policy,
+        env_key="PLANTMATICS_INFRASPECIFIC_POLICY",
+        cfg=cfg,
+        attr_name="infraspecific_rank_policy",
+        valid_choices=VALID_INFRASPECIFIC_RANK_POLICIES,
+        default="collapse_to_species",
+    )
+
+
+def resolve_growth_form_preset(
+    cfg: Optional[PipelineConfig] = None,
+    explicit_preset: Optional[str] = None,
+) -> str:
+    """Resolve the active growth form preset with explicit, environment, YAML, and default fallback."""
+    return _resolve_validated_taxa_choice(
+        explicit=explicit_preset,
+        env_key="PLANTMATICS_GROWTH_FORM_PRESET",
+        cfg=cfg,
+        attr_name="growth_form_preset",
+        valid_choices=VALID_GROWTH_FORM_PRESETS,
+        default="rosette_herb",
     )
 
 

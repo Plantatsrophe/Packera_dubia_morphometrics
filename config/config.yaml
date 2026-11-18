@@ -49,6 +49,8 @@ models:
 taxa:
   target_genus: "Packera"
   target_family: "Asteraceae"
+  infraspecific_rank_policy: "collapse_to_species"
+  growth_form_preset: "rosette_herb"
   target_species: []
   synonyms: {}
   outgroups: []
@@ -129,6 +131,8 @@ thresholds:
 
 # Phase 1: Voucher Harvesting & Quality Filtering
 harvesting:
+  portal_sources: ["gbif"]
+  symbiota_api_urls: []
   max_records_per_taxon: 5000
   max_uncertainty_meters: 5000.0
   geographic_scope: "eastern_na"
