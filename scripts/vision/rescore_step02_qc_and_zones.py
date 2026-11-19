@@ -949,14 +949,19 @@ def rescore_tier_a_leaves(
                 if "plant_individual_id" not in m_df.columns:
                     m_df["plant_individual_id"] = 0
                 key_to_idx: Dict[Tuple[str, int, int], int] = {}
+                cat_leaf_to_idx: Dict[Tuple[str, int], int] = {}
                 for r_i, mr in m_df.iterrows():
+                    cat_m = str(mr["catalogNumber"]).strip()
+                    lid_m = int(mr["leaf_id"])
                     k_m = (
-                        str(mr["catalogNumber"]).strip(),
+                        cat_m,
                         int(mr["plant_individual_id"]) if pd.notna(mr["plant_individual_id"]) else 0,
-                        int(mr["leaf_id"]),
+                        lid_m,
                     )
                     key_to_idx[k_m] = int(r_i)
+                    cat_leaf_to_idx.setdefault((cat_m, lid_m), int(r_i))
                 sync_cols = (
+                    "plant_individual_id",
                     "solidity",
                     "circularity",
                     "detector_class_id",
@@ -989,24 +994,28 @@ def rescore_tier_a_leaves(
                             m_df[col_s] = ""
                         elif col_s in {"is_crop_clipped", "bilateral_lobe_symmetry", "efa_qc_pass", "is_calibrated_mm"}:
                             m_df[col_s] = col_s == "efa_qc_pass"
-                        elif col_s == "detector_class_id":
+                        elif col_s in {"detector_class_id", "plant_individual_id"}:
                             m_df[col_s] = 0
                         else:
                             m_df[col_s] = np.nan
                     elif col_s not in {
                         "qc_flag_reason", "leaf_zone", "scale_source",
                         "is_crop_clipped", "bilateral_lobe_symmetry", "efa_qc_pass",
-                        "is_calibrated_mm", "detector_class_id",
+                        "is_calibrated_mm", "detector_class_id", "plant_individual_id",
                     }:
                         m_df[col_s] = pd.to_numeric(m_df[col_s], errors="coerce")
                 for _, r_u in el_df.iterrows():
-                    k_u = (str(r_u["catalogNumber"]).strip(), int(r_u["plant_individual_id"]), int(r_u["leaf_id"]))
-                    if k_u in key_to_idx:
-                        mi = key_to_idx[k_u]
+                    cat_u = str(r_u["catalogNumber"]).strip()
+                    lid_u = int(r_u["leaf_id"])
+                    k_u = (cat_u, int(r_u["plant_individual_id"]), lid_u)
+                    mi = key_to_idx.get(k_u)
+                    if mi is None:
+                        mi = cat_leaf_to_idx.get((cat_u, lid_u))
+                    if mi is not None:
                         for col_s in sync_cols:
                             if col_s in {"is_crop_clipped", "bilateral_lobe_symmetry", "efa_qc_pass", "is_calibrated_mm"}:
                                 m_df.at[mi, col_s] = bool(r_u[col_s])
-                            elif col_s == "detector_class_id":
+                            elif col_s in {"detector_class_id", "plant_individual_id"}:
                                 m_df.at[mi, col_s] = int(r_u[col_s])
                             elif col_s in {"qc_flag_reason", "leaf_zone", "scale_source"}:
                                 m_df.at[mi, col_s] = str(r_u.get(col_s) or "")

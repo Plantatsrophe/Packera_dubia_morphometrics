@@ -371,7 +371,7 @@ apply_eb_institution_batch_centering <- function(df, target_cols, min_inst_n = 1
         chi_v <- suppressWarnings(stats::chisq.test(tab_rg, simulate.p.value = FALSE)$statistic)
         cramers_v <- sqrt(as.numeric(chi_v) / max(1.0, sum(tab_rg) * (min(nrow(tab_rg), ncol(tab_rg)) - 1L)))
         dom_share <- stats::weighted.mean(apply(tab_rg, 1L, max) / pmax(rowSums(tab_rg), 1), w = rowSums(tab_rg))
-        is_regionally_confounded <- (is.finite(cramers_v) && cramers_v > 0.45) || (is.finite(dom_share) && dom_share >= 0.75)
+        is_regionally_confounded <- (is.finite(cramers_v) && cramers_v > 0.65) || (is.finite(dom_share) && dom_share >= 0.75)
       }
       break
     }

@@ -1281,11 +1281,23 @@ fetch_step03_contours_from_db <- function(
       return(NULL)
     }
     q_cats <- paste(vapply(cats, function(x) as.character(DBI::dbQuoteString(conn, x)), character(1)), collapse = ", ")
-    sql <- paste0(
-      base_sql,
-      sprintf("WHERE %s AND el.catalogNumber IN (%s) ORDER BY el.catalogNumber, el.plant_individual_id, el.leaf_id;", contour_pred, q_cats)
-    )
-    rows <- tryCatch(DBI::dbGetQuery(conn, sql), error = function(e) NULL)
+    rac_cats <- if (has_cohort) {
+      tryCatch(trimws(as.character(DBI::dbGetQuery(conn, "SELECT DISTINCT catalogNumber FROM run_active_cohort WHERE run_id = $1;", params = list(rid))$catalogNumber)), error = function(e) character(0))
+    } else character(0)
+    if (has_cohort && length(rac_cats) > 0L && all(cats %in% rac_cats)) {
+      sql <- paste0(
+        base_sql,
+        "INNER JOIN run_active_cohort rac ON rac.catalogNumber = el.catalogNumber AND rac.plant_individual_id = el.plant_individual_id ",
+        sprintf("WHERE rac.run_id = $1 AND %s AND el.catalogNumber IN (%s) ORDER BY el.catalogNumber, el.plant_individual_id, el.leaf_id;", contour_pred, q_cats)
+      )
+      rows <- tryCatch(DBI::dbGetQuery(conn, sql, params = list(rid)), error = function(e) NULL)
+    } else {
+      sql <- paste0(
+        base_sql,
+        sprintf("WHERE %s AND el.catalogNumber IN (%s) ORDER BY el.catalogNumber, el.plant_individual_id, el.leaf_id;", contour_pred, q_cats)
+      )
+      rows <- tryCatch(DBI::dbGetQuery(conn, sql), error = function(e) NULL)
+    }
   } else if (has_cohort) {
     sql <- paste0(
       base_sql,
@@ -1332,6 +1344,20 @@ fetch_step03_contours_from_db <- function(
         }
         if (length(disk_cats) > 0L && length(intersect(disk_cats, unique(rows$catalogNumber))) == 0L) {
           return(NULL)
+        }
+      }
+      if ("plant_individual_id" %in% names(m_hdr)) {
+        mc_all_v <- trimws(as.character(m_hdr$catalogNumber))
+        mp_all_v <- suppressWarnings(as.integer(m_hdr$plant_individual_id))
+        mp_all_v[is.na(mp_all_v)] <- 0L
+        m_cat_pids <- unique(paste(mc_all_v, mp_all_v, sep = "__"))
+        r_cats_v <- trimws(as.character(rows$catalogNumber))
+        r_pids_v <- if ("plant_individual_id" %in% names(rows)) suppressWarnings(as.integer(rows$plant_individual_id)) else rep(0L, nrow(rows))
+        r_pids_v[is.na(r_pids_v)] <- 0L
+        keep_ramet_m <- !(r_cats_v %in% mc_all_v) | (paste(r_cats_v, r_pids_v, sep = "__") %in% m_cat_pids)
+        if (!all(keep_ramet_m)) {
+          rows <- rows[keep_ramet_m, , drop = FALSE]
+          if (nrow(rows) == 0L) return(NULL)
         }
       }
       if ("leaf_id" %in% names(m_hdr)) {
@@ -2491,9 +2517,19 @@ persist_step04_to_sqlite <- function(
   .prune_stale_run_rows_r(conn, "otu_morphometrics", rid, df_db)
 
   if (db_table_exists_safe(conn, "run_active_cohort") && db_table_exists_safe(conn, "vouchers")) {
-    # Update authority_weight and is_promoted_bronze on existing cohort rows without violating vouchers FK
-    v_cats <- tryCatch(DBI::dbGetQuery(conn, "SELECT catalogNumber FROM vouchers;")$catalogNumber, error = function(e) character(0))
-    coh_sub <- df_db[df_db$catalogNumber %in% v_cats, , drop = FALSE]
+    # Update authority_weight and is_promoted_bronze on existing cohort rows without re-inserting pruned ramets
+    existing_rac <- tryCatch(
+      DBI::dbGetQuery(conn, "SELECT catalogNumber, COALESCE(plant_individual_id, 0) AS plant_individual_id FROM run_active_cohort WHERE run_id = $1;", params = list(rid)),
+      error = function(e) data.frame()
+    )
+    if (nrow(existing_rac) > 0L) {
+      ex_keys <- paste(trimws(as.character(existing_rac$catalogNumber)), as.integer(existing_rac$plant_individual_id), sep = "__")
+      df_keys <- paste(trimws(as.character(df_db$catalogNumber)), as.integer(df_db$plant_individual_id), sep = "__")
+      coh_sub <- df_db[df_keys %in% ex_keys, , drop = FALSE]
+    } else {
+      v_cats <- tryCatch(DBI::dbGetQuery(conn, "SELECT catalogNumber FROM vouchers;")$catalogNumber, error = function(e) character(0))
+      coh_sub <- df_db[df_db$catalogNumber %in% v_cats, , drop = FALSE]
+    }
     if (nrow(coh_sub) > 0L) {
       coh_cols <- intersect(
         c(
