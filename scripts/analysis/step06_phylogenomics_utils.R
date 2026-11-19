@@ -35,14 +35,22 @@ if (grDevices::dev.cur() == 1L) {
   n_shared_mat <- matrix(0L, nrow = n, ncol = n)
   min_shared <- if (p >= 200L) 150L else max(10L, as.integer(floor(0.20 * p)))
   if (n >= 2L) {
-    for (i in seq_len(n - 1L)) {
-      vi <- dosage_mat[i, ]; mi <- is.finite(vi)
-      for (j in (i + 1L):n) {
-        vj <- dosage_mat[j, ]; shared <- mi & is.finite(vj); ns <- sum(shared)
-        n_shared_mat[i, j] <- ns; n_shared_mat[j, i] <- ns
-        dval <- if (ns >= min_shared) mean(abs(vi[shared] - vj[shared])) else NA_real_
-        d_mat[i, j] <- dval; d_mat[j, i] <- dval
+    eval_row_i <- function(i) {
+      vi <- dosage_mat[i, ]; mi <- is.finite(vi); j_seq <- (i + 1L):n
+      ns_v <- integer(length(j_seq)); dv_v <- rep(NA_real_, length(j_seq))
+      for (k in seq_along(j_seq)) {
+        vj <- dosage_mat[j_seq[k], ]; sh <- mi & is.finite(vj); ns <- sum(sh); ns_v[k] <- ns
+        if (ns >= min_shared) dv_v[k] <- mean(abs(vi[sh] - vj[sh]))
       }
+      list(i = i, j_seq = j_seq, ns = ns_v, d = dv_v)
+    }
+    i_seq <- seq_len(n - 1L)
+    nw_d <- if (n >= 32L && exists("packera_mclapply", mode = "function") && exists("resolve_packera_workers", mode = "function")) resolve_packera_workers(64L, length(i_seq)) else 1L
+    row_res <- if (nw_d > 1L) packera_mclapply(i_seq, eval_row_i, mc.cores = nw_d) else lapply(i_seq, eval_row_i)
+    for (rr in row_res) {
+      i <- rr$i; js <- rr$j_seq
+      n_shared_mat[i, js] <- rr$ns; n_shared_mat[js, i] <- rr$ns
+      d_mat[i, js] <- rr$d; d_mat[js, i] <- rr$d
     }
   }
   d_raw <- d_mat
@@ -197,7 +205,8 @@ if (grDevices::dev.cur() == 1L) {
     d_g_sub <- d_geno_mat[geo_idx, geo_idx, drop = FALSE]
     has_var <- is.finite(stats::sd(d_g_sub[upper.tri(d_g_sub)], na.rm = TRUE)) && stats::sd(d_g_sub[upper.tri(d_g_sub)], na.rm = TRUE) > 0 &&
       is.finite(stats::sd(d_geo[upper.tri(d_geo)], na.rm = TRUE)) && stats::sd(d_geo[upper.tri(d_geo)], na.rm = TRUE) > 0
-    m_res <- if (has_var && requireNamespace("vegan", quietly = TRUE)) tryCatch(vegan::mantel(stats::as.dist(d_g_sub), stats::as.dist(d_geo), permutations = 999L), error = function(e) NULL) else NULL
+    nw_vg <- if (exists("resolve_packera_workers", mode = "function")) resolve_packera_workers(64L) else 1L
+    m_res <- if (has_var && requireNamespace("vegan", quietly = TRUE)) tryCatch(vegan::mantel(stats::as.dist(d_g_sub), stats::as.dist(d_geo), permutations = 999L, parallel = nw_vg), error = function(e) NULL) else NULL
     congr_rows[[length(congr_rows) + 1L]] <- data.frame(
       comparison = "Genomic_vs_Geographic_IBD", n_samples = ng,
       mantel_r = round(if (!is.null(m_res)) as.numeric(m_res$statistic) else if (has_var) stats::cor(d_g_sub[upper.tri(d_g_sub)], d_geo[upper.tri(d_geo)]) else NA_real_, 4),
@@ -224,8 +233,9 @@ if (grDevices::dev.cur() == 1L) {
       X_m <- as.matrix(morph_linked_rows[m_match[ok_m], c("PC1", "PC2", "PC3"), drop = FALSE]); X_m[!is.finite(X_m)] <- 0.0
       X_g <- pco_coords[ok_m, seq_len(min(3L, ncol(pco_coords))), drop = FALSE]; d_m <- as.matrix(stats::dist(X_m)); d_g <- d_geno_mat[ok_m, ok_m, drop = FALSE]
       has_mvar <- is.finite(stats::sd(d_g[upper.tri(d_g)], na.rm = TRUE)) && stats::sd(d_g[upper.tri(d_g)], na.rm = TRUE) > 0 && is.finite(stats::sd(d_m[upper.tri(d_m)], na.rm = TRUE)) && stats::sd(d_m[upper.tri(d_m)], na.rm = TRUE) > 0
-      m_gm <- if (has_mvar && requireNamespace("vegan", quietly = TRUE)) tryCatch(vegan::mantel(stats::as.dist(d_g), stats::as.dist(d_m), permutations = 999L), error = function(e) NULL) else NULL
-      p_gm <- if (has_mvar && requireNamespace("vegan", quietly = TRUE)) tryCatch(vegan::protest(X_g, X_m, permutations = 999L), error = function(e) NULL) else NULL
+      nw_vg2 <- if (exists("resolve_packera_workers", mode = "function")) resolve_packera_workers(64L) else 1L
+      m_gm <- if (has_mvar && requireNamespace("vegan", quietly = TRUE)) tryCatch(vegan::mantel(stats::as.dist(d_g), stats::as.dist(d_m), permutations = 999L, parallel = nw_vg2), error = function(e) NULL) else NULL
+      p_gm <- if (has_mvar && requireNamespace("vegan", quietly = TRUE)) tryCatch(vegan::protest(X_g, X_m, permutations = 999L, parallel = nw_vg2), error = function(e) NULL) else NULL
       congr_rows[[length(congr_rows) + 1L]] <- data.frame(
         comparison = "Genomic_vs_Morphometrics_PCA", n_samples = length(ok_m),
         mantel_r = if (!is.null(m_gm)) round(as.numeric(m_gm$statistic), 4) else if (has_mvar) round(stats::cor(d_g[upper.tri(d_g)], d_m[upper.tri(d_m)]), 4) else NA_real_,

@@ -210,17 +210,23 @@ fit_tier0_calibrated_projection <- function(df, opts = list()) {
   lat <- .pick_num_prop(df, "decimalLatitude"); lon <- .pick_num_prop(df, "decimalLongitude")
   pop_vec <- ifelse(nzchar(pop_col), pop_col, ifelse(is.finite(lat) & is.finite(lon), sprintf("%.1f_%.1f", round(lat, 1), round(lon, 1)), as.character(seq_len(n))))
   oof_logits <- matrix(NA_real_, nrow = length(train_idx), ncol = length(classes))
-  for (pop in unique(pop_vec[train_idx])) {
+  u_pops <- unique(pop_vec[train_idx])
+  eval_pop <- function(pop) {
     va_pos <- which(pop_vec[train_idx] == pop); tr_pos <- setdiff(seq_along(train_idx), va_pos)
     if (length(unique(y_all[train_idx[tr_pos]])) == length(classes)) {
-      oof_logits[va_pos, ] <- .fit_gda_predict(X_use[train_idx[tr_pos], , drop = FALSE], y_all[train_idx[tr_pos]], X_use[train_idx[va_pos], , drop = FALSE], classes)$logits
+      list(vp = va_pos, lg = .fit_gda_predict(X_use[train_idx[tr_pos], , drop = FALSE], y_all[train_idx[tr_pos]], X_use[train_idx[va_pos], , drop = FALSE], classes)$logits)
     } else {
-      for (vp in va_pos) {
-        tr1 <- setdiff(seq_along(train_idx), vp)
-        if (length(unique(y_all[train_idx[tr1]])) == length(classes)) oof_logits[vp, ] <- .fit_gda_predict(X_use[train_idx[tr1], , drop = FALSE], y_all[train_idx[tr1]], X_use[train_idx[vp], , drop = FALSE], classes)$logits[1L, ]
+      m_vp <- matrix(NA_real_, nrow = length(va_pos), ncol = length(classes))
+      for (k in seq_along(va_pos)) {
+        tr1 <- setdiff(seq_along(train_idx), va_pos[k])
+        if (length(unique(y_all[train_idx[tr1]])) == length(classes)) m_vp[k, ] <- .fit_gda_predict(X_use[train_idx[tr1], , drop = FALSE], y_all[train_idx[tr1]], X_use[train_idx[va_pos[k]], , drop = FALSE], classes)$logits[1L, ]
       }
+      list(vp = va_pos, lg = m_vp)
     }
   }
+  nw_pop <- if (length(u_pops) >= 4L && exists("packera_mclapply", mode = "function") && exists("resolve_packera_workers", mode = "function")) resolve_packera_workers(64L, length(u_pops)) else 1L
+  pop_res <- if (nw_pop > 1L) packera_mclapply(u_pops, eval_pop, mc.cores = nw_pop) else lapply(u_pops, eval_pop)
+  for (pr in pop_res) oof_logits[pr$vp, ] <- pr$lg
 
   oof_ok <- stats::complete.cases(oof_logits); y_tr <- y_all[train_idx]; T_opt <- 1.0; kappa <- NA_real_
   cm <- matrix(0L, nrow = length(classes), ncol = length(classes), dimnames = list(classes, classes))

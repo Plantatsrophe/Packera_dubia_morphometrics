@@ -272,21 +272,24 @@ summarize_weighted_circular_phenology <- function(target_flowering, active_tx, c
 
   pair_recs <- list()
   if (length(active_tx) >= 2L) {
-    for (pr in utils::combn(active_tx, 2L, simplify = FALSE)) {
+    eval_pair <- function(pr) {
       tx1 <- pr[1L]; tx2 <- pr[2L]; s1 <- tx_stats[[tx1]]; s2 <- tx_stats[[tx2]]
-      if (is.null(s1) || is.null(s2) || s1$n < 3L || s2$n < 3L) next
+      if (is.null(s1) || is.null(s2) || s1$n < 3L || s2$n < 3L) return(NULL)
       diff_doy <- atan2(sin(s1$mu_rad - s2$mu_rad), cos(s1$mu_rad - s2$mu_rad)) * day_per_rad
       se_pair <- sqrt((s1$sd_doy^2 / s1$n) + (s2$sd_doy^2 / s2$n))
       pair_df <- rbind(s1$sub_df, s2$sub_df); pair_grp <- c(rep(tx1, s1$n), rep(tx2, s2$n))
       has_hdoy <- ("hopkins_adjusted_doy" %in% names(pair_df)) && all(is.finite(suppressWarnings(as.numeric(pair_df$hopkins_adjusted_doy))))
       pair_th <- if (isTRUE(has_hdoy)) to_rad(pair_df$hopkins_adjusted_doy) else as.numeric(pair_df$delta_doy) * 2.0 * pi / 365.25
       pair_res <- if (exists("run_circular_multigroup_phase_test", mode = "function")) run_circular_multigroup_phase_test(pair_th, pair_grp, B = B, seed = seed) else list(watson_f = NA_real_, perm_p = NA_real_)
-      pair_recs[[length(pair_recs) + 1L]] <- list(
+      list(
         tx1 = tx1, tx2 = tx2, n_pair = as.integer(s1$n + s2$n), diff_doy = diff_doy, se_pair = se_pair,
         wf = if (!is.null(pair_res$watson_f) && is.finite(pair_res$watson_f)) as.numeric(pair_res$watson_f) else NA_real_,
         raw_p = if (!is.null(pair_res$perm_p) && is.finite(pair_res$perm_p)) as.numeric(pair_res$perm_p) else NA_real_
       )
     }
+    raw_pairs <- utils::combn(active_tx, 2L, simplify = FALSE)
+    nw_p <- if (length(raw_pairs) >= 2L && exists("packera_mclapply", mode = "function") && exists("resolve_packera_workers", mode = "function")) resolve_packera_workers(64L, length(raw_pairs)) else 1L
+    pair_recs <- Filter(Negate(is.null), if (nw_p > 1L) packera_mclapply(raw_pairs, eval_pair, mc.cores = nw_p) else lapply(raw_pairs, eval_pair))
   }
   if (length(pair_recs) > 0L) {
     adj_ps <- stats::p.adjust(vapply(pair_recs, function(r) r$raw_p, numeric(1)), method = "BH")

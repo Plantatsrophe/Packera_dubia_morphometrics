@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -253,7 +254,7 @@ def select_nucleotide_substitution_model(
             with tempfile.TemporaryDirectory() as td:
                 fa = Path(td) / "aln.fasta"
                 fa.write_text("".join(f">{sid}\n{seqs[sid]}\n" for sid in present), encoding="utf-8")
-                res = subprocess.run(["iqtree2", "-s", str(fa), "-m", "MF", "-T", str(min(4, _resolve_max_workers())), "--prefix", str(Path(td) / "iq")], capture_output=True, text=True, timeout=15)
+                res = subprocess.run(["iqtree2", "-s", str(fa), "-m", "MF", "-T", str(min(32, _resolve_max_workers())), "--prefix", str(Path(td) / "iq")], capture_output=True, text=True, timeout=15)
                 m = re.search(r"Best-fit model according to BIC:\s*(\S+)", res.stdout)
                 iq_model = m.group(1).strip() if m else None
         except Exception:
@@ -293,7 +294,8 @@ def compute_model_corrected_divergence_blocks(
     n_samp, n_blk = a1.shape[0], len(block_slices)
     diff_blk, call_blk = np.zeros((n_blk, n_samp, n_samp)), np.zeros((n_blk, n_samp, n_samp))
     w_het, w_call = np.zeros((n_blk, n_samp)), np.zeros((n_blk, n_samp))
-    for bi, (st, en) in enumerate(block_slices):
+    def _do_blk(item: Tuple[int, Tuple[int, int]]) -> None:
+        bi, (st, en) = item
         x1, x2 = a1[:, st:en], a2[:, st:en]
         ok = x1 >= 0
         wc = np.sum(ok, axis=1).astype(np.float64)
@@ -301,8 +303,7 @@ def compute_model_corrected_divergence_blocks(
         w_het[bi] = np.where(wc > 0, _apply_evo_distance(np.sum(ok & (xd == 2) & ((x1 & 1) == 0), axis=1) / np.maximum(1.0, wc), np.sum(ok & (xd == 2) & ((x1 & 1) == 1), axis=1) / np.maximum(1.0, wc), np.sum(ok & ((xd & 1) == 1), axis=1) / np.maximum(1.0, wc), model_spec) * wc, 0.0)
         hy = np.stack([x1, x2, x1, x2], axis=1)
         for i in range(n_samp):
-            if not np.any(ok[i]):
-                continue
+            if not np.any(ok[i]): continue
             vij = ok & ok[i][None, :]
             cij = np.sum(vij, axis=1).astype(np.float64)
             call_blk[bi, i, :], den = cij, 4.0 * np.maximum(1.0, cij)
@@ -312,6 +313,9 @@ def compute_model_corrected_divergence_blocks(
             p2 = np.sum(vij[:, None, :] & (xor == 2) & ((hx & 1) == 1), axis=(1, 2))
             qs = np.sum(vij[:, None, :] & ((xor & 1) == 1), axis=(1, 2))
             diff_blk[bi, i, :] = np.where(cij > 0, _apply_evo_distance(p1 / den, p2 / den, qs / den, model_spec) * cij, 0.0)
+    if (nw := (min(_resolve_max_workers(), n_blk) if n_blk >= 8 else 1)) > 1:
+        with ThreadPoolExecutor(max_workers=nw) as p: list(p.map(_do_blk, enumerate(block_slices)))
+    else: list(map(_do_blk, enumerate(block_slices)))
     return diff_blk, call_blk, w_het, w_call
 
 

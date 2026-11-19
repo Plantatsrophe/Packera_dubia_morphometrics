@@ -179,24 +179,30 @@ if (grDevices::dev.cur() == 1L) {
   q_list <- lapply(specs, qr); q_ibd <- q_list[["IBD_only"]]
   e_y <- fits[["IBD_only"]]$residuals; ssr_y_ibd <- max(1e-12, sum(e_y^2))
   r2_ibd <- r2_vec[match("IBD_only", m_names)]; delta_r2_obs <- r2_vec[match("IBD_plus_IBE", m_names)] - r2_ibd
-  ge_mod <- integer(length(m_names)); ge_ibd <- 0L; ge_ibe <- 0L; ge_morph <- 0L; ge_part_ibe <- 0L
-
-  for (pm in seq_len(eff_perm)) {
-    perm <- sample.int(m); yp <- .zscore_vec(dg_sub[perm, perm][ut]); sst_p <- max(1e-12, sum((yp - mean(yp))^2))
-    for (j in seq_along(m_names)[-1L]) {
-      bp <- qr.coef(q_list[[j]], yp); bp[is.na(bp)] <- 0.0
-      if (max(0.0, 1.0 - sum((yp - specs[[j]] %*% bp)^2) / sst_p) >= r2_vec[j]) ge_mod[j] <- ge_mod[j] + 1L
-      if (m_names[j] == full_name) {
-        if (is.finite(b_ibd) && is.finite(bp["IBD"]) && abs(bp["IBD"]) >= abs(b_ibd)) ge_ibd <- ge_ibd + 1L
-        if (is.finite(b_ibe) && is.finite(bp["IBE"]) && abs(bp["IBE"]) >= abs(b_ibe)) ge_ibe <- ge_ibe + 1L
-        if ("Morph" %in% names(bp) && is.finite(b_morph) && is.finite(bp["Morph"]) && abs(bp["Morph"]) >= abs(b_morph)) ge_morph <- ge_morph + 1L
+  perms_mm <- replicate(eff_perm, sample.int(m), simplify = FALSE)
+  eval_mm_chunk <- function(idx_v) {
+    gm <- integer(length(m_names)); gibd <- 0L; gibe <- 0L; gmp <- 0L; gpi <- 0L
+    for (pm in idx_v) {
+      perm <- perms_mm[[pm]]; yp <- .zscore_vec(dg_sub[perm, perm][ut]); sst_p <- max(1e-12, sum((yp - mean(yp))^2))
+      for (j in seq_along(m_names)[-1L]) {
+        bp <- qr.coef(q_list[[j]], yp); bp[is.na(bp)] <- 0.0
+        if (max(0.0, 1.0 - sum((yp - specs[[j]] %*% bp)^2) / sst_p) >= r2_vec[j]) gm[j] <- gm[j] + 1L
+        if (m_names[j] == full_name) {
+          if (is.finite(b_ibd) && is.finite(bp["IBD"]) && abs(bp["IBD"]) >= abs(b_ibd)) gibd <- gibd + 1L
+          if (is.finite(b_ibe) && is.finite(bp["IBE"]) && abs(bp["IBE"]) >= abs(b_ibe)) gibe <- gibe + 1L
+          if ("Morph" %in% names(bp) && is.finite(b_morph) && is.finite(bp["Morph"]) && abs(bp["Morph"]) >= abs(b_morph)) gmp <- gmp + 1L
+        }
       }
+      x2_p <- .zscore_vec(d_eco[perm, perm][ut]); c_x2 <- qr.coef(q_ibd, x2_p); c_x2[is.na(c_x2)] <- 0.0
+      e_x2 <- x2_p - specs[["IBD_only"]] %*% c_x2; denom_x2 <- sum(e_x2^2)
+      dr2_p <- if (denom_x2 > 1e-12) ((sum(e_y * e_x2))^2 / (denom_x2 * ssr_y_ibd)) * (1.0 - r2_ibd) else 0.0
+      if (dr2_p >= max(0.0, delta_r2_obs) - 1e-12) gpi <- gpi + 1L
     }
-    x2_p <- .zscore_vec(d_eco[perm, perm][ut]); c_x2 <- qr.coef(q_ibd, x2_p); c_x2[is.na(c_x2)] <- 0.0
-    e_x2 <- x2_p - specs[["IBD_only"]] %*% c_x2; denom_x2 <- sum(e_x2^2)
-    dr2_p <- if (denom_x2 > 1e-12) ((sum(e_y * e_x2))^2 / (denom_x2 * ssr_y_ibd)) * (1.0 - r2_ibd) else 0.0
-    if (dr2_p >= max(0.0, delta_r2_obs) - 1e-12) ge_part_ibe <- ge_part_ibe + 1L
+    c(gm, gibd, gibe, gmp, gpi)
   }
+  nw_mm <- if (eff_perm >= 99L && exists("packera_mclapply", mode = "function") && exists("resolve_packera_workers", mode = "function")) resolve_packera_workers(64L, ceiling(eff_perm / 16L)) else 1L
+  mm_tot <- if (nw_mm > 1L) Reduce("+", packera_mclapply(parallel::splitIndices(eff_perm, nw_mm), eval_mm_chunk, mc.cores = nw_mm)) else eval_mm_chunk(seq_len(eff_perm))
+  nk <- length(m_names); ge_mod <- mm_tot[seq_len(nk)]; ge_ibd <- mm_tot[nk + 1L]; ge_ibe <- mm_tot[nk + 2L]; ge_morph <- mm_tot[nk + 3L]; ge_part_ibe <- mm_tot[nk + 4L]
 
   perm_p <- vapply(seq_along(m_names), function(j) if (j == 1L) 1.0 else (ge_mod[j] + 1.0) / (eff_perm + 1.0), numeric(1))
   p_part_ibe <- (ge_part_ibe + 1.0) / (eff_perm + 1.0)

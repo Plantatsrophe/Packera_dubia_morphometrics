@@ -94,12 +94,13 @@ align_contour_horizontal_xax <- function(coo, is_upright = NA) {
 run_parallel_momocs_efa <- function(coo_list, fac_df, nb_h, calibrate_fn) {
   coo_list <- lapply(coo_list, align_contour_horizontal_xax)
   n_out <- length(coo_list)
-  n_w <- if (exists("resolve_packera_workers", mode = "function")) {
-    resolve_packera_workers(32L, ceiling(n_out / 80L))
+  n_w <- if (n_out >= 24L && exists("resolve_packera_workers", mode = "function")) {
+    resolve_packera_workers(64L, ceiling(n_out / 12L))
   } else {
     1L
   }
-  chunk_ids <- split(seq_len(n_out), cut(seq_len(n_out), breaks = max(2L, n_w), labels = FALSE))
+  n_chunks <- max(1L, min(n_out, n_w))
+  chunk_ids <- if (n_chunks <= 1L) list(seq_len(n_out)) else split(seq_len(n_out), cut(seq_len(n_out), breaks = n_chunks, labels = FALSE))
   prep_fn <- function(idx_vec) {
     m <- length(idx_vec)
     cs_v <- numeric(m)
@@ -336,15 +337,15 @@ aggregate_step03_otu_medians_fast <- function(closed_leaf_df, all_harm_cols, sym
     )
   }
 
-  n_w <- if (n_spec >= 300L && exists("resolve_packera_workers", mode = "function")) {
-    resolve_packera_workers(32L, ceiling(n_spec / 100L))
+  n_w <- if (n_spec >= 48L && exists("resolve_packera_workers", mode = "function")) {
+    resolve_packera_workers(64L, ceiling(n_spec / 12L))
   } else {
     1L
   }
   if (n_w <= 1L) {
     res <- agg_chunk_fn(seq_len(n_spec))
   } else {
-    g_chunks <- split(seq_len(n_spec), cut(seq_len(n_spec), breaks = n_w, labels = FALSE))
+    g_chunks <- split(seq_len(n_spec), cut(seq_len(n_spec), breaks = min(n_spec, n_w), labels = FALSE))
     c_list <- packera_mclapply(g_chunks, agg_chunk_fn, mc.cores = n_w)
     pull_c <- function(nm) unlist(lapply(c_list, `[[`, nm), use.names = FALSE)
     res <- list(

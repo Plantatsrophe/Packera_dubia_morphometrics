@@ -3118,16 +3118,15 @@ class SegmentAndExtractPipeline:
                         prep_workers = 1
                         post_workers = 1
                     else:
-                        prefetch_workers = max(4, min(32, t_val // 2))
-                        prep_workers = max(4, min(48, (t_val * 3) // 4))
-                        post_workers = max(4, min(64, t_val))
+                        prefetch_workers = min(t_val, max(4, min(64, t_val // 2)))
+                        prep_workers = min(t_val, max(4, min(64, (t_val * 3) // 4)))
+                        post_workers = min(t_val, 64)
                 else:
                     n_cpu = os.cpu_count() or 32
-                    # On 32-core / 64-thread SMT CPUs, scale worker pools to full physical core count (32) by default
-                    eff_cores = min(32, max(4, n_cpu // 2)) if n_cpu >= 32 else max(4, (n_cpu * 3) // 4)
-                    prefetch_workers = max(4, min(24, eff_cores // 2))
-                    prep_workers = max(4, min(32, (eff_cores * 3) // 4))
-                    post_workers = max(4, min(64, eff_cores))
+                    eff_cores = min(64, max(4, n_cpu))
+                    prefetch_workers = min(eff_cores, max(4, min(64, eff_cores // 2)))
+                    prep_workers = min(eff_cores, max(4, min(64, (eff_cores * 3) // 4)))
+                    post_workers = eff_cores
                 if self.prefetch_workers_override is not None:
                     prefetch_workers = max(1, int(self.prefetch_workers_override))
                 if self.prep_workers_override is not None:

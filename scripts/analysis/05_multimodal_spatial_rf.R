@@ -1463,7 +1463,8 @@ query_ssurgo_sda <- function(df, cache_dir = "data/environmental/ssurgo_cache", 
         query_ssurgo_sda_batch(sub_df, cache_dir, b_idx, demo = demo, batch_size = batch_size)
       }
       rem_batches <- if (!isTRUE(demo) && length(batch_indices) >= 2L && exists("packera_mclapply", mode = "function")) {
-        packera_mclapply(seq_along(batch_indices), run_one_ss_batch, mc.cores = min(4L, length(batch_indices)), mc.preschedule = FALSE)
+        n_ss <- if (exists("resolve_packera_workers", mode = "function")) min(16L, resolve_packera_workers(16L, length(batch_indices))) else min(4L, length(batch_indices))
+        packera_mclapply(seq_along(batch_indices), run_one_ss_batch, mc.cores = n_ss, mc.preschedule = FALSE)
       } else {
         lapply(seq_along(batch_indices), run_one_ss_batch)
       }
@@ -2728,7 +2729,7 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
     w_bg <- rep(sum(w_pres) / max(1L, nrow(bg_gen$X_bg)), nrow(bg_gen$X_bg))
     wts_pb <- c(w_pres, w_bg)
 
-    rf_threads <- if (exists("resolve_packera_workers", mode = "function")) resolve_packera_workers(32L) else 1L
+    rf_threads <- if (exists("resolve_packera_workers", mode = "function")) resolve_packera_workers(64L) else 1L
     df_env_pb <- data.frame(y = y_pb, as.data.frame(X_env_pb), check.names = FALSE)
     df_all_pb <- data.frame(y = y_pb, as.data.frame(X_all_pb), check.names = FALSE)
     if (requireNamespace("ranger", quietly = TRUE)) {
@@ -2792,39 +2793,49 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
     }
     X_env_pb_cand_raw <- rbind(X_env_cov_ok[anchor_idx, cand_pb_vars, drop = FALSE], X_bg_cand[, cand_pb_vars, drop = FALSE])
 
-    for (k_f in sort(unique(fold_pb))) {
+    u_pb_folds <- sort(unique(fold_pb))
+    cv_pb_workers <- if (length(u_pb_folds) >= 2L && rf_threads > 1L && exists("packera_mclapply", mode = "function")) min(rf_threads, length(u_pb_folds)) else 1L
+    pb_fold_threads <- max(1L, as.integer(floor(rf_threads / cv_pb_workers)))
+    eval_pb_fold <- function(k_f) {
       tr_i <- which(fold_pb != k_f); te_i <- which(fold_pb == k_f)
-      if (length(tr_i) >= 8L && length(te_i) >= 1L && length(unique(pb_occ[tr_i])) == 2L) {
-        fold_scr_pb <- screen_predictors_within_cv_fold(
-          X_tr_raw_df = as.data.frame(X_env_pb_cand_raw[tr_i, , drop = FALSE], check.names = FALSE),
-          cand_vars = cand_pb_vars,
-          clim_vars = intersect(clim_cand_cv, cand_pb_vars),
-          edaph_vars = intersect(edaph_cand_cv, cand_pb_vars),
-          topo_vars = intersect(topo_cand_cv, cand_pb_vars),
-          y_tr = factor(pb_occ[tr_i]),
-          cor.threshold = cfg_s05$cor_threshold,
-          vif.threshold = cfg_s05$vif_threshold,
-          intraspecific_mode = intraspecific_mode
-        )
-        fold_selected_sets[[paste0("pb_", k_f)]] <- fold_scr_pb$selected_vars
-        X_te_pb_f <- apply_fold_imputation(
-          as.data.frame(X_env_pb_cand_raw[te_i, , drop = FALSE], check.names = FALSE),
-          fold_scr_pb$selected_vars,
-          fold_scr_pb$train_medians
-        )
-        if (requireNamespace("ranger", quietly = TRUE)) {
-          tr_df_pb <- data.frame(y = droplevels(y_pb[tr_i]), fold_scr_pb$X_tr_imp, check.names = FALSE)
-          mns_pbf <- .clamp_rf_min_node(nrow(tr_df_pb))
-          sf_pbf <- .clamp_rf_sample_frac(nrow(tr_df_pb))
-          fit_b <- ranger::ranger(y ~ ., data = tr_df_pb, num.trees = max(100L, floor(n_trees / 2L)), probability = TRUE, min.node.size = mns_pbf, max.depth = rf_max_depth_cfg, sample.fraction = sf_pbf, case.weights = wts_pb[tr_i], num.threads = rf_threads, seed = 42L + as.integer(k_f))
-          pr_b <- stats::predict(fit_b, data = X_te_pb_f, num.threads = rf_threads)$predictions
-          if (is.matrix(pr_b) && "Presence" %in% colnames(pr_b)) oof_pb_pres[te_i] <- pr_b[, "Presence"]
-        } else {
-          fit_b <- randomForest::randomForest(x = fold_scr_pb$X_tr_imp, y = droplevels(y_pb[tr_i]), ntree = max(100L, floor(n_trees / 2L)))
-          pr_b <- stats::predict(fit_b, newdata = X_te_pb_f, type = "prob")
-          if (is.matrix(pr_b) && "Presence" %in% colnames(pr_b)) oof_pb_pres[te_i] <- pr_b[, "Presence"]
-        }
+      if (!(length(tr_i) >= 8L && length(te_i) >= 1L && length(unique(pb_occ[tr_i])) == 2L)) return(NULL)
+      fold_scr_pb <- screen_predictors_within_cv_fold(
+        X_tr_raw_df = as.data.frame(X_env_pb_cand_raw[tr_i, , drop = FALSE], check.names = FALSE),
+        cand_vars = cand_pb_vars,
+        clim_vars = intersect(clim_cand_cv, cand_pb_vars),
+        edaph_vars = intersect(edaph_cand_cv, cand_pb_vars),
+        topo_vars = intersect(topo_cand_cv, cand_pb_vars),
+        y_tr = factor(pb_occ[tr_i]),
+        cor.threshold = cfg_s05$cor_threshold,
+        vif.threshold = cfg_s05$vif_threshold,
+        intraspecific_mode = intraspecific_mode
+      )
+      X_te_pb_f <- apply_fold_imputation(
+        as.data.frame(X_env_pb_cand_raw[te_i, , drop = FALSE], check.names = FALSE),
+        fold_scr_pb$selected_vars,
+        fold_scr_pb$train_medians
+      )
+      pres_p <- rep(NA_real_, length(te_i))
+      if (requireNamespace("ranger", quietly = TRUE)) {
+        tr_df_pb <- data.frame(y = droplevels(y_pb[tr_i]), fold_scr_pb$X_tr_imp, check.names = FALSE)
+        mns_pbf <- .clamp_rf_min_node(nrow(tr_df_pb))
+        sf_pbf <- .clamp_rf_sample_frac(nrow(tr_df_pb))
+        fit_b <- ranger::ranger(y ~ ., data = tr_df_pb, num.trees = max(100L, floor(n_trees / 2L)), probability = TRUE, min.node.size = mns_pbf, max.depth = rf_max_depth_cfg, sample.fraction = sf_pbf, case.weights = wts_pb[tr_i], num.threads = pb_fold_threads, seed = 42L + as.integer(k_f))
+        pr_b <- stats::predict(fit_b, data = X_te_pb_f, num.threads = pb_fold_threads)$predictions
+        if (is.matrix(pr_b) && "Presence" %in% colnames(pr_b)) pres_p <- pr_b[, "Presence"]
+      } else {
+        set.seed(42L + as.integer(k_f))
+        fit_b <- randomForest::randomForest(x = fold_scr_pb$X_tr_imp, y = droplevels(y_pb[tr_i]), ntree = max(100L, floor(n_trees / 2L)))
+        pr_b <- stats::predict(fit_b, newdata = X_te_pb_f, type = "prob")
+        if (is.matrix(pr_b) && "Presence" %in% colnames(pr_b)) pres_p <- pr_b[, "Presence"]
       }
+      list(key = paste0("pb_", k_f), selected_vars = fold_scr_pb$selected_vars, te_i = te_i, pres_p = pres_p)
+    }
+    pb_res <- if (cv_pb_workers > 1L) packera_mclapply(u_pb_folds, eval_pb_fold, mc.cores = cv_pb_workers) else lapply(u_pb_folds, eval_pb_fold)
+    for (fr in pb_res) {
+      if (is.null(fr)) next
+      fold_selected_sets[[fr$key]] <- fr$selected_vars
+      oof_pb_pres[fr$te_i] <- fr$pres_p
     }
     heldout_pb <- is.finite(oof_pb_pres)
     miss_pb <- which(!heldout_pb)
@@ -2927,7 +2938,7 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
   X_all_anc <- X_all[anchor_idx, , drop = FALSE]
   wts_anc   <- case_wts[anchor_idx]
 
-  rf_threads <- if (exists("resolve_packera_workers", mode = "function")) resolve_packera_workers(32L) else 1L
+  rf_threads <- if (exists("resolve_packera_workers", mode = "function")) resolve_packera_workers(64L) else 1L
   if (requireNamespace("ranger", quietly = TRUE)) {
     df_env_anc <- data.frame(y = y_anchor, as.data.frame(X_env_anc), check.names = FALSE)
     df_all_anc <- data.frame(y = y_anchor, as.data.frame(X_all_anc), check.names = FALSE)
@@ -3009,59 +3020,65 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
 
   X_cand_anc <- as.data.frame(X_env_cov_ok[anchor_idx, cv_cand_vars, drop = FALSE], stringsAsFactors = FALSE, check.names = FALSE)
   unique_folds <- sort(unique(stats::na.omit(fold_ids_anc)))
-  for (f_id in unique_folds) {
+  cv_workers <- if (length(unique_folds) >= 2L && rf_threads > 1L && exists("packera_mclapply", mode = "function")) min(rf_threads, length(unique_folds)) else 1L
+  fold_rf_threads <- max(1L, as.integer(floor(rf_threads / cv_workers)))
+  eval_anc_fold <- function(f_id) {
     tr_sub <- which(fold_ids_anc != f_id)
     te_sub <- which(fold_ids_anc == f_id)
-    if (length(tr_sub) >= 4 && length(te_sub) >= 1 && length(unique(y_anchor[tr_sub])) >= 2) {
-      y_tr_f <- droplevels(y_anchor[tr_sub])
-      fold_scr <- screen_predictors_within_cv_fold(
-        X_tr_raw_df = X_cand_anc[tr_sub, , drop = FALSE],
-        cand_vars = cv_cand_vars,
-        clim_vars = clim_cand_cv,
-        edaph_vars = edaph_cand_cv,
-        topo_vars = topo_cand_cv,
-        y_tr = y_tr_f,
-        cor.threshold = cfg_s05$cor_threshold,
-        vif.threshold = cfg_s05$vif_threshold,
-        intraspecific_mode = intraspecific_mode
-      )
-      fold_selected_sets[[as.character(f_id)]] <- fold_scr$selected_vars
-      X_te_f <- apply_fold_imputation(
-        X_cand_anc[te_sub, , drop = FALSE],
-        fold_scr$selected_vars,
-        fold_scr$train_medians
-      )
-      oof_ref_anc[te_sub] <- if (isTRUE(post_sel_rf)) {
-        compute_fold_reclustered_ecotype_ref(fold_scr$X_tr_imp, y_tr_f, X_te_f, seed = 42L + as.integer(f_id))
-      } else {
-        as.character(y_anchor[te_sub])
-      }
-      wts_tr_f <- auth_wts[anchor_idx[tr_sub]] * spatial_balance_weight[anchor_idx[tr_sub]] * compute_inverse_class_frequency_weights(y_tr_f)
-      wts_tr_f <- pmin(4.0, pmax(0.25, wts_tr_f / max(mean(wts_tr_f, na.rm = TRUE), 1e-8)))
-      if (requireNamespace("ranger", quietly = TRUE)) {
-        tr_df <- data.frame(y = y_tr_f, fold_scr$X_tr_imp, check.names = FALSE)
-        mns_cv <- .clamp_rf_min_node(nrow(tr_df))
-        sf_cv <- .clamp_rf_sample_frac(nrow(tr_df))
-        fit_cv <- ranger::ranger(y ~ ., data = tr_df, num.trees = max(100, floor(n_trees / 2)),
-                                 probability = TRUE, min.node.size = mns_cv, max.depth = rf_max_depth_cfg,
-                                 sample.fraction = sf_cv, case.weights = wts_tr_f, num.threads = rf_threads, seed = 42 + as.integer(f_id))
-        pr_mat <- stats::predict(fit_cv, data = X_te_f, num.threads = rf_threads)$predictions
-        if (!is.matrix(pr_mat)) pr_mat <- matrix(pr_mat, nrow = length(te_sub), dimnames = list(NULL, names(pr_mat)))
-        oof_prob_mat[te_sub, ] <- 0.0
-        for (cl_nm in intersect(colnames(pr_mat), cls_levels)) {
-          oof_prob_mat[te_sub, cl_nm] <- pr_mat[, cl_nm]
-        }
-        oof_preds_anc[te_sub] <- colnames(pr_mat)[max.col(pr_mat, ties.method = "first")]
-      } else {
-        fit_cv <- randomForest::randomForest(x = fold_scr$X_tr_imp, y = y_tr_f, ntree = max(100, floor(n_trees / 2)))
-        pr_mat <- stats::predict(fit_cv, newdata = X_te_f, type = "prob")
-        oof_prob_mat[te_sub, ] <- 0.0
-        for (cl_nm in intersect(colnames(pr_mat), cls_levels)) {
-          oof_prob_mat[te_sub, cl_nm] <- pr_mat[, cl_nm]
-        }
-        oof_preds_anc[te_sub] <- as.character(stats::predict(fit_cv, newdata = X_te_f))
-      }
+    if (!(length(tr_sub) >= 4 && length(te_sub) >= 1 && length(unique(y_anchor[tr_sub])) >= 2)) return(NULL)
+    y_tr_f <- droplevels(y_anchor[tr_sub])
+    fold_scr <- screen_predictors_within_cv_fold(
+      X_tr_raw_df = X_cand_anc[tr_sub, , drop = FALSE],
+      cand_vars = cv_cand_vars,
+      clim_vars = clim_cand_cv,
+      edaph_vars = edaph_cand_cv,
+      topo_vars = topo_cand_cv,
+      y_tr = y_tr_f,
+      cor.threshold = cfg_s05$cor_threshold,
+      vif.threshold = cfg_s05$vif_threshold,
+      intraspecific_mode = intraspecific_mode
+    )
+    X_te_f <- apply_fold_imputation(
+      X_cand_anc[te_sub, , drop = FALSE],
+      fold_scr$selected_vars,
+      fold_scr$train_medians
+    )
+    oof_ref_f <- if (isTRUE(post_sel_rf)) {
+      compute_fold_reclustered_ecotype_ref(fold_scr$X_tr_imp, y_tr_f, X_te_f, seed = 42L + as.integer(f_id))
+    } else {
+      as.character(y_anchor[te_sub])
     }
+    wts_tr_f <- auth_wts[anchor_idx[tr_sub]] * spatial_balance_weight[anchor_idx[tr_sub]] * compute_inverse_class_frequency_weights(y_tr_f)
+    wts_tr_f <- pmin(4.0, pmax(0.25, wts_tr_f / max(mean(wts_tr_f, na.rm = TRUE), 1e-8)))
+    if (requireNamespace("ranger", quietly = TRUE)) {
+      tr_df <- data.frame(y = y_tr_f, fold_scr$X_tr_imp, check.names = FALSE)
+      mns_cv <- .clamp_rf_min_node(nrow(tr_df))
+      sf_cv <- .clamp_rf_sample_frac(nrow(tr_df))
+      fit_cv <- ranger::ranger(y ~ ., data = tr_df, num.trees = max(100, floor(n_trees / 2)),
+                               probability = TRUE, min.node.size = mns_cv, max.depth = rf_max_depth_cfg,
+                               sample.fraction = sf_cv, case.weights = wts_tr_f, num.threads = fold_rf_threads, seed = 42 + as.integer(f_id))
+      pr_mat <- stats::predict(fit_cv, data = X_te_f, num.threads = fold_rf_threads)$predictions
+      if (!is.matrix(pr_mat)) pr_mat <- matrix(pr_mat, nrow = length(te_sub), dimnames = list(NULL, names(pr_mat)))
+      preds_f <- colnames(pr_mat)[max.col(pr_mat, ties.method = "first")]
+    } else {
+      set.seed(42L + as.integer(f_id))
+      fit_cv <- randomForest::randomForest(x = fold_scr$X_tr_imp, y = y_tr_f, ntree = max(100, floor(n_trees / 2)))
+      pr_mat <- stats::predict(fit_cv, newdata = X_te_f, type = "prob")
+      preds_f <- as.character(stats::predict(fit_cv, newdata = X_te_f))
+    }
+    list(key = as.character(f_id), selected_vars = fold_scr$selected_vars, te_sub = te_sub, oof_ref = oof_ref_f, pr_mat = pr_mat, preds = preds_f)
+  }
+  fold_res_list <- if (cv_workers > 1L) packera_mclapply(unique_folds, eval_anc_fold, mc.cores = cv_workers) else lapply(unique_folds, eval_anc_fold)
+  for (fr in fold_res_list) {
+    if (is.null(fr)) next
+    fold_selected_sets[[fr$key]] <- fr$selected_vars
+    te_sub <- fr$te_sub
+    oof_ref_anc[te_sub] <- fr$oof_ref
+    oof_prob_mat[te_sub, ] <- 0.0
+    for (cl_nm in intersect(colnames(fr$pr_mat), cls_levels)) {
+      oof_prob_mat[te_sub, cl_nm] <- fr$pr_mat[, cl_nm]
+    }
+    oof_preds_anc[te_sub] <- fr$preds
   }
 
   # Fill any unassigned OOF rows (e.g. if a tiny fold had only 1 class) from OOB predictions of rf_prob_anchor
@@ -3375,8 +3392,8 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
 .evaluate_partition_jobs_parallel <- function(job_specs, grp_col, n_perm) {
   n_jobs <- length(job_specs)
   if (n_jobs == 0L) return(list())
-  can_par <- (n_perm >= 99L) && exists("packera_mclapply", mode = "function") &&
-             exists("resolve_packera_workers", mode = "function") && (resolve_packera_workers(32L) > 1L)
+  can_par <- (n_perm >= 19L) && exists("packera_mclapply", mode = "function") &&
+             exists("resolve_packera_workers", mode = "function") && (resolve_packera_workers(64L) > 1L)
   if (!can_par) {
     return(lapply(job_specs, function(jb) {
       compute_pca_env_partition_overlap(
@@ -3386,13 +3403,9 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
     }))
   }
 
-  # Build z1, z2, ov grids once per (pair, partition) job, then fan out equivalency + similarity chunks across 32 cores
-  grid_states <- vector("list", n_jobs)
-  flat_tasks <- list()
-  max_w <- resolve_packera_workers(32L)
-  chunks_per_test <- max(1L, min(6L, floor(max_w / max(2L * n_jobs, 1L))))
-
-  for (j_i in seq_len(n_jobs)) {
+  max_w <- resolve_packera_workers(64L)
+  chunks_per_test <- max(1L, min(as.integer(ceiling(n_perm / 4L)), as.integer(ceiling(max_w / max(1L, n_jobs)))))
+  build_grid_job <- function(j_i) {
     jb <- job_specs[[j_i]]
     prep <- if (!is.null(jb$prep)) jb$prep else .prepare_partition_scores_glob(jb$bg_mat, jb$rf_var_weights)
     idx1 <- which(grp_col == jb$sp1)
@@ -3413,8 +3426,12 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
         } else NULL
       }, error = function(e) NULL)
     }
-    grid_states[[j_i]] <- list(prep = prep, g_st = g_st)
-    if (!is.null(g_st)) {
+    list(prep = prep, g_st = g_st)
+  }
+  grid_states <- if (n_jobs >= 2L) packera_mclapply(seq_len(n_jobs), build_grid_job, mc.cores = min(max_w, n_jobs)) else lapply(seq_len(n_jobs), build_grid_job)
+  flat_tasks <- list()
+  for (j_i in seq_len(n_jobs)) {
+    if (!is.null(grid_states[[j_i]]$g_st)) {
       base_rep <- floor(n_perm / chunks_per_test)
       rem_rep <- n_perm - base_rep * chunks_per_test
       rep_vec <- rep(base_rep, chunks_per_test)
@@ -3431,7 +3448,7 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
   chunk_outs <- list()
   if (length(flat_tasks) > 0L) {
     base_seed <- sample.int(100000000L, 1L)
-    n_workers <- resolve_packera_workers(32L, length(flat_tasks))
+    n_workers <- resolve_packera_workers(64L, length(flat_tasks))
     chunk_outs <- packera_mclapply(
       seq_along(flat_tasks),
       function(t_i) {

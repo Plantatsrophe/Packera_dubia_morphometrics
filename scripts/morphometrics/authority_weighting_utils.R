@@ -417,7 +417,7 @@ select_morphometric_subspace <- function(X, group_vec = NULL, min_p = 2L, max_p 
   if (is.null(q_used)) {
     q_used <- min(n_m - 1L, max(floor(0.80 * n_m), floor((n_m + p_m + 1L) / 2L)))
   }
-  if (n_m <= 1000L) {
+  if (n_m <= 250L) {
     return(tryCatch(MASS::cov.rob(X_mat, method = "mcd", quantile.used = q_used), error = function(e) NULL))
   }
   # Partitioned parallel FastMCD (Rousseeuw & Van Driessen 1999) + 2 full-sample C-steps across all n_m rows
@@ -425,7 +425,7 @@ select_morphometric_subspace <- function(X, group_vec = NULL, min_p = 2L, max_p 
   on.exit({ if (!is.null(old_seed)) assign(".Random.seed", old_seed, envir = .GlobalEnv) }, add = TRUE)
   set.seed(as.integer(seed))
   q_frac <- min(0.95, max(0.50, q_used / n_m))
-  n_blk <- min(8L, max(2L, as.integer(ceiling(n_m / 600L))))
+  n_blk <- min(32L, max(2L, as.integer(ceiling(n_m / 120L))))
   blk_cap <- min(n_m, n_blk * 350L)
   pool_idx <- if (blk_cap < n_m) round(seq(1L, n_m, length.out = blk_cap)) else seq_len(n_m)
   perm_idx <- pool_idx[sample.int(length(pool_idx))]
@@ -437,7 +437,7 @@ select_morphometric_subspace <- function(X, group_vec = NULL, min_p = 2L, max_p 
     tryCatch(MASS::cov.rob(Xb, method = "mcd", quantile.used = qb), error = function(e) NULL)
   }
   cand_fits <- if (isTRUE(allow_parallel) && exists("packera_mclapply", mode = "function") && exists("resolve_packera_workers", mode = "function")) {
-    packera_mclapply(blocks, fit_block, mc.cores = resolve_packera_workers(min(16L, n_blk), n_blk))
+    packera_mclapply(blocks, fit_block, mc.cores = resolve_packera_workers(64L, n_blk))
   } else {
     lapply(blocks, fit_block)
   }
@@ -493,8 +493,8 @@ select_morphometric_subspace <- function(X, group_vec = NULL, min_p = 2L, max_p 
     df_scale <- sqrt(nrow(X_t) / max(1.0, nrow(X_t) - 1.0))
     diff_t * df_scale
   }
-  resid_blocks <- if (length(u_pool_tx) >= 2L && sum(valid_pool) >= 1200L && exists("packera_mclapply", mode = "function") && exists("resolve_packera_workers", mode = "function")) {
-    packera_mclapply(u_pool_tx, build_resid, mc.cores = resolve_packera_workers(16L, length(u_pool_tx)))
+  resid_blocks <- if (length(u_pool_tx) >= 2L && sum(valid_pool) >= 120L && exists("packera_mclapply", mode = "function") && exists("resolve_packera_workers", mode = "function")) {
+    packera_mclapply(u_pool_tx, build_resid, mc.cores = resolve_packera_workers(64L, length(u_pool_tx)))
   } else {
     lapply(u_pool_tx, build_resid)
   }
@@ -611,7 +611,7 @@ select_adaptive_reference_anchors <- function(
   lqw_col <- if ("leaf_quality_weight" %in% names(df)) suppressWarnings(as.numeric(df$leaf_quality_weight)) else NULL
 
   unique_taxa <- unique(taxa_vec[valid_pool])
-  par_taxa <- length(unique_taxa) >= 2L && n >= 800L && exists("packera_mclapply", mode = "function") && exists("resolve_packera_workers", mode = "function")
+  par_taxa <- length(unique_taxa) >= 2L && n >= 80L && exists("packera_mclapply", mode = "function") && exists("resolve_packera_workers", mode = "function")
   eval_one_taxon <- function(tx) {
     pruned_out <- integer(0)
     promo_out <- integer(0)
@@ -871,8 +871,8 @@ select_adaptive_reference_anchors <- function(
     list(pruned = pruned_out, promo = promo_out)
   }
 
-  tx_results <- if (length(unique_taxa) >= 2L && n >= 800L && exists("packera_mclapply", mode = "function") && exists("resolve_packera_workers", mode = "function")) {
-    packera_mclapply(unique_taxa, eval_one_taxon, mc.cores = resolve_packera_workers(min(16L, length(unique_taxa)), length(unique_taxa)))
+  tx_results <- if (isTRUE(par_taxa)) {
+    packera_mclapply(unique_taxa, eval_one_taxon, mc.cores = resolve_packera_workers(64L, length(unique_taxa)))
   } else {
     lapply(unique_taxa, eval_one_taxon)
   }
@@ -2470,7 +2470,7 @@ fit_parallel_mclust_gmm <- function(X_core, G_vec, modelNames = NULL, max_hc_sub
   has_ties <- .max_column_tie_count(X_core) > p_dim
   ctrl <- mclust::emControl(itmax = c(180L, 180L), tol = c(1e-5, sqrt(.Machine$double.eps)))
 
-  if (n_obs <= 300L && !has_ties) {
+  if (n_obs <= 40L && !has_ties) {
     return(mclust::Mclust(X_core, G = G_int, modelNames = modelNames, control = ctrl, verbose = FALSE))
   }
 
@@ -2514,7 +2514,7 @@ fit_parallel_mclust_gmm <- function(X_core, G_vec, modelNames = NULL, max_hc_sub
   use_par <- exists("packera_mclapply", mode = "function") && n_tasks >= 2L
   fits <- if (use_par) {
     n_w <- if (exists("resolve_packera_workers", mode = "function")) {
-      resolve_packera_workers(min(32L, n_tasks), n_tasks)
+      resolve_packera_workers(64L, n_tasks)
     } else {
       min(8L, n_tasks)
     }

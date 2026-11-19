@@ -26,7 +26,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.core.config import PipelineConfig
+from scripts.core.config import PipelineConfig, resolve_max_workers
 from scripts.core.harvester import VoucherHarvester
 from scripts.core.taxonomy_authority import (
     resolve_geographic_scope_settings,
@@ -134,11 +134,12 @@ def build_cli_parser() -> argparse.ArgumentParser:
         default=False,
         help="Flag to enable asynchronous download of high-resolution specimen images.",
     )
+    default_conc = resolve_max_workers(default=cfg.harvesting.download_concurrency, cap=32, cfg=cfg)
     parser.add_argument(
         "--concurrency",
         type=int,
-        default=cfg.harvesting.download_concurrency,
-        help=f"Maximum concurrent asynchronous image downloads (default: {cfg.harvesting.download_concurrency}).",
+        default=default_conc,
+        help=f"Maximum concurrent asynchronous image downloads (default: {default_conc}, auto-scaled up to 32 from --threads).",
     )
     parser.add_argument(
         "--min-megapixels",

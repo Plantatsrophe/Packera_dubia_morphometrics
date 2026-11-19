@@ -154,18 +154,24 @@ run_step06_genomic_phylogenomics <- function(opts) {
   full_model <- .fit_shrinkage_dapc(X_dapc[ref_idx, , drop = FALSE], y_ref, X_dapc)
   pred_taxon <- full_model$pred; post_prob <- full_model$max_p; margin_vec <- full_model$margin; probs_mat <- full_model$probs
   oof_pred <- rep(NA_character_, length(ref_idx)); oof_logloss <- rep(NA_real_, length(ref_idx))
-  for (ri in seq_along(ref_idx)) {
+  eval_loro_ri <- function(ri) {
     i_global <- ref_idx[ri]; rep_i <- rep_ids[i_global]
     hold_mask <- if (!is.na(rep_i) && nzchar(rep_i)) (rep_ids[ref_idx] == rep_i) else (seq_along(ref_idx) == ri)
     tr_sub <- which(!hold_mask)
-    if (sum(y_ref[tr_sub] == y_ref[i_global], na.rm = TRUE) >= 1L && length(unique(y_ref[tr_sub])) >= 2L) {
-      cv_fit <- .fit_shrinkage_dapc(X_dapc[ref_idx[tr_sub], , drop = FALSE], y_ref[tr_sub], X_dapc[i_global, , drop = FALSE])
-      oof_pred[ri] <- cv_fit$pred[1L]; pred_taxon[i_global] <- cv_fit$pred[1L]; post_prob[i_global] <- cv_fit$max_p[1L]; margin_vec[i_global] <- cv_fit$margin[1L]
-      probs_mat[i_global, ] <- 0.0; common_cols <- intersect(colnames(probs_mat), colnames(cv_fit$probs))
-      if (length(common_cols) > 0L) probs_mat[i_global, common_cols] <- cv_fit$probs[1L, common_cols]
-      p_true <- if (as.character(y_ref[i_global]) %in% colnames(cv_fit$probs)) as.numeric(cv_fit$probs[1L, as.character(y_ref[i_global])]) else 1e-6
-      oof_logloss[ri] <- -log(min(1.0 - 1e-6, max(1e-6, p_true)))
-    }
+    if (sum(y_ref[tr_sub] == y_ref[i_global], na.rm = TRUE) < 1L || length(unique(y_ref[tr_sub])) < 2L) return(NULL)
+    cv_fit <- .fit_shrinkage_dapc(X_dapc[ref_idx[tr_sub], , drop = FALSE], y_ref[tr_sub], X_dapc[i_global, , drop = FALSE])
+    p_true <- if (as.character(y_ref[i_global]) %in% colnames(cv_fit$probs)) as.numeric(cv_fit$probs[1L, as.character(y_ref[i_global])]) else 1e-6
+    list(ri = ri, ig = i_global, pred = cv_fit$pred[1L], max_p = cv_fit$max_p[1L], margin = cv_fit$margin[1L],
+         probs = cv_fit$probs, ll = -log(min(1.0 - 1e-6, max(1e-6, p_true))))
+  }
+  nw_lr <- if (length(ref_idx) >= 8L && exists("packera_mclapply", mode = "function") && exists("resolve_packera_workers", mode = "function")) resolve_packera_workers(64L, length(ref_idx)) else 1L
+  loro_res <- if (nw_lr > 1L) packera_mclapply(seq_along(ref_idx), eval_loro_ri, mc.cores = nw_lr) else lapply(seq_along(ref_idx), eval_loro_ri)
+  for (lr in loro_res) {
+    if (is.null(lr)) next
+    oof_pred[lr$ri] <- lr$pred; pred_taxon[lr$ig] <- lr$pred; post_prob[lr$ig] <- lr$max_p; margin_vec[lr$ig] <- lr$margin
+    probs_mat[lr$ig, ] <- 0.0; common_cols <- intersect(colnames(probs_mat), colnames(lr$probs))
+    if (length(common_cols) > 0L) probs_mat[lr$ig, common_cols] <- lr$probs[1L, common_cols]
+    oof_logloss[lr$ri] <- lr$ll
   }
   valid_oof <- !is.na(oof_pred)
   loro_acc <- if (any(valid_oof)) mean(oof_pred[valid_oof] == y_ref[valid_oof], na.rm = TRUE) else NA_real_

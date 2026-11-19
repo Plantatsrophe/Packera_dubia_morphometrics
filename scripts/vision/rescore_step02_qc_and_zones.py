@@ -36,7 +36,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.core.config import PipelineConfig
+from scripts.core.config import PipelineConfig, resolve_max_workers
 from scripts.core.db import get_db_connection
 from scripts.core.io_utils import atomic_write_text
 from scripts.vision.leaf_geometry_utils import (
@@ -305,7 +305,7 @@ def rescore_tier_a_leaves(
             }
 
         n_rows = len(el_df)
-        n_workers = min(32, max(1, int(workers) if workers is not None else (os.cpu_count() or 8)))
+        n_workers = max(1, int(workers)) if (workers is not None and int(workers) >= 1) else resolve_max_workers(default=os.cpu_count() or 8, cap=64)
         cal_src_set = {str(s).strip().lower() for s in _CALIBRATED_SCALE_SOURCES}
         if "scale_source" not in el_df.columns:
             el_df["scale_source"] = ""
@@ -382,7 +382,7 @@ def rescore_tier_a_leaves(
                             unboxed_scales[h[0]] = h[1]
                 else:
                     if len(ruler_tasks) >= 8 and n_workers > 1:
-                        with ThreadPoolExecutor(max_workers=min(4, n_workers)) as tpool:
+                        with ThreadPoolExecutor(max_workers=max(1, min(32, (n_workers + 1) // 2))) as tpool:
                             cal_hits = list(tpool.map(_cal_sheet_task, ruler_tasks))
                     else:
                         cal_hits = [_cal_sheet_task(t) for t in ruler_tasks]
@@ -1058,7 +1058,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--manifest", type=Path, default=None, help="Optional extracted_leaf_manifest.csv path override.")
     parser.add_argument("--allow-partial-leaves", action="store_true", default=False, help="Allow detector_class_id == 1 (Leaf_PARTIAL) to pass QC.")
     parser.add_argument("--recompute-photometry", action="store_true", default=False, help="Recompute blade_cie_l_norm/sd where crops or sheet-matched masks exist.")
-    parser.add_argument("--workers", type=int, default=None, help="Worker thread/process count cap (default: auto up to 32).")
+    parser.add_argument("--workers", "-j", "--threads", dest="workers", type=int, default=None, help="Worker thread/process count cap (default: auto up to 64).")
     return parser.parse_args(argv)
 
 

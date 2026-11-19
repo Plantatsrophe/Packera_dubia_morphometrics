@@ -159,7 +159,7 @@ select_admixture_k_cross_entropy <- function(dos_mat, d_mat = NULL, k_max = 8L, 
       list(ce_mean = if (any(vc)) mean(ce_f[vc]) else NA_real_, ce_se = if (sum(vc) >= 2L) stats::sd(ce_f[vc]) / sqrt(sum(vc)) else 0.0,
            rmse_mean = if (any(is.finite(rmse_f))) mean(rmse_f, na.rm = TRUE) else NA_real_, sil = .compute_pam_silhouette(d_mat, kv))
     }
-    nw <- if ((n * m) > 8000L && exists("resolve_packera_workers", mode = "function")) resolve_packera_workers(n_tasks = length(k_grid)) else 1L
+    nw <- if ((n * m) > 1000L && exists("resolve_packera_workers", mode = "function")) resolve_packera_workers(64L, length(k_grid)) else 1L
     k_res <- if (nw > 1L && exists("packera_mclapply", mode = "function")) packera_mclapply(k_grid, eval_k, mc.cores = nw) else lapply(k_grid, eval_k)
     ce_means <- vapply(k_res, `[[`, numeric(1L), "ce_mean"); ce_ses <- vapply(k_res, `[[`, numeric(1L), "ce_se")
     rmse_means <- vapply(k_res, `[[`, numeric(1L), "rmse_mean"); sils <- vapply(k_res, `[[`, numeric(1L), "sil")
@@ -268,7 +268,9 @@ estimate_ledoit_wolf_lambda <- function(X_centered) {
                    "GTR+G" = phangorn::optim.pml(f0, model = "GTR", optGamma = TRUE, rearrangement = "none", control = ctrl))
       bics <- vapply(fits, function(f) { ll <- stats::logLik(f); dk <- attr(ll, "df"); if (is.null(dk)) dk <- f$df; -2 * as.numeric(ll) + as.numeric(dk) * log(max(1, ncol(dna_mat))) }, numeric(1L))
       bm <- names(which.min(bics))
-      bs <- phangorn::bootstrap.pml(fits[[bm]], bs = 100L, optNni = FALSE, multicore = FALSE, control = ctrl)
+      nw_bs <- if (identical(.Platform$OS.type, "unix") && exists("resolve_packera_workers", mode = "function")) resolve_packera_workers(64L, 100L) else 1L
+      bs <- tryCatch(phangorn::bootstrap.pml(fits[[bm]], bs = 100L, optNni = FALSE, multicore = (nw_bs > 1L), mc.cores = nw_bs, control = ctrl),
+                     error = function(e) phangorn::bootstrap.pml(fits[[bm]], bs = 100L, optNni = FALSE, multicore = FALSE, control = ctrl))
       list(model = bm, boot = round(mean(as.numeric(ape::prop.clades(tr_sub, lapply(bs, ape::unroot))), na.rm = TRUE), 2))
     }, error = function(e) NULL)
     if (!is.null(pr) && is.finite(pr$boot)) return(pr)

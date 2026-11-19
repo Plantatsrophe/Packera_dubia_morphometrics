@@ -81,7 +81,7 @@ test_and_correct_allometry <- function(morpho_df, correct_mode = "auto", permuta
   if (all(gold_df$eff_weight <= 0)) gold_df$eff_weight <- 1.0
   gold_df$scientificName <- droplevels(factor(gold_df$scientificName)); Y <- as.matrix(gold_df[, sym_names, drop = FALSE]); set.seed(seed); anova_df <- NULL; pw_df <- NULL
   if (requireNamespace("RRPP", quietly = TRUE) && nlevels(gold_df$scientificName) >= 2) {
-    rr_par <- if (nrow(gold_df) >= 120L && exists("resolve_packera_workers", mode = "function")) resolve_packera_workers(16L) else FALSE
+    rr_par <- if (nrow(gold_df) >= 96L && exists("resolve_packera_workers", mode = "function")) resolve_packera_workers(64L, ceiling(permutations / 25L)) else FALSE
     rdf <- RRPP::rrpp.data.frame(Y = Y, log_centsize = gold_df$log_centsize, scientificName = gold_df$scientificName)
     fit_rrpp <- tryCatch(RRPP::lm.rrpp(Y ~ log_centsize * scientificName, data = rdf, weights = gold_df$eff_weight, iter = permutations, turbo = TRUE, Parallel = rr_par, print.progress = FALSE), error = function(e) tryCatch(RRPP::lm.rrpp(Y ~ log_centsize * scientificName, data = rdf, iter = permutations, turbo = TRUE, Parallel = rr_par, print.progress = FALSE), error = function(e2) NULL))
     if (!is.null(fit_rrpp)) {

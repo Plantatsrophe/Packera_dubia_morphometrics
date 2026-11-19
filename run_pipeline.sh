@@ -652,9 +652,11 @@ mkdir -p \
   "${RUN_DIR}/outputs/reports" \
   "${RUN_DIR}/logs"
 
-# Maintain runs/latest symlink pointing to the most recent RUN_DIR
+# Maintain runs/latest symlink pointing to the most recent RUN_DIR (unless disabled for parallel workers)
 mkdir -p "runs"
-ln -sfn "${RUN_ID}" "runs/latest"
+if [[ "${PLANTMATICS_NO_LATEST_SYMLINK:-0}" != "1" ]]; then
+  ln -sfn "${RUN_ID}" "runs/latest"
+fi
 
 export PYTHONUNBUFFERED=1
 LOG_FILE="${RUN_DIR}/logs/pipeline.log"
@@ -888,6 +890,10 @@ if [[ "${START_STEP}" -le 1 && "${REUSE_CANONICAL_DATA}" == "false" ]]; then
       HARVEST_SPATIAL_ARGS+=(--usda-exempt-gold)
     elif [[ "${USDA_EXEMPT_GOLD}" == "false" ]]; then
       HARVEST_SPATIAL_ARGS+=(--no-usda-exempt-gold)
+    fi
+    if [[ -n "${THREADS}" ]]; then
+      HARVEST_CONC=$(( THREADS > 32 ? 32 : (THREADS < 1 ? 1 : THREADS) ))
+      HARVEST_SPATIAL_ARGS+=(--concurrency "${HARVEST_CONC}")
     fi
     "${PYTHON_MAIN}" scripts/data_prep/01_voucher_harvester.py \
       --out-dir "data/raw_vouchers" \
@@ -1987,7 +1993,8 @@ if [[ "${START_STEP}" -le 4 ]]; then
   "${PYTHON_MAIN}" scripts/pipeline/02_segment_and_extract.py \
     --vouchers "${RUN_DIR}/data/tables/curated_vouchers.csv" \
     --output-dir "${RUN_DIR}/data" \
-    --regenerate-figures-only
+    --regenerate-figures-only \
+    "${COMPUTE_ARGS[@]}"
 fi
 
 # ------------------------------------------------------------------------------

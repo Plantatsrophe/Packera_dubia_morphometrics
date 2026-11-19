@@ -1076,6 +1076,36 @@ def resolve_cpu_threads(
     return default
 
 
+def resolve_max_workers(
+    default: Optional[int] = None,
+    cap: Optional[int] = None,
+    cfg: Optional[PipelineConfig] = None,
+) -> int:
+    """Resolve bounded CPU worker count, collapsing to 1 inside forked workers to block nested forks."""
+    if os.environ.get("PLANTMATICS_IN_FORK_WORKER", "").strip() == "1":
+        return 1
+    env_val = (
+        os.environ.get("PLANTMATICS_MAX_WORKERS", "").strip()
+        or os.environ.get("PACKERA_MAX_WORKERS", "").strip()
+    )
+    resolved: Optional[int] = None
+    if env_val:
+        try:
+            parsed = int(env_val)
+            if parsed >= 1:
+                resolved = parsed
+        except ValueError:
+            resolved = None
+    if resolved is None:
+        resolved = resolve_cpu_threads(None, cfg=cfg, default=default)
+    if resolved is None:
+        resolved = os.cpu_count() or 1
+    out = max(1, int(resolved))
+    if cap is not None and int(cap) >= 1:
+        out = min(out, int(cap))
+    return out
+
+
 def resolve_gpu_batch_size(
     cli_val: Optional[int] = None,
     cfg: Optional[PipelineConfig] = None,

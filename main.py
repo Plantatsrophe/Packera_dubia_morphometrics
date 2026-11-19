@@ -631,6 +631,13 @@ def run_harvest(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     output_csv.parent.mkdir(parents=True, exist_ok=True)
 
+    harvest_conc = args.concurrency
+    if harvest_conc is None:
+        t_req = getattr(args, "threads", None)
+        if t_req is not None and int(t_req) >= 1:
+            harvest_conc = min(32, max(1, int(t_req)))
+        else:
+            harvest_conc = cfg["harvesting"]["download_concurrency"]
     cmd = [
         sys.executable, str(script_path),
         "--out-dir", str(out_dir),
@@ -639,7 +646,7 @@ def run_harvest(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         "--max-uncertainty", str(args.max_uncertainty or cfg["harvesting"]["max_uncertainty_meters"]),
         "--min-megapixels", str(args.min_megapixels or cfg["harvesting"]["min_megapixels"]),
         "--min-file-size-kb", str(args.min_file_size_kb or cfg["harvesting"]["min_file_size_kb"]),
-        "--concurrency", str(args.concurrency or cfg["harvesting"]["download_concurrency"]),
+        "--concurrency", str(harvest_conc),
     ]
     cfg_target_species: List[str] = []
     if isinstance(cfg, PipelineConfig):

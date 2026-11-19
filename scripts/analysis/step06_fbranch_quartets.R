@@ -130,49 +130,45 @@ compute_quartet_concordance_snps2cf <- function(pass_df, dos_mat, max_quartets =
   comb_q <- utils::combn(seq_along(uniq_taxa), 4L, simplify = FALSE); max_q <- max(1L, as.integer(max_quartets))
   if (length(comb_q) > max_q) comb_q <- comb_q[sort(sample.int(length(comb_q), max_q, replace = FALSE))]
 
-  rows <- vector("list", length(comb_q)); gamma_by_taxon <- stats::setNames(numeric(length(uniq_taxa)), uniq_taxa)
-  for (qi in seq_along(comb_q)) {
+  q_specs <- lapply(seq_along(comb_q), function(qi) {
     t4 <- uniq_taxa[comb_q[[qi]]]
     grid <- expand.grid(s1 = tax_groups[[t4[1L]]], s2 = tax_groups[[t4[2L]]], s3 = tax_groups[[t4[3L]]], s4 = tax_groups[[t4[4L]]], KEEP.OUT.ATTRS = FALSE, stringsAsFactors = FALSE)
-    if (nrow(grid) == 0L) next
     if (nrow(grid) > 16L) grid <- grid[sort(sample.int(nrow(grid), 16L, replace = FALSE)), , drop = FALSE]
-
+    list(t4 = t4, grid = grid)
+  })
+  eval_quartet <- function(qs) {
+    t4 <- qs$t4; grid <- qs$grid
+    if (nrow(grid) == 0L) return(NULL)
     any_valid_sites <- FALSE; c1_vec <- numeric(0); c2_vec <- numeric(0); c3_vec <- numeric(0)
     for (r_idx in seq_len(nrow(grid))) {
       sub <- dos_mat[as.integer(grid[r_idx, ]), , drop = FALSE]
-      ok <- colSums(is.finite(sub)) == 4L
-      if (sum(ok) < 8L) next
+      ok <- colSums(is.finite(sub)) == 4L; if (sum(ok) < 8L) next
       any_valid_sites <- TRUE; bin <- round(sub[, ok, drop = FALSE]); inf <- which(colSums(bin) == 2L)
       if (length(inf) == 0L) next
       b_inf <- bin[, inf, drop = FALSE]
-      c1_vec <- c(c1_vec, sum(b_inf[1L, ] == b_inf[2L, ]))
-      c2_vec <- c(c2_vec, sum(b_inf[1L, ] == b_inf[3L, ]))
-      c3_vec <- c(c3_vec, sum(b_inf[1L, ] == b_inf[4L, ]))
+      c1_vec <- c(c1_vec, sum(b_inf[1L, ] == b_inf[2L, ])); c2_vec <- c(c2_vec, sum(b_inf[1L, ] == b_inf[3L, ])); c3_vec <- c(c3_vec, sum(b_inf[1L, ] == b_inf[4L, ]))
     }
-    if (!any_valid_sites) next
-    if (length(c1_vec) == 0L) {
-      rows[[qi]] <- data.frame(quartet = paste(t4, collapse = ";"), major_topology = paste0(t4[1L], ",", t4[2L], "|", t4[3L], ",", t4[4L]), cf_12_34 = 1.0, cf_13_24 = 0.0, cf_14_23 = 0.0, n_inform_loci = 0.0, snaq_gamma_minor = 0.0, g_test_p = 1.0, delta_aicc_reticulation = 0.0, stringsAsFactors = FALSE)
-      next
-    }
+    if (!any_valid_sites) return(NULL)
+    if (length(c1_vec) == 0L) return(list(t4 = t4, gm = 0.0, row = data.frame(quartet = paste(t4, collapse = ";"), major_topology = paste0(t4[1L], ",", t4[2L], "|", t4[3L], ",", t4[4L]), cf_12_34 = 1.0, cf_13_24 = 0.0, cf_14_23 = 0.0, n_inform_loci = 0.0, snaq_gamma_minor = 0.0, g_test_p = 1.0, delta_aicc_reticulation = 0.0, stringsAsFactors = FALSE)))
     c1 <- mean(c1_vec); c2 <- mean(c2_vec); c3 <- mean(c3_vec); n_inf <- sum(c(c1, c2, c3))
-    if (n_inf <= 0.0) next
+    if (n_inf <= 0.0) return(NULL)
     cf_vec <- c(c1, c2, c3) / n_inf; s <- sort(c(c1, c2, c3), decreasing = TRUE)
     top_n <- c(paste0(t4[1L], ",", t4[2L], "|", t4[3L], ",", t4[4L]), paste0(t4[1L], ",", t4[3L], "|", t4[2L], ",", t4[4L]), paste0(t4[1L], ",", t4[4L], "|", t4[2L], ",", t4[3L]))[which.max(cf_vec)]
     p0 <- c(s[1L], 0.5 * (s[2L] + s[3L]), 0.5 * (s[2L] + s[3L])) / n_inf; p1 <- s / n_inf
-    pos0 <- (s > 0.0) & (p0 > 0.0); pos1 <- (s > 0.0) & (p1 > 0.0)
-    const_ll <- lgamma(n_inf + 1.0) - sum(lgamma(s + 1.0))
+    pos0 <- (s > 0.0) & (p0 > 0.0); pos1 <- (s > 0.0) & (p1 > 0.0); const_ll <- lgamma(n_inf + 1.0) - sum(lgamma(s + 1.0))
     ll_0 <- const_ll + sum(s[pos0] * log(p0[pos0])); ll_1 <- const_ll + sum(s[pos1] * log(p1[pos1]))
     g_test_p <- stats::pchisq(max(0.0, 2.0 * (ll_1 - ll_0)), df = 1.0, lower.tail = FALSE)
     delta_aicc_ret <- (-2.0 * ll_0 + 2.0 + 4.0 / max(1.0, n_inf - 2.0)) - (-2.0 * ll_1 + 4.0 + 12.0 / max(1.0, n_inf - 3.0))
     gamma_minor <- if (is.finite(delta_aicc_ret) && delta_aicc_ret >= 2.0 && is.finite(g_test_p) && g_test_p < 0.05) round(s[2L] / max(1e-9, s[1L] + s[2L]), 4) else 0.0
-    for (tx_q in t4) gamma_by_taxon[tx_q] <- max(gamma_by_taxon[tx_q], gamma_minor)
-    rows[[qi]] <- data.frame(
-      quartet = paste(t4, collapse = ";"), major_topology = top_n,
-      cf_12_34 = round(cf_vec[1L], 4), cf_13_24 = round(cf_vec[2L], 4), cf_14_23 = round(cf_vec[3L], 4),
-      n_inform_loci = round(n_inf, 2), snaq_gamma_minor = gamma_minor, g_test_p = g_test_p,
-      delta_aicc_reticulation = round(delta_aicc_ret, 4), stringsAsFactors = FALSE
-    )
+    list(t4 = t4, gm = gamma_minor, row = data.frame(
+      quartet = paste(t4, collapse = ";"), major_topology = top_n, cf_12_34 = round(cf_vec[1L], 4), cf_13_24 = round(cf_vec[2L], 4), cf_14_23 = round(cf_vec[3L], 4),
+      n_inform_loci = round(n_inf, 2), snaq_gamma_minor = gamma_minor, g_test_p = g_test_p, delta_aicc_reticulation = round(delta_aicc_ret, 4), stringsAsFactors = FALSE
+    ))
   }
+  nw_q <- if (length(q_specs) >= 4L && exists("packera_mclapply", mode = "function") && exists("resolve_packera_workers", mode = "function")) resolve_packera_workers(64L, length(q_specs)) else 1L
+  q_res <- if (nw_q > 1L) packera_mclapply(q_specs, eval_quartet, mc.cores = nw_q) else lapply(q_specs, eval_quartet)
+  gamma_by_taxon <- stats::setNames(numeric(length(uniq_taxa)), uniq_taxa)
+  rows <- lapply(q_res, function(qr) if (is.null(qr)) NULL else { for (tx_q in qr$t4) gamma_by_taxon[tx_q] <<- max(gamma_by_taxon[tx_q], qr$gm); qr$row })
 
   cf_df <- do.call(rbind, Filter(Negate(is.null), rows))
   if (is.null(cf_df) || nrow(cf_df) == 0L) cf_df <- .empty_cf_df()

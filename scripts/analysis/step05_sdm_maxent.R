@@ -604,7 +604,7 @@ compute_continuous_boyce_index <- function(suitability_all, suitability_pres, n_
   )
 }
 
-.fit_single_srf_binary_model <- function(p_vec, X_df, w_vec = NULL, n_trees = 250L) {
+.fit_single_srf_binary_model <- function(p_vec, X_df, w_vec = NULL, n_trees = 250L, num_threads = NULL) {
   p_num <- as.integer(as.numeric(p_vec) > 0.5)
   X_mat <- as.data.frame(X_df)
   pred_cols <- colnames(X_mat)
@@ -618,8 +618,16 @@ compute_continuous_boyce_index <- function(suitability_all, suitability_pres, n_
   y_fac <- factor(ifelse(p_num == 1L, "Presence", "Background"), levels = c("Background", "Presence"))
 
   if (requireNamespace("ranger", quietly = TRUE) && sum(p_num == 1L) >= 2L && sum(p_num == 0L) >= 2L) {
-    max_w <- if (n_rows <= 2500L) 2L else 16L
-    rf_threads <- if (exists("resolve_packera_workers", mode = "function")) min(max_w, resolve_packera_workers(max_w)) else 1L
+    in_fork <- identical(Sys.getenv("PLANTMATICS_IN_FORK_WORKER", unset = ""), "1")
+    rf_threads <- if (!is.null(num_threads) && length(num_threads) == 1L && is.finite(num_threads)) {
+      max(1L, as.integer(num_threads))
+    } else if (in_fork) {
+      1L
+    } else if (exists("resolve_packera_workers", mode = "function")) {
+      resolve_packera_workers(64L, max(2L, as.integer(ceiling(n_rows / 16L))))
+    } else {
+      1L
+    }
     tr_df <- data.frame(y = y_fac, X_mat, check.names = FALSE)
     fit_rg <- tryCatch(
       ranger::ranger(y ~ ., data = tr_df, num.trees = n_trees, probability = TRUE, case.weights = w_rf, num.threads = rf_threads, seed = 42),
@@ -636,7 +644,8 @@ compute_continuous_boyce_index <- function(suitability_all, suitability_pres, n_
             v[!is.finite(v)] <- stats::median(X_mat[[cn]], na.rm = TRUE)
             nd[[cn]] <- v
           }
-          pr_m <- tryCatch(stats::predict(fit_rg, data = nd, num.threads = rf_threads)$predictions, error = function(e) NULL)
+          p_th <- if (identical(Sys.getenv("PLANTMATICS_IN_FORK_WORKER", unset = ""), "1")) 1L else rf_threads
+          pr_m <- tryCatch(stats::predict(fit_rg, data = nd, num.threads = p_th)$predictions, error = function(e) NULL)
           if (is.matrix(pr_m) && "Presence" %in% colnames(pr_m)) {
             pr <- as.numeric(pr_m[, "Presence"])
           } else {
@@ -1092,6 +1101,8 @@ fit_and_project_maxent_sdm_maps <- function(
   focal_artifacts <- NULL
   all_sdm_artifacts <- list()
 
+  tg_bundles <- list()
+  fit_tasks <- list()
   for (tg in target_groups) {
     pres_mask <- if (tg %in% df$species_standardized && !(tg %in% grp_vec)) {
       elig_mask & (df$species_standardized == tg)
@@ -1126,176 +1137,229 @@ fit_and_project_maxent_sdm_maps <- function(
     X_comb <- comb_df[, kept_vars, drop = FALSE]
     coords_comb <- as.matrix(comb_df[, c("longitude", "latitude")])
 
-    # Spatial-Block Cross-Validation (k = 5 spatial blocks)
     k_folds <- min(5L, max(2L, n_pres))
     block_ids <- assign_spatial_grid_blocks(coords_comb, block_deg = block_deg_use, k = k_folds)
-    # Ensure presence points span at least 2 folds when possible
     if (length(unique(block_ids[p_vec == 1L])) < 2L && n_pres >= 2L) {
       block_ids[p_vec == 1L] <- ((seq_len(n_pres) - 1L) %% min(k_folds, n_pres)) + 1L
     }
 
-    oof_mx <- rep(NA_real_, length(p_vec))
-    oof_rf <- rep(NA_real_, length(p_vec))
     u_folds <- sort(unique(block_ids))
+    tg_bundles[[tg]] <- list(
+      tg = tg, pres_mask = pres_mask, n_pres = n_pres, n_bg = n_bg,
+      p_vec = p_vec, w_vec = w_vec, X_comb = X_comb, u_folds = u_folds
+    )
     for (fid in u_folds) {
       tr_idx <- which(block_ids != fid)
       te_idx <- which(block_ids == fid)
       if (sum(p_vec[tr_idx] == 1L) >= 2L && sum(p_vec[tr_idx] == 0L) >= 2L && length(te_idx) >= 1L) {
-        mx_cv <- .fit_single_maxent_model(p_vec[tr_idx], X_comb[tr_idx, , drop = FALSE], w_vec[tr_idx])
-        rf_cv <- .fit_single_srf_binary_model(p_vec[tr_idx], X_comb[tr_idx, , drop = FALSE], w_vec[tr_idx], n_trees = 200L)
-        oof_mx[te_idx] <- mx_cv$predict_cloglog(X_comb[te_idx, , drop = FALSE])
-        oof_rf[te_idx] <- rf_cv$predict_prob(X_comb[te_idx, , drop = FALSE])
+        fit_tasks[[length(fit_tasks) + 1L]] <- list(kind = "cv", tg = tg, tr_idx = tr_idx, te_idx = te_idx)
       }
     }
+    fit_tasks[[length(fit_tasks) + 1L]] <- list(kind = "full", tg = tg)
+  }
 
+  max_w <- if (exists("resolve_packera_workers", mode = "function")) resolve_packera_workers(64L) else 1L
+  eff_w <- if (length(fit_tasks) >= 2L && exists("packera_mclapply", mode = "function")) min(max_w, length(fit_tasks)) else 1L
+  job_rf_threads <- max(1L, as.integer(floor(max_w / max(1L, eff_w))))
+
+  fit_res_list <- list()
+  if (length(fit_tasks) > 0L) {
+    run_fit_task <- function(t_i) {
+      tk <- fit_tasks[[t_i]]
+      bd <- tg_bundles[[tk$tg]]
+      if (identical(tk$kind, "cv")) {
+        tr <- tk$tr_idx; te <- tk$te_idx
+        mx_cv <- .fit_single_maxent_model(bd$p_vec[tr], bd$X_comb[tr, , drop = FALSE], bd$w_vec[tr])
+        rf_cv <- .fit_single_srf_binary_model(bd$p_vec[tr], bd$X_comb[tr, , drop = FALSE], bd$w_vec[tr], n_trees = 200L, num_threads = job_rf_threads)
+        list(oof_mx = mx_cv$predict_cloglog(bd$X_comb[te, , drop = FALSE]), oof_rf = rf_cv$predict_prob(bd$X_comb[te, , drop = FALSE]))
+      } else {
+        mx_f <- .fit_single_maxent_model(bd$p_vec, bd$X_comb, bd$w_vec)
+        rf_f <- .fit_single_srf_binary_model(bd$p_vec, bd$X_comb, bd$w_vec, n_trees = 300L, num_threads = job_rf_threads)
+        list(mx_full = mx_f, rf_full = rf_f)
+      }
+    }
+    fit_res_list <- if (eff_w > 1L) {
+      packera_mclapply(seq_along(fit_tasks), run_fit_task, mc.cores = eff_w, mc.preschedule = FALSE)
+    } else {
+      lapply(seq_along(fit_tasks), run_fit_task)
+    }
+  }
+
+  .eval_oof_roc_cbi <- function(p_v, pred_v, w_v, ok_m) {
+    use_oof <- is.logical(ok_m) && length(ok_m) == length(p_v) &&
+      sum(p_v[ok_m] == 1L) >= 2L && sum(p_v[ok_m] == 0L) >= 2L
+    idx <- if (use_oof) which(ok_m) else seq_along(p_v)
+    p_eval <- p_v[idx]
+    pred_eval <- pred_v[idx]
+    list(
+      roc = .compute_roc_auc_curve(p_eval, pred_eval, w_v[idx]),
+      cbi = compute_continuous_boyce_index(pred_eval, pred_eval[p_eval == 1L], n_bins = 20L)
+    )
+  }
+  .pick_tg_top_pred <- function(cands, X_all, mx_m, rf_m, fallback_nm) {
+    c_use <- intersect(cands, colnames(X_all))
+    if (length(c_use) == 0L) return(fallback_nm)
+    if (length(c_use) == 1L) return(c_use[1L])
+    base_p <- 0.5 * mx_m$predict_cloglog(X_all) + 0.5 * rf_m$predict_prob(X_all)
+    scores <- vapply(c_use, function(vn) {
+      X_med <- X_all
+      col_v <- suppressWarnings(as.numeric(X_med[[vn]]))
+      fin <- is.finite(col_v)
+      if (sum(fin) < 2L || stats::sd(col_v[fin]) < 1e-10) return(0.0)
+      X_med[[vn]] <- rep(stats::median(col_v[fin], na.rm = TRUE), nrow(X_med))
+      alt_p <- 0.5 * mx_m$predict_cloglog(X_med) + 0.5 * rf_m$predict_prob(X_med)
+      sc <- mean(abs(base_p - alt_p), na.rm = TRUE)
+      if (!is.finite(sc)) 0.0 else as.numeric(sc)
+    }, numeric(1))
+    if (all(scores <= 1e-10)) return(c_use[1L])
+    c_use[which.max(scores)]
+  }
+
+  tg_models <- list()
+  for (tg in names(tg_bundles)) {
+    bd <- tg_bundles[[tg]]
+    p_vec <- bd$p_vec; w_vec <- bd$w_vec; X_comb <- bd$X_comb
+    n_pres <- bd$n_pres; n_bg <- bd$n_bg; pres_mask <- bd$pres_mask
+    oof_mx <- rep(NA_real_, length(p_vec))
+    oof_rf <- rep(NA_real_, length(p_vec))
+    mx_full <- NULL; rf_full <- NULL
+    for (t_i in seq_along(fit_tasks)) {
+      tk <- fit_tasks[[t_i]]
+      if (!identical(tk$tg, tg)) next
+      fr <- fit_res_list[[t_i]]
+      if (identical(tk$kind, "cv")) {
+        oof_mx[tk$te_idx] <- fr$oof_mx
+        oof_rf[tk$te_idx] <- fr$oof_rf
+      } else {
+        mx_full <- fr$mx_full
+        rf_full <- fr$rf_full
+      }
+    }
     ok_oof_mx <- is.finite(oof_mx)
     ok_oof_rf <- is.finite(oof_rf)
-
-    # Fit full models on all presence + target-group background data
-    mx_full <- .fit_single_maxent_model(p_vec, X_comb, w_vec)
-    rf_full <- .fit_single_srf_binary_model(p_vec, X_comb, w_vec, n_trees = 300L)
-
-    # Fill any fold that lacked training presences with full model predictions
     na_mx <- !ok_oof_mx
     if (any(na_mx)) oof_mx[na_mx] <- mx_full$predict_cloglog(X_comb[na_mx, , drop = FALSE])
     na_rf <- !ok_oof_rf
     if (any(na_rf)) oof_rf[na_rf] <- rf_full$predict_prob(X_comb[na_rf, , drop = FALSE])
 
-    .eval_oof_roc_cbi <- function(p_v, pred_v, w_v, ok_m) {
-      use_oof <- is.logical(ok_m) && length(ok_m) == length(p_v) &&
-        sum(p_v[ok_m] == 1L) >= 2L && sum(p_v[ok_m] == 0L) >= 2L
-      idx <- if (use_oof) which(ok_m) else seq_along(p_v)
-      p_eval <- p_v[idx]
-      pred_eval <- pred_v[idx]
-      list(
-        roc = .compute_roc_auc_curve(p_eval, pred_eval, w_v[idx]),
-        cbi = compute_continuous_boyce_index(pred_eval, pred_eval[p_eval == 1L], n_bins = 20L)
-      )
-    }
-
     eval_mx <- .eval_oof_roc_cbi(p_vec, oof_mx, w_vec, ok_oof_mx)
     eval_rf <- .eval_oof_roc_cbi(p_vec, oof_rf, w_vec, ok_oof_rf)
-    roc_mx <- eval_mx$roc
-    cbi_mx <- eval_mx$cbi
-    roc_rf <- eval_rf$roc
-    cbi_rf <- eval_rf$cbi
+    roc_mx <- eval_mx$roc; cbi_mx <- eval_mx$cbi
+    roc_rf <- eval_rf$roc; cbi_rf <- eval_rf$cbi
     auc_mx <- if (is.finite(roc_mx$auc)) roc_mx$auc else 0.5
     auc_rf <- if (is.finite(roc_rf$auc)) roc_rf$auc else 0.5
-
-    # AUC_block-weighted ensemble (default 0.5 * MaxEnt + 0.5 * SpatialRF weighted by AUC_block)
     w_ens_mx <- if ((auc_mx + auc_rf) > 1e-6) auc_mx / (auc_mx + auc_rf) else 0.5
     w_ens_rf <- 1.0 - w_ens_mx
     oof_ens <- pmin(1.0, pmax(0.0, w_ens_mx * oof_mx + w_ens_rf * oof_rf))
     ok_oof_ens <- ok_oof_mx & ok_oof_rf
     eval_ens <- .eval_oof_roc_cbi(p_vec, oof_ens, w_vec, ok_oof_ens)
-    roc_ens <- eval_ens$roc
-    cbi_ens <- eval_ens$cbi
+    roc_ens <- eval_ens$roc; cbi_ens <- eval_ens$cbi
     auc_ens <- if (is.finite(roc_ens$auc)) roc_ens$auc else round(0.5 * (auc_mx + auc_rf), 4)
 
-    .pick_tg_top_pred <- function(cands, X_all, mx_m, rf_m, fallback_nm) {
-      c_use <- intersect(cands, colnames(X_all))
-      if (length(c_use) == 0L) return(fallback_nm)
-      if (length(c_use) == 1L) return(c_use[1L])
-      base_p <- 0.5 * mx_m$predict_cloglog(X_all) + 0.5 * rf_m$predict_prob(X_all)
-      scores <- vapply(c_use, function(vn) {
-        X_med <- X_all
-        col_v <- suppressWarnings(as.numeric(X_med[[vn]]))
-        fin <- is.finite(col_v)
-        if (sum(fin) < 2L || stats::sd(col_v[fin]) < 1e-10) return(0.0)
-        X_med[[vn]] <- rep(stats::median(col_v[fin], na.rm = TRUE), nrow(X_med))
-        alt_p <- 0.5 * mx_m$predict_cloglog(X_med) + 0.5 * rf_m$predict_prob(X_med)
-        sc <- mean(abs(base_p - alt_p), na.rm = TRUE)
-        if (!is.finite(sc)) 0.0 else as.numeric(sc)
-      }, numeric(1))
-      if (all(scores <= 1e-10)) return(c_use[1L])
-      c_use[which.max(scores)]
-    }
     tg_top_clim_pred <- .pick_tg_top_pred(clim_cand, X_comb, mx_full, rf_full, top_clim_pred)
     tg_top_edaph_pred <- .pick_tg_top_pred(edaph_cand, X_comb, mx_full, rf_full, top_edaph_pred)
-
     perf_rows[[length(perf_rows) + 1L]] <- data.frame(
-      Taxon_or_Morphotype = tg,
-      N_Presences = as.integer(n_pres),
-      N_Background = as.integer(n_bg),
+      Taxon_or_Morphotype = tg, N_Presences = as.integer(n_pres), N_Background = as.integer(n_bg),
       MaxEnt_Engine = as.character(mx_full$engine),
       Selected_Feature_Class = if (!is.null(mx_full$selected_feature_class)) as.character(mx_full$selected_feature_class) else "L",
       Selected_Reg_Multiplier = if (!is.null(mx_full$selected_reg_multiplier) && is.finite(mx_full$selected_reg_multiplier)) round(as.numeric(mx_full$selected_reg_multiplier), 3) else NA_real_,
       MaxEnt_AICc = if (!is.null(mx_full$maxent_aicc) && is.finite(mx_full$maxent_aicc)) round(as.numeric(mx_full$maxent_aicc), 3) else NA_real_,
       MaxEnt_NonZero_Betas = if (!is.null(mx_full$n_nonzero_betas)) as.integer(mx_full$n_nonzero_betas) else NA_integer_,
-      AUC_Block_MaxEnt = round(auc_mx, 4),
-      CBI_MaxEnt = round(as.numeric(cbi_mx), 4),
-      AUC_Block_SpatialRF = round(auc_rf, 4),
-      CBI_SpatialRF = round(as.numeric(cbi_rf), 4),
-      AUC_Block_Ensemble = round(auc_ens, 4),
-      CBI_Ensemble = round(as.numeric(cbi_ens), 4),
-      Top_Climatic_Predictor = as.character(tg_top_clim_pred),
-      Top_Edaphic_Predictor = as.character(tg_top_edaph_pred),
+      AUC_Block_MaxEnt = round(auc_mx, 4), CBI_MaxEnt = round(as.numeric(cbi_mx), 4),
+      AUC_Block_SpatialRF = round(auc_rf, 4), CBI_SpatialRF = round(as.numeric(cbi_rf), 4),
+      AUC_Block_Ensemble = round(auc_ens, 4), CBI_Ensemble = round(as.numeric(cbi_ens), 4),
+      Top_Climatic_Predictor = as.character(tg_top_clim_pred), Top_Edaphic_Predictor = as.character(tg_top_edaph_pred),
       stringsAsFactors = FALSE
     )
+    tg_models[[tg]] <- list(
+      taxon = tg, pres_mask = pres_mask, mx_full = mx_full, rf_full = rf_full,
+      w_ens_mx = w_ens_mx, w_ens_rf = w_ens_rf,
+      roc_mx = roc_mx, roc_rf = roc_rf, roc_ens = roc_ens,
+      cbi_mx = cbi_mx, cbi_rf = cbi_rf, cbi_ens = cbi_ens,
+      top_clim_pred = tg_top_clim_pred, top_edaph_pred = tg_top_edaph_pred,
+      X_comb = X_comb, p_vec = p_vec
+    )
+  }
 
-    # Project continuous habitat suitability across env_stack via terra::predict()
-    rast_mx <- NULL
-    rast_rf <- NULL
-    rast_ens <- NULL
-    if (!is.null(env_stack) && requireNamespace("terra", quietly = TRUE)) {
-      rast_mx <- tryCatch(
-        terra::predict(env_stack, mx_full, fun = function(model, data, ...) model$predict_cloglog(data), na.rm = TRUE),
-        error = function(e) NULL
-      )
-      rast_rf <- tryCatch(
-        terra::predict(env_stack, rf_full, fun = function(model, data, ...) model$predict_prob(data), na.rm = TRUE),
-        error = function(e) NULL
-      )
-      if (!is.null(rast_mx) && !is.null(rast_rf)) {
-        names(rast_mx) <- "maxent_cloglog"
-        names(rast_rf) <- "spatial_rf_suitability"
-        rast_ens <- w_ens_mx * rast_mx + w_ens_rf * rast_rf
-        names(rast_ens) <- "ensemble_suitability"
-
-        safe_name <- gsub("^_+|_+$", "", tolower(gsub("[^A-Za-z0-9]+", "_", tg)))
-        mx_tif_out <- file.path(raster_dir, sprintf("sdm_%s_maxent_cloglog.tif", safe_name))
-        ens_tif_out <- file.path(raster_dir, sprintf("sdm_%s_ensemble.tif", safe_name))
-
-        .write_deflate_tif <- function(r_obj, path_target) {
-          tmp_t <- paste0(path_target, ".tmp.tif")
-          dir.create(dirname(path_target), recursive = TRUE, showWarnings = FALSE)
-          tryCatch(
-            terra::writeRaster(r_obj, filename = tmp_t, overwrite = TRUE, gdal = gdal_deflate),
-            error = function(e) terra::writeRaster(r_obj, filename = tmp_t, overwrite = TRUE, gdal = c("COMPRESS=DEFLATE", "ZLEVEL=6"))
-          )
-          if (file.exists(tmp_t)) file.rename(tmp_t, path_target)
+  # Extract raster cell predictors ONCE in parent (zero SpatRaster pointers across fork), then predict in parallel chunks
+  rast_preds_by_tg <- list()
+  if (!is.null(env_stack) && requireNamespace("terra", quietly = TRUE) && length(tg_models) > 0L) {
+    n_grid_cells <- terra::ncell(env_stack)
+    env_vals_df <- as.data.frame(terra::values(env_stack))
+    colnames(env_vals_df) <- names(env_stack)
+    ok_cells <- which(stats::complete.cases(env_vals_df[, kept_vars, drop = FALSE]))
+    if (length(ok_cells) > 0L) {
+      env_ok_df <- env_vals_df[ok_cells, kept_vars, drop = FALSE]
+      n_ok <- nrow(env_ok_df)
+      n_tg <- length(tg_models)
+      chunks_per_tg <- max(1L, min(as.integer(ceiling(n_ok / 250L)), as.integer(ceiling(max_w / n_tg))))
+      row_chunks <- if (chunks_per_tg > 1L) split(seq_len(n_ok), cut(seq_len(n_ok), breaks = chunks_per_tg, labels = FALSE)) else list(seq_len(n_ok))
+      proj_tasks <- list()
+      for (tg in names(tg_models)) {
+        for (c_i in seq_along(row_chunks)) proj_tasks[[length(proj_tasks) + 1L]] <- list(tg = tg, idx = row_chunks[[c_i]])
+      }
+      proj_fn <- function(pt) {
+        nd <- env_ok_df[pt$idx, , drop = FALSE]
+        tm <- tg_models[[pt$tg]]
+        list(mx = as.numeric(tm$mx_full$predict_cloglog(nd)), rf = as.numeric(tm$rf_full$predict_prob(nd)))
+      }
+      proj_res <- if (length(proj_tasks) >= 2L && max_w > 1L && exists("packera_mclapply", mode = "function")) {
+        packera_mclapply(proj_tasks, proj_fn, mc.cores = min(max_w, length(proj_tasks)), mc.preschedule = FALSE)
+      } else {
+        lapply(proj_tasks, proj_fn)
+      }
+      for (tg in names(tg_models)) {
+        mx_ok <- numeric(n_ok); rf_ok <- numeric(n_ok)
+        for (p_i in seq_along(proj_tasks)) {
+          if (identical(proj_tasks[[p_i]]$tg, tg)) {
+            idx_c <- proj_tasks[[p_i]]$idx
+            mx_ok[idx_c] <- proj_res[[p_i]]$mx
+            rf_ok[idx_c] <- proj_res[[p_i]]$rf
+          }
         }
-
-        if (write_prod_rasters) {
-          tryCatch(.write_deflate_tif(rast_mx, mx_tif_out), error = function(e) NULL)
-          tryCatch(.write_deflate_tif(rast_ens, ens_tif_out), error = function(e) NULL)
-        }
+        rast_preds_by_tg[[tg]] <- list(n_cells = n_grid_cells, ok_cells = ok_cells, mx_ok = mx_ok, rf_ok = rf_ok)
       }
     }
+    r_tpl <- terra::rast(env_stack[[1L]])
+    .write_deflate_tif <- function(r_obj, path_target) {
+      tmp_t <- paste0(path_target, ".tmp.tif")
+      dir.create(dirname(path_target), recursive = TRUE, showWarnings = FALSE)
+      tryCatch(
+        terra::writeRaster(r_obj, filename = tmp_t, overwrite = TRUE, gdal = gdal_deflate),
+        error = function(e) terra::writeRaster(r_obj, filename = tmp_t, overwrite = TRUE, gdal = c("COMPRESS=DEFLATE", "ZLEVEL=6"))
+      )
+      if (file.exists(tmp_t)) file.rename(tmp_t, path_target)
+    }
+  }
 
+  for (tg in names(tg_models)) {
+    tm <- tg_models[[tg]]
+    rast_mx <- NULL; rast_rf <- NULL; rast_ens <- NULL
+    if (!is.null(env_stack) && requireNamespace("terra", quietly = TRUE) && !is.null(rast_preds_by_tg[[tg]])) {
+      rp <- rast_preds_by_tg[[tg]]
+      v_mx <- rep(NA_real_, rp$n_cells); v_mx[rp$ok_cells] <- rp$mx_ok
+      v_rf <- rep(NA_real_, rp$n_cells); v_rf[rp$ok_cells] <- rp$rf_ok
+      rast_mx <- terra::rast(r_tpl); terra::values(rast_mx) <- v_mx; names(rast_mx) <- "maxent_cloglog"
+      rast_rf <- terra::rast(r_tpl); terra::values(rast_rf) <- v_rf; names(rast_rf) <- "spatial_rf_suitability"
+      rast_ens <- tm$w_ens_mx * rast_mx + tm$w_ens_rf * rast_rf; names(rast_ens) <- "ensemble_suitability"
+      safe_name <- gsub("^_+|_+$", "", tolower(gsub("[^A-Za-z0-9]+", "_", tg)))
+      mx_tif_out <- file.path(raster_dir, sprintf("sdm_%s_maxent_cloglog.tif", safe_name))
+      ens_tif_out <- file.path(raster_dir, sprintf("sdm_%s_ensemble.tif", safe_name))
+      if (write_prod_rasters) {
+        tryCatch(.write_deflate_tif(rast_mx, mx_tif_out), error = function(e) NULL)
+        tryCatch(.write_deflate_tif(rast_ens, ens_tif_out), error = function(e) NULL)
+      }
+    }
     tg_art <- list(
-      taxon = tg,
-      pres_mask = pres_mask,
-      mx_full = mx_full,
-      rf_full = rf_full,
-      rast_mx = rast_mx,
-      rast_rf = rast_rf,
-      rast_ens = rast_ens,
-      roc_mx = roc_mx,
-      roc_rf = roc_rf,
-      roc_ens = roc_ens,
-      cbi_mx = cbi_mx,
-      cbi_rf = cbi_rf,
-      cbi_ens = cbi_ens,
-      top_clim_pred = tg_top_clim_pred,
-      top_edaph_pred = tg_top_edaph_pred,
-      X_comb = X_comb,
-      p_vec = p_vec
+      taxon = tg, pres_mask = tm$pres_mask, mx_full = tm$mx_full, rf_full = tm$rf_full,
+      rast_mx = rast_mx, rast_rf = rast_rf, rast_ens = rast_ens,
+      roc_mx = tm$roc_mx, roc_rf = tm$roc_rf, roc_ens = tm$roc_ens,
+      cbi_mx = tm$cbi_mx, cbi_rf = tm$cbi_rf, cbi_ens = tm$cbi_ens,
+      top_clim_pred = tm$top_clim_pred, top_edaph_pred = tm$top_edaph_pred,
+      X_comb = tm$X_comb, p_vec = tm$p_vec
     )
     all_sdm_artifacts[[tg]] <- tg_art
-    if (is.null(focal_artifacts)) {
-      focal_artifacts <- tg_art
-    }
+    if (is.null(focal_artifacts)) focal_artifacts <- tg_art
   }
   if (!is.null(focal_taxon) && nzchar(focal_taxon) && (focal_taxon %in% names(all_sdm_artifacts))) {
     focal_artifacts <- all_sdm_artifacts[[focal_taxon]]

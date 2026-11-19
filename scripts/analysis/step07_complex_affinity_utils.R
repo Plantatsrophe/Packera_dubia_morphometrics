@@ -369,18 +369,18 @@ compute_hopkins_phenological_affinity <- function(morph_df, taxa, anchor_mask = 
     }
     pmin(1.0, pmax(0.0, as.numeric(p_ww)))
   }
-  raw_p <- numeric(0)
-  for (i in seq_len(n_taxa)) for (j in seq_len(n_taxa)) if (i != j) {
-    if (has_tx_pheno[[taxa[i]]] && has_tx_pheno[[taxa[j]]]) {
-      arc_rad <- abs(atan2(sin(mu_theta[i] - mu_theta[j]), cos(mu_theta[i] - mu_theta[j]))); delta_circ <- arc_rad * (365.25 / (2.0 * pi))
-      S_pheno[i, j] <- exp(-(delta_circ^2) / (2.0 * (21.0^2)))
-      if (i < j) {
-        th_i <- theta_adj[morph_df$species_standardized == taxa[i] & anthesis_mask & !noise_m]
-        th_j <- theta_adj[morph_df$species_standardized == taxa[j] & anthesis_mask & !noise_m]
-        raw_p <- c(raw_p, .circular_watson_williams_or_perm_p(th_i, th_j))
-      }
-    }
+  pair_ij <- list()
+  for (i in seq_len(n_taxa)) for (j in seq_len(n_taxa)) if (i != j && has_tx_pheno[[taxa[i]]] && has_tx_pheno[[taxa[j]]]) {
+    arc_rad <- abs(atan2(sin(mu_theta[i] - mu_theta[j]), cos(mu_theta[i] - mu_theta[j]))); delta_circ <- arc_rad * (365.25 / (2.0 * pi))
+    S_pheno[i, j] <- exp(-(delta_circ^2) / (2.0 * (21.0^2)))
+    if (i < j) pair_ij[[length(pair_ij) + 1L]] <- c(i, j)
   }
+  eval_ph_p <- function(ij) {
+    .circular_watson_williams_or_perm_p(theta_adj[morph_df$species_standardized == taxa[ij[1L]] & anthesis_mask & !noise_m],
+                                        theta_adj[morph_df$species_standardized == taxa[ij[2L]] & anthesis_mask & !noise_m])
+  }
+  nw_ph <- if (length(pair_ij) >= 2L && exists("packera_mclapply", mode = "function") && exists("resolve_packera_workers", mode = "function")) resolve_packera_workers(64L, length(pair_ij)) else 1L
+  raw_p <- if (length(pair_ij) > 0L) unlist(if (nw_ph > 1L) packera_mclapply(pair_ij, eval_ph_p, mc.cores = nw_ph) else lapply(pair_ij, eval_ph_p), use.names = FALSE) else numeric(0)
   pheno_fdr_p <- if (length(raw_p) > 0L) stats::p.adjust(raw_p, method = "BH") else numeric(0)
   list(S_pheno = S_pheno, has_pheno = sum(has_tx_pheno) >= 2L, delta_doy_resid = delta_doy_resid, pheno_fdr_p = pheno_fdr_p, alpha_eb = alpha_eb)
 }

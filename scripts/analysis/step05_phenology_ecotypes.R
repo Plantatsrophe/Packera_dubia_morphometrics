@@ -793,11 +793,12 @@ compute_isolation_by_environment <- function(df, edaph_vars = character(0), clim
     pure_cl <- max(0.0, r2_all - r2_no_cl)
     pure_sp <- max(0.0, r2_all - r2_no_sp)
 
+    nw_ibe <- if (exists("resolve_packera_workers", mode = "function")) resolve_packera_workers(64L) else 1L
     f_obs <- NA_real_; p_perm <- NA_real_
     if (requireNamespace("vegan", quietly = TRUE) && ncol(X_env) >= 1L && (n - ncol(X_env) - ncol(mem_mat)) >= 4L) {
       rda_res <- tryCatch({
         fit_r <- vegan::rda(Y ~ X_env + Condition(mem_mat))
-        an_r <- suppressMessages(suppressWarnings(vegan::anova.cca(fit_r, permutations = as.integer(max(19L, n_perm)))))
+        an_r <- suppressMessages(suppressWarnings(vegan::anova.cca(fit_r, permutations = as.integer(max(19L, n_perm)), parallel = nw_ibe)))
         list(F_val = as.numeric(an_r$F[1L]), p_val = as.numeric(an_r$`Pr(>F)`[1L]))
       }, error = function(e) NULL)
       if (!is.null(rda_res)) {
@@ -812,12 +813,17 @@ compute_isolation_by_environment <- function(df, edaph_vars = character(0), clim
       df1 <- max(1L, q1$rank - q0$rank); df2 <- max(1L, n - q1$rank)
       f_obs <- ((rss0 - rss1) / df1) / max(rss1 / df2, 1e-8)
       Y_res0 <- qr.resid(q0, Y)
-      f_null <- numeric(n_perm)
-      for (b in seq_len(n_perm)) {
-        Yp <- Y_res0[sample.int(n), , drop = FALSE]
+      perms_ibe <- replicate(n_perm, sample.int(n), simplify = FALSE)
+      eval_ibe_perm <- function(b) {
+        Yp <- Y_res0[perms_ibe[[b]], , drop = FALSE]
         rss0_b <- sum(qr.resid(q0, Yp)^2)
         rss1_b <- sum(qr.resid(q1, Yp)^2)
-        f_null[b] <- ((rss0_b - rss1_b) / df1) / max(rss1_b / df2, 1e-8)
+        ((rss0_b - rss1_b) / df1) / max(rss1_b / df2, 1e-8)
+      }
+      f_null <- if (n_perm >= 99L && nw_ibe > 1L && exists("packera_mclapply", mode = "function")) {
+        unlist(packera_mclapply(seq_len(n_perm), eval_ibe_perm, mc.cores = min(nw_ibe, n_perm)), use.names = FALSE)
+      } else {
+        vapply(seq_len(n_perm), eval_ibe_perm, numeric(1))
       }
       p_perm <- (sum(f_null >= f_obs) + 1.0) / (n_perm + 1.0)
     }

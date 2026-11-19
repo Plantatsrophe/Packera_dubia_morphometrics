@@ -18,6 +18,7 @@ import math
 import shutil
 import sys
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -46,6 +47,7 @@ from scripts.analysis.step06_coalescent_alignment_utils import (
     parse_invariant_alignment,
 )
 from scripts.analysis.step06_coalescent_models import (
+    _resolve_max_workers,
     compute_coalescent_introgression_bf,
     compute_model_corrected_divergence_blocks,
     select_nucleotide_substitution_model,
@@ -119,10 +121,10 @@ def compute_coalescent_gdi_delimitation(
     taxon_gdi_map: Dict[str, Dict[str, Any]] = {}
     boot_draws = rng.integers(0, n_blk, size=(max(10, n_boot), n_blk)) if n_blk > 1 else np.zeros((10, 1), dtype=int)
 
-    for tx in taxa:
+    def _eval_tx_gdi(tx: str) -> Optional[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
         others = [o for o in taxa if o != tx]
         if not others:
-            continue
+            return None
         sister = min(others, key=lambda o: pair_dxy.get((tx, o), 1.0))
         idx_a, idx_b = by_taxon[tx], by_taxon[sister]
         th_a, th_b, dxy = _calc_lineage_theta_and_dxy(diff_blk, call_blk, within_het, within_call, idx_a, idx_b)
@@ -149,14 +151,27 @@ def compute_coalescent_gdi_delimitation(
             "coalescent_gdi": round(gdi_obs, 4), "gdi_ci_low": round(ci_low, 4), "gdi_ci_high": round(ci_high, 4),
             "gdi_classification": gdi_cls, "bpp_introgression_bf": bpp_bf, "substitution_model": substitution_model, "bf_method": bf_info["bf_method"],
         }
-        taxon_rows.append(rec)
-        taxon_gdi_map[tx] = rec
-        adequacy_rows.append({
+        ad_row = {
             "taxon": tx, "nearest_sister_taxon": sister, "substitution_model": substitution_model, "bf_method": bf_info["bf_method"],
             "bic_m0": bf_info["bic_m0"], "bic_m1": bf_info["bic_m1"], "log_bf_10": bf_info["log_bf_10"], "bf_10": bf_info["bf_10"],
             "w_introgr": bf_info["w_introgr"], "tau_introgr": bf_info["tau_introgr"], "tau_sp": bf_info["tau_sp"],
             "coalescent_gdi": rec["coalescent_gdi"], "gdi_classification": gdi_cls,
-        })
+        }
+        return tx, rec, ad_row
+
+    nw_tx = min(_resolve_max_workers(), len(taxa)) if len(taxa) >= 2 else 1
+    if nw_tx > 1:
+        with ThreadPoolExecutor(max_workers=nw_tx) as pool:
+            tx_outs = list(pool.map(_eval_tx_gdi, taxa))
+    else:
+        tx_outs = [_eval_tx_gdi(tx) for tx in taxa]
+    for item in tx_outs:
+        if item is None:
+            continue
+        tx, rec, ad_row = item
+        taxon_rows.append(rec)
+        taxon_gdi_map[tx] = rec
+        adequacy_rows.append(ad_row)
 
     sample_rows = [
         {

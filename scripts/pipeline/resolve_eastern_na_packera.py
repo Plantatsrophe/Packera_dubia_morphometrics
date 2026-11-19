@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse, csv, io, json, math, os, re, secrets, shutil, sqlite3, subprocess, sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
@@ -32,20 +33,14 @@ MASTER_SYNTHESIS_COLS: Tuple[str, ...] = (
 )
 
 def _write_atomic_text(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    path.parent.mkdir(parents=True, exist_ok=True); tmp = path.with_suffix(path.suffix + ".tmp")
     with open(tmp, "w", encoding="utf-8", newline="") as fh:
-        fh.write(text)
-        fh.flush()
-        os.fsync(fh.fileno())
+        fh.write(text); fh.flush(); os.fsync(fh.fileno())
     tmp.replace(path)
 
 def _write_atomic_csv(path: Path, fieldnames: Sequence[str], rows: Sequence[Dict[str, Any]]) -> None:
-    buf = io.StringIO(newline="")
-    writer = csv.DictWriter(buf, fieldnames=list(fieldnames), extrasaction="ignore")
-    writer.writeheader()
-    writer.writerows(rows)
-    _write_atomic_text(path, buf.getvalue())
+    buf = io.StringIO(newline=""); w = csv.DictWriter(buf, fieldnames=list(fieldnames), extrasaction="ignore")
+    w.writeheader(); w.writerows(rows); _write_atomic_text(path, buf.getvalue())
 
 def _resolve_ro_db_path(ws: Path, db_path: Optional[Path]) -> Path:
     if db_path is not None:
@@ -62,9 +57,7 @@ def _open_ro_conn(db_file: Path) -> Optional[sqlite3.Connection]:
     if not db_file.is_file():
         return None
     try:
-        conn = sqlite3.connect(f"file:{db_file.as_posix()}?mode=ro", uri=True)
-        conn.row_factory = sqlite3.Row
-        return conn
+        conn = sqlite3.connect(f"file:{db_file.as_posix()}?mode=ro", uri=True); conn.row_factory = sqlite3.Row; return conn
     except sqlite3.Error:
         return None
 
@@ -242,10 +235,11 @@ def _build_genus_commands(run_script: Path, g1_eff: str, g2: str, g3: str, args:
     cmds.append(("Genus_Stage_3_Gold_Thin", g3, ["bash", str(run_script), "--run-id", g3, "--start-step", "3", "--geographic-scope", args.geographic_scope, "--exclude-misidentified", "--triage-source", g1_eff, "--spatial-thin-km", f"{args.spatial_thin_km:g}", "--gold-only", *tail]))
     return cmds
 
-def _species_commands(run_script: Path, sp: str, sp_prefix: str, g1_eff: str, args: argparse.Namespace) -> List[Tuple[str, str, List[str]]]:
+def _species_commands(run_script: Path, sp: str, sp_prefix: str, g1_eff: str, args: argparse.Namespace, threads_override: Optional[int] = None) -> List[Tuple[str, str, List[str]]]:
     return build_four_stage_commands(
         run_script=run_script, focal_taxon=sp, prefix=sp_prefix, discovery_run_id=g1_eff, geographic_scope=args.geographic_scope,
-        gold_anchors=args.gold_anchors, spatial_thin_km=args.spatial_thin_km, threads=args.threads, gpu_batch_size=args.gpu_batch_size,
+        gold_anchors=args.gold_anchors, spatial_thin_km=args.spatial_thin_km,
+        threads=(args.threads if threads_override is None else threads_override), gpu_batch_size=args.gpu_batch_size,
         db_path=args.db, skip_discovery=True, skip_harvest=True,
     )
 
@@ -345,7 +339,7 @@ def build_parser() -> argparse.ArgumentParser:
     for flag, dflt in (("--prefix", "eastern_na"), ("--parent-run-id", None), ("--discovery-run-id", None)):
         p.add_argument(flag, default=dflt)
     p.add_argument("--geographic-scope", default="eastern_na", choices=("eastern_na", "north_america", "global"))
-    for flag, typ, dflt in (("--min-vouchers", int, 15), ("--gold-anchors", int, 30), ("--spatial-thin-km", float, 15.0), ("--gpu-batch-size", int, None)):
+    for flag, typ, dflt in (("--min-vouchers", int, 15), ("--gold-anchors", int, 30), ("--spatial-thin-km", float, 15.0), ("--gpu-batch-size", int, None), ("--species-jobs", int, 1)):
         p.add_argument(flag, type=typ, default=dflt)
     p.add_argument("-j", "--threads", type=int, default=None)
     for flag in ("--db", "--output-dir"):
@@ -356,10 +350,11 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument(flag, action="store_true", default=False)
     return p
 
-def _run_stage_batch(ws: Path, prefix_lbl: str, cmds: Sequence[Tuple[str, str, List[str]]], args: argparse.Namespace, statuses: Dict[str, str]) -> int:
+def _run_stage_batch(ws: Path, prefix_lbl: str, cmds: Sequence[Tuple[str, str, List[str]]], args: argparse.Namespace, statuses: Dict[str, str], env_extra: Optional[Dict[str, str]] = None) -> int:
     if args.summarize_only:
         statuses.update({rid: "summarize_only" for _, rid, _ in cmds})
         return 0
+    sub_env = ({**os.environ, **env_extra} if env_extra else None)
     for lbl, rid, cmd in cmds:
         full_lbl = f"{prefix_lbl}:{lbl}" if prefix_lbl else lbl
         if not args.force and _stage_is_complete(ws, rid):
@@ -367,7 +362,7 @@ def _run_stage_batch(ws: Path, prefix_lbl: str, cmds: Sequence[Tuple[str, str, L
             statuses[rid] = "skipped_checkpoint"
             continue
         print(f"\n=== Executing {full_lbl} ({rid}) ===", flush=True)
-        proc = subprocess.run(cmd, cwd=str(ws), check=False)
+        proc = subprocess.run(cmd, cwd=str(ws), check=False, **({"env": sub_env} if sub_env else {}))
         statuses[rid] = "completed" if proc.returncode == 0 else f"failed_{proc.returncode}"
         if proc.returncode != 0:
             print(f"[ERROR] {full_lbl} ({rid}) exited with status {proc.returncode}.", file=sys.stderr)
@@ -377,9 +372,8 @@ def _run_stage_batch(ws: Path, prefix_lbl: str, cmds: Sequence[Tuple[str, str, L
 def _git_commit_sha(ws: Path) -> str:
     try:
         res = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(ws), capture_output=True, text=True, timeout=3, check=False)
-        return res.stdout.strip() if res.returncode == 0 and res.stdout.strip() else "unknown"
-    except Exception:
-        return "unknown"
+        return res.stdout.strip() or "unknown" if res.returncode == 0 else "unknown"
+    except Exception: return "unknown"
 
 def main(argv: Optional[Sequence[str]] = None, workspace_root: Optional[Path] = None) -> int:
     raw_argv = list(argv) if argv is not None else sys.argv[1:]
@@ -414,12 +408,21 @@ def main(argv: Optional[Sequence[str]] = None, workspace_root: Optional[Path] = 
         _compile_genus_summary(ws, genus_dir, g1_eff, g2, g3, conn)
         qualifying = discover_qualifying_eastern_species(ws, **disc_kw)
         if not args.skip_intraspecific_sweep:
-            for sp, _ in qualifying:
-                slug = slugify_taxon(sp)
-                sp_prefix = f"{parent_run_id}/{slug}/"
-                if (rc := _run_stage_batch(ws, sp, _species_commands(run_script, sp, sp_prefix, g1_eff, args), args, statuses)) != 0:
-                    return rc
-                compile_complex_resolution_summary(focal_taxon=sp, prefix=sp_prefix, discovery_run_id=g1_eff, workspace_root=ws, db_path=args.db, output_dir=parent_dir / slug)
+            sp_jobs = max(1, int(getattr(args, "species_jobs", 1) or 1))
+            def _run_sp(sp_name: str) -> Tuple[str, str, int, Dict[str, str]]:
+                slug = slugify_taxon(sp_name); sp_pref = f"{parent_run_id}/{slug}/"; st_m: Dict[str, str] = {}
+                t_sub = max(1, int(args.threads) // min(sp_jobs, len(qualifying))) if (sp_jobs > 1 and args.threads) else args.threads
+                env_x = {"PLANTMATICS_NO_LATEST_SYMLINK": "1"} if (sp_jobs > 1 and len(qualifying) > 1) else None
+                return sp_name, slug, _run_stage_batch(ws, sp_name, _species_commands(run_script, sp_name, sp_pref, g1_eff, args, t_sub), args, st_m, env_x), st_m
+            if sp_jobs > 1 and len(qualifying) > 1:
+                with ThreadPoolExecutor(max_workers=min(sp_jobs, len(qualifying))) as ex:
+                    sp_res = list(ex.map(_run_sp, [sp for sp, _ in qualifying]))
+            else:
+                sp_res = [_run_sp(sp) for sp, _ in qualifying]
+            for sp_name, slug, rc_sp, st_m in sp_res:
+                statuses.update(st_m)
+                if rc_sp != 0: return rc_sp
+                compile_complex_resolution_summary(focal_taxon=sp_name, prefix=f"{parent_run_id}/{slug}/", discovery_run_id=g1_eff, workspace_root=ws, db_path=args.db, output_dir=parent_dir / slug)
         master_rows = [_build_master_row(ws, conn, parent_run_id, sp, cnt, g1_eff, g2, not args.skip_intraspecific_sweep) for sp, cnt in qualifying]
     finally:
         if conn is not None:
@@ -438,8 +441,7 @@ def main(argv: Optional[Sequence[str]] = None, workspace_root: Optional[Path] = 
     }, indent=2) + "\n")
     if args.output_dir is not None and args.output_dir.resolve() != parent_dir.resolve():
         args.output_dir.mkdir(parents=True, exist_ok=True)
-        for src in artifacts:
-            shutil.copy2(src, args.output_dir / src.name)
+        for src in artifacts: shutil.copy2(src, args.output_dir / src.name)
     return 0
 
 if __name__ == "__main__":

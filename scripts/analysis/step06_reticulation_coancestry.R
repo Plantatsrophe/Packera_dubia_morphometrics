@@ -63,26 +63,37 @@ compute_microhaplotype_coancestry <- function(pass_ids, dos_mat, raw_genomics_di
     used_mode <- "122bp_phylip_microhaplotypes"
     idx_map <- match(pass_ids, phy$sample_ids); valid_pos <- which(!is.na(idx_map)); m <- length(valid_pos)
     raw_mats <- lapply(phy$seqs[idx_map[valid_pos]], charToRaw)
-    for (b in phy$blocks) {
-      st <- (b - 1L) * phy$block_len + 1L; en <- b * phy$block_len
-      sub_list <- lapply(raw_mats, function(r) r[st:en])
-      if (length(unique(vapply(sub_list, rawToChar, character(1)))) < 2L) next
-      d_blk <- matrix(Inf, nrow = m, ncol = m)
-      for (a in seq_len(m)) {
-        ra <- sub_list[[a]]; ok_a <- ra != as.raw(0x4e) & ra != as.raw(0x2d)
-        if (sum(ok_a) < 10L) next
-        for (b2 in seq_len(m)) {
-          if (a == b2) next
-          rb <- sub_list[[b2]]; ok <- ok_a & (rb != as.raw(0x4e)) & (rb != as.raw(0x2d))
-          if (sum(ok) >= 10L) d_blk[a, b2] <- sum(ra[ok] != rb[ok]) / sum(ok)
-        }
-        fin_b <- which(is.finite(d_blk[a, ]))
-        if (length(fin_b) > 0L) {
-          min_d <- min(d_blk[a, fin_b])
-          donors <- fin_b[d_blk[a, fin_b] <= (min_d + 1.0 / phy$block_len + 1e-9)]
-          C_mat[valid_pos[a], valid_pos[donors]] <- C_mat[valid_pos[a], valid_pos[donors]] + (1.0 / length(donors))
+    eval_blk_chunk <- function(blk_vec) {
+      C_loc <- matrix(0.0, nrow = m, ncol = m)
+      for (b in blk_vec) {
+        st <- (b - 1L) * phy$block_len + 1L; en <- b * phy$block_len
+        sub_list <- lapply(raw_mats, function(r) r[st:en])
+        if (length(unique(vapply(sub_list, rawToChar, character(1)))) < 2L) next
+        d_blk <- matrix(Inf, nrow = m, ncol = m)
+        for (a in seq_len(m)) {
+          ra <- sub_list[[a]]; ok_a <- ra != as.raw(0x4e) & ra != as.raw(0x2d)
+          if (sum(ok_a) < 10L) next
+          for (b2 in seq_len(m)) {
+            if (a == b2) next
+            rb <- sub_list[[b2]]; ok <- ok_a & (rb != as.raw(0x4e)) & (rb != as.raw(0x2d))
+            if (sum(ok) >= 10L) d_blk[a, b2] <- sum(ra[ok] != rb[ok]) / sum(ok)
+          }
+          fin_b <- which(is.finite(d_blk[a, ]))
+          if (length(fin_b) > 0L) {
+            min_d <- min(d_blk[a, fin_b])
+            donors <- fin_b[d_blk[a, fin_b] <= (min_d + 1.0 / phy$block_len + 1e-9)]
+            C_loc[a, donors] <- C_loc[a, donors] + (1.0 / length(donors))
+          }
         }
       }
+      C_loc
+    }
+    nw_blk <- if (length(phy$blocks) >= 8L && exists("packera_mclapply", mode = "function") && exists("resolve_packera_workers", mode = "function")) resolve_packera_workers(64L, ceiling(length(phy$blocks) / 4L)) else 1L
+    if (nw_blk > 1L) {
+      b_chunks <- split(phy$blocks, cut(seq_along(phy$blocks), breaks = nw_blk, labels = FALSE))
+      C_mat[valid_pos, valid_pos] <- C_mat[valid_pos, valid_pos] + Reduce("+", packera_mclapply(b_chunks, eval_blk_chunk, mc.cores = nw_blk))
+    } else {
+      C_mat[valid_pos, valid_pos] <- C_mat[valid_pos, valid_pos] + eval_blk_chunk(phy$blocks)
     }
   }
 
@@ -214,7 +225,7 @@ compute_hybrid_index_q12 <- function(pass_df, dos_mat, q_mat = NULL, p1_vec = NU
   parent_a <- character(n); parent_b <- character(n); best_aicc_out <- rep(NA_real_, n); best_weight_out <- rep(NA_real_, n)
   delta_aicc_out <- rep(NA_real_, n); raw_p_out <- rep(NA_real_, n); cand_best_idx <- integer(n); pure_best_idx <- integer(n); is_div_vec <- logical(n)
 
-  for (i in seq_len(n)) {
+  eval_hi_i <- function(i) {
     y <- dos_mat[i, ]
     if (q_has_taxa) {
       ordered_ref <- intersect(q_cols[order(q_mat[i, ], decreasing = TRUE)], ref_taxa)
@@ -226,33 +237,40 @@ compute_hybrid_index_q12 <- function(pass_df, dos_mat, q_mat = NULL, p1_vec = NU
     pa <- if (!is.na(p1_vec[i]) && nzchar(p1_vec[i]) && p1_vec[i] %in% ref_taxa) p1_vec[i] else if (!is_query[i] && !is.na(species_vec[i]) && species_vec[i] %in% ref_taxa) species_vec[i] else cand_taxa[1L]
     pb_pool <- setdiff(cand_taxa, pa)
     pb <- if (!is.na(p2_vec[i]) && nzchar(p2_vec[i]) && p2_vec[i] %in% ref_taxa && p2_vec[i] != pa) p2_vec[i] else if (length(pb_pool) >= 1L) pb_pool[1L] else pa
-    parent_a[i] <- pa; parent_b[i] <- pb; fa <- taxa_freq[[pa]]; fb <- taxa_freq[[pb]]
-    if (is.null(fa) || is.null(fb) || identical(pa, pb)) { cls_out[i] <- "Undetermined"; next }
-    ok <- is.finite(y) & is.finite(fa) & is.finite(fb); delta_p <- abs(fb - fa); diag_m <- ok & (delta_p >= 0.45); n_diag <- sum(diag_m); n_diag_out[i] <- n_diag
-    if (n_diag == 0L) { cls_out[i] <- "Undetermined"; next }
+    fa <- taxa_freq[[pa]]; fb <- taxa_freq[[pb]]
+    if (is.null(fa) || is.null(fb) || identical(pa, pb)) return(list(pa = pa, pb = pb, n_diag = 0L, h = NA_real_, q12 = NA_real_, cls = "Undetermined", is_div = FALSE, cand_idx = 0L, pure_idx = 0L, aicc = NA_real_, wt = NA_real_, delta = NA_real_, raw_p = NA_real_))
+    ok <- is.finite(y) & is.finite(fa) & is.finite(fb); delta_p <- abs(fb - fa); diag_m <- ok & (delta_p >= 0.45); n_diag <- sum(diag_m)
+    if (n_diag == 0L) return(list(pa = pa, pb = pb, n_diag = 0L, h = NA_real_, q12 = NA_real_, cls = "Undetermined", is_div = FALSE, cand_idx = 0L, pure_idx = 0L, aicc = NA_real_, wt = NA_real_, delta = NA_real_, raw_p = NA_real_))
 
     conserved_m <- ok & (delta_p <= 0.15)
     priv_div <- if (sum(conserved_m) >= 10L) mean(abs(y[conserved_m] - 0.5 * (fa[conserved_m] + fb[conserved_m]))) else 0.0
     nearest_ref_d <- if (!is.null(d_mat) && any(!is_query)) min(d_mat[i, setdiff(which(!is_query), i)], na.rm = TRUE) else NA_real_
     x_pol <- ifelse(fb[diag_m] >= fa[diag_m], y[diag_m], 1.0 - y[diag_m]); h_val <- mean(x_pol); q12_val <- mean(1.0 - abs(2.0 * x_pol - 1.0))
-    h_out[i] <- round(h_val, 4); q12_out[i] <- round(q12_val, 4)
 
     is_div_assign <- !is.na(geno_sp_vec[i]) && nzchar(geno_sp_vec[i]) && !(geno_sp_vec[i] %in% c(pa, pb)) && is.finite(geno_prob_vec[i]) && geno_prob_vec[i] >= 0.70 && !isTRUE(geno_adm_vec[i]) && q12_val < 0.20
     is_div_dist <- !is.null(d_mat) && ((is_query[i] && is.finite(nearest_ref_d) && nearest_ref_d > div_dist_cut && q12_val < 0.72) || (priv_div >= 0.14 && q12_val < 0.65) || (n_diag < 8L && is.finite(nearest_ref_d) && nearest_ref_d > med_ref_d + 1.5 * mad_ref_d))
-    is_div_vec[i] <- is_div_assign || is_div_dist
-
+    is_div_i <- is_div_assign || is_div_dist
     if (n_diag < 6L) {
-      cls_out[i] <- if (is_div_vec[i]) "Divergent_NonHybrid_Lineage" else if (h_val <= 0.10 && q12_val < 0.20) "Pure_Parent_1" else if (h_val >= 0.90 && q12_val < 0.20) "Pure_Parent_2" else if (h_val >= 0.35 && h_val <= 0.65 && q12_val >= 0.70) "F1_Hybrid" else if (h_val >= 0.30 && h_val <= 0.70 && q12_val >= 0.35) "F2_Hybrid" else if (h_val < 0.35 && q12_val >= 0.25) "BC1_Parent_1" else if (h_val > 0.65 && q12_val >= 0.25) "BC1_Parent_2" else if (q12_val < 0.25 && h_val > 0.10 && h_val < 0.90) "Advanced_Introgressant" else "Pure_Parent_1"
-      next
+      c_low <- if (is_div_i) "Divergent_NonHybrid_Lineage" else if (h_val <= 0.10 && q12_val < 0.20) "Pure_Parent_1" else if (h_val >= 0.90 && q12_val < 0.20) "Pure_Parent_2" else if (h_val >= 0.35 && h_val <= 0.65 && q12_val >= 0.70) "F1_Hybrid" else if (h_val >= 0.30 && h_val <= 0.70 && q12_val >= 0.35) "F2_Hybrid" else if (h_val < 0.35 && q12_val >= 0.25) "BC1_Parent_1" else if (h_val > 0.65 && q12_val >= 0.25) "BC1_Parent_2" else if (q12_val < 0.25 && h_val > 0.10 && h_val < 0.90) "Advanced_Introgressant" else "Pure_Parent_1"
+      return(list(pa = pa, pb = pb, n_diag = n_diag, h = round(h_val, 4), q12 = round(q12_val, 4), cls = c_low, is_div = is_div_i, cand_idx = 0L, pure_idx = 0L, aicc = NA_real_, wt = NA_real_, delta = NA_real_, raw_p = NA_real_))
     }
     n11 <- sum(x_pol < 0.25); n12 <- sum(x_pol >= 0.25 & x_pol <= 0.75); n22 <- sum(x_pol > 0.75)
     adv_fit <- .fit_advanced_introgressant_mle(n11, n12, n22, h_val, q12_val, eps = 0.015)
     ll_vec <- c(.eval_hybrid_multinomial_ll(n11, n12, n22, 0.0, 0.0), .eval_hybrid_multinomial_ll(n11, n12, n22, 1.0, 0.0), .eval_hybrid_multinomial_ll(n11, n12, n22, 0.5, 1.0), .eval_hybrid_multinomial_ll(n11, n12, n22, 0.5, 0.5), .eval_hybrid_multinomial_ll(n11, n12, n22, 0.25, 0.5), .eval_hybrid_multinomial_ll(n11, n12, n22, 0.75, 0.5), adv_fit$ll)
     aicc_vec <- vapply(seq_along(ll_vec), function(m) -2.0 * ll_vec[m] + 2.0 * k_vec[m] + (2.0 * k_vec[m] * (k_vec[m] + 1.0)) / max(1.0, n_diag - k_vec[m] - 1.0), numeric(1))
     w_vec <- exp(-0.5 * (aicc_vec - min(aicc_vec))); w_vec <- w_vec / sum(w_vec); best_idx <- which.min(aicc_vec)
-    best_aicc_out[i] <- aicc_vec[best_idx]; best_weight_out[i] <- w_vec[best_idx]; delta_aicc_out[i] <- min(aicc_vec[1:2]) - min(aicc_vec[3:7])
-    cand_best_idx[i] <- best_idx; pure_best_idx[i] <- if (aicc_vec[1L] <= aicc_vec[2L]) 1L else 2L
-    raw_p_out[i] <- stats::pchisq(2.0 * max(0.0, max(ll_vec[3:7]) - max(ll_vec[1:2])), df = 2.0, lower.tail = FALSE)
+    list(pa = pa, pb = pb, n_diag = n_diag, h = round(h_val, 4), q12 = round(q12_val, 4), cls = "Pending", is_div = is_div_i,
+         cand_idx = best_idx, pure_idx = if (aicc_vec[1L] <= aicc_vec[2L]) 1L else 2L,
+         aicc = aicc_vec[best_idx], wt = w_vec[best_idx], delta = min(aicc_vec[1:2]) - min(aicc_vec[3:7]),
+         raw_p = stats::pchisq(2.0 * max(0.0, max(ll_vec[3:7]) - max(ll_vec[1:2])), df = 2.0, lower.tail = FALSE))
+  }
+  nw_hi <- if (n >= 8L && exists("packera_mclapply", mode = "function") && exists("resolve_packera_workers", mode = "function")) resolve_packera_workers(64L, n) else 1L
+  hi_res <- if (nw_hi > 1L) packera_mclapply(seq_len(n), eval_hi_i, mc.cores = nw_hi) else lapply(seq_len(n), eval_hi_i)
+  for (i in seq_len(n)) {
+    hr <- hi_res[[i]]
+    parent_a[i] <- hr$pa; parent_b[i] <- hr$pb; n_diag_out[i] <- hr$n_diag; h_out[i] <- hr$h; q12_out[i] <- hr$q12
+    cls_out[i] <- hr$cls; is_div_vec[i] <- hr$is_div; cand_best_idx[i] <- hr$cand_idx; pure_best_idx[i] <- hr$pure_idx
+    best_aicc_out[i] <- hr$aicc; best_weight_out[i] <- hr$wt; delta_aicc_out[i] <- hr$delta; raw_p_out[i] <- hr$raw_p
   }
 
   lrt_q_bh <- rep(NA_real_, n); fin_p <- which(is.finite(raw_p_out))

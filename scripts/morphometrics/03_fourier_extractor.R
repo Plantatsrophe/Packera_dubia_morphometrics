@@ -330,7 +330,7 @@ run_fourier_extraction <- function(opts) {
   cal_fn <- function(o = NULL, harm_mat = NULL, nb_h = f_cfg$harmonics) verify_harmonic_power_calibration(o, harm_mat = harm_mat, nb_h = nb_h, min_h = eff_min_h, max_h = eff_max_h, target_power = f_cfg$target_harmonic_power)
   efa_ok <- FALSE; harm_mat <- out_obj <- ef_res <- NULL; h_opt <- max(eff_min_h, min(eff_max_h, as.integer(f_cfg$harmonics)))
   if (requireNamespace("Momocs", quietly = TRUE)) {
-    if (length(coo_list) >= 240L && exists("run_parallel_momocs_efa", mode = "function") && exists("resolve_packera_workers", mode = "function") && resolve_packera_workers(32L) > 1L) {
+    if (length(coo_list) >= 32L && exists("run_parallel_momocs_efa", mode = "function") && exists("resolve_packera_workers", mode = "function") && resolve_packera_workers(64L) > 1L) {
       p_efa <- tryCatch(run_parallel_momocs_efa(coo_list, fac_df, f_cfg$harmonics, cal_fn), error = function(e) NULL)
       if (!is.null(p_efa$harm_mat)) { out_obj <- p_efa$out_obj; fac_df <- p_efa$fac_df; h_opt <- p_efa$h_opt; ef_res <- p_efa$ef_res; harm_mat <- p_efa$harm_mat; efa_ok <- TRUE; harmonic_names <- as.vector(outer(c("A", "B", "C", "D"), seq_len(h_opt), function(x, y) paste0(x, y))) }
     }
@@ -349,7 +349,7 @@ run_fourier_extraction <- function(opts) {
   }
   if (!efa_ok || is.null(harm_mat)) {
     h_opt <- cal_fn(out_obj, nb_h = f_cfg$harmonics); harmonic_names <- as.vector(outer(c("A", "B", "C", "D"), seq_len(h_opt), function(x, y) paste0(x, y)))
-    h_l <- if (length(coo_list) >= 240L && exists("packera_mclapply", mode = "function")) packera_mclapply(coo_list, function(c) compute_efourier_coords_pure(c, nb_h = h_opt, norm = FALSE, start = FALSE), mc.cores = resolve_packera_workers(32L, length(coo_list))) else lapply(coo_list, function(c) compute_efourier_coords_pure(c, nb_h = h_opt, norm = FALSE, start = FALSE))
+    h_l <- if (length(coo_list) >= 32L && exists("packera_mclapply", mode = "function")) packera_mclapply(coo_list, function(c) compute_efourier_coords_pure(c, nb_h = h_opt, norm = FALSE, start = FALSE), mc.cores = resolve_packera_workers(64L, length(coo_list))) else lapply(coo_list, function(c) compute_efourier_coords_pure(c, nb_h = h_opt, norm = FALSE, start = FALSE))
     harm_mat <- do.call(rbind, h_l); colnames(harm_mat) <- harmonic_names
   }
   if (all(harmonic_names %in% colnames(harm_mat))) harm_mat <- harm_mat[, harmonic_names, drop = FALSE] else if (ncol(harm_mat) == length(harmonic_names)) colnames(harm_mat) <- harmonic_names

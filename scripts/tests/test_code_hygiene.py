@@ -322,6 +322,7 @@ class TestCodeHygiene(unittest.TestCase):
             PROJECT_ROOT / "scripts" / "figures" / "step07_figures.R": 420,
             PROJECT_ROOT / "scripts" / "figures" / "step07b_network_figures.R": 320,
             PROJECT_ROOT / "scripts" / "tests" / "test_step07_audit_hygiene.py": 400,
+            PROJECT_ROOT / "scripts" / "tests" / "test_parallel_thread_scaling.py": 300,
         }
         bounded_paths = (
             *strict_ceilings.keys(),

@@ -1451,8 +1451,55 @@ extract_micro_topography_3dep <- function(coords_df, env_dir = "data/environment
         lat_fl <- as.integer(floor(lat_v[v_idx]))
         lon_fl <- as.integer(floor(lon_v[v_idx]))
         pt_tiles <- sprintf("%s%02d%s%03d", ifelse(lat_fl >= 0L, "N", "S"), abs(lat_fl), ifelse(lon_fl >= 0L, "E", "W"), abs(lon_fl))
-        for (tid in unique(pt_tiles)) {
-          if (tid %in% names(tile_map)) {
+        matched_tids <- intersect(unique(pt_tiles), names(tile_map))
+        nw_3d <- if (length(matched_tids) >= 2L && exists("packera_mclapply", mode = "function") && exists("resolve_packera_workers", mode = "function")) resolve_packera_workers(64L, length(matched_tids)) else 1L
+        if (nw_3d > 1L) {
+          coords_df_in <- df[, c("longitude", "latitude"), drop = FALSE]
+          tile_outs <- packera_mclapply(matched_tids, function(tid) {
+            rows_tid <- v_idx[pt_tiles == tid]
+            r_dem <- tryCatch(terra::rast(tile_map[[tid]]), error = function(e) NULL)
+            if (is.null(r_dem) || length(rows_tid) == 0L) return(NULL)
+            tryCatch({
+              pts_sub <- terra::vect(coords_df_in[rows_tid, , drop = FALSE], geom = c("longitude", "latitude"), crs = "EPSG:4326")
+              pts_proj <- .project_vect_to_rast(pts_sub, r_dem)
+              ext_pts <- terra::ext(pts_proj); res_xy <- terra::res(r_dem)
+              is_lonlat <- isTRUE(tryCatch(terra::is.lonlat(r_dem), error = function(e) TRUE))
+              pad_x <- max(res_xy[1] * 65.0, if (is_lonlat) 0.018 else 1800.0)
+              pad_y <- max(res_xy[2] * 65.0, if (is_lonlat) 0.018 else 1800.0)
+              r_sub <- tryCatch(terra::crop(r_dem, terra::ext(ext_pts[1] - pad_x, ext_pts[2] + pad_x, ext_pts[3] - pad_y, ext_pts[4] + pad_y)), error = function(e) NULL)
+              if (is.null(r_sub) || terra::ncell(r_sub) < 9L) return(NULL)
+              tpi_rast <- r_sub - terra::focal(r_sub, w = 5, fun = mean, na.rm = TRUE)
+              slope_rast <- terra::terrain(r_sub, v = "slope", unit = "degrees")
+              asp_rast <- terra::terrain(r_sub, v = "aspect", unit = "degrees")
+              fdir_rast <- tryCatch(terra::terrain(r_sub, v = "flowdir"), error = function(e) NULL)
+              facc_rast <- if (!is.null(fdir_rast)) tryCatch(terra::flowAccumulation(fdir_rast), error = function(e) NULL) else NULL
+              list(
+                rows = rows_tid, is_lonlat = is_lonlat, res_xy = res_xy,
+                elev = as.numeric(terra::extract(r_sub, pts_proj)[[2]]),
+                tpi = as.numeric(terra::extract(tpi_rast, pts_proj)[[2]]),
+                slope = as.numeric(terra::extract(slope_rast, pts_proj)[[2]]),
+                asp = as.numeric(terra::extract(asp_rast, pts_proj)[[2]]),
+                facc = if (!is.null(facc_rast)) as.numeric(terra::extract(facc_rast, pts_proj)[[2]]) else rep(NA_real_, length(rows_tid))
+              )
+            }, error = function(e) NULL)
+          }, mc.cores = nw_3d)
+          for (to in tile_outs) {
+            if (is.null(to)) next
+            rs <- to$rows; lat_sub <- lat_v[rs]
+            cw <- if (to$is_lonlat) sqrt(pmax(1.0, (to$res_xy[1] * 111320.0 * cos(pmin(80.0, abs(lat_sub)) * pi / 180.0)) * (to$res_xy[2] * 110574.0))) else sqrt(pmax(1.0, to$res_xy[1] * to$res_xy[2]))
+            ok_e <- is.finite(to$elev) & is.na(df$elevation_m[rs]); if (any(ok_e)) df$elevation_m[rs[ok_e]] <- round(to$elev[ok_e], 1)
+            ok_t <- is.finite(to$tpi); if (any(ok_t)) df$topo_tpi_30m[rs[ok_t]] <- round(to$tpi[ok_t], 2)
+            ok_s <- is.finite(to$slope)
+            if (any(ok_s)) {
+              sl_c <- pmax(0.05, pmin(75.0, to$slope[ok_s])); df$topo_slope_deg[rs[ok_s]] <- round(sl_c, 2)
+              hli_s <- .compute_mccune_keon_hli(lat_sub[ok_s], sl_c, to$asp[ok_s]); ok_h <- is.finite(hli_s)
+              if (any(ok_h)) df$topo_hli_30m[rs[ok_s][ok_h]] <- round(hli_s[ok_h], 4)
+            }
+            ok_w <- is.finite(to$facc) & is.finite(to$slope)
+            if (any(ok_w)) df$topo_twi_30m[rs[ok_w]] <- round(pmin(25.0, pmax(0.5, log(pmax(1e-3, ((pmax(0.0, to$facc[ok_w]) + 1.0) * cw[ok_w]) / pmax(tan(pmax(to$slope[ok_w], 0.10) * (pi / 180.0)), 1e-4))))), 2)
+          }
+        } else {
+          for (tid in matched_tids) {
             rows_tid <- v_idx[pt_tiles == tid]
             r_tile <- tryCatch(terra::rast(tile_map[[tid]]), error = function(e) NULL)
             extract_from_single_dem(r_tile, rows_tid)

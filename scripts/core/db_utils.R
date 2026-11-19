@@ -34,18 +34,21 @@ env_plantmatics_or_packera <- function(p_key, k_key = NULL, unset = "") {
   unset
 }
 
-resolve_packera_workers <- function(max_workers = 32L, n_tasks = NULL) {
+resolve_packera_workers <- function(max_workers = 64L, n_tasks = NULL) {
+  if (identical(Sys.getenv("PLANTMATICS_IN_FORK_WORKER", unset = ""), "1")) {
+    return(1L)
+  }
   if (!identical(.Platform$OS.type, "unix") || !requireNamespace("parallel", quietly = TRUE)) {
     return(1L)
   }
   env_w <- suppressWarnings(as.integer(trimws(env_plantmatics_or_packera("PLANTMATICS_MAX_WORKERS", "PACKERA_MAX_WORKERS"))))
   if (is.na(env_w) || env_w < 1L) {
-    det_phys <- tryCatch(parallel::detectCores(logical = FALSE), error = function(e) NA_integer_)
     det_log <- tryCatch(parallel::detectCores(logical = TRUE), error = function(e) 1L)
-    base_cores <- if (!is.na(det_phys) && det_phys >= 1L) {
-      as.integer(det_phys)
-    } else if (!is.na(det_log) && det_log >= 1L) {
+    det_phys <- tryCatch(parallel::detectCores(logical = FALSE), error = function(e) NA_integer_)
+    base_cores <- if (!is.na(det_log) && det_log >= 1L) {
       as.integer(det_log)
+    } else if (!is.na(det_phys) && det_phys >= 1L) {
+      as.integer(det_phys)
     } else {
       1L
     }
@@ -60,33 +63,37 @@ resolve_packera_workers <- function(max_workers = 32L, n_tasks = NULL) {
 }
 
 packera_mclapply <- function(X, FUN, mc.cores = 1L, mc.preschedule = TRUE) {
+  if (identical(Sys.getenv("PLANTMATICS_IN_FORK_WORKER", unset = ""), "1")) {
+    return(lapply(X, FUN))
+  }
   n_x <- length(X)
   eff_cores <- max(1L, min(as.integer(mc.cores), max(1L, n_x)))
   if (eff_cores <= 1L || n_x <= 1L || !identical(.Platform$OS.type, "unix") || !requireNamespace("parallel", quietly = TRUE)) {
     return(lapply(X, FUN))
   }
-  blas_vars <- c("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "VECLIB_MAXIMUM_THREADS")
-  prev_vals <- Sys.getenv(blas_vars, unset = NA_character_)
-  on.exit(
-    {
-      for (vn in blas_vars) {
-        pv <- prev_vals[[vn]]
-        if (is.na(pv)) {
-          Sys.unsetenv(vn)
-        } else {
-          do.call(Sys.setenv, stats::setNames(list(pv), vn))
-        }
+  guard_vars <- c("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "RCPP_PARALLEL_NUM_THREADS", "PLANTMATICS_IN_FORK_WORKER")
+  prev_vals <- Sys.getenv(guard_vars, unset = NA_character_)
+  restore_env <- function() {
+    for (vn in guard_vars) {
+      pv <- prev_vals[[vn]]
+      if (is.na(pv)) {
+        Sys.unsetenv(vn)
+      } else {
+        do.call(Sys.setenv, stats::setNames(list(pv), vn))
       }
-    },
-    add = TRUE
-  )
+    }
+  }
+  on.exit(restore_env(), add = TRUE)
   Sys.setenv(
     OMP_NUM_THREADS = "1",
     OPENBLAS_NUM_THREADS = "1",
     MKL_NUM_THREADS = "1",
-    VECLIB_MAXIMUM_THREADS = "1"
+    VECLIB_MAXIMUM_THREADS = "1",
+    RCPP_PARALLEL_NUM_THREADS = "1",
+    PLANTMATICS_IN_FORK_WORKER = "1"
   )
   res <- parallel::mclapply(X, FUN, mc.cores = eff_cores, mc.preschedule = mc.preschedule)
+  restore_env()
   bad_idx <- which(vapply(res, function(el) inherits(el, "try-error"), logical(1)))
   if (length(bad_idx) > 0L) {
     res[bad_idx] <- lapply(X[bad_idx], FUN)

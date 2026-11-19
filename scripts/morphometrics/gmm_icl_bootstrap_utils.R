@@ -36,9 +36,9 @@ compute_gmm_icl_profile <- function(X_core, bic_table, modelNames = NULL, pure_r
   k_vec <- as.integer(bic_table$K); bic_vec <- as.numeric(bic_table$BIC)
   icl_vec <- rep(NA_real_, length(k_vec)); ent_vec <- rep(NA_real_, length(k_vec))
   bic_model_cols <- grep("^BIC_", names(bic_table), value = TRUE); has_mclust <- .ensure_mclust_attached()
-  for (i in seq_along(k_vec)) {
-    k_val <- k_vec[i]; bic_val <- bic_vec[i]; if (!is.finite(k_val) || !is.finite(bic_val)) next
-    if (k_val <= 1L) { ent_vec[i] <- 0.0; icl_vec[i] <- bic_val; next }
+  eval_icl_k <- function(i) {
+    k_val <- k_vec[i]; bic_val <- bic_vec[i]; if (!is.finite(k_val) || !is.finite(bic_val)) return(c(NA_real_, NA_real_))
+    if (k_val <= 1L) return(c(bic_val, 0.0))
     win_model_k <- modelNames
     if (length(bic_model_cols) > 0L) {
       row_bics <- as.numeric(unlist(bic_table[i, bic_model_cols, drop = TRUE])); row_bics[!is.finite(row_bics)] <- NA_real_
@@ -57,8 +57,11 @@ compute_gmm_icl_profile <- function(X_core, bic_table, modelNames = NULL, pure_r
     }
     if (is.null(z_raw)) z_raw <- .kmeans_soft_responsibilities(X_core, k_val, seed_i)
     z_mat <- matrix(as.numeric(z_raw), nrow = n_core, ncol = k_val); z_mat[!is.finite(z_mat)] <- 1.0 / k_val
-    ent_k <- -sum(z_mat * log(pmax(z_mat, 1e-12))); ent_vec[i] <- ent_k; icl_vec[i] <- bic_val - 2.0 * ent_k
+    ent_k <- -sum(z_mat * log(pmax(z_mat, 1e-12))); c(bic_val - 2.0 * ent_k, ent_k)
   }
+  nw_icl <- if (sum(k_vec > 1L, na.rm = TRUE) >= 2L && exists("resolve_packera_workers", mode = "function")) resolve_packera_workers(64L, length(k_vec)) else 1L
+  icl_rows <- if (nw_icl > 1L && exists("packera_mclapply", mode = "function")) packera_mclapply(seq_along(k_vec), eval_icl_k, mc.cores = nw_icl) else lapply(seq_along(k_vec), eval_icl_k)
+  for (i in seq_along(k_vec)) { icl_vec[i] <- icl_rows[[i]][1L]; ent_vec[i] <- icl_rows[[i]][2L] }
   idx_1 <- match(1L, k_vec); icl_1 <- if (!is.na(idx_1) && is.finite(icl_vec[idx_1])) icl_vec[idx_1] else icl_vec[1L]
   data.frame(K = bic_table$K, ICL = round(icl_vec, 2), Delta_ICL_vs_Null = round(icl_vec - icl_1, 2), Classification_Entropy = round(ent_vec, 3), stringsAsFactors = FALSE)
 }
@@ -135,7 +138,7 @@ run_gmm_pair_bootstrap_lrt <- function(X_core, g_null = 1L, g_alt = 2L, modelNam
     ll1 <- as.numeric(bp$fit_null$loglik); ll2 <- as.numeric(bp$fit_alt$loglik)
     if (!is.finite(ll1) || !is.finite(ll2)) NA_real_ else max(0.0, 2.0 * (ll2 - ll1))
   }
-  lrt_list <- if (exists("packera_mclapply", mode = "function")) packera_mclapply(seq_len(B), boot_worker, mc.cores = if (exists("resolve_packera_workers", mode = "function")) resolve_packera_workers(16L, B) else 1L) else lapply(seq_len(B), boot_worker)
+  lrt_list <- if (exists("packera_mclapply", mode = "function")) packera_mclapply(seq_len(B), boot_worker, mc.cores = if (exists("resolve_packera_workers", mode = "function")) resolve_packera_workers(64L, B) else 1L) else lapply(seq_len(B), boot_worker)
   lrt_boot <- as.numeric(unlist(lrt_list)); n_valid <- sum(is.finite(lrt_boot))
   boot_p <- if (n_valid > 0L) (1.0 + sum(lrt_boot >= obs_lrt, na.rm = TRUE)) / (n_valid + 1.0) else 1.0
   list(lrt_stat = round(obs_lrt, 3), p_value = round(boot_p, 4), n_boot_valid = as.integer(n_valid), null_model = as.character(fit_null$modelName), alt_model = as.character(fit_alt$modelName))

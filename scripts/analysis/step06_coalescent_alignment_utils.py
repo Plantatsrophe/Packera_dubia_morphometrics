@@ -18,6 +18,7 @@ import os
 import re
 import sqlite3
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from itertools import combinations
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -172,13 +173,20 @@ def compute_svdquartets_support(
         sv = np.linalg.svd(mats, compute_uv=False)
         return np.sqrt(np.sum(sv[..., 10:] ** 2, axis=-1))
 
+    q_jobs: List[Tuple[str, str, str, str, int, int, int, int, np.ndarray, int, np.ndarray]] = []
     for t1, t2, t3, t4 in all_q:
         i1, i2, i3, i4 = rep_idx[t1], rep_idx[t2], rep_idx[t3], rep_idx[t4]
         valid = (a1[i1] >= 0) & (a1[i2] >= 0) & (a1[i3] >= 0) & (a1[i4] >= 0)
         if (nv := int(np.sum(valid))) < 20:
             continue
-        b1, b2, b3, b4 = a1[i1, valid], a1[i2, valid], a1[i3, valid], a1[i4, valid]
         n_b = max(4, min(40, nv // (2 if nv < 40 else 10)))
+        draws = rng.integers(0, n_b, size=(max(1, n_boot), n_b))
+        q_jobs.append((t1, t2, t3, t4, i1, i2, i3, i4, valid, n_b, draws))
+
+    def _eval_quartet_svd(job: Tuple[str, str, str, str, int, int, int, int, np.ndarray, int, np.ndarray]) -> Dict[str, Any]:
+        t1, t2, t3, t4, i1, i2, i3, i4, valid, n_b, draws = job
+        nv = int(np.sum(valid))
+        b1, b2, b3, b4 = a1[i1, valid], a1[i2, valid], a1[i3, valid], a1[i4, valid]
         blk_splits = np.array_split(np.arange(nv), n_b)
         blk_tensors = np.zeros((n_b, 256), dtype=np.float64)
         idx_256 = b1.astype(np.int32) * 64 + b2.astype(np.int32) * 16 + b3.astype(np.int32) * 4 + b4.astype(np.int32)
@@ -196,8 +204,7 @@ def compute_svdquartets_support(
         w = np.exp(-np.array([s_best, s_sec, s_trd]) / scale)
         support = float(w[0] / np.sum(w))
 
-        draws = rng.integers(0, n_b, size=(max(1, n_boot), n_b))
-        bw = np.zeros((max(1, n_boot), n_b), dtype=np.float64)
+        bw = np.zeros((draws.shape[0], n_b), dtype=np.float64)
         for bi in range(n_b):
             bw[:, bi] = np.sum(draws == bi, axis=1)
         boot_raw = (bw @ blk_tensors).reshape(-1, 4, 4, 4, 4)
@@ -210,12 +217,19 @@ def compute_svdquartets_support(
         boot_supp = float(n_match / float(len(boot_win)))
         p_val = float((len(boot_win) - n_match + 1) / float(len(boot_win) + 1))
 
-        rows.append({
+        return {
             "quartet_id": f"{t1};{t2};{t3};{t4}", "best_split": split_labels[best_idx],
             "svd_score_best": round(s_best, 6), "svd_score_second": round(s_sec, 6),
             "quartet_support": round(support, 4), "quartet_boot_support": round(boot_supp, 4),
             "quartet_p_value": round(p_val, 4), "n_sites_used": min(nv, n_sites),
-        })
+        }
+
+    nw_q = min(_resolve_max_workers(), len(q_jobs)) if len(q_jobs) >= 4 else 1
+    if nw_q > 1:
+        with ThreadPoolExecutor(max_workers=nw_q) as pool:
+            rows = list(pool.map(_eval_quartet_svd, q_jobs))
+    else:
+        rows = [_eval_quartet_svd(j) for j in q_jobs]
     return pd.DataFrame(rows, columns=empty_cols) if not rows else pd.DataFrame(rows)
 
 

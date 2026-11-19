@@ -16,6 +16,7 @@ import argparse
 import json
 import sqlite3
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -26,7 +27,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.core.config import resolve_genomics_config
+from scripts.core.config import resolve_genomics_config, resolve_max_workers
 from scripts.core.db import get_db_connection, upsert_genomic_samples
 from scripts.core.logger import setup_logging
 from scripts.data_prep.step06_ploidy_hdplot_utils import (
@@ -344,8 +345,8 @@ def run_genomic_ingestion(
             if ref_depth_mat.size > 0 and alt_depth_mat.size > 0 and n_loci_retained > 0:
                 sc_mask = keep_mask & (hd_df["is_paraloss1272_single_copy"].to_numpy(dtype=int) == 1)
                 sc_indices = np.where(sc_mask)[0]
-                for r in pass_recs:
-                    sid = r["genetic_sample_id"]
+                def _fit_cyto_one(r_item: Dict[str, Any]) -> Tuple[Dict[str, Any], str, Any, str, bool]:
+                    sid = r_item["genetic_sample_id"]
                     sidx = sample_idx_map[sid]
                     use_idx = kept_indices
                     if sc_indices.size >= min_het_cfg:
@@ -356,17 +357,25 @@ def run_genomic_ingestion(
                             rat_sc = av_sc[hm_sc] / np.maximum(1.0, dp_sc[hm_sc])
                             if int(np.sum((rat_sc >= 0.10) & (rat_sc <= 0.90))) >= min_het_cfg:
                                 use_idx = sc_indices
-                    u_pl, sp_m, sp_mu, has_u_cyto = cyto_ctx_by_sid.get(sid, (r.get("ploidy_level"), None, False, False))
+                    u_pl, sp_m, sp_mu, has_u_cyto = cyto_ctx_by_sid.get(sid, (r_item.get("ploidy_level"), None, False, False))
                     inf_c, nq_d = _infer_sample_cytotype(
                         ref_depth_mat[sidx, use_idx], alt_depth_mat[sidx, use_idx], dosage_mat[sidx, use_idx], u_pl,
                         species_modal_ploidy=sp_m, is_multi_cytotype=sp_mu, min_het_loci=min_het_cfg,
                         strong_delta_bic=strong_bic_cfg, min_delta_logl_per_locus=min_logl_per_locus_cfg,
                     )
+                    return r_item, sid, inf_c, nq_d, has_u_cyto
+                n_cw = min(resolve_max_workers(), len(pass_recs)) if len(pass_recs) >= 8 else 1
+                if n_cw > 1:
+                    with ThreadPoolExecutor(max_workers=n_cw) as c_pool:
+                        cyto_results = list(c_pool.map(_fit_cyto_one, pass_recs))
+                else:
+                    cyto_results = [_fit_cyto_one(r_item) for r_item in pass_recs]
+                for r_item, sid, inf_c, nq_d, has_u_cyto in cyto_results:
                     if not has_u_cyto:
-                        r["inferred_cytotype"] = inf_c
-                    r["nquire_delta_logl"] = nq_d
-                    if str(r.get("inferred_cytotype") or "") in _CYTO_TO_PLOIDY:
-                        fallback_ploidy_by_sid[sid] = _CYTO_TO_PLOIDY[str(r["inferred_cytotype"])]
+                        r_item["inferred_cytotype"] = inf_c
+                    r_item["nquire_delta_logl"] = nq_d
+                    if str(r_item.get("inferred_cytotype") or "") in _CYTO_TO_PLOIDY:
+                        fallback_ploidy_by_sid[sid] = _CYTO_TO_PLOIDY[str(r_item["inferred_cytotype"])]
             if not from_precomputed_dosage and ref_depth_mat.size > 0 and n_loci_retained > 0:
                 rd_pass, ad_pass = ref_depth_mat[pass_rows, :][:, kept_indices], alt_depth_mat[pass_rows, :][:, kept_indices]
                 cytos = [str(r["inferred_cytotype"]) for r in pass_recs]

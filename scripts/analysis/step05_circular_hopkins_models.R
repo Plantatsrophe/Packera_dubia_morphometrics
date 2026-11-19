@@ -302,12 +302,14 @@ run_circular_multigroup_phase_test <- function(theta_vec, group_vec, B = 999L, s
 
   obs_stat <- sum_rg - r_tot
   B_int <- max(1L, as.integer(B))
-  n_ge <- 0L
-  for (b in seq_len(B_int)) {
-    rs_b <- rowsum(mat_cs, g_idx[sample.int(n_tot)], reorder = FALSE)
-    stat_b <- sum(sqrt(rs_b[, 1L]^2 + rs_b[, 2L]^2)) - r_tot
-    if (is.finite(stat_b) && stat_b >= (obs_stat - 1e-12)) n_ge <- n_ge + 1L
-  }
+  perms <- replicate(B_int, sample.int(n_tot), simplify = FALSE)
+  eval_idx <- function(idx_v) sum(vapply(idx_v, function(b) {
+    rs_b <- rowsum(mat_cs, g_idx[perms[[b]]], reorder = FALSE)
+    st <- sum(sqrt(rs_b[, 1L]^2 + rs_b[, 2L]^2)) - r_tot
+    is.finite(st) && st >= (obs_stat - 1e-12)
+  }, logical(1)))
+  nw_c <- if (B_int >= 99L && exists("packera_mclapply", mode = "function") && exists("resolve_packera_workers", mode = "function")) resolve_packera_workers(64L, ceiling(B_int / 16L)) else 1L
+  n_ge <- if (nw_c > 1L) sum(unlist(packera_mclapply(parallel::splitIndices(B_int, nw_c), eval_idx, mc.cores = nw_c), use.names = FALSE)) else eval_idx(seq_len(B_int))
   perm_p <- (n_ge + 1.0) / (B_int + 1.0)
   list(watson_f = watson_f, watson_p = watson_p, perm_p = perm_p, n_groups = as.integer(s), n_obs = as.integer(n_tot), groups = valid_grps)
 }
