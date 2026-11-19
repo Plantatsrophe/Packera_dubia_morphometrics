@@ -41,6 +41,7 @@ for (f in c(
   "scripts/morphometrics/gmm_icl_bootstrap_utils.R",
   "scripts/analysis/step05_circular_hopkins_models.R",
   "scripts/analysis/step05_config_geo_utils.R",
+  "scripts/analysis/05_multimodal_spatial_rf.R",
   "scripts/analysis/step05_sdm_maxent.R"
 )) {
   source(f)
@@ -58,8 +59,9 @@ res$workers <- list(w58 = w58, in_fork_vals = as.integer(in_fork_vals), w58_afte
 
 # 2. Circular phenology permutation + pairwise summary bit parity (1 vs 8 workers)
 set.seed(11L)
-th_vec <- c(stats::rnorm(18L, 1.8, 0.18), stats::rnorm(18L, 2.7, 0.18))
-grp_vec <- rep(c("Packera aurea", "Packera dubia"), each = 18L)
+act_tx <- c("Packera aurea", "Packera dubia", "Packera anonyma")
+th_vec <- c(stats::rnorm(12L, 1.8, 0.18), stats::rnorm(12L, 2.7, 0.18), stats::rnorm(12L, 2.2, 0.18))
+grp_vec <- rep(act_tx, each = 12L)
 df_ph <- data.frame(
   catalogNumber = sprintf("PH_%02d", seq_along(th_vec)),
   species_standardized = grp_vec,
@@ -72,10 +74,10 @@ df_ph <- data.frame(
 )
 Sys.setenv(PLANTMATICS_MAX_WORKERS = "1", PACKERA_MAX_WORKERS = "1")
 c1 <- run_circular_multigroup_phase_test(th_vec, grp_vec, B = 199L, seed = 42L)
-s1 <- summarize_weighted_circular_phenology(df_ph, B = 199L, seed = 42L)
+s1 <- summarize_weighted_circular_phenology(df_ph, act_tx, c1, B = 199L, seed = 42L)
 Sys.setenv(PLANTMATICS_MAX_WORKERS = "8", PACKERA_MAX_WORKERS = "8")
 c8 <- run_circular_multigroup_phase_test(th_vec, grp_vec, B = 199L, seed = 42L)
-s8 <- summarize_weighted_circular_phenology(df_ph, B = 199L, seed = 42L)
+s8 <- summarize_weighted_circular_phenology(df_ph, act_tx, c8, B = 199L, seed = 42L)
 res$circ <- list(
   wf_diff = abs(c1$watson_f - c8$watson_f),
   pp_diff = abs(c1$perm_p - c8$perm_p),
@@ -119,6 +121,7 @@ if (requireNamespace("terra", quietly = TRUE)) {
     latitude = c(runif(n_s / 2L, 35, 39), runif(n_s / 2L, 33, 37)),
     bio1_mean_temp = c(rnorm(n_s / 2L, 12, 1), rnorm(n_s / 2L, 16, 1)),
     bio12_annual_precip = c(rnorm(n_s / 2L, 1200, 50), rnorm(n_s / 2L, 1400, 50)),
+    authority_weight = 2.0,
     sdm_prior_weight_01 = 1.0,
     coord_uncertainty_m = 50.0,
     determiner_tier = "Tier_1_Gold",
@@ -130,11 +133,12 @@ if (requireNamespace("terra", quietly = TRUE)) {
   .build_regional_sdm_raster_stack <<- function(...) r_stk
   .ensure_step05_fig_modules <<- function() invisible(NULL)
   render_step05c_sdm_suitability_png <<- function(...) invisible(NULL)
-  srf_stub <- list(kept_vars = c("bio1_mean_temp", "bio12_annual_precip"), clim_vars = "bio1_mean_temp", edaph_vars = "bio12_annual_precip", anchor_idx = seq_len(n_s))
+  kv <- c("bio1_mean_temp", "bio12_annual_precip")
+  srf_stub <- list(collinearity_screening = list(kept_vars = kv), importance = data.frame(Predictor = kv, MeanDecreaseAccuracy = c(0.5, 0.4)), spatial_autocorr_range_km = 55.0)
   Sys.setenv(PLANTMATICS_MAX_WORKERS = "1", PACKERA_MAX_WORKERS = "1")
-  m1 <- fit_and_project_maxent_sdm_maps(df_sdm, srf_res = srf_stub, env_dir = tmp_root, out_dir = file.path(tmp_root, "sdm1"), focal_taxon = "Packera aurea", demo = FALSE)
+  m1 <- fit_and_project_maxent_sdm_maps(df_sdm, srf_res = srf_stub, env_dir = tmp_root, out_dir = file.path(tmp_root, "sdm1"), kept_vars = kv, focal_taxon = "Packera aurea", demo = FALSE)
   Sys.setenv(PLANTMATICS_MAX_WORKERS = "4", PACKERA_MAX_WORKERS = "4")
-  m4 <- fit_and_project_maxent_sdm_maps(df_sdm, srf_res = srf_stub, env_dir = tmp_root, out_dir = file.path(tmp_root, "sdm4"), focal_taxon = "Packera aurea", demo = FALSE)
+  m4 <- fit_and_project_maxent_sdm_maps(df_sdm, srf_res = srf_stub, env_dir = tmp_root, out_dir = file.path(tmp_root, "sdm4"), kept_vars = kv, focal_taxon = "Packera aurea", demo = FALSE)
   v1 <- as.numeric(terra::values(m1$focal$rast_ens))
   v4 <- as.numeric(terra::values(m4$focal$rast_ens))
   res$sdm <- list(
