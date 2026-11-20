@@ -2037,7 +2037,18 @@ if [[ "${START_STEP}" -le 6 ]]; then
     GENOMIC_CHECK_OUT="$("${PYTHON_MAIN}" scripts/data_prep/06_ingest_genetic_data.py --genomics-dir "${GENOMICS_DIR_EFF}" --check-only 2>/dev/null || true)"
     if [[ "${GENOMIC_CHECK_OUT}" == *"HAS_GENOMIC_INPUTS=1"* ]]; then
       HAS_GENO=1
+    else
+      DYN_V_ARGS=()
+      if [[ -s "${RUN_DIR}/data/tables/curated_vouchers.csv" ]]; then
+        DYN_V_ARGS=(--vouchers "${RUN_DIR}/data/tables/curated_vouchers.csv")
+      fi
+      GENOMIC_DYN_OUT="$("${PYTHON_MAIN}" scripts/data_prep/06_ingest_genetic_data.py --genomics-dir "${GENOMICS_DIR_EFF}" ${DYN_V_ARGS[@]+"${DYN_V_ARGS[@]}"} ${FOCAL_ARGS[@]+"${FOCAL_ARGS[@]}"} --check-dynamic 2>/dev/null || true)"
+      if [[ "${GENOMIC_DYN_OUT}" == *"HAS_DYNAMIC_GENOMIC_INPUTS=1"* ]]; then
+        HAS_GENO=1
+      fi
     fi
+  elif [[ -n "${FOCAL_TAXON}" ]]; then
+    HAS_GENO=1
   fi
   if [[ "${HAS_GENO}" -eq 1 ]]; then
     echo "[Step 06/07] Running Independent Genomic Ingestion & Phylogenomic Integration..."
@@ -2050,6 +2061,10 @@ if [[ "${START_STEP}" -le 6 ]]; then
     "${PYTHON_MAIN}" scripts/data_prep/06_ingest_genetic_data.py \
       --genomics-dir "${GENOMICS_DIR_EFF}" \
       --out-dir "${RUN_DIR}/outputs/reports" \
+      --vouchers "${RUN_DIR}/data/tables/curated_vouchers.csv" \
+      --genomic-tier auto \
+      ${FOCAL_ARGS[@]+"${FOCAL_ARGS[@]}"} \
+      ${INTRASPECIFIC_ARGS[@]+"${INTRASPECIFIC_ARGS[@]}"} \
       ${GENO_IN_DB_ARGS[@]+"${GENO_IN_DB_ARGS[@]}"} \
       ${DEMO_FLAG[@]+"${DEMO_FLAG[@]}"}
     Rscript scripts/analysis/06_genomic_phylogenomics.R \
@@ -2057,10 +2072,14 @@ if [[ "${START_STEP}" -le 6 ]]; then
       --parsed-dir "${RUN_DIR}/outputs/reports" \
       --out-dir "${RUN_DIR}/outputs/genomics" \
       --tables-dir "${RUN_DIR}/data/tables" \
+      --vouchers "${RUN_DIR}/data/tables/curated_vouchers.csv" \
+      --genomic-tier auto \
       --figure-a "${RUN_DIR}/outputs/figures/fig06a_genomic_pcoa_tree_concordance.png" \
       --figure-b "${RUN_DIR}/outputs/figures/fig06b_reticulation_gdi_landscape.png" \
       --figure-c "${RUN_DIR}/outputs/figures/fig06c_cytonuclear_paralog_cytotype_audit.png" \
       --run-id "${RUN_ID}" \
+      ${FOCAL_ARGS[@]+"${FOCAL_ARGS[@]}"} \
+      ${INTRASPECIFIC_ARGS[@]+"${INTRASPECIFIC_ARGS[@]}"} \
       ${GENO_R_DB_ARGS[@]+"${GENO_R_DB_ARGS[@]}"} \
       ${DEMO_FLAG[@]+"${DEMO_FLAG[@]}"}
     GENOMIC_STEP07_ARGS=(--genomic-dir "${RUN_DIR}/outputs/genomics")

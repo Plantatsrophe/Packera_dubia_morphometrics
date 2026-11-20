@@ -384,13 +384,14 @@ select_backbone_guided_outgroup <- function(uniq_taxa, p_dist, backbone = NULL) 
   res_df
 }
 
-evaluate_public_backbone_and_organellar <- function(pass_df, raw_geno_dir, out_dir) {
+evaluate_public_backbone_and_organellar <- function(pass_df, raw_geno_dir, out_dir, extra_taxa = character(0)) {
   dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
   bb <- load_public_packera_backbone(raw_geno_dir)
   n <- nrow(pass_df)
   sp_col <- intersect(c("species_standardized", "taxon", "taxon_name"), names(pass_df))[1L]
   sp_raw <- if (n > 0L && !is.na(sp_col)) as.character(pass_df[[sp_col]]) else rep(NA_character_, n)
-  uniq_tx <- unique(sp_raw[!is.na(sp_raw) & nzchar(trimws(sp_raw))])
+  ex_clean <- as.character(extra_taxa[!is.na(extra_taxa) & nzchar(trimws(as.character(extra_taxa)))])
+  uniq_tx <- unique(c(sp_raw[!is.na(sp_raw) & nzchar(trimws(sp_raw))], ex_clean))
 
   mo_tr <- bb$trees$MO; ap_tr <- bb$trees$ASTRALPro
   shared_tips <- if (!is.null(mo_tr) && !is.null(ap_tr)) intersect(mo_tr$tip.label, ap_tr$tip.label) else character(0)

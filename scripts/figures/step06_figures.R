@@ -209,7 +209,27 @@
     ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 20, hjust = 1), axis.text.y = ggplot2::element_text(size = 7.4))
 }
 
-render_fig06a_genomic_pcoa_tree_png <- function(out_png, pass_df, assign_df, q_mat, pco_eig_pct, tr, concordance_df, db_path, run_id) {
+format_step06_tier1_annotation <- function(focal_taxon = "", intraspecific_mode = FALSE, n_focal = 0L, n_total = 0L) {
+  ft <- trimws(as.character(focal_taxon))
+  if (nzchar(ft) && isTRUE(intraspecific_mode)) {
+    list(
+      title = "Step 06 [Tier 1 - NextRAD]: Intraspecific Lineage Structure",
+      subtitle = sprintf("Focal taxon: %s (n_focal = %d / n_total = %d; polarizing sister excluded from ordination)", ft, as.integer(n_focal), as.integer(n_total))
+    )
+  } else if (nzchar(ft)) {
+    list(
+      title = "Step 06 [Tier 1 - NextRAD]: Complex Dosage Phylogenomics",
+      subtitle = sprintf("Focal complex: %s (n_focal = %d / n_total = %d; strict upstream independence)", ft, as.integer(n_focal), as.integer(n_total))
+    )
+  } else {
+    list(
+      title = "Step 06: Independent Nuclear & Polyploid-Dosage Phylogenomics",
+      subtitle = sprintf("QC-passing genomic cohort (n = %d; strict upstream independence preserved)", as.integer(n_total))
+    )
+  }
+}
+
+render_fig06a_genomic_pcoa_tree_png <- function(out_png, pass_df, assign_df, q_mat, pco_eig_pct, tr, concordance_df, db_path, run_id, focal_taxon = "", intraspecific_mode = FALSE) {
   if (identical(Sys.getenv("PLANTMATICS_SKIP_FIGURES", unset = ""), "1") ||
       identical(Sys.getenv("PACKERA_SKIP_FIGURES", unset = ""), "1")) return(invisible(""))
   if (!requireNamespace("ggplot2", quietly = TRUE) || !requireNamespace("patchwork", quietly = TRUE)) return(invisible(""))
@@ -263,10 +283,12 @@ render_fig06a_genomic_pcoa_tree_png <- function(out_png, pass_df, assign_df, q_m
 
   p_d <- .build_concordance_panel_gg(plot_df, concordance_df, db_path, run_id)
 
+  n_foc <- if (nzchar(trimws(as.character(focal_taxon)))) sum(plot_df$display_taxon == trimws(as.character(focal_taxon)), na.rm = TRUE) else 0L
+  ann_t1 <- format_step06_tier1_annotation(focal_taxon = focal_taxon, intraspecific_mode = intraspecific_mode, n_focal = n_foc, n_total = nrow(plot_df))
   combo <- (p_a | p_b) / (p_c | p_d) +
     patchwork::plot_annotation(
-      title = "Step 06: Independent Nuclear & Polyploid-Dosage Phylogenomics",
-      subtitle = sprintf("QC-passing genomic cohort (n = %d; strict upstream independence preserved)", nrow(plot_df)),
+      title = ann_t1$title,
+      subtitle = ann_t1$subtitle,
       theme = ggplot2::theme(plot.title = ggplot2::element_text(face = "bold", size = 12.0), plot.subtitle = ggplot2::element_text(size = 9.5, color = "#475569"))
     )
   dir.create(dirname(out_png), recursive = TRUE, showWarnings = FALSE)
@@ -274,25 +296,38 @@ render_fig06a_genomic_pcoa_tree_png <- function(out_png, pass_df, assign_df, q_m
   invisible(out_png)
 }
 
-render_fig06b_reticulation_gdi_png <- function(out_png, tri_df, fbranch_df, gdi_df, feems_edges_df, mmrr_summary_df, organellar_placement_df = NULL) {
+render_fig06b_reticulation_gdi_png <- function(out_png, tri_df, fbranch_df, gdi_df, feems_edges_df, mmrr_summary_df, organellar_placement_df = NULL, focal_taxon = "", intraspecific_mode = FALSE, coanc_df = NULL) {
   if (identical(Sys.getenv("PLANTMATICS_SKIP_FIGURES", unset = ""), "1") ||
       identical(Sys.getenv("PACKERA_SKIP_FIGURES", unset = ""), "1")) return(invisible(""))
   if (!requireNamespace("ggplot2", quietly = TRUE) || !requireNamespace("patchwork", quietly = TRUE)) return(invisible(""))
 
   tri_bound <- data.frame(h = c(0.0, 0.5, 1.0, 0.0), q12 = c(0.0, 1.0, 0.0, 0.0))
   tri_ok <- tri_df[is.finite(tri_df$hybrid_index_h) & is.finite(tri_df$interspecific_ancestry_q12), , drop = FALSE]
-  p_tri <- ggplot2::ggplot() +
-    ggplot2::geom_path(data = tri_bound, ggplot2::aes(x = .data$h, y = .data$q12), linetype = "dashed", color = "#4B5563", linewidth = 0.7) +
-    ggplot2::labs(title = "A. Interspecific Ancestry Triangle (h vs. Q12)", x = "Hybrid Index (h)", y = "Interspecific Ancestry (Q12)") +
-    ggplot2::coord_cartesian(xlim = c(-0.04, 1.04), ylim = c(-0.04, 1.05)) +
-    theme_packera_pub(base_size = 9.5) +
-    ggplot2::theme(legend.title = ggplot2::element_blank())
-  if (nrow(tri_ok) > 0L) {
-    cls_lev <- sort(unique(tri_ok$hybrid_generation_class))
-    sh_c <- stats::setNames(rep(c(1L, 2L, 5L, 0L, 6L, 4L), length.out = length(cls_lev)), cls_lev)
-    p_tri <- p_tri +
-      ggplot2::geom_point(data = tri_ok, ggplot2::aes(x = .data$hybrid_index_h, y = .data$interspecific_ancestry_q12, color = .data$hybrid_generation_class, shape = .data$hybrid_generation_class), size = 3.0, stroke = 1.15, fill = NA) +
-      ggplot2::scale_shape_manual(values = sh_c)
+  use_coanc <- isTRUE(intraspecific_mode) && !is.null(coanc_df) && is.data.frame(coanc_df) && nrow(coanc_df) >= 2L && ncol(coanc_df) >= 4L
+  if (use_coanc) {
+    id_c <- as.character(coanc_df$genetic_sample_id); mat_c <- as.matrix(coanc_df[, -(1:2), drop = FALSE])
+    c_long <- expand.grid(s1 = id_c, s2 = colnames(mat_c), stringsAsFactors = FALSE)
+    c_long$val <- as.numeric(mat_c)
+    p_tri <- ggplot2::ggplot(c_long, ggplot2::aes(x = .data$s2, y = .data$s1, fill = .data$val)) +
+      ggplot2::geom_tile(color = "#FFFFFF", linewidth = 0.25) +
+      ggplot2::scale_fill_gradient(low = "#F8FAFC", high = "#0072B2", name = "Co-ancestry") +
+      ggplot2::labs(title = "A. Intraspecific Deme Co-ancestry Matrix (RADpainter)", x = "Donor Sample", y = "Recipient Sample") +
+      theme_packera_pub(base_size = 9.0) +
+      ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 55, hjust = 1, size = 6.8), axis.text.y = ggplot2::element_text(size = 6.8))
+  } else {
+    p_tri <- ggplot2::ggplot() +
+      ggplot2::geom_path(data = tri_bound, ggplot2::aes(x = .data$h, y = .data$q12), linetype = "dashed", color = "#4B5563", linewidth = 0.7) +
+      ggplot2::labs(title = "A. Interspecific Ancestry Triangle (h vs. Q12)", x = "Hybrid Index (h)", y = "Interspecific Ancestry (Q12)") +
+      ggplot2::coord_cartesian(xlim = c(-0.04, 1.04), ylim = c(-0.04, 1.05)) +
+      theme_packera_pub(base_size = 9.5) +
+      ggplot2::theme(legend.title = ggplot2::element_blank())
+    if (nrow(tri_ok) > 0L) {
+      cls_lev <- sort(unique(tri_ok$hybrid_generation_class))
+      sh_c <- stats::setNames(rep(c(1L, 2L, 5L, 0L, 6L, 4L), length.out = length(cls_lev)), cls_lev)
+      p_tri <- p_tri +
+        ggplot2::geom_point(data = tri_ok, ggplot2::aes(x = .data$hybrid_index_h, y = .data$interspecific_ancestry_q12, color = .data$hybrid_generation_class, shape = .data$hybrid_generation_class), size = 3.0, stroke = 1.15, fill = NA) +
+        ggplot2::scale_shape_manual(values = sh_c)
+    }
   }
 
   pol_vals <- if (!is.null(fbranch_df) && "polarization_source" %in% names(fbranch_df)) {
@@ -371,9 +406,10 @@ render_fig06b_reticulation_gdi_png <- function(out_png, tri_df, fbranch_df, gdi_
     ltab <- table(as.character(organellar_placement_df$locus))
     sprintf("GenBank/BOLD 11-mer locus placement: n=%d (%s)", nrow(organellar_placement_df), paste(sprintf("%s=%d", names(ltab), as.integer(ltab)), collapse = ", "))
   } else NULL
+  ann_t1 <- if (nzchar(trimws(as.character(focal_taxon)))) format_step06_tier1_annotation(focal_taxon = focal_taxon, intraspecific_mode = intraspecific_mode, n_total = nrow(tri_df)) else list(title = "Step 06: Reticulation Dynamics, Coalescent gdi, & Landscape Migration")
   combo <- (p_tri | p_fb) / (p_gdi | p_feems) +
     patchwork::plot_annotation(
-      title = "Step 06: Reticulation Dynamics, Coalescent gdi, & Landscape Migration",
+      title = if (nzchar(trimws(as.character(focal_taxon)))) paste0(ann_t1$title, " (Reticulation & gdi)") else ann_t1$title,
       subtitle = ann_sub,
       theme = ggplot2::theme(plot.title = ggplot2::element_text(face = "bold", size = 12.0), plot.subtitle = ggplot2::element_text(size = 9.0, color = "#475569"))
     )

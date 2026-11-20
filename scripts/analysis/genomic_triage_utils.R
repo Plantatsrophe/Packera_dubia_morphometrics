@@ -160,6 +160,15 @@ load_step07_genomic_metrics <- function(opts, df) {
   ref_sp <- if ("species_standardized" %in% names(df)) df$species_standardized else character(0)
   if ("geno_predicted_taxon" %in% names(ga_df)) ga_df$geno_predicted_taxon <- .align_packera_orthography(ga_df$geno_predicted_taxon, ref_sp)
   if ("geno_predicted_taxon" %in% names(df)) df$geno_predicted_taxon <- .align_packera_orthography(df$geno_predicted_taxon, ref_sp)
+  pbc_df <- read_opt_csv("public_backbone_concordance.csv")
+  if (!is.null(pbc_df) && nrow(pbc_df) > 0L && "species_standardized" %in% names(df) && "taxon" %in% names(pbc_df)) {
+    mp <- match(as.character(df$species_standardized), as.character(pbc_df$taxon))
+    for (bc_col in intersect(c("public_backbone_clade", "public_phytop_ils_index", "public_phytop_ih_index"), names(pbc_df))) {
+      if (!(bc_col %in% names(df))) df[[bc_col]] <- pbc_df[[bc_col]][rep(NA_integer_, nrow(df))]
+      need_b <- !is.na(mp) & (is.na(df[[bc_col]]) | !nzchar(trimws(as.character(df[[bc_col]]))))
+      if (any(need_b)) df[[bc_col]][need_b] <- pbc_df[[bc_col]][mp[need_b]]
+    }
+  }
   attr(df, "genomic_assignments_df") <- ga_df
   attr(df, "genomic_model_metrics") <- if (file.exists(gm_path)) tryCatch(utils::read.csv(gm_path, stringsAsFactors = FALSE), error = function(e) NULL) else NULL
   attr(df, "genomic_gdi_delimitation") <- read_opt_csv("coalescent_gdi_delimitation.csv")

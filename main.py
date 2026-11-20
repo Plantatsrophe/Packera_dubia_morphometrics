@@ -1184,10 +1184,14 @@ def run_genomics_stream(
 
     import importlib
 
-    discover_genomic_inputs = importlib.import_module("scripts.data_prep.06_ingest_genetic_data").discover_genomic_inputs
-
+    ingest_mod = importlib.import_module("scripts.data_prep.06_ingest_genetic_data")
     genomics_dir = Path(getattr(args, "genomics_dir", None) or env_geno or (PROJECT_ROOT / "data" / "genomics"))
-    if not discover_genomic_inputs(genomics_dir).has_genetic_payload:
+    assets = ingest_mod.discover_genomic_inputs(genomics_dir)
+    has_pub = ingest_mod.has_valid_public_genomic_records(assets)
+    focal_arg = getattr(args, "focal_taxon", None)
+    intra_flag = bool(getattr(args, "intraspecific_mode", False))
+    vouchers_csv = tables_dir / "curated_vouchers.csv"
+    if not (assets.has_genetic_payload or (has_pub and (run_dir is not None or bool(focal_arg)))):
         logger.info("[Step 06/07] No genomic files staged in data/genomics/ - skipping standalone Step 06")
         print("[Step 06/07] No genomic files staged in data/genomics/ - skipping standalone Step 06")
         return None
@@ -1228,6 +1232,14 @@ def run_genomics_stream(
         "--out-dir",
         str(eff_reports_dir),
     ]
+    if vouchers_csv.is_file():
+        cmd_ingest.extend(["--vouchers", str(vouchers_csv)])
+    if vouchers_csv.is_file() or focal_arg:
+        cmd_ingest.extend(["--genomic-tier", "auto"])
+    if focal_arg:
+        cmd_ingest.extend(["--focal-taxon", str(focal_arg)])
+    if intra_flag:
+        cmd_ingest.append("--intraspecific-mode")
     if db_arg and str(db_arg) != ":memory:":
         cmd_ingest.extend(["--db-path", str(db_arg)])
     if is_demo:
@@ -1258,6 +1270,14 @@ def run_genomics_stream(
         "--run-id",
         eff_run_id,
     ]
+    if vouchers_csv.is_file():
+        cmd_geno.extend(["--vouchers", str(vouchers_csv)])
+    if vouchers_csv.is_file() or focal_arg:
+        cmd_geno.extend(["--genomic-tier", "auto"])
+    if focal_arg:
+        cmd_geno.extend(["--focal-taxon", str(focal_arg)])
+    if intra_flag:
+        cmd_geno.append("--intraspecific-mode")
     if db_arg and str(db_arg) != ":memory:":
         cmd_geno.extend(["--db", str(db_arg)])
     if is_demo:

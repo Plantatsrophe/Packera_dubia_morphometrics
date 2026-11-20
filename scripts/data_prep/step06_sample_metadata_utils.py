@@ -84,6 +84,10 @@ class StagedGenomicAssets:
     def has_genetic_payload(self) -> bool:
         return bool(self.variant_files or self.dosage_files or self.tree_files or self.admixture_q_files or self.alignment_files)
 
+    @property
+    def has_public_or_organellar_payload(self) -> bool:
+        return bool(self.public_reference_files or self.organellar_files)
+
 
 def _canonical_taxon_equiv_key(taxon: Any) -> str:
     return canonical_taxon_equiv_key(taxon)

@@ -527,6 +527,40 @@ def _extract_stage_metrics(
         if cy_tier in {"C1_Direct_Cytovoucher", "C2_Exsiccatae_Cytoduplicate"}:
             n_cytovouchers_linked += 1
 
+    def _read_genomics_csv(fname: str) -> List[Dict[str, str]]:
+        for cand in (
+            run_dir / "outputs" / "genomics" / fname,
+            run_dir / "outputs" / "reports" / fname,
+            run_dir / "data" / "tables" / fname,
+        ):
+            if rows_g := _read_csv_rows(cand):
+                return rows_g
+        return []
+
+    if not gdi_vals:
+        for gr in _read_genomics_csv("coalescent_gdi_delimitation.csv"):
+            g_src = str(gr.get("gdi_source") or "").strip()
+            if g_src not in ("", "nextrad_msc", "hybseq_supermatrix_msc"):
+                continue
+            g_tx = standardize_packera_taxon(str(gr.get("taxon") or ""))
+            if focal_std and g_tx != focal_std:
+                continue
+            gv = _safe_float(gr.get("coalescent_gdi"))
+            if gv is not None and math.isfinite(gv):
+                gdi_vals.append(gv)
+
+    if not backbone_clades:
+        for pr in _read_genomics_csv("public_backbone_concordance.csv"):
+            p_tx = standardize_packera_taxon(str(pr.get("taxon") or pr.get("normalized_taxon") or ""))
+            if focal_std and p_tx != focal_std:
+                continue
+            bc = str(pr.get("public_backbone_clade") or "").strip()
+            if bc and bc.upper() not in {"NA", "NAN", "NONE", "NULL"}:
+                backbone_clades.append(bc)
+
+    gm_rows = _read_genomics_csv("genomic_model_metrics.csv")
+    active_genomic_tier = str(gm_rows[0].get("active_genomic_tier") or "").strip() if gm_rows else ""
+
     median_coalescent_gdi: Optional[float] = (
         float(statistics.median(gdi_vals)) if gdi_vals else None
     )
@@ -617,6 +651,7 @@ def _extract_stage_metrics(
         "max_batch_partial_eta_sq": f"{max_eta:.4f}" if max_eta is not None else "",
         "median_coalescent_gdi": median_coalescent_gdi,
         "public_backbone_clade": public_backbone_clade,
+        "active_genomic_tier": active_genomic_tier,
         "n_tier0_abstained": n_tier0_abstained,
         "reported_cytotypes": reported_cytotypes,
         "n_cytovouchers_linked": n_cytovouchers_linked,

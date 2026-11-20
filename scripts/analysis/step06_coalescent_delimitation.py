@@ -195,6 +195,11 @@ def run_coalescent_delimitation(
     dosage_tsv: Optional[Path] = None,
     block_len: Optional[int] = None,
     n_boot: Optional[int] = None,
+    focal_taxon: Optional[str] = None,
+    intraspecific_mode: bool = False,
+    cluster_csv: Optional[Path] = None,
+    gdi_source: str = "nextrad_msc",
+    alignment_file: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Execute invariant-site SVDquartets, BPP export, and gdi delimitation into `out_dir`."""
     gcfg = resolve_genomics_config()
@@ -203,17 +208,36 @@ def run_coalescent_delimitation(
 
     discover_fn = importlib.import_module("scripts.data_prep.06_ingest_genetic_data").discover_genomic_inputs
     assets = discover_fn(genomics_dir)
-    if not assets.alignment_files and not (dosage_tsv and dosage_tsv.exists()):
+    align_cands = [alignment_file] if (alignment_file and alignment_file.is_file()) else sorted(
+        assets.alignment_files, key=lambda p: (0 if p.name.lower().endswith((".phylip", ".phy", ".nex", ".nexus")) else 1, p.name)
+    )
+    if not align_cands and not (dosage_tsv and dosage_tsv.exists()):
         return {"status": "skipped_empty", "n_samples": 0}
 
     pass_set, sample_taxon_map, rep_pair_map, hq_reads_map, miss_rate_map = _load_sample_metadata(genomics_dir, parsed_samples_csv)
+    cluster_map: Dict[str, str] = {}
+    cl_src = cluster_csv if (cluster_csv and cluster_csv.is_file()) else parsed_samples_csv
+    if cl_src and cl_src.is_file():
+        cdf = pd.read_csv(cl_src, dtype=str, keep_default_na=False)
+        for _, r in cdf.iterrows():
+            if (sid_c := str(r.get("genetic_sample_id") or "").strip()) and (gc := str(r.get("genetic_cluster") or "").strip()):
+                cluster_map[sid_c] = gc
     out_dir.mkdir(parents=True, exist_ok=True)
     gdi_csv, gdi_samp_csv = out_dir / "coalescent_gdi_delimitation.csv", out_dir / "coalescent_gdi_samples.csv"
     svdq_csv, model_sel_csv, adequacy_csv = out_dir / "svdquartets_support.csv", out_dir / "substitution_model_selection.csv", out_dir / "coalescent_model_adequacy.csv"
 
-    if assets.alignment_files:
-        align_sorted = sorted(assets.alignment_files, key=lambda p: (0 if p.name.lower().endswith((".phylip", ".phy", ".nex", ".nexus")) else 1, p.name))
-        primary_path = align_sorted[0]
+    def _apply_intraspecific_demes(gdi_df: pd.DataFrame, sids_in: Sequence[str], taxa_in: Sequence[str], diff_blk: np.ndarray, call_blk: np.ndarray, within_het: np.ndarray, within_call: np.ndarray, nb: int, smod: str, bpp_p: Optional[Path]) -> pd.DataFrame:
+        if not intraspecific_mode or not focal_taxon or not cluster_map: return gdi_df
+        f_low = focal_taxon.strip().lower()
+        deme_lbls = [cluster_map.get(sid, tx) if tx.strip().lower() == f_low else tx for sid, tx in zip(sids_in, taxa_in)]
+        focal_demes = {lbl for lbl, tx in zip(deme_lbls, taxa_in) if tx.strip().lower() == f_low and lbl.startswith("Geno_Cluster_")}
+        if len(focal_demes) < 2: return gdi_df
+        d_df, _ = compute_coalescent_gdi_delimitation(sids_in, deme_lbls, diff_blk, call_blk, within_het, within_call, n_boot=nb, substitution_model=smod, bpp_out_path=bpp_p)
+        d_sub = d_df[d_df["taxon"].isin(focal_demes)] if not d_df.empty else d_df
+        return pd.concat([gdi_df, d_sub], ignore_index=True) if not d_sub.empty else gdi_df
+
+    if align_cands:
+        primary_path = align_cands[0]
         sids, seqs = parse_invariant_alignment(primary_path)
         if pass_set is not None and len(kept := [(sid, sq) for sid, sq in zip(sids, seqs) if sid in pass_set]) >= 4:
             sids, seqs = [x[0] for x in kept], [x[1] for x in kept]
@@ -243,7 +267,10 @@ def run_coalescent_delimitation(
             n_boot=eff_n_boot, substitution_model=best_model, bpp_out_path=out_dir / "bpp_msci_out.txt",
         )
         adequacy_df = gdi_df.attrs.get("adequacy_df", pd.DataFrame())
+        gdi_df = _apply_intraspecific_demes(gdi_df, sids, taxa_labels, diff_blk, call_blk, within_het, within_call, eff_n_boot, best_model, out_dir / "bpp_msci_out.txt")
+        gdi_df["gdi_source"] = gdi_source
         gdi_s_df = _expand_gdi_samples(gdi_s_df, group_members, orig_sids)
+        gdi_s_df["gdi_source"] = gdi_source
         svdq_df.to_csv(svdq_csv, index=False)
         gdi_df.to_csv(gdi_csv, index=False)
         gdi_s_df.to_csv(gdi_samp_csv, index=False)
@@ -274,7 +301,10 @@ def run_coalescent_delimitation(
         w_call = np.sum(np.isfinite(mat), axis=1, keepdims=True).astype(np.float64).T
         gdi_df, gdi_s_df = compute_coalescent_gdi_delimitation(sids, taxa_labels, diff_blk, call_blk, w_het, w_call, n_boot=50)
         adequacy_df = gdi_df.attrs.get("adequacy_df", pd.DataFrame())
+        gdi_df = _apply_intraspecific_demes(gdi_df, sids, taxa_labels, diff_blk, call_blk, w_het, w_call, 50, "JC69", None)
+        gdi_df["gdi_source"] = gdi_source
         gdi_s_df = _expand_gdi_samples(gdi_s_df, group_members, orig_sids)
+        gdi_s_df["gdi_source"] = gdi_source
         gdi_df.to_csv(gdi_csv, index=False); gdi_s_df.to_csv(gdi_samp_csv, index=False); adequacy_df.to_csv(adequacy_csv, index=False)
         pd.DataFrame(columns=["quartet_id", "best_split", "svd_score_best", "svd_score_second", "quartet_support", "quartet_boot_support", "quartet_p_value", "n_sites_used"]).to_csv(svdq_csv, index=False)
         return {"status": "completed_dosage_fallback", "n_samples": n_s, "gdi_csv": str(gdi_csv)}
@@ -289,10 +319,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--parsed-samples", type=Path, default=None)
     parser.add_argument("--dosage-tsv", type=Path, default=None)
+    parser.add_argument("--alignment-file", type=Path, default=None)
+    parser.add_argument("--focal-taxon", type=str, default=None)
+    parser.add_argument("--intraspecific-mode", action="store_true", default=False)
+    parser.add_argument("--cluster-csv", type=Path, default=None)
+    parser.add_argument("--gdi-source", type=str, default="nextrad_msc")
     parser.add_argument("--block-len", type=int, default=int(gcfg["coalescent_block_len"]))
     parser.add_argument("--n-boot", type=int, default=int(gcfg["coalescent_n_boot"]))
     args = parser.parse_args(list(argv) if argv is not None else None)
-    run_coalescent_delimitation(args.genomics_dir, args.out_dir, parsed_samples_csv=args.parsed_samples, dosage_tsv=args.dosage_tsv, block_len=args.block_len, n_boot=args.n_boot)
+    run_coalescent_delimitation(
+        args.genomics_dir, args.out_dir, parsed_samples_csv=args.parsed_samples, dosage_tsv=args.dosage_tsv,
+        block_len=args.block_len, n_boot=args.n_boot, focal_taxon=args.focal_taxon,
+        intraspecific_mode=bool(args.intraspecific_mode), cluster_csv=args.cluster_csv,
+        gdi_source=args.gdi_source, alignment_file=args.alignment_file,
+    )
     return 0
 
 

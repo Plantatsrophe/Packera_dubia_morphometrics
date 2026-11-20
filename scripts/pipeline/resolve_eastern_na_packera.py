@@ -286,6 +286,7 @@ def _build_master_row(
     gdi = next((v for v in (s3.get("median_coalescent_gdi"), s2.get("median_coalescent_gdi"), s1.get("median_coalescent_gdi")) if v is not None), None)
     rep_cyto = next((s.get("reported_cytotypes") for s in (s3, s2, s1) if s.get("reported_cytotypes")), "")
     n_cyto = max((int(s.get("n_cytovouchers_linked") or 0) for s in (s3, s2, s1)), default=0)
+    geno_tier = next((s.get("active_genomic_tier") for s in (s3, s2, s1) if s.get("active_genomic_tier")), "")
     verdict = ("Genus baseline only (intraspecific sweep skipped)" if not sweep_ran else
                "Candidate cryptic lineage detected" if int(s3.get("n_cohesive_cryptic_otus") or 0) > 0 else
                "Intraspecific ecotypic substructure detected" if int(s3.get("n_subspecies_ecotype") or 0) > 0 else "Single cohesive evolutionary lineage")
@@ -304,7 +305,7 @@ def _build_master_row(
         "public_backbone_clade": s3.get("public_backbone_clade") or s2.get("public_backbone_clade") or s1.get("public_backbone_clade") or "",
         "n_tier0_abstained": int(s3.get("n_tier0_abstained") or 0), "thinned_stage4_otus": int(s4.get("n_focal_otus") or 0),
         "thinned_optimal_k": s4.get("gmm_optimal_k", ""), "primary_verdict": verdict,
-        "reported_cytotypes": rep_cyto, "n_cytovouchers_linked": n_cyto,
+        "reported_cytotypes": rep_cyto, "n_cytovouchers_linked": n_cyto, "active_genomic_tier": geno_tier,
     }
 
 def _render_monograph_report(
@@ -329,7 +330,8 @@ def _render_monograph_report(
     ] + ([f"* *{r['species_standardized']}*: {r['primary_verdict']} (neighbors: {r['complex_neighbors'] or 'None'}; "
           f"confirmed type controls: {r['n_confirmed_type_control']}; Tier 0 abstentions: {r['n_tier0_abstained']}" +
           (f"; cytotypes: {r['reported_cytotypes'] or 'recorded'} ({r['n_cytovouchers_linked']} linked)"
-           if (r.get("reported_cytotypes") or int(r.get("n_cytovouchers_linked") or 0) > 0) else "") + ")."
+           if (r.get("reported_cytotypes") or int(r.get("n_cytovouchers_linked") or 0) > 0) else "") +
+          (f"; genomic tier: {r['active_genomic_tier']}" if r.get("active_genomic_tier") else "") + ")."
           for r in master_rows]
          if master_rows else ["* No *Packera* binomials exceeded the minimum voucher threshold in this run."])
     return "\n".join(lines) + "\n"
