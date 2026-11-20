@@ -56,6 +56,13 @@ from scripts.core.config import (
     normalize_countries_list,
 )
 from scripts.core.logger import setup_logging
+from scripts.core.step01_concept_authority_utils import (
+    CORE_PACKERA_GOLD_REGEXES,
+    CORE_PACKERA_GOLD_SURNAMES,
+    REGIONAL_AND_HISTORICAL_SILVER_REGEXES,
+    REGIONAL_AND_HISTORICAL_SILVER_SURNAMES,
+    apply_concept_and_segregate_recency_caps,
+)
 
 EXPORT_COLUMNS = [
     "catalogNumber",
@@ -427,16 +434,22 @@ def stratify_duplicates(
         date_to_indices.setdefault(d, []).append(idx)
 
     for d_val, idx_list in date_to_indices.items():
-        if d_val == "unknown_date":
+        if d_val == "unknown_date" or d_val.endswith("-00-00"):
             for i in idx_list:
                 cat = sanitize_filename(str(df.iloc[i].get("catalogNumber", i)))
                 group_labels[i] = f"{norm_collectors[i]}_sn_{cat}_{d_val}"
             continue
 
-        coord_indices = [i for i in idx_list if has_coords[i]]
-        no_coord_indices = [i for i in idx_list if not has_coords[i]]
+        coord_indices: List[int] = []
+        no_coord_indices: List[int] = []
+        for i in idx_list:
+            is_cent = _as_bool_flag(df.iloc[i].get("is_centroid_or_inst_coord"))
+            if not has_coords[i] or norm_collectors[i] == "unknown" or is_cent:
+                no_coord_indices.append(i)
+            else:
+                coord_indices.append(i)
 
-        # Records without coordinates cannot verify < 50m proximity; preserve as unique singletons
+        # Records lacking exact coords, named collector, or centroid hygiene stay unique singletons
         for i in no_coord_indices:
             cat = sanitize_filename(str(df.iloc[i].get("catalogNumber", i)))
             group_labels[i] = f"{norm_collectors[i]}_sn_{cat}_{d_val}"
@@ -444,7 +457,11 @@ def stratify_duplicates(
         # Match unnumbered records to any numbered collection on the same date within max_distance_meters
         numbered_date_indices = [
             i for i in range(n_rows)
-            if norm_numbers[i] and norm_dates[i] == d_val and has_coords[i]
+            if norm_numbers[i]
+            and norm_dates[i] == d_val
+            and has_coords[i]
+            and norm_collectors[i] != "unknown"
+            and not _as_bool_flag(df.iloc[i].get("is_centroid_or_inst_coord"))
         ]
 
         matched_to_numbered = set()
@@ -455,7 +472,7 @@ def stratify_duplicates(
                     or not row_std_taxa[num_i]
                     or row_std_taxa[i] == row_std_taxa[num_i]
                 )
-                if same_tx and (norm_collectors[i] == norm_collectors[num_i] or norm_collectors[i] == "unknown"):
+                if same_tx and norm_collectors[i] == norm_collectors[num_i]:
                     dist = haversine_distance_meters(lats[i], lons[i], lats[num_i], lons[num_i])
                     if dist <= max_distance_meters:
                         group_labels[i] = group_labels[num_i]
@@ -482,8 +499,7 @@ def stratify_duplicates(
                         b_idx = remaining_coord_indices[b]
                         same_coll = (
                             norm_collectors[curr_idx] == norm_collectors[b_idx]
-                            or norm_collectors[curr_idx] == "unknown"
-                            or norm_collectors[b_idx] == "unknown"
+                            and norm_collectors[curr_idx] != "unknown"
                         )
                         same_tx = (
                             not row_std_taxa[curr_idx]
@@ -658,7 +674,7 @@ def stratify_duplicates(
 
             cat_tiebreak = str(row.get("catalogNumber", idx))
 
-            score_tuple = (has_type, type_subrank, in_range_rank, tier_score, is_home_herb, res_score, cat_tiebreak)
+            score_tuple = (has_type, type_subrank, tier_score, in_range_rank, is_home_herb, res_score, cat_tiebreak)
             scored_candidates.append((score_tuple, idx))
             idx_to_std_tx[idx] = _resolve_row_standardized_packera(row)
             idx_to_tier[idx] = tier
@@ -715,7 +731,7 @@ def stratify_duplicates(
             else:
                 row_conflict = True
             conflict_list[pos_i] = bool(conflict_list[pos_i] or row_conflict)
-            if best_gold_taxon and not (not best_gold_from_inrange and not idx_to_extra.get(idx, False)):
+            if best_gold_taxon and (not multi_gold_disagreement or best_gold_from_inrange or idx_to_extra.get(idx, False)):
                 gold_taxon_list[pos_i] = best_gold_taxon
 
         scored_candidates.sort(key=lambda x: x[0], reverse=True)
@@ -917,7 +933,7 @@ def reconcile_cross_taxon_exsiccatae_with_db(
             else:
                 row_conf = True
             conf_vals[pos_i] = bool(conf_vals[pos_i] or row_conf)
-            if best_gold_tx and not gold_vals[pos_i] and not (not best_gold_from_inrange and not r_extra):
+            if best_gold_tx and not gold_vals[pos_i] and (not multi_gold or best_gold_from_inrange or r_extra):
                 gold_vals[pos_i] = best_gold_tx
 
     out_df["exsiccatae_taxonomic_conflict"] = conf_vals
@@ -1437,52 +1453,11 @@ _AMBIGUOUS_COMMON_SURNAMES: Set[str] = {
     "scott", "smith", "stewart", "taylor", "thomas", "thompson", "turner", "walker",
     "ward", "watson", "weber", "welsh", "white", "williams", "wilson", "wood", "wright", "young",
 }
-CORE_PACKERA_MONOGRAPHERS: Set[str] = {
-    "trock", "barkley", "kowal", "mahoney", "soderholm", "bain",
-    "mabberley", "mandel", "moore-pollard", "weakley", "gramling",
-    "uttal", "pippen", "nesom", "greenman",
-}
-REGIONAL_FLORA_SPECIALISTS: Set[str] = {
-    "boufford", "judziewicz", "okennon", "okane", "yeatts", "ruyle-douglas",
-    "boivin", "cronquist", "fernald", "rydberg", "spellenberg", "kral",
-    "godfrey", "sorrie", "strother", "brouillet", "semple", "schilling",
-    "floden", "poindexter", "wieboldt", "mcmillan", "beauchamp",
-}
+CORE_PACKERA_MONOGRAPHERS: Set[str] = set(CORE_PACKERA_GOLD_SURNAMES)
+REGIONAL_FLORA_SPECIALISTS: Set[str] = set(REGIONAL_AND_HISTORICAL_SILVER_SURNAMES)
 PACKERA_SPECIALISTS: Set[str] = CORE_PACKERA_MONOGRAPHERS | REGIONAL_FLORA_SPECIALISTS
-_CORE_QUALIFIED_SPECIALIST_REGEXES: Tuple[re.Pattern, ...] = tuple(
-    re.compile(pat, re.IGNORECASE)
-    for pat in (
-        r"\b(?:c\.?\s*c\.?|craig(?:\s+c\.?)?)\s+freeman\b|\bfreeman\s*,\s*(?:c\.?\s*c\.?|craig)\b",
-        r"\b(?:w\.?\s*a\.?|william\s+a\.?)\s+weber\b|\bweber\s*,\s*(?:w\.?\s*a\.?|william)\b",
-        r"\b(?:j\.?\s*l\.?|judith\s+l\.?)\s+golden\b|\bgolden\s*,\s*(?:j\.?\s*l\.?|judith)\b",
-        r"\b(?:j\.?\s*g\.?|john\s+g\.?)\s+packer\b|\bpacker\s*,\s*(?:j\.?\s*g\.?|john)\b",
-        r"\b(?:c\.?|charles)\s+jeffrey\b|\bjeffrey\s*,\s*(?:c\.?|charles)\b",
-        r"\b(?:b\.?\s*l\.?|billie\s+l(?:ee)?\.?)\s+turner\b|\bturner\s*,\s*(?:b\.?\s*l\.?|billie)\b",
-        r"\b(?:e\.?\s*r\.?|erika\s+r\.?)\s+moore\b|\bmoore\s*,\s*(?:e\.?\s*r\.?|erika)\b",
-        r"(?:^|[\s|,;(])[áa]\.?\s*l[öo]ve\b|\bd\.?\s*l[öo]ve\b|\b[áa]skell\s+l[öo]ve\b|\bdoris\s+l[öo]ve\b",
-    )
-)
-_REGIONAL_QUALIFIED_SPECIALIST_REGEXES: Tuple[re.Pattern, ...] = tuple(
-    re.compile(pat, re.IGNORECASE)
-    for pat in (
-        r"\b(?:g\.?\s*w\.?|george\s+w\.?)\s+douglas\b|\bdouglas\s*,\s*(?:g\.?\s*w\.?|george)\b",
-        r"\b(?:e\.?\s*l\.?|edward\s+lee)\s+greene\b|\bgreene\s*,\s*(?:e\.?\s*l\.?|edward)\b",
-        r"\b(?:a\.?|asa)\s+gray\b|\bgray\s*,\s*(?:a\.?|asa)\b",
-        r"\b(?:j\.?\s*k\.?|john\s+kunkel)\s+small\b|\bsmall\s*,\s*(?:j\.?\s*k\.?|john)\b",
-        r"\b(?:alph\.?|alphonso)\s+wood\b|\bwood\s*,\s*(?:alph\.?|alphonso)\b",
-        r"\b(?:s\.?\s*f\.?|sidney\s+fay)\s+blake\b|\bblake\s*,\s*(?:s\.?\s*f\.?|sidney)\b",
-        r"\b(?:s\.?|sereno)\s+watson\b|\bwatson\s*,\s*(?:s\.?|sereno)\b",
-        r"\b(?:s\.?\s*l\.?|stanley\s+l\.?)\s+welsh\b|\bwelsh\s*,\s*(?:s\.?\s*l\.?|stanley)\b",
-        r"\b(?:n\.?\s*d\.?|duane)\s+atwood\b|\batwood\s*,\s*(?:n\.?\s*d\.?|duane)\b",
-        r"\b(?:r\.?\s*d\.?|robert\s+d\.?)\s+dorn\b|\bdorn\s*,\s*(?:r\.?\s*d\.?|robert)\b",
-        r"\b(?:n\.?\s*l\.?|nathaniel\s+l(?:ord)?\.?)\s+britton\b|\bbritton\s*,\s*(?:n\.?\s*l\.?|nathaniel)\b",
-        r"\b(?:a\.?\s*a\.?|amos\s+a(?:rthur)?\.?)\s+heller\b|\bheller\s*,\s*(?:a\.?\s*a\.?|amos)\b",
-        r"\b(?:l\.?\s*d\.?|dwayne)\s+estes\b|\bestes\s*,\s*(?:l\.?\s*d\.?|dwayne)\b",
-        r"\b(?:j\.?\s*j\.?\s*n\.?|julian(?:\s+j\.?\s*n\.?)?)\s+campbell\b|\bcampbell\s*,\s*(?:j\.?\s*j\.?\s*n\.?|julian)\b",
-        r"\bo['’]?kennon\b|\br\.?\s*j\.?\s*o['’]?kennon\b",
-        r"\bo['’]?kane\b|\bs\.?\s*l\.?\s*o['’]?kane\b",
-    )
-)
+_CORE_QUALIFIED_SPECIALIST_REGEXES: Tuple[re.Pattern, ...] = CORE_PACKERA_GOLD_REGEXES
+_REGIONAL_QUALIFIED_SPECIALIST_REGEXES: Tuple[re.Pattern, ...] = REGIONAL_AND_HISTORICAL_SILVER_REGEXES
 _QUALIFIED_SPECIALIST_REGEXES: Tuple[re.Pattern, ...] = (
     _CORE_QUALIFIED_SPECIALIST_REGEXES + _REGIONAL_QUALIFIED_SPECIALIST_REGEXES
 )
@@ -1504,6 +1479,19 @@ def _has_core_monographer_match(text: str) -> bool:
     if surnames & CORE_PACKERA_MONOGRAPHERS:
         return True
     return any(q_rx.search(s_str) for q_rx in _CORE_QUALIFIED_SPECIALIST_REGEXES)
+
+
+def _has_regional_or_historical_specialist_match(text: str) -> bool:
+    """Return True if `text` matches a regional flora or historical Senecioneae specialist."""
+    if not text or not str(text).strip():
+        return False
+    s_str = str(text).strip()
+    if _has_non_person_determination_token(s_str):
+        return False
+    surnames = set(normalize_determiner_surnames(s_str))
+    if surnames & REGIONAL_FLORA_SPECIALISTS:
+        return True
+    return any(q_rx.search(s_str) for q_rx in _REGIONAL_QUALIFIED_SPECIALIST_REGEXES)
 
 
 def _has_specialist_match(text: str, extra_patterns: Optional[Iterable[str]] = None) -> bool:
@@ -1964,6 +1952,7 @@ def parse_determiner_tier(
     habitat_raw: Optional[str],
     dynamic_specialists: Optional[Iterable[str]] = None,
     dynamic_herbaria: Optional[Iterable[str]] = None,
+    is_open_or_hybrid: bool = False,
 ) -> Tuple[str, str, str]:
     """
     Evaluates Darwin Core fields to assign a taxonomic determination credibility tier
@@ -2014,6 +2003,10 @@ def parse_determiner_tier(
     else:
         identified_by_combined = history if history else (recorded_by if recorded_by else identified_by)
 
+    # Quarantine non-type open-nomenclature and hybrid-formula sheets strictly to Tier_3_Bronze
+    if is_open_or_hybrid and not is_type:
+        return "Tier_3_Bronze", type_status_clean, identified_by_combined
+
     # Match specialists strictly on current determination (`identifiedBy`), only consulting
     # `verbatimIdentificationHistory` when `identifiedBy` is absent/collector-ref (so an older
     # superseded specialist annotation in history never promotes a newer non-specialist override).
@@ -2024,23 +2017,28 @@ def parse_determiner_tier(
         else history
     )
 
-    is_specialist = False
-    is_regional_collector_fallback_silver = False
+    is_core_monographer = False
+    is_regional_specialist_silver = False
     if not (is_non_person_det and not eff_hist_for_specialist and type_rank <= 0):
         explicit_det_text = f"{eff_id_for_specialist} | {eff_hist_for_specialist}".strip(" |")
-        if explicit_det_text and _has_specialist_match(explicit_det_text):
-            is_specialist = True
+        if explicit_det_text and _has_core_monographer_match(explicit_det_text):
+            is_core_monographer = True
+        elif explicit_det_text and (
+            _has_regional_or_historical_specialist_match(explicit_det_text)
+            or _has_specialist_match(explicit_det_text)
+        ):
+            is_regional_specialist_silver = True
         elif fallback_to_collector and recorded_by:
             if _has_core_monographer_match(recorded_by):
-                is_specialist = True
-            elif _has_specialist_match(recorded_by):
-                # Prolific regional flora collectors on blank-identifiedBy field labels route to Silver
-                is_regional_collector_fallback_silver = True
+                is_core_monographer = True
+            elif _has_regional_or_historical_specialist_match(recorded_by) or _has_specialist_match(recorded_by):
+                # Regional flora collectors on blank-identifiedBy field labels route to Silver
+                is_regional_specialist_silver = True
 
     # Corpus-discovered multi-herbarium specialists cap at Tier_2_Silver (never Tier_1_Gold),
     # and apply ONLY to explicit determinations/unoverridden history (never collector fallback).
     is_dynamic_corpus_specialist_silver = False
-    if not is_specialist and dynamic_specialists and (has_explicit_det or eff_hist_for_specialist):
+    if not is_core_monographer and not is_regional_specialist_silver and dynamic_specialists and (has_explicit_det or eff_hist_for_specialist):
         dyn_spec_set: Set[str] = set()
         for item in dynamic_specialists:
             if item is None:
@@ -2065,10 +2063,10 @@ def parse_determiner_tier(
                         is_dynamic_corpus_specialist_silver = True
                         break
 
-    if is_type or is_specialist:
+    if is_type or is_core_monographer:
         return "Tier_1_Gold", type_status_clean, identified_by_combined
 
-    if is_regional_collector_fallback_silver or is_dynamic_corpus_specialist_silver:
+    if is_regional_specialist_silver or is_dynamic_corpus_specialist_silver:
         return "Tier_2_Silver", type_status_clean, identified_by_combined
 
     if "[exsiccatae " in identified_by.lower():
@@ -2098,6 +2096,8 @@ def apply_corpus_authority_tiers(
     df: pd.DataFrame,
     dynamic_specialists: Optional[Set[str]] = None,
     dynamic_herbaria: Optional[Set[str]] = None,
+    db_path: Optional[Union[str, Path]] = None,
+    workspace_dir: Optional[Path] = None,
 ) -> pd.DataFrame:
     """
     Applies the 3-Layer Dynamic Authority Engine across an assembled DataFrame:
@@ -2237,6 +2237,8 @@ def apply_corpus_authority_tiers(
 
         raw_sci = row.get("scientificName") or row.get("species_raw")
         std_sp = standardize_packera_taxon(raw_sci) or _resolve_row_standardized_packera(row)
+        c_stat_r = str(row.get("concept_synonymy_status", "") if not pd.isna(row.get("concept_synonymy_status", "")) else "").strip()
+        row_open_hyb = _as_bool_flag(row.get("is_open_or_hybrid_concept")) or (c_stat_r in {"Open_Nomenclature", "Hybrid_Formula"})
 
         tier_eval, type_clean, _ = parse_determiner_tier(
             type_status_raw=t_raw,
@@ -2248,12 +2250,16 @@ def apply_corpus_authority_tiers(
             habitat_raw=hab_raw,
             dynamic_specialists=eff_specs,
             dynamic_herbaria=eff_herbs,
+            is_open_or_hybrid=row_open_hyb,
         )
 
         prev_tier = str(row.get("determiner_tier", "") if not pd.isna(row.get("determiner_tier", "")) else "").strip()
         ex_gold = str(row.get("exsiccatae_gold_taxon", "") if not pd.isna(row.get("exsiccatae_gold_taxon", "")) else "").strip()
         is_exsiccatae_transfer = "[exsiccatae " in str(id_raw or "").lower()
-        if is_exsiccatae_transfer:
+        t_rank_row, _ = classify_nomenclatural_type_rank(t_raw)
+        if row_open_hyb and t_rank_row == 0:
+            tier_eval = "Tier_3_Bronze"
+        elif is_exsiccatae_transfer:
             tier_eval = "Tier_2_Silver"
         elif prev_tier in {"Tier_1_Gold", "Tier_2_Silver"} and ex_gold and std_sp == ex_gold and tier_eval == "Tier_3_Bronze":
             tier_eval = prev_tier
@@ -2300,7 +2306,7 @@ def apply_corpus_authority_tiers(
     out["determiner_tier"] = new_tiers
     if update_type_col:
         out["type_status"] = new_types
-    return out
+    return apply_concept_and_segregate_recency_caps(out, db_path=db_path, workspace_dir=workspace_dir)
 
 
 def resolve_geographic_scope_settings(

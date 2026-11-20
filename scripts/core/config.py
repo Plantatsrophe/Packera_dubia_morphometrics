@@ -534,6 +534,7 @@ class HarvestingConfig:
     usda_county_filter: bool = False
     usda_county_buffer_km: float = 50.0
     usda_exempt_gold: bool = True
+    include_ungeoreferenced_state_vouchers: bool = True
 
 
 @dataclass(frozen=True)
@@ -808,6 +809,8 @@ class PipelineConfig:
             harv_kwargs["usda_exempt_gold"] = bool(harv_kwargs["usda_exempt_gold"])
         if "transcontinental_ecoregion_gate" in harv_kwargs:
             harv_kwargs["transcontinental_ecoregion_gate"] = bool(harv_kwargs["transcontinental_ecoregion_gate"])
+        if "include_ungeoreferenced_state_vouchers" in harv_kwargs:
+            harv_kwargs["include_ungeoreferenced_state_vouchers"] = bool(harv_kwargs["include_ungeoreferenced_state_vouchers"])
         harvesting = HarvestingConfig(**harv_kwargs)
 
         vision_lm3_fallback = (raw_cfg.get("vision") or {}).get("leafmachine3", {}) or {}
@@ -907,10 +910,8 @@ CLASS_COLORS_BGR: Dict[int, Tuple[int, int, int]] = {
     3: (0, 215, 255), 4: (50, 100, 200), 5: (0, 140, 70), 6: (230, 30, 230),
 }
 
-# Layer 1: Genus-wide North American Packera / Senecioneae monographers & initial-qualified flora authors
-# (Common surnames like Freeman, Turner, Fuller, Weber, Golden, Packer, Estes, Welsh, Dorn, Heller, Britton
-#  are strictly initial/given-name-qualified; checklist compilers like Kartesz are excluded.)
-SPECIALIST_PATTERNS: List[str] = [
+# Layer 1A: Core post-1960 Packera / Senecioneae monographers and segregate authors (Tier_1_Gold)
+CORE_PACKERA_MONOGRAPHER_PATTERNS: List[str] = [
     r"\bBarkley\b", r"\bT\.?\s*M\.?\s*Barkley\b", r"\bTheodore\s+M\.?\s+Barkley\b",
     r"\bTrock\b", r"\bD\.?\s*K\.?\s*Trock\b", r"\bDebra\s+K\.?\s+Trock\b",
     r"\bKowal\b", r"\bR\.?\s*R\.?\s*Kowal\b", r"\bRobert\s+R\.?\s+Kowal\b",
@@ -919,22 +920,30 @@ SPECIALIST_PATTERNS: List[str] = [
     r"\bMahoney\b", r"\bA\.?\s*M\.?\s*Mahoney\b", r"\bAlison\s+M\.?\s+Mahoney\b",
     r"\bSoderholm\b", r"\bJ\.?\s*Soderholm\b",
     r"\bJ\.?\s*G\.?\s*Packer\b|\bJohn\s+G\.?\s+Packer\b|\bPacker\s*,\s*(?:J\.?\s*G\.?|John)\b",
-    r"\bC\.?\s*Jeffrey\b|\bCharles\s+Jeffrey\b|\bJeffrey\s*,\s*(?:C\.?|Charles)\b",
-    r"\bMabberley\b", r"\bD\.?\s*J\.?\s*Mabberley\b",
     r"\bMandel\b", r"\bJ\.?\s*R\.?\s*Mandel\b", r"\bJennifer\s+R\.?\s+Mandel\b",
     r"\bMoore[-\s]?Pollard\b",
     r"\b(?:E\.?\s*R\.?|Erika\s+R\.?)\s+Moore\b|\bMoore\s*,\s*(?:E\.?\s*R\.?|Erika)\b",
     r"\bBoufford\b", r"\bD\.?\s*E\.?\s*Boufford\b",
     r"\bGramling\b", r"\bA\.?\s*Gramling\b",
     r"\bC\.?\s*C\.?\s*Freeman\b|\bCraig\s+(?:C\.?\s+)?Freeman\b|\bFreeman\s*,\s*(?:C\.?\s*C\.?|Craig)\b",
+    r"\bW\.?\s*A\.?\s*Weber\b|\bWilliam\s+A\.?\s+Weber\b|\bWeber\s*,\s*(?:W\.?\s*A\.?|William)\b",
+    r"\bUttal\b", r"\bL\.?\s*J\.?\s*Uttal\b", r"\bLeonard\s+J\.?\s+Uttal\b",
+    r"\bNesom\b", r"\bG\.?\s*L\.?\s*Nesom\b", r"\bGuy\s+L\.?\s+Nesom\b",
+    r"\bJ\.?\s*L\.?\s*Golden\b|\bJudith\s+L\.?\s+Golden\b|\bGolden\s*,\s*(?:J\.?\s*L\.?|Judith)\b",
+    r"\bL\.?\s*D\.?\s*Estes\b|\bDwayne\s+Estes\b|\bEstes\s*,\s*(?:L\.?\s*D\.?|Dwayne)\b",
+    r"\bPoindexter\b", r"\bD\.?\s*B\.?\s*Poindexter\b",
+]
+
+# Layer 1B: Regional flora authorities and historical Senecioneae authors (Tier_2_Silver)
+REGIONAL_AND_HISTORICAL_SPECIALIST_PATTERNS: List[str] = [
+    r"\bC\.?\s*Jeffrey\b|\bCharles\s+Jeffrey\b|\bJeffrey\s*,\s*(?:C\.?|Charles)\b",
+    r"\bMabberley\b", r"\bD\.?\s*J\.?\s*Mabberley\b",
     r"\bCronquist\b", r"\bA\.?\s*Cronquist\b", r"\bArthur\s+(?:J\.?\s+)?Cronquist\b",
     r"\bGreenman\b", r"\bJ\.?\s*M\.?\s*Greenman\b", r"\bJesse\s+M(?:ore)?\.?\s+Greenman\b",
-    r"\bW\.?\s*A\.?\s*Weber\b|\bWilliam\s+A\.?\s+Weber\b|\bWeber\s*,\s*(?:W\.?\s*A\.?|William)\b",
     r"(?:^|[\s|,;(])[ÁA]\.?\s*L[öo]ve\b", r"\bD\.?\s*L[öo]ve\b",
     r"\b[ÁA]skell\s+L[öo]ve\b", r"\bDoris\s+L[öo]ve\b",
     r"\bSpellenberg\b", r"\bR\.?\s*(?:W\.?\s*)?Spellenberg\b", r"\bRichard\s+Spellenberg\b",
     r"\bPippen\b", r"\bR\.?\s*W\.?\s*Pippen\b", r"\bRichard\s+W\.?\s+Pippen\b",
-    r"\bUttal\b", r"\bL\.?\s*J\.?\s*Uttal\b", r"\bLeonard\s+J\.?\s+Uttal\b",
     r"\bJudziewicz\b", r"\bE\.?\s*J\.?\s*Judziewicz\b",
     r"\bO['’]?Kennon\b", r"\bR\.?\s*J\.?\s*O['’]?Kennon\b",
     r"\bS\.?\s*L\.?\s*Welsh\b|\bStanley\s+L\.?\s+Welsh\b|\bWelsh\s*,\s*(?:S\.?\s*L\.?|Stanley)\b",
@@ -958,20 +967,21 @@ SPECIALIST_PATTERNS: List[str] = [
     r"\bKral\b", r"\bR\.?\s*Kral\b", r"\bRobert\s+Kral\b",
     r"\bGodfrey\b", r"\bR\.?\s*K\.?\s*Godfrey\b", r"\bRobert\s+K\.?\s+Godfrey\b",
     r"\bSorrie\b", r"\bB\.?\s*A\.?\s*Sorrie\b", r"\bBruce\s+A\.?\s+Sorrie\b",
-    r"\bNesom\b", r"\bG\.?\s*L\.?\s*Nesom\b", r"\bGuy\s+L\.?\s+Nesom\b",
     r"\bStrother\b", r"\bJ\.?\s*L\.?\s*Strother\b", r"\bJohn\s+L\.?\s+Strother\b",
     r"\bB\.?\s*L\.?\s*Turner\b|\bBillie\s+L(?:ee)?\.?\s+Turner\b|\bTurner\s*,\s*(?:B\.?\s*L\.?|Billie)\b",
-    r"\bJ\.?\s*L\.?\s*Golden\b|\bJudith\s+L\.?\s+Golden\b|\bGolden\s*,\s*(?:J\.?\s*L\.?|Judith)\b",
     r"\bBrouillet\b", r"\bL\.?\s*Brouillet\b",
     r"\bSemple\b", r"\bJ\.?\s*C\.?\s*Semple\b",
     r"\bSchilling\b", r"\bE\.?\s*E\.?\s*Schilling\b",
     r"\bFloden\b", r"\bA\.?\s*J\.?\s*Floden\b",
-    r"\bL\.?\s*D\.?\s*Estes\b|\bDwayne\s+Estes\b|\bEstes\s*,\s*(?:L\.?\s*D\.?|Dwayne)\b",
-    r"\bPoindexter\b", r"\bD\.?\s*B\.?\s*Poindexter\b",
     r"\bWieboldt\b", r"\bT\.?\s*F\.?\s*Wieboldt\b",
     r"\bMcMillan\b", r"\bP\.?\s*D\.?\s*McMillan\b",
     r"\bBeauchamp\b", r"\bR\.?\s*M\.?\s*Beauchamp\b",
+    r"\b(?:J\.?\s*J\.?\s*N\.?|Julian(?:\s+J\.?\s*N\.?)?)\s+Campbell\b|\bCampbell\s*,\s*(?:J\.?\s*J\.?\s*N\.?|Julian)\b",
 ]
+
+SPECIALIST_PATTERNS: List[str] = (
+    CORE_PACKERA_MONOGRAPHER_PATTERNS + REGIONAL_AND_HISTORICAL_SPECIALIST_PATTERNS
+)
 MAJOR_HERBARIA_CODES: Set[str] = {
     "NCU", "DUKE", "NCSC", "GA", "US", "NY", "BRIT", "MO", "WIS", "VDB", "FLAS", "TEX", "LL", "TENN", "F",
     "GH", "PH", "KANU", "MSC", "COLO", "RM", "UC", "JEPS", "CAS", "DAO", "CAN", "MEXU",
@@ -1041,6 +1051,9 @@ DEFAULT_HOME_HERBARIUM = _DEFAULT_CONFIG.harvesting.home_herbarium
 DEFAULT_USDA_COUNTY_FILTER = _DEFAULT_CONFIG.harvesting.usda_county_filter
 DEFAULT_USDA_COUNTY_BUFFER_KM = _DEFAULT_CONFIG.harvesting.usda_county_buffer_km
 DEFAULT_USDA_EXEMPT_GOLD = _DEFAULT_CONFIG.harvesting.usda_exempt_gold
+DEFAULT_INCLUDE_UNGEOREFERENCED_STATE_VOUCHERS: bool = (
+    _DEFAULT_CONFIG.harvesting.include_ungeoreferenced_state_vouchers
+)
 
 
 def resolve_cpu_threads(

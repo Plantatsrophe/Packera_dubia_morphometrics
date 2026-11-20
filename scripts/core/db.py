@@ -704,6 +704,16 @@ def upsert_vouchers_records(
             row_dict["is_centroid_or_inst_coord"] = _to_bool_int(rec.get("is_centroid_or_inst_coord"), default=0)
         if "coord_quarantine_reason" in rec and not _is_missing(rec.get("coord_quarantine_reason")):
             row_dict["coord_quarantine_reason"] = _to_str(rec.get("coord_quarantine_reason"))
+        if "typified_basionym" in rec and not _is_missing(rec.get("typified_basionym")):
+            row_dict["typified_basionym"] = _to_str(rec.get("typified_basionym"))
+        if "verbatim_taxon_concept" in rec and not _is_missing(rec.get("verbatim_taxon_concept")):
+            row_dict["verbatim_taxon_concept"] = _to_str(rec.get("verbatim_taxon_concept"))
+        if "concept_synonymy_status" in rec and not _is_missing(rec.get("concept_synonymy_status")):
+            row_dict["concept_synonymy_status"] = _to_str(rec.get("concept_synonymy_status"))
+        if "identification_year" in rec and not _is_missing(rec.get("identification_year")):
+            row_dict["identification_year"] = _to_int(rec.get("identification_year"))
+        if "is_open_or_hybrid_concept" in rec and not _is_missing(rec.get("is_open_or_hybrid_concept")):
+            row_dict["is_open_or_hybrid_concept"] = _to_bool_int(rec.get("is_open_or_hybrid_concept"), default=0)
         if "spatial_balance_weight" in rec and not _is_missing(rec.get("spatial_balance_weight")):
             row_dict["spatial_balance_weight"] = _to_float(rec.get("spatial_balance_weight"))
         qc_val = _to_str(rec.get("qc_status"))
@@ -724,7 +734,10 @@ def upsert_vouchers_records(
     )
 
 
-_CSV_BOOL_VOUCHER_COLUMNS = frozenset({"is_primary_duplicate", "exsiccatae_taxonomic_conflict", "is_calibrated_mm", "is_centroid_or_inst_coord"})
+_CSV_BOOL_VOUCHER_COLUMNS = frozenset({
+    "is_primary_duplicate", "exsiccatae_taxonomic_conflict", "is_calibrated_mm",
+    "is_centroid_or_inst_coord", "is_open_or_hybrid_concept",
+})
 
 
 def _format_voucher_csv_value(col: str, val: Any) -> Any:

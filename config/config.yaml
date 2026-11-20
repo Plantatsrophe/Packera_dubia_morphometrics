@@ -152,6 +152,7 @@ harvesting:
   usda_county_filter: false
   usda_county_buffer_km: 50.0
   usda_exempt_gold: true
+  include_ungeoreferenced_state_vouchers: true
 
 # Phase 2: LeafMachine3 ONNX Segmentation & Morphological Extraction
 segmentation:

@@ -150,7 +150,7 @@ PACKERA_DB_LOGICAL_COLS <- c(
   "geno_quality_pass", "is_putative_novel_or_hybrid_query", "is_geno_admixed", "cytonuclear_discordant",
   "is_multi_cytotype_taxon", "cytotype_reproductive_barrier_pass",
   "is_nwi_wetland", "is_hybrid_taxon", "is_native", "is_exotic", "is_historical_or_extirpated",
-  "is_centroid_or_inst_coord", "env_mcd_outlier_flag"
+  "is_centroid_or_inst_coord", "is_open_or_hybrid_concept", "env_mcd_outlier_flag"
 )
 
 PACKERA_DB_HARMONIC_COLS <- as.vector(vapply(
@@ -207,7 +207,12 @@ PACKERA_DB_WC_BIO_COLS <- c(
   if (identical(table_name, "vouchers")) {
     return(c(
       is_centroid_or_inst_coord = "INTEGER DEFAULT 0",
-      coord_quarantine_reason = "TEXT"
+      coord_quarantine_reason = "TEXT",
+      typified_basionym = "TEXT",
+      verbatim_taxon_concept = "TEXT",
+      concept_synonymy_status = "TEXT",
+      identification_year = "INTEGER",
+      is_open_or_hybrid_concept = "INTEGER DEFAULT 0"
     ))
   }
   if (identical(table_name, "extracted_leaves")) {
@@ -810,9 +815,11 @@ connect_packera_db <- function(
   .apply_packera_sqlite_pragmas_r(conn, read_only = FALSE)
 
   cur_ver <- .get_sqlite_user_version_r(conn)
+  v_fields_chk <- if (db_table_exists_safe(conn, "vouchers")) tryCatch(DBI::dbListFields(conn, "vouchers"), error = function(e) character(0)) else c("typified_basionym", "verbatim_taxon_concept", "concept_synonymy_status", "identification_year", "is_open_or_hybrid_concept")
   el_fields_chk <- if (db_table_exists_safe(conn, "extracted_leaves")) tryCatch(DBI::dbListFields(conn, "extracted_leaves"), error = function(e) character(0)) else c("leaf_zone", "ect_path")
   om_fields_chk <- if (db_table_exists_safe(conn, "otu_morphometrics")) tryCatch(DBI::dbListFields(conn, "otu_morphometrics"), error = function(e) character(0)) else c("cauline_leaf_count", "ECT_PC1", "scale_source")
   mv_fields_chk <- if (db_table_exists_safe(conn, "v_integrative_triage_master")) tryCatch(DBI::dbListFields(conn, "v_integrative_triage_master"), error = function(e) character(0)) else character(0)
+  v_has_concept <- all(c("typified_basionym", "verbatim_taxon_concept", "concept_synonymy_status", "identification_year", "is_open_or_hybrid_concept") %in% v_fields_chk)
   el_has_zone <- all(c("leaf_zone", "ect_path") %in% el_fields_chk)
   om_has_cauline <- all(c("cauline_leaf_count", "ECT_PC1", "scale_source") %in% om_fields_chk)
   mv_has_latest <- identical(eff_path, ":memory:") || all(c(
@@ -830,10 +837,13 @@ connect_packera_db <- function(
     "hydro_edaphic_niche_regime", "wetland_fidelity_concordance", "basionym_synonymy_type",
     "backbone_basionym_name", "protologue_url", "natureserve_global_rank",
     "nwpl_indicator_code", "nwpl_wetland_score",
-    "is_centroid_or_inst_coord", "coord_quarantine_reason", "env_mahal_d2", "env_mcd_outlier_flag"
+    "is_centroid_or_inst_coord", "coord_quarantine_reason",
+    "typified_basionym", "verbatim_taxon_concept", "concept_synonymy_status",
+    "identification_year", "is_open_or_hybrid_concept",
+    "env_mahal_d2", "env_mcd_outlier_flag"
   ) %in% mv_fields_chk)
   if (cur_ver >= PLANTMATICS_SCHEMA_USER_VERSION &&
-    el_has_zone && om_has_cauline && mv_has_latest &&
+    v_has_concept && el_has_zone && om_has_cauline && mv_has_latest &&
     (identical(eff_path, ":memory:") || (
       db_table_exists_safe(conn, "v_integrative_triage_master") &&
         db_table_exists_safe(conn, "genomic_samples") &&
@@ -884,7 +894,10 @@ connect_packera_db <- function(
         "hydro_edaphic_niche_regime", "wetland_fidelity_concordance", "basionym_synonymy_type",
         "backbone_basionym_name", "protologue_url", "natureserve_global_rank",
         "nwpl_indicator_code", "nwpl_wetland_score",
-        "is_centroid_or_inst_coord", "coord_quarantine_reason", "env_mahal_d2", "env_mcd_outlier_flag"
+        "is_centroid_or_inst_coord", "coord_quarantine_reason",
+        "typified_basionym", "verbatim_taxon_concept", "concept_synonymy_status",
+        "identification_year", "is_open_or_hybrid_concept",
+        "env_mahal_d2", "env_mcd_outlier_flag"
       )
       if (length(v_cols) > 0L && !all(req_v_cols %in% v_cols)) {
         view_needs_refresh <- TRUE
@@ -2321,7 +2334,13 @@ fetch_step04_morphometrics_from_db <- function(
   v_cols <- if (db_table_exists_safe(conn, "vouchers")) tryCatch(DBI::dbListFields(conn, "vouchers"), error = function(e) character(0)) else character(0)
 
   extra_v_cols <- intersect(
-    c("usda_symbol", "usda_county_status", "exsiccatae_key", "exsiccatae_taxonomic_conflict", "exsiccatae_gold_taxon", "is_centroid_or_inst_coord", "coord_quarantine_reason"),
+    c(
+      "usda_symbol", "usda_county_status", "exsiccatae_key",
+      "exsiccatae_taxonomic_conflict", "exsiccatae_gold_taxon",
+      "is_centroid_or_inst_coord", "coord_quarantine_reason",
+      "typified_basionym", "verbatim_taxon_concept", "concept_synonymy_status",
+      "identification_year", "is_open_or_hybrid_concept"
+    ),
     v_cols
   )
 

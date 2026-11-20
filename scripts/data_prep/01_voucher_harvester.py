@@ -223,6 +223,15 @@ def build_cli_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--include-ungeoreferenced-state-vouchers",
+        action=argparse.BooleanOptionalAction,
+        default=cfg.harvesting.include_ungeoreferenced_state_vouchers,
+        help=(
+            "Rescue ungeoreferenced (hasCoordinate=False) cis-Mississippi / eastern state herbarium "
+            f"sheets for morphological and authority curation (default: {cfg.harvesting.include_ungeoreferenced_state_vouchers})."
+        ),
+    )
+    parser.add_argument(
         "--db",
         type=str,
         default=None,
@@ -305,6 +314,13 @@ def main(argv: list[str] | None = None) -> None:
         min_eastern_residency_records=int(cfg.harvesting.min_eastern_residency_records),
         cis_mississippi_longitude_threshold=float(cfg.harvesting.cis_mississippi_longitude_threshold),
         min_cis_mississippi_fraction=float(cfg.harvesting.min_cis_mississippi_fraction),
+        include_ungeoreferenced_state_vouchers=bool(
+            getattr(
+                args,
+                "include_ungeoreferenced_state_vouchers",
+                cfg.harvesting.include_ungeoreferenced_state_vouchers,
+            )
+        ),
         webp_quality=int(cfg.harvesting.webp_quality),
     )
 

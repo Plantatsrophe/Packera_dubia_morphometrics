@@ -130,6 +130,48 @@ is_extralimital_or_conflicted_non_type <- function(df) {
   )
 }
 
+# Identify non-type open-nomenclature (cf./aff./?/s.l.) or two-epithet hybrid formulas.
+.identify_open_or_hybrid_concept_mask <- function(df) {
+  n <- if (is.null(df)) 0L else nrow(df)
+  if (n == 0L) return(logical(0))
+  res <- rep(FALSE, n)
+  if ("is_open_or_hybrid_concept" %in% names(df)) {
+    v_oh <- df$is_open_or_hybrid_concept
+    if (is.logical(v_oh)) {
+      res <- res | (!is.na(v_oh) & v_oh)
+    } else if (is.numeric(v_oh) || is.integer(v_oh)) {
+      res <- res | (!is.na(v_oh) & v_oh != 0)
+    } else {
+      sv <- tolower(trimws(as.character(v_oh)))
+      res <- res | (!is.na(sv) & (sv %in% c("1", "true", "t", "yes")))
+    }
+  }
+  if ("concept_synonymy_status" %in% names(df)) {
+    cs <- trimws(as.character(df$concept_synonymy_status))
+    res <- res | (!is.na(cs) & (cs %in% c("Open_Nomenclature", "Hybrid_Formula")))
+  }
+  # Match two-epithet hybrid formulas without flagging single-epithet nothospecies (e.g. Packera ×memmingeri).
+  hyb_pat <- "[A-Z][a-z]+[[:space:]]+[a-z][a-z-]+([[:space:]]*×|[[:space:]]+[xX][[:space:]]+)([A-Z][a-z]*\\.?[[:space:]]+)?[a-z][a-z-]+"
+  open_pat <- "(^|[[:space:][:punct:]])(cf|aff|vel[[:space:]]+aff)\\.?($|[[:space:][:punct:]])|\\?|sensu[[:space:]]+lato|(^|[[:space:][:punct:]])s\\.l\\.($|[[:space:][:punct:]])|putative[[:space:]]+hybrid|hybrid[[:space:]]+(with|between)|intermediate[[:space:]]+(between|toward)|intergrade[[:space:]]+with"
+  for (col_nm in intersect(c("verbatim_taxon_concept", "species_raw", "scientificName", "identificationQualifier", "verbatimIdentification", "identificationRemarks"), names(df))) {
+    txt <- trimws(as.character(df[[col_nm]]))
+    ok <- !is.na(txt) & nzchar(txt)
+    if (!any(ok)) next
+    hit_hyb <- grepl(hyb_pat, txt[ok])
+    hit_open <- grepl(open_pat, txt[ok], ignore.case = TRUE)
+    res[ok] <- res[ok] | hit_hyb | hit_open
+  }
+  res
+}
+
+# Identify non-type vouchers mapped from a heterotypic synonym rather than sensu stricto concept.
+.is_heterotypic_synonym_mask <- function(df) {
+  n <- if (is.null(df)) 0L else nrow(df)
+  if (n == 0L || !("concept_synonymy_status" %in% names(df))) return(rep(FALSE, n))
+  cs <- trimws(as.character(df$concept_synonymy_status))
+  !is.na(cs) & (cs == "Heterotypic_Synonym")
+}
+
 .standardize_determiner_tier_vec <- function(df) {
   n <- nrow(df)
   if (n == 0L) return(character(0))
@@ -139,6 +181,11 @@ is_extralimital_or_conflicted_non_type <- function(df) {
   out[grepl("tier_?2|silver", raw, ignore.case = TRUE)] <- "Tier_2_Silver"
   out[grepl("tier_?[01]|gold|type", raw, ignore.case = TRUE)] <- "Tier_1_Gold"
   t_info <- .identify_type_specimen_vec(df)
+  # Quarantine non-type open-nomenclature and hybrid-formula sheets to Tier_3_Bronze.
+  is_open_hyb <- .identify_open_or_hybrid_concept_mask(df)
+  if (any(is_open_hyb & !t_info$is_type_specimen)) {
+    out[is_open_hyb & !t_info$is_type_specimen] <- "Tier_3_Bronze"
+  }
   if (any(t_info$is_type_specimen)) {
     out[t_info$is_type_specimen] <- "Tier_1_Gold"
   }
@@ -581,7 +628,9 @@ select_adaptive_reference_anchors <- function(
       }
     }
   }
-  anchor_pool <- valid_pool & !extralimital_mask
+  is_open_hyb_non_type <- .identify_open_or_hybrid_concept_mask(df) & !(type_rank >= 1L)
+  is_het_syn_non_type <- .is_heterotypic_synonym_mask(df) & !(type_rank >= 1L)
+  anchor_pool <- valid_pool & !extralimital_mask & !is_open_hyb_non_type
 
   is_type_valid <- (type_rank >= 1L) & valid_pool
   is_nb_type_valid <- as.logical(type_info$is_name_bearing_type) & valid_pool
@@ -620,6 +669,9 @@ select_adaptive_reference_anchors <- function(
     gs_type_local <- is_type_valid[idx_gs]
     gs_nb_type_local <- is_nb_type_valid[idx_gs]
     gs_paratype_local <- gs_type_local & !gs_nb_type_local
+    # Anchor type medoids and shrinkage strictly on name-bearing types when available.
+    gs_anchor_type_local <- if (any(gs_nb_type_local)) gs_nb_type_local else gs_type_local
+    gs_het_local <- is_het_syn_non_type[idx_gs]
     gs_gold_local <- is_gold[idx_gs]
     gs_silver_local <- is_silver[idx_gs]
     n_gold_k <- sum(gs_gold_local)
@@ -636,7 +688,7 @@ select_adaptive_reference_anchors <- function(
       ((dis_med_sol <= 0.65) || (is.finite(ent_med_sol) && ((ent_med_sol - dis_med_sol) >= 0.18)))
     min_dis_gold_frac <- if (has_bimodal_dis_cluster) 0.15 else 0.25
     allow_dis_split <- isTRUE(if (n_gold_k > 0L) (dis_gold_frac >= min_dis_gold_frac) else (dis_gold_frac >= 0.30))
-    idx_type_k <- idx_gs[gs_type_local]
+    idx_type_k <- idx_gs[gs_anchor_type_local]
     n_type_k <- length(idx_type_k)
     n_eff_type_k <- if (n_type_k > 0L) .count_effective_type_gatherings(df, idx_type_k) else 0.0
     gamma_k <- if (n_type_k > 0L) .compute_type_shrinkage_gamma(n_eff_type_k, length(idx_gs)) else 0.0
@@ -654,23 +706,24 @@ select_adaptive_reference_anchors <- function(
           X_gs <- X_gs_raw[, col_sub, drop = FALSE]
           p_eff <- ncol(X_gs)
           extreme_type_local <- rep(FALSE, nrow(X_gs))
-          if (any(gs_type_local) && sum(!gs_type_local) >= 5L) {
-            nt_mask <- if (sum(gs_gold_local & !gs_type_local) >= 5L) (gs_gold_local & !gs_type_local) else !gs_type_local
+          if (any(gs_anchor_type_local) && sum(!gs_anchor_type_local) >= 5L) {
+            nt_strict <- gs_gold_local & !gs_type_local & !gs_het_local
+            nt_mask <- if (sum(nt_strict) >= 5L) nt_strict else if (sum(gs_gold_local & !gs_type_local) >= 5L) (gs_gold_local & !gs_type_local) else !gs_anchor_type_local
             X_nt <- X_gs[nt_mask, , drop = FALSE]
             mu_nt <- .compute_robust_taxon_medoid(X_nt)
             cov_nt_raw <- stats::cov(X_nt)
             cov_nt_raw[!is.finite(cov_nt_raw)] <- 0.0
             reg_nt <- max(1e-4, 0.05 * max(mean(diag(cov_nt_raw), na.rm = TRUE), 1e-4))
             S_nt <- cov_nt_raw + diag(reg_nt, nrow = p_eff, ncol = p_eff)
-            type_pos <- which(gs_type_local)
+            type_pos <- which(gs_anchor_type_local)
             d2_type_prelim <- tryCatch(
               stats::mahalanobis(X_gs[type_pos, , drop = FALSE], center = mu_nt, cov = S_nt),
               error = function(e) rep(0.0, length(type_pos))
             )
             extreme_type_local[type_pos] <- is.finite(d2_type_prelim) & (d2_type_prelim > stats::qchisq(0.99, df = p_eff))
           }
-          non_ext_type_pos <- which(gs_type_local & !extreme_type_local)
-          if (n_type_k > 0L && length(non_ext_type_pos) == 0L && sum(!gs_type_local) >= 5L) {
+          non_ext_type_pos <- which(gs_anchor_type_local & !extreme_type_local)
+          if (n_type_k > 0L && length(non_ext_type_pos) == 0L && sum(!gs_anchor_type_local) >= 5L) {
             mu_type_gs <- NULL
             gamma_k <- 0.0
           } else if (length(non_ext_type_pos) > 0L) {
@@ -685,7 +738,9 @@ select_adaptive_reference_anchors <- function(
             drop_gs <- rep(FALSE, nrow(X_gs))
             for (pos_m in list(gs_ent_pos, gs_dis_pos)) {
               Xm <- X_gs[pos_m, , drop = FALSE]
-              pos_m_gold <- pos_m[gs_gold_local[pos_m] & !extreme_type_local[pos_m]]
+              # Prefer non-heterotypic Gold+Type anchors for mode medoid when >= 3 exist.
+              pos_m_gold_strict <- pos_m[gs_gold_local[pos_m] & !extreme_type_local[pos_m] & !gs_het_local[pos_m]]
+              pos_m_gold <- if (length(pos_m_gold_strict) >= 3L) pos_m_gold_strict else pos_m[gs_gold_local[pos_m] & !extreme_type_local[pos_m]]
               has_gold_med_m <- length(pos_m_gold) >= 3L
               use_gold_m <- length(pos_m_gold) >= max(5L, p_eff + 3L)
               pos_m_fit <- if (use_gold_m) pos_m_gold else pos_m[!extreme_type_local[pos_m]]
@@ -706,7 +761,7 @@ select_adaptive_reference_anchors <- function(
               cent_m <- cent_raw_m
               cov_shift_m <- matrix(0.0, nrow = p_eff, ncol = p_eff)
               if (!is.null(mu_type_gs) && gamma_k > 0.0) {
-                sub_types <- pos_m[gs_type_local[pos_m] & !extreme_type_local[pos_m]]
+                sub_types <- pos_m[gs_anchor_type_local[pos_m] & !extreme_type_local[pos_m]]
                 mu_sub <- if (length(sub_types) > 0L) .compute_robust_taxon_medoid(X_gs[sub_types, , drop = FALSE]) else mu_type_gs
                 cent_m <- (1.0 - gamma_k) * cent_raw_m + gamma_k * mu_sub
                 d_mu_m <- cent_m - cent_raw_m
@@ -720,9 +775,10 @@ select_adaptive_reference_anchors <- function(
                 S_sub_pool + diag(1e-4, nrow = p_eff, ncol = p_eff)
               }) + cov_shift_m
               d2_m <- tryCatch(stats::mahalanobis(Xm, center = cent_m, cov = cov_m), error = function(e) rep(0.0, nrow(Xm)))
+              # Screen Paratypes strictly alongside standard Gold anchors while keeping name-bearing types immune.
               q_thr_m <- ifelse(
                 gs_paratype_local[pos_m],
-                stats::qchisq(0.99, df = p_eff),
+                stats::qchisq(mahal_q_gold_silver, df = p_eff),
                 ifelse(
                   gs_silver_local[pos_m] & has_gold_med_m,
                   stats::qchisq(min(mahal_q_gold_silver, 0.90), df = p_eff),
@@ -733,7 +789,9 @@ select_adaptive_reference_anchors <- function(
               if (any(dr_m) && sum(!dr_m) >= 2L) drop_gs[pos_m[dr_m]] <- TRUE
             }
           } else {
-            gold_core_pos <- which(gs_gold_local & !extreme_type_local)
+            # Prefer non-heterotypic Gold+Type anchors for overall taxon medoid when >= 3 exist.
+            gold_core_strict <- which(gs_gold_local & !extreme_type_local & !gs_het_local)
+            gold_core_pos <- if (length(gold_core_strict) >= 3L) gold_core_strict else which(gs_gold_local & !extreme_type_local)
             has_gold_medoid <- length(gold_core_pos) >= 3L
             use_gold_core <- length(gold_core_pos) >= max(5L, p_eff + 3L)
             X_gs_fit <- if (use_gold_core) {
@@ -772,7 +830,7 @@ select_adaptive_reference_anchors <- function(
             d2_gs <- tryCatch(stats::mahalanobis(X_gs, center = center_gs, cov = cov_gs), error = function(e) rep(0.0, nrow(X_gs)))
             q_thr_gs <- ifelse(
               gs_paratype_local,
-              stats::qchisq(0.99, df = p_eff),
+              stats::qchisq(mahal_q_gold_silver, df = p_eff),
               ifelse(
                 gs_silver_local & has_gold_medoid,
                 stats::qchisq(min(mahal_q_gold_silver, 0.90), df = p_eff),
@@ -824,7 +882,7 @@ select_adaptive_reference_anchors <- function(
           X_ref <- X_use[ref_ids, , drop = FALSE]
           medoid_tx <- .compute_robust_taxon_medoid(X_ref, S_inv = S_pool_inv)
           if (n_type_k > 0L) {
-            mu_type_tx <- .compute_robust_taxon_medoid(X_use[idx_gs[gs_type_local], , drop = FALSE], S_inv = S_pool_inv)
+            mu_type_tx <- .compute_robust_taxon_medoid(X_use[idx_gs[gs_anchor_type_local], , drop = FALSE], S_inv = S_pool_inv)
             medoid_tx <- (1.0 - gamma_k) * medoid_tx + gamma_k * mu_type_tx
           }
           base_cov_tx <- if (n_gs >= (p_eff + 3L)) {
@@ -915,7 +973,8 @@ select_adaptive_reference_anchors <- function(
       for (k in seq_len(K_cl)) {
         ik <- idx_by_tx[[k]]
         if (length(ik) > 0L) {
-          gold_ik <- ik[is_gold[ik]]
+          gold_ik_strict <- ik[is_gold[ik] & !is_het_syn_non_type[ik]]
+          gold_ik <- if (length(gold_ik_strict) >= 3L) gold_ik_strict else ik[is_gold[ik]]
           ref_ik <- if (length(gold_ik) >= 3L) gold_ik else ik
           mu_cl_mat[k, ] <- .compute_robust_taxon_medoid(X_cl[ref_ik, , drop = FALSE], S_inv = S_cl_inv)
         }
@@ -929,7 +988,8 @@ select_adaptive_reference_anchors <- function(
         ik <- idx_by_tx[[yk]]
         if (length(ik) >= 3L) {
           ik_loo <- setdiff(ik, r_i)
-          gold_loo <- ik_loo[is_gold[ik_loo]]
+          gold_loo_strict <- ik_loo[is_gold[ik_loo] & !is_het_syn_non_type[ik_loo]]
+          gold_loo <- if (length(gold_loo_strict) >= 3L) gold_loo_strict else ik_loo[is_gold[ik_loo]]
           ref_loo <- if (length(gold_loo) >= 3L) gold_loo else ik_loo
           mu_use[yk, ] <- .compute_robust_taxon_medoid(X_cl[ref_loo, , drop = FALSE], S_inv = S_cl_inv)
         }
@@ -1831,7 +1891,8 @@ compute_empirical_bayes_authority_weights <- function(
       }
     }
   }
-  act_mask[extralimital_ds] <- FALSE
+  is_open_hyb_non_type_ds <- .identify_open_or_hybrid_concept_mask(df) & !is_type_mask
+  act_mask[extralimital_ds | is_open_hyb_non_type_ds] <- FALSE
 
   if (mode == "active_passive" && !any(act_mask)) {
     return(rep(0.0, n))
@@ -2263,7 +2324,7 @@ compute_empirical_bayes_authority_weights <- function(
     w_final[cap_cont$capped_mask] <- pmax(0.01, w_final[cap_cont$capped_mask])
     w_final[!cap_cont$capped_mask] <- pmax(0.5, pmin(3.0, w_final[!cap_cont$capped_mask]))
   }
-  w_final[extralimital_ds] <- 0.0
+  w_final[extralimital_ds | is_open_hyb_non_type_ds] <- 0.0
   round(w_final, 6)
 }
 
@@ -2560,7 +2621,19 @@ fit_parallel_mclust_gmm <- function(X_core, G_vec, modelNames = NULL, max_hc_sub
     rep("Unknown", n)
   }
   raw_v <- rep(NA_character_, n)
-  for (sc in intersect(c("species_raw", "scientificName", "taxon", "species_standardized"), names(df))) {
+  if ("typified_basionym" %in% names(df)) {
+    tb <- trimws(as.character(df$typified_basionym))
+    hit_tb <- !is.na(tb) & nzchar(tb) & !(tolower(tb) %in% c("na", "nan", "null", "none", "unknown"))
+    raw_v[hit_tb] <- tb[hit_tb]
+  }
+  for (tf in intersect(c("type_status", "typeStatus"), names(df))) {
+    ts_s <- trimws(as.character(df[[tf]]))
+    has_of <- is.na(raw_v) & !is.na(ts_s) & grepl("type[[:space:]]+of[[:space:]]+[A-Z][a-z]+[[:space:]]+[a-z][a-z-]+", ts_s, ignore.case = TRUE)
+    if (any(has_of)) {
+      raw_v[has_of] <- sub(".*type[[:space:]]+of[[:space:]]+", "", ts_s[has_of], ignore.case = TRUE)
+    }
+  }
+  for (sc in intersect(c("species_raw", "verbatim_taxon_concept", "scientificName", "taxon", "species_standardized"), names(df))) {
     cand <- trimws(as.character(df[[sc]]))
     hit <- is.na(raw_v) & !is.na(cand) & nzchar(cand) & !(tolower(cand) %in% c("na", "nan", "null", "none", "unknown"))
     raw_v[hit] <- cand[hit]
@@ -2569,11 +2642,15 @@ fit_parallel_mclust_gmm <- function(X_core, G_vec, modelNames = NULL, max_hc_sub
   parse_one <- function(s, fb_one) {
     if (is.na(s) || !nzchar(s)) return(fb_one)
     s_clean <- gsub("[[:space:]]+", " ", trimws(s))
-    m_infra <- regmatches(s_clean, regexpr("^[A-Z][a-z]+[[:space:]]+[a-z][a-z-]+[[:space:]]+(var\\.|subsp\\.|ssp\\.|f\\.)[[:space:]]+[a-z][a-z-]+", s_clean))
-    if (length(m_infra) > 0L && nzchar(m_infra[1L])) return(m_infra[1L])
+    m_bin <- regmatches(s_clean, regexpr("^[A-Z][a-z]+[[:space:]]+[a-z][a-z-]+", s_clean))
+    m_infra <- regmatches(s_clean, regexpr("^[A-Z][a-z]+[[:space:]]+[a-z][a-z-]+[[:space:]]+(var\\.|subsp\\.|ssp\\.)[[:space:]]+[a-z][a-z-]+", s_clean))
+    if (length(m_infra) > 0L && nzchar(m_infra[1L]) && length(m_bin) > 0L) {
+      # Strip botanical autonyms where infraspecific epithet duplicates specific epithet.
+      toks_i <- strsplit(m_infra[1L], "[[:space:]]+")[[1L]]
+      if (length(toks_i) >= 4L && tolower(toks_i[4L]) != tolower(toks_i[2L])) return(m_infra[1L])
+    }
     m_hyb <- regmatches(s_clean, regexpr("^[A-Z][a-z]+[[:space:]]+[x×][[:space:]]*[a-z][a-z-]+", s_clean))
     if (length(m_hyb) > 0L && nzchar(m_hyb[1L])) return(gsub("[[:space:]]+", " ", m_hyb[1L]))
-    m_bin <- regmatches(s_clean, regexpr("^[A-Z][a-z]+[[:space:]]+[a-z][a-z-]+", s_clean))
     if (length(m_bin) > 0L && nzchar(m_bin[1L])) return(m_bin[1L])
     fb_one
   }
@@ -2591,17 +2668,41 @@ fit_parallel_mclust_gmm <- function(X_core, G_vec, modelNames = NULL, max_hc_sub
   }, character(1), USE.NAMES = FALSE)
 }
 
-.is_homotypic_sensu_stricto_basionym <- function(basionym_vec, accepted_vec) {
+# Check homotypic basionym identity honoring concept_synonymy_status, backbone_basionym_name, and replacement pairs.
+.is_homotypic_sensu_stricto_basionym <- function(basionym_vec, accepted_vec, df = NULL) {
+  n_b <- length(basionym_vec)
+  if (n_b == 0L) return(logical(0))
+  b_low <- gsub("[[:space:]]+", " ", tolower(trimws(as.character(basionym_vec))))
+  a_low <- gsub("[[:space:]]+", " ", tolower(trimws(as.character(accepted_vec))))
   b_stem <- .extract_terminal_epithet_stem(basionym_vec)
   a_stem <- .extract_terminal_epithet_stem(accepted_vec)
-  nzchar(b_stem) & nzchar(a_stem) & (b_stem == a_stem)
+  out <- nzchar(b_stem) & nzchar(a_stem) & (b_stem == a_stem)
+  known_dubia <- (a_low == "packera dubia") & (b_low %in% c("cineraria dubia", "senecio dubius", "senecio tomentosus", "packera tomentosa"))
+  out <- out | known_dubia
+  if (!is.null(df) && nrow(df) == n_b) {
+    if ("backbone_basionym_name" %in% names(df)) {
+      bb <- gsub("[[:space:]]+", " ", tolower(trimws(as.character(df$backbone_basionym_name))))
+      for (ii in seq_len(n_b)) {
+        if (!is.na(bb[ii]) && nzchar(bb[ii]) && nzchar(b_low[ii]) && (bb[ii] == b_low[ii] || startsWith(bb[ii], paste0(b_low[ii], " ")))) {
+          out[ii] <- TRUE
+        }
+      }
+    }
+    if ("concept_synonymy_status" %in% names(df)) {
+      cs <- trimws(as.character(df$concept_synonymy_status))
+      out[!is.na(cs) & (cs == "Heterotypic_Synonym")] <- FALSE
+      out[!is.na(cs) & (cs %in% c("Homotypic_Synonym", "Accepted_Sensu_Stricto"))] <- TRUE
+    }
+  }
+  out
 }
 
 .filter_homotypic_type_rows <- function(df, type_rows, accepted_taxon) {
   if (length(type_rows) <= 1L || is.null(df) || nrow(df) == 0L) return(type_rows)
-  bas_sub <- .canonicalize_type_basionym_vec(df[type_rows, , drop = FALSE], rep(accepted_taxon, length(type_rows)))
-  if (length(unique(bas_sub)) <= 1L) return(type_rows)
-  is_homo <- .is_homotypic_sensu_stricto_basionym(bas_sub, rep(accepted_taxon, length(type_rows)))
+  df_sub <- df[type_rows, , drop = FALSE]
+  bas_sub <- .canonicalize_type_basionym_vec(df_sub, rep(accepted_taxon, length(type_rows)))
+  is_homo <- .is_homotypic_sensu_stricto_basionym(bas_sub, rep(accepted_taxon, length(type_rows)), df = df_sub)
+  if (length(unique(bas_sub)) <= 1L && all(is_homo == is_homo[1L])) return(type_rows)
   if (any(is_homo)) type_rows[is_homo] else type_rows
 }
 
@@ -2784,7 +2885,7 @@ compute_type_specimen_morph_control <- function(
         b_rows <- type_rows_k[bas_k == bn]
         if (length(b_rows) == 0L) b_rows <- type_rows_k
         cp <- compute_pool_centroid(b_rows)
-        is_homo <- isTRUE(.is_homotypic_sensu_stricto_basionym(bn, tx_k)[1L])
+        is_homo <- all(.is_homotypic_sensu_stricto_basionym(rep(bn, length(b_rows)), rep(tx_k, length(b_rows)), df = df[b_rows, , drop = FALSE]))
         list(
           taxon = tx_k,
           basionym = bn,

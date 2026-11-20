@@ -1093,39 +1093,48 @@ class TestDynamicAuthorityEngineAndSynonymExpansion(unittest.TestCase):
     """Test suite for the 3-Layer Dynamic Authority Engine, GBIF synonym expansion, and geographic scopes."""
 
     def test_layer1_expanded_north_american_monographers(self):
-        """Verify expanded genus-wide Packera/Senecioneae monographers classify as Tier_1_Gold."""
-        monographers = [
-            "C. C. Freeman",
-            "A. Cronquist",
-            "J. M. Greenman",
-            "W. A. Weber",
-            "Á. Löve",
-            "R. Spellenberg",
-            "R. W. Pippen",
-            "L. J. Uttal",
-            "M. L. Fernald",
-            "P. A. Rydberg",
-            "A. A. Heller",
-            "R. Kral",
-            "R. K. Godfrey",
-            "B. A. Sorrie",
-            "G. L. Nesom",
-            "J. L. Strother",
-            "B. L. Turner",
-            "J. L. Golden",
+        """Verify core Packera monographers -> Tier_1_Gold, bare common surnames -> Tier_3_Bronze,
+        and regional/historical authorities -> Tier_2_Silver (promoted on Holotypes)."""
+        core_gold = [
+            "C. C. Freeman", "W. A. Weber", "L. J. Uttal", "G. L. Nesom",
+            "J. L. Golden", "L. D. Estes", "Dwayne Estes",
         ]
-        for det_name in monographers:
-            with self.subTest(determiner=det_name):
+        for det_name in core_gold:
+            with self.subTest(core_gold=det_name):
                 tier, _, _ = parse_determiner_tier(
-                    type_status_raw=None,
-                    identified_by_raw=det_name,
-                    recorded_by_raw="Collector",
-                    history_raw=None,
-                    institution_code_raw="SMALL_HERB",
-                    locality_raw=" Meadow",
-                    habitat_raw=None,
+                    type_status_raw=None, identified_by_raw=det_name,
+                    recorded_by_raw="Collector", history_raw=None,
+                    institution_code_raw="SMALL_HERB", locality_raw="Meadow", habitat_raw=None,
                 )
                 self.assertEqual(tier, "Tier_1_Gold", f"{det_name} should map to Tier_1_Gold")
+
+        tier_bare, _, _ = parse_determiner_tier(
+            type_status_raw=None, identified_by_raw="J. Estes",
+            recorded_by_raw="Collector", history_raw=None,
+            institution_code_raw="SMALL_HERB", locality_raw="Meadow", habitat_raw=None,
+        )
+        self.assertEqual(tier_bare, "Tier_3_Bronze", "Bare 'J. Estes' must remain Tier_3_Bronze")
+
+        regional_silver = [
+            "A. Cronquist", "J. M. Greenman", "Á. Löve", "R. Spellenberg",
+            "R. W. Pippen", "M. L. Fernald", "P. A. Rydberg", "A. A. Heller",
+            "R. Kral", "R. K. Godfrey", "B. A. Sorrie", "J. L. Strother",
+            "B. L. Turner", "A. Gray", "C. Jeffrey",
+        ]
+        for det_name in regional_silver:
+            with self.subTest(regional_silver=det_name):
+                tier, _, _ = parse_determiner_tier(
+                    type_status_raw=None, identified_by_raw=det_name,
+                    recorded_by_raw="Collector", history_raw=None,
+                    institution_code_raw="SMALL_HERB", locality_raw="Meadow", habitat_raw=None,
+                )
+                self.assertEqual(tier, "Tier_2_Silver", f"{det_name} should map to Tier_2_Silver")
+                tier_holo, _, _ = parse_determiner_tier(
+                    type_status_raw="Holotype", identified_by_raw=det_name,
+                    recorded_by_raw="Collector", history_raw=None,
+                    institution_code_raw="SMALL_HERB", locality_raw="Meadow", habitat_raw=None,
+                )
+                self.assertEqual(tier_holo, "Tier_1_Gold", f"Holotype by {det_name} must promote to Tier_1_Gold")
 
     def test_discover_corpus_authorities_promotes_multi_institution_specialist_not_local_collector(self):
         """
@@ -2053,8 +2062,10 @@ class TestPhase1AuthorityHygieneAndExsiccataeConflict(unittest.TestCase):
 
             csv_df = pd.read_csv(out_csv)
             from scripts.core.harvester import EXPORT_COLUMNS
-            self.assertEqual(list(csv_df.columns), EXPORT_COLUMNS)
-            self.assertEqual(len(csv_df.columns), 23)
+            self.assertEqual(len(EXPORT_COLUMNS), 23)
+            self.assertEqual(list(csv_df.columns[: len(EXPORT_COLUMNS)]), EXPORT_COLUMNS)
+            self.assertIn("exsiccatae_taxonomic_conflict", csv_df.columns)
+            self.assertIn("exsiccatae_gold_taxon", csv_df.columns)
 
             conn = sqlite3.connect(str(db_path))
             try:
@@ -2612,7 +2623,6 @@ class TestPhase1AuthorityHygieneAndExsiccataeConflict(unittest.TestCase):
             "J.L. Golden",
             "C.C. Freeman",
             "G.L. Nesom",
-            "E.L. Greene",
             "E.R. Moore",
             "A.S. Weakley",
             "D.E. Boufford",
@@ -2620,6 +2630,7 @@ class TestPhase1AuthorityHygieneAndExsiccataeConflict(unittest.TestCase):
         for spec_name in specialists:
             with self.subTest(specialist=spec_name):
                 self.assertEqual(_eval_tier(spec_name), "Tier_1_Gold")
+        self.assertEqual(_eval_tier("E.L. Greene"), "Tier_2_Silver")
 
         rows = []
         loan_species = [
@@ -3042,8 +3053,8 @@ class TestStep1SystematicsAndDownstreamAuthorityAudit(unittest.TestCase):
             )
             self.assertEqual(tier, "Tier_3_Bronze", f"Non-specialist '{non_spec}' falsely promoted to {tier}")
 
-        # While initial-qualified core Packera specialists DO get Tier_1_Gold (investigator Fuller routes Silver/Bronze)
-        for real_spec in ("T.M. Barkley", "Debra K. Trock", "R.R. Kowal", "J.F. Bain", "B.L. Turner", "C.C. Freeman"):
+        # While initial-qualified core Packera specialists DO get Tier_1_Gold (and B.L. Turner routes Silver)
+        for real_spec in ("T.M. Barkley", "Debra K. Trock", "R.R. Kowal", "J.F. Bain", "L.D. Estes", "C.C. Freeman"):
             tier, _, _ = parse_determiner_tier(
                 type_status_raw=None,
                 identified_by_raw=real_spec,
@@ -3054,6 +3065,10 @@ class TestStep1SystematicsAndDownstreamAuthorityAudit(unittest.TestCase):
                 habitat_raw=None,
             )
             self.assertEqual(tier, "Tier_1_Gold", f"Core specialist '{real_spec}' failed Tier_1_Gold: {tier}")
+        self.assertEqual(
+            parse_determiner_tier(None, "B.L. Turner", "Field Collector", None, "UNKNOWN_HERB", "Roadside", None)[0],
+            "Tier_2_Silver",
+        )
         self.assertEqual(
             parse_determiner_tier(None, "B. Fuller", "Field Collector", None, "NCU", "Granite outcrop near Wake Forest", None)[0],
             "Tier_2_Silver",

@@ -96,6 +96,7 @@ from scripts.core.config import (
     DEFAULT_CIS_MISSISSIPPI_LON,
     DEFAULT_GEOGRAPHIC_SCOPE,
     DEFAULT_HOME_HERBARIUM,
+    DEFAULT_INCLUDE_UNGEOREFERENCED_STATE_VOUCHERS,
     DEFAULT_MIN_CIS_MISSISSIPPI_FRAC,
     DEFAULT_MIN_FILE_SIZE_KB,
     DEFAULT_MIN_MEGAPIXELS,
@@ -125,6 +126,13 @@ from scripts.core.step01_biogeography_utils import (
     resolve_eastern_resident_whitelist,
     resolve_synonym_genera,
 )
+from scripts.core.step01_concept_authority_utils import (
+    extract_identification_year,
+    extract_typified_basionym,
+    has_open_nomenclature_qualifier,
+    is_interspecific_hybrid_formula,
+    parse_voucher_taxonomic_concept,
+)
 from scripts.core.usda_plants_ranges import filter_vouchers_by_usda_county_range
 
 _SYNONYM_GENERA: Set[str] = resolve_synonym_genera()
@@ -143,6 +151,8 @@ def _extract_canonical_binomial(
     txt = str(raw_name).strip()
     if not txt:
         return None
+    if is_interspecific_hybrid_formula(txt, allowed_genera=allowed_genera)[0]:
+        return None
     m = re.match(r"^([A-Za-z]+)(?:\s*×\s*|\s+[xX×]\s+|\s+)([a-zA-Z][a-zA-Z-]*)", txt)
     if not m:
         return None
@@ -156,7 +166,7 @@ def _extract_canonical_binomial(
 
 
 def _extract_infraspecific_taxon(raw_name: Any) -> str:
-    """Extract normalized infraspecific rank + epithet ('var. gracilis', 'subsp. ...') if present."""
+    """Extract normalized infraspecific rank + epithet ('var. gracilis', 'subsp. ...'), stripping autonyms."""
     if raw_name is None or (isinstance(raw_name, float) and math.isnan(raw_name)):
         return ""
     txt = str(raw_name).strip()
@@ -172,6 +182,9 @@ def _extract_infraspecific_taxon(raw_name: Any) -> str:
     rk_raw = m.group(1).lower()
     ep = m.group(2).lower().strip("-")
     if ep in _OPEN_NOMENCLATURE_EPITHETS:
+        return ""
+    m_sp = re.match(r"^[A-Za-z]+(?:\s*×\s*|\s+[xX×]\s+|\s+)([a-zA-Z][a-zA-Z-]*)", txt)
+    if m_sp and ep == m_sp.group(1).lower().strip("-"):
         return ""
     rk_map = {
         "ssp": "subsp.",
@@ -912,6 +925,8 @@ def standardize_packera_taxon(raw_name: Any) -> Optional[str]:
     s_compact = re.sub(r"\s+", " ", s_orig.lower())
     if s_compact in {"none", "nan", "null", "na", "unknown", "packera"}:
         return None
+    if is_interspecific_hybrid_formula(s_orig, _SYNONYM_GENERA)[0]:
+        return None
 
     cand_bin = _extract_canonical_binomial(s_orig, _SYNONYM_GENERA)
     is_non_packera_syn_genus = bool(cand_bin and cand_bin.split(" ", 1)[0] in (_SYNONYM_GENERA - {"Packera"}))
@@ -1575,7 +1590,9 @@ def export_curated_table(
                 df[c] = ""
 
         prev_tiers = df["determiner_tier"].astype(str).tolist()
-        df = apply_corpus_authority_tiers(df)
+        df = apply_corpus_authority_tiers(df, db_path=db_path)
+        if "_raw_date_identified" in df.columns:
+            df = df.drop(columns=["_raw_date_identified"])
         tiers_changed = df["determiner_tier"].astype(str).tolist() != prev_tiers
 
         if (
@@ -1590,6 +1607,14 @@ def export_curated_table(
         "locality",
         "doy",
         "species_standardized",
+        "infraspecific_taxon",
+        "exsiccatae_taxonomic_conflict",
+        "exsiccatae_gold_taxon",
+        "typified_basionym",
+        "verbatim_taxon_concept",
+        "concept_synonymy_status",
+        "identification_year",
+        "is_open_or_hybrid_concept",
         "is_centroid_or_inst_coord",
         "coord_quarantine_reason",
         "pixels_per_mm",
@@ -1645,6 +1670,11 @@ def export_curated_table(
                                 "usda_symbol",
                                 "usda_county_status",
                                 "infraspecific_taxon",
+                                "typified_basionym",
+                                "verbatim_taxon_concept",
+                                "concept_synonymy_status",
+                                "identification_year",
+                                "is_open_or_hybrid_concept",
                                 "georef_qc_status",
                                 "is_centroid_or_inst_coord",
                                 "coord_quarantine_reason",
@@ -1961,6 +1991,7 @@ class VoucherHarvester:
         min_eastern_residency_records: int = 10,
         cis_mississippi_longitude_threshold: float = DEFAULT_CIS_MISSISSIPPI_LON,
         min_cis_mississippi_fraction: float = DEFAULT_MIN_CIS_MISSISSIPPI_FRAC,
+        include_ungeoreferenced_state_vouchers: bool = DEFAULT_INCLUDE_UNGEOREFERENCED_STATE_VOUCHERS,
         webp_quality: int = 92,
         **_unused_kwargs: Any,
     ):
@@ -2202,6 +2233,7 @@ class VoucherHarvester:
         self.min_eastern_residency_records = max(1, int(min_eastern_residency_records))
         self.cis_mississippi_longitude_threshold = float(cis_mississippi_longitude_threshold)
         self.min_cis_mississippi_fraction = float(min_cis_mississippi_fraction)
+        self.include_ungeoreferenced_state_vouchers = bool(include_ungeoreferenced_state_vouchers)
         self.webp_quality = max(1, min(100, int(webp_quality)))
         self.last_usda_filter_stats: Optional[Dict[str, Any]] = None
         self._secondary_duplicate_pool: Optional[pd.DataFrame] = None
@@ -2512,14 +2544,44 @@ class VoucherHarvester:
                             )
 
                 resolved_packera = standardize_packera_taxon(raw_sci_val) or acc_from_rec
+                concept_info = parse_voucher_taxonomic_concept(
+                    rec=rec,
+                    resolved_species=resolved_packera,
+                    is_type_specimen=is_rec_type,
+                    synonym_genera=_SYNONYM_GENERA,
+                )
+                if not resolved_packera and concept_info.get("species_standardized_hint"):
+                    resolved_packera = (
+                        standardize_packera_taxon(concept_info["species_standardized_hint"])
+                        or concept_info["species_standardized_hint"]
+                    )
+                if concept_info.get("infraspecific_taxon"):
+                    infraspecific_val = str(concept_info["infraspecific_taxon"])
+                elif concept_info.get("is_open_or_hybrid_concept"):
+                    infraspecific_val = ""
                 if is_direct_genus_query or self.is_genus_wide:
                     if not resolved_packera or not re.match(r"^Packera\s+(?:[x×]\s*)?[a-z-]+$", resolved_packera):
                         seen_catalog_keys.discard(unique_key)
                         return
-                if resolved_packera and not raw_sci_val.lower().startswith(resolved_packera.lower()):
+                is_open_or_hybrid = bool(concept_info.get("is_open_or_hybrid_concept"))
+                if resolved_packera and (is_open_or_hybrid or not raw_sci_val.lower().startswith(resolved_packera.lower())):
                     sci_name_val = resolved_packera
                 else:
                     sci_name_val = raw_sci_val
+                species_raw_val = raw_sci_val
+                typ_bas_val = str(concept_info.get("typified_basionym") or "").strip()
+                if (
+                    is_rec_type
+                    and typ_bas_val
+                    and resolved_packera
+                    and raw_sci_val.lower().startswith(resolved_packera.lower())
+                    and not typ_bas_val.lower().startswith(resolved_packera.lower())
+                ):
+                    species_raw_val = str(
+                        rec.get("verbatimScientificName")
+                        or rec.get("typifiedName")
+                        or typ_bas_val
+                    ).strip()
 
                 raw_loc_val = rec.get("locality") or rec.get("verbatimLocality")
                 raw_hab_val = rec.get("habitat")
@@ -2534,6 +2596,7 @@ class VoucherHarvester:
                     locality_raw=raw_loc_val,
                     habitat_raw=raw_hab_val,
                     dynamic_specialists=None,
+                    is_open_or_hybrid=is_open_or_hybrid,
                 )
 
                 # 6. North American (CEC / US EPA) Level III Ecoregion Polygon Assignment
@@ -2568,8 +2631,13 @@ class VoucherHarvester:
                     "catalogNumber": catalog_number,
                     "institutionCode": inst_code,
                     "scientificName": sci_name_val,
-                    "species_raw": raw_sci_val,
+                    "species_raw": species_raw_val,
                     "infraspecific_taxon": infraspecific_val,
+                    "typified_basionym": typ_bas_val,
+                    "verbatim_taxon_concept": str(concept_info.get("verbatim_taxon_concept") or ""),
+                    "concept_synonymy_status": str(concept_info.get("concept_synonymy_status") or "Accepted_Sensu_Stricto"),
+                    "identification_year": concept_info.get("identification_year"),
+                    "is_open_or_hybrid_concept": is_open_or_hybrid,
                     "georef_qc_status": georef_qc_status,
                     "is_centroid_or_inst_coord": bool(is_cent_q),
                     "coord_quarantine_reason": str(coord_q_reason or ""),
@@ -2595,6 +2663,7 @@ class VoucherHarvester:
                     "_is_western_rec": bool(is_west_rec),
                     "_is_type_rec": bool(is_rec_type),
                     "_raw_identified_by": str(rec.get("identifiedBy") or "").strip(),
+                    "_raw_date_identified": str(rec.get("dateIdentified") or "").strip(),
                     "_raw_history": str(rec.get("verbatimIdentificationHistory") or "").strip(),
                     "_raw_type_status": str(rec.get("typeStatus") or "").strip(),
                     "_raw_locality": str(raw_loc_val or "").strip(),
@@ -2677,32 +2746,97 @@ class VoucherHarvester:
                     if not country_exhausted[country_code]:
                         _run_country_pages(country_code, None)
 
-            # Secondary Type-Specimen Rescue Query ensuring nomenclatural types are always captured
-            if self.exclude_western and taxon_retained < self.max_records_per_taxon:
+            # Ungeoreferenced (hasCoordinate=False) Cis-Mississippi State Rescue Pass for historical sheets
+            if (
+                use_server_lon_filter
+                and self.include_ungeoreferenced_state_vouchers
+                and taxon_retained < self.max_records_per_taxon
+            ):
                 for country_code in country_targets:
                     if taxon_retained >= self.max_records_per_taxon:
                         break
-                    type_search_kwargs: Dict[str, Any] = {
-                        "basisOfRecord": "PRESERVED_SPECIMEN",
-                        "typeStatus": "*",
-                        "limit": 300,
-                        "offset": 0,
-                    }
-                    if is_direct_genus_query and genus_key is not None:
-                        type_search_kwargs["taxonKey"] = genus_key
-                    else:
-                        type_search_kwargs["scientificName"] = taxon
-                    if country_code:
-                        type_search_kwargs["country"] = country_code
-                    try:
-                        type_resp = occ.search(**type_search_kwargs)
-                        type_results = type_resp.get("results", []) if isinstance(type_resp, dict) else []
-                    except Exception:
-                        type_results = []
-                    for t_rec in type_results:
-                        if taxon_retained >= self.max_records_per_taxon:
+                    u_offset = 0
+                    while taxon_retained < self.max_records_per_taxon:
+                        u_kwargs: Dict[str, Any] = {
+                            "basisOfRecord": "PRESERVED_SPECIMEN",
+                            "mediaType": "StillImage",
+                            "hasCoordinate": False,
+                            "limit": limit,
+                            "offset": u_offset,
+                        }
+                        if is_direct_genus_query and genus_key is not None:
+                            u_kwargs["taxonKey"] = genus_key
+                        else:
+                            u_kwargs["scientificName"] = taxon
+                        if country_code:
+                            u_kwargs["country"] = country_code
+                        try:
+                            u_resp = occ.search(**u_kwargs)
+                            u_results = u_resp.get("results", []) if isinstance(u_resp, dict) else []
+                            u_count = (
+                                int(u_resp.get("count"))
+                                if isinstance(u_resp, dict) and u_resp.get("count") is not None
+                                else (u_offset + len(u_results))
+                            )
+                        except Exception:
                             break
-                        _ingest_occurrence_record(t_rec, require_type=True)
+                        if not u_results:
+                            break
+                        # Guard against mock occ.search handlers ignoring hasCoordinate=False
+                        has_finite_lon = False
+                        for u_rec in u_results:
+                            lon_u = u_rec.get("decimalLongitude")
+                            try:
+                                if lon_u is not None and math.isfinite(float(lon_u)):
+                                    has_finite_lon = True
+                                    break
+                            except (TypeError, ValueError):
+                                pass
+                        if u_offset == 0 and has_finite_lon:
+                            break
+                        seen_before = len(seen_catalog_keys)
+                        for u_rec in u_results:
+                            if taxon_retained >= self.max_records_per_taxon:
+                                break
+                            if not is_cis_mississippi_record(u_rec.get("stateProvince"), lat=None, lon=None):
+                                continue
+                            _ingest_occurrence_record(u_rec, require_type=False)
+                        if len(seen_catalog_keys) == seen_before:
+                            break
+                        u_offset += len(u_results)
+                        if u_offset >= u_count:
+                            break
+                        time.sleep(0.05)
+
+            # Unconditional & Country-Unrestricted Type-Specimen Rescue (captures European/uncoded types even at quota)
+            type_country_targets: List[Optional[str]] = list(country_targets)
+            if self.countries and None not in type_country_targets:
+                type_country_targets.append(None)
+            for country_code in type_country_targets:
+                type_search_kwargs: Dict[str, Any] = {
+                    "basisOfRecord": "PRESERVED_SPECIMEN",
+                    "typeStatus": "*",
+                    "limit": 300,
+                    "offset": 0,
+                }
+                if is_direct_genus_query and genus_key is not None:
+                    type_search_kwargs["taxonKey"] = genus_key
+                else:
+                    type_search_kwargs["scientificName"] = taxon
+                if country_code:
+                    type_search_kwargs["country"] = country_code
+                try:
+                    type_resp = occ.search(**type_search_kwargs)
+                    type_results = type_resp.get("results", []) if isinstance(type_resp, dict) else []
+                except Exception:
+                    type_results = []
+                if not type_results:
+                    continue
+                seen_before_t = len(seen_catalog_keys)
+                for t_rec in type_results:
+                    _ingest_occurrence_record(t_rec, require_type=True)
+                if len(seen_catalog_keys) == seen_before_t and country_code is None:
+                    break
 
             self.logger.info(
                 f"Taxon '{taxon}': Processed {taxon_harvested} occurrences -> "
@@ -2798,11 +2932,18 @@ class VoucherHarvester:
                     f"Dynamic Authority Engine: Discovered {len(dyn_specs)} corpus specialist(s) "
                     f"and {len(dyn_herbs)} dynamic research herbarium/herbaria."
                 )
-            df = apply_corpus_authority_tiers(df, dynamic_specialists=dyn_specs, dynamic_herbaria=dyn_herbs)
+            df = apply_corpus_authority_tiers(
+                df,
+                dynamic_specialists=dyn_specs,
+                dynamic_herbaria=dyn_herbs,
+                db_path=self.db_path,
+                workspace_dir=self.workspace_dir,
+            )
             raw_audit_cols = [
                 c for c in (
                     "_is_western_rec", "_is_type_rec",
-                    "_raw_identified_by", "_raw_history", "_raw_type_status", "_raw_locality", "_raw_habitat",
+                    "_raw_identified_by", "_raw_date_identified", "_raw_history",
+                    "_raw_type_status", "_raw_locality", "_raw_habitat",
                 )
                 if c in df.columns
             ]
