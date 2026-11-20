@@ -179,17 +179,24 @@ local({
             assign("commandArgs", function(trailingOnly = FALSE) {
               if (isTRUE(trailingOnly)) cli_args else base::commandArgs(FALSE)
             }, envir = .GlobalEnv)
-            source(script_path, local = .GlobalEnv)
+            exprs <- parse(file = script_path, encoding = "UTF-8")
+            if (length(exprs) > 0L) {
+              eval(as.call(c(quote(`{`), as.list(exprs))), envir = .GlobalEnv)
+            }
           }
           invisible(NULL)
         }, file = out_file),
         message = function(m) {
-          err_chunks <<- c(err_chunks, conditionMessage(m))
-          invokeRestart("muffleMessage")
+          if (sink.number(type = "message") == 2L) {
+            err_chunks <<- c(err_chunks, conditionMessage(m))
+            invokeRestart("muffleMessage")
+          }
         },
         warning = function(w) {
-          err_chunks <<- c(err_chunks, paste0("Warning message: ", conditionMessage(w), "\n"))
-          invokeRestart("muffleWarning")
+          if (sink.number(type = "message") == 2L) {
+            err_chunks <<- c(err_chunks, paste0("Warning message: ", conditionMessage(w), "\n"))
+            invokeRestart("muffleWarning")
+          }
         }
       ),
       error = function(e) {

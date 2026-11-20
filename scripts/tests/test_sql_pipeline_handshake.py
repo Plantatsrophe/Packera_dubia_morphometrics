@@ -1326,13 +1326,6 @@ local({{
                     intraspecific_mode INTEGER DEFAULT 0
                 );
                 INSERT INTO pipeline_runs (run_id, start_timestamp) VALUES ('r_27', '2026-11-14T00:00:00Z');
-                CREATE TABLE otu_morphometrics (
-                    run_id TEXT NOT NULL,
-                    catalogNumber TEXT NOT NULL,
-                    plant_individual_id INTEGER NOT NULL DEFAULT 0,
-                    PC1 REAL,
-                    PRIMARY KEY (run_id, catalogNumber, plant_individual_id)
-                );
                 CREATE TABLE environmental_cache (
                     lat_lon_key TEXT PRIMARY KEY,
                     catalogNumber TEXT
