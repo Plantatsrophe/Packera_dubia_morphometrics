@@ -6,7 +6,6 @@ import json
 import math
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -17,6 +16,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.data_prep import download_geochem_wetland_layers as dl_geochem
+from scripts.tests._r_session import run_warm_r_cmd
 
 SKIP_R_REASON = "Skipping batched R Step 05 layer hygiene tests under fast audit or missing Rscript."
 SKIP_R_COND = (
@@ -246,13 +246,11 @@ class TestStep05LayerHygiene(unittest.TestCase):
             r_path = tmp_path / "run_hygiene.R"
             out_json = tmp_path / "results.json"
             r_path.write_text(_WARM_R_SCRIPT, encoding="utf-8")
-            proc = subprocess.run(
+            proc = run_warm_r_cmd(
                 ["Rscript", str(r_path), str(out_json), str(tmp_path)],
-                cwd=str(PROJECT_ROOT),
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=180,
+                stage_key="step05",
+                cwd=PROJECT_ROOT,
+                skip_figures=True,
             )
             if proc.returncode != 0 or not out_json.exists():
                 raise RuntimeError(f"Warm R hygiene check failed (rc={proc.returncode}):\n{proc.stdout}\n{proc.stderr}")

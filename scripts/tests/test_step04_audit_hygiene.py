@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-import json, math, os, re, shutil, sqlite3, subprocess, sys, tempfile, unittest
+import json, math, os, re, shutil, sqlite3, sys, tempfile, unittest
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -11,6 +11,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.core.db_schema import init_db_schema
+from scripts.tests._r_session import run_warm_r_cmd
 
 SKIP_R_REASON = "Skipping batched R Step 04 audit hygiene tests under fast audit or missing Rscript."
 SKIP_R_COND = (
@@ -206,9 +207,9 @@ class TestStep04AuditHygiene(unittest.TestCase):
         fx = _seed_step04_inputs(tmp_p)
         r_path, out_json = tmp_p / "run_step04_hygiene.R", tmp_p / "results.json"
         r_path.write_text(_WARM_R_SCRIPT, encoding="utf-8")
-        proc = subprocess.run(
+        proc = run_warm_r_cmd(
             ["Rscript", str(r_path), str(out_json), str(tmp_p), str(fx["db_path"]), str(fx["v_csv"]), str(fx["s04_dir"])],
-            cwd=str(PROJECT_ROOT), capture_output=True, text=True, check=False, timeout=180,
+            stage_key="step04", cwd=PROJECT_ROOT,
         )
         if proc.returncode != 0 or not out_json.exists():
             raise RuntimeError(f"Batched Step 04 R failed (rc={proc.returncode}):\n{proc.stdout}\n{proc.stderr}")

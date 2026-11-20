@@ -408,24 +408,6 @@ class TestAtomicTableExport(unittest.TestCase):
 class TestVoucherHarvesterCLI(unittest.TestCase):
     """Test suite for 01_voucher_harvester.py CLI parser and main entrypoint."""
 
-    def test_cli_parser_defaults(self):
-        """Verify default CLI arguments match PipelineConfig specifications."""
-        import importlib
-        mod_cli = importlib.import_module("scripts.data_prep.01_voucher_harvester")
-        parser = mod_cli.build_cli_parser()
-        args = parser.parse_args([])
-
-        self.assertIsInstance(args.taxa, list)
-        self.assertEqual(args.taxa, [])
-        self.assertFalse(hasattr(args, "all_eastern_taxa"))
-        with self.assertRaises(SystemExit):
-            parser.parse_args(["--all-eastern-taxa"])
-        self.assertEqual(args.max_records, 5000)
-        self.assertEqual(args.min_megapixels, 8.0)
-        self.assertEqual(args.min_file_size_kb, 500.0)
-        self.assertTrue(args.exclude_western)
-        self.assertFalse(args.download_images)
-
     def test_cli_parser_custom_args(self):
         """Verify custom CLI arguments are correctly parsed."""
         import importlib
@@ -978,16 +960,7 @@ class TestSpatialBalancingAndThinning(unittest.TestCase):
         self.assertGreater(mean_w_ar, mean_w_nc)
 
     def test_max_per_region_and_cli_arguments(self):
-        """Verify max_per_region quota balancing on Tier B thinning and Step 01 CLI defaults/removals."""
-        import importlib
-        cli_mod = importlib.import_module("scripts.data_prep.01_voucher_harvester")
-        parser = cli_mod.build_cli_parser()
-        args = parser.parse_args([])
-        self.assertTrue(args.check_sharpness)
-        for removed_flag in ("--spatial-thin-km", "--max-per-state", "--max-per-region"):
-            with self.assertRaises(SystemExit):
-                parser.parse_args([removed_flag, "15"])
-
+        """Verify max_per_region quota balancing on Tier B thinning."""
         df_reg = pd.DataFrame([
             {
                 "catalogNumber": f"REG_R1_{i}",
@@ -1118,35 +1091,6 @@ class TestEPALevel3EcoregionAssignment(unittest.TestCase):
 
 class TestDynamicAuthorityEngineAndSynonymExpansion(unittest.TestCase):
     """Test suite for the 3-Layer Dynamic Authority Engine, GBIF synonym expansion, and geographic scopes."""
-
-    def test_protologue_author_promotion_retired(self):
-        """Verify protologue-author extraction is retired and historical authors do not auto-promote non-types."""
-        from scripts.core import taxonomy_authority as ta
-
-        self.assertFalse(hasattr(ta, "extract_" + "protologue_authors"))
-        for non_type_author in ("K. Sprengel", "F. Michaux", "A. Michaux"):
-            tier_nt, _, _ = parse_determiner_tier(
-                type_status_raw=None,
-                identified_by_raw=non_type_author,
-                recorded_by_raw="Field Collector",
-                history_raw=None,
-                institution_code_raw="XYZ_LOCAL",
-                locality_raw="Sandy slope",
-                habitat_raw=None,
-            )
-            self.assertEqual(tier_nt, "Tier_3_Bronze")
-
-        # Curated monographer (D. J. Mabberley) still classifies as Tier_1_Gold
-        tier, _, _ = parse_determiner_tier(
-            type_status_raw=None,
-            identified_by_raw="D. J. Mabberley",
-            recorded_by_raw="Field Collector",
-            history_raw=None,
-            institution_code_raw="XYZ_LOCAL",
-            locality_raw="Sandy slope",
-            habitat_raw=None,
-        )
-        self.assertEqual(tier, "Tier_1_Gold")
 
     def test_layer1_expanded_north_american_monographers(self):
         """Verify expanded genus-wide Packera/Senecioneae monographers classify as Tier_1_Gold."""

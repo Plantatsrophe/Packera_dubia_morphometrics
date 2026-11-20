@@ -26,10 +26,19 @@ _MANAGED_ENV_KEYS = (
     "PLANTMATICS_RUN_DIR",
     "PLANTMATICS_GENOMICS_DIR",
     "PLANTMATICS_SKIP_FIGURES",
+    "PLANTMATICS_DEMO_MODE",
+    "PLANTMATICS_MAX_WORKERS",
+    "PLANTMATICS_IN_FORK_WORKER",
+    "PLANTMATICS_CYTOLOGY_DIR",
     "PACKERA_DB_PATH",
     "PACKERA_RUN_DIR",
     "PACKERA_GENOMICS_DIR",
     "PACKERA_SKIP_FIGURES",
+    "PACKERA_DEMO_MODE",
+    "PACKERA_MAX_WORKERS",
+    "PACKERA_CYTOLOGY_DIR",
+    "PACKERA_SQLITE_DB",
+    "RUN_ID",
 )
 
 _WORKER_R_CODE = r"""
@@ -167,6 +176,9 @@ local({
               fn_obj(opts_obj)
             }
           } else {
+            assign("commandArgs", function(trailingOnly = FALSE) {
+              if (isTRUE(trailingOnly)) cli_args else base::commandArgs(FALSE)
+            }, envir = .GlobalEnv)
             source(script_path, local = .GlobalEnv)
           }
           invisible(NULL)
@@ -421,6 +433,7 @@ class WarmRSession:
         self,
         script_or_code: Union[Path, str],
         *,
+        cli_args: Sequence[Union[str, Path]] = (),
         cwd: Optional[Union[str, Path]] = None,
         env: Optional[Mapping[str, str]] = None,
         skip_figures: bool = False,
@@ -434,6 +447,7 @@ class WarmRSession:
             s_path.write_text(script_or_code, encoding="utf-8")
         return self._dispatch(
             mode="script",
+            cli_args=[str(a) for a in cli_args],
             script_path=s_path,
             cwd=cwd,
             env=env,
@@ -493,7 +507,9 @@ def run_warm_r_cmd(
     parts = [str(c) for c in cmd]
     if len(parts) >= 3 and parts[1] == "-e":
         sk = stage_key or "step03"
-        return get_warm_r_session(sk).run_script(parts[2], cwd=cwd, env=env, skip_figures=skip_figures)
+        return get_warm_r_session(sk).run_script(
+            parts[2], cli_args=parts[3:], cwd=cwd, env=env, skip_figures=skip_figures
+        )
     if len(parts) >= 2:
         script_name = Path(parts[1]).name
         resolved_stage = _SCRIPT_TO_STAGE.get(script_name)
@@ -502,7 +518,9 @@ def run_warm_r_cmd(
                 parts[2:], cwd=cwd, env=env, skip_figures=skip_figures
             )
         sk = stage_key or "step04"
-        return get_warm_r_session(sk).run_script(Path(parts[1]), cwd=cwd, env=env, skip_figures=skip_figures)
+        return get_warm_r_session(sk).run_script(
+            Path(parts[1]), cli_args=parts[2:], cwd=cwd, env=env, skip_figures=skip_figures
+        )
     raise ValueError(f"Unsupported Rscript command sequence: {parts}")
 
 

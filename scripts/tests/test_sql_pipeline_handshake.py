@@ -901,179 +901,6 @@ class TestSQLPipelineHandshake(unittest.TestCase):
                 conn.close()
 
 
-    def test_curation_triage_hybrid_parentage_columns_and_migration(self) -> None:
-        """Verify curation_triage and v_integrative_triage_master expose hybrid_parent_1, hybrid_parent_2, and hybrid_zone_cohesion_pass, and migrate older schemas idempotently."""
-        with tempfile.TemporaryDirectory() as tmp:
-            db_p = Path(tmp) / "legacy_ct.sqlite"
-            raw_conn = sqlite3.connect(db_p)
-            raw_conn.executescript(
-                """
-                CREATE TABLE pipeline_runs (run_id TEXT PRIMARY KEY, start_time TEXT);
-                INSERT INTO pipeline_runs (run_id, start_time) VALUES ('r1', '2026-11-12T00:00:00Z');
-                CREATE TABLE curation_triage (
-                    run_id TEXT NOT NULL,
-                    catalogNumber TEXT NOT NULL,
-                    plant_individual_id INTEGER NOT NULL DEFAULT 0,
-                    taxonomic_treatment_subtype TEXT,
-                    recommended_determination TEXT,
-                    cryptic_cluster_cohesion_pass INTEGER,
-                    is_completed_voucher INTEGER,
-                    PRIMARY KEY (run_id, catalogNumber, plant_individual_id)
-                );
-                INSERT INTO curation_triage VALUES ('r1', 'NCU-HYB-1', 0, 'Hybrid_Introgressant', 'Packera dubia x Packera anonyma', 0, 1);
-                """
-            )
-            raw_conn.commit()
-            raw_conn.close()
-
-            conn = get_db_connection(db_p, init_schema=True)
-            try:
-                ct_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(curation_triage);").fetchall()}
-                mv_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(v_integrative_triage_master);").fetchall()}
-                for req_col in ("hybrid_zone_cohesion_pass", "hybrid_parent_1", "hybrid_parent_2"):
-                    self.assertIn(req_col, ct_cols)
-                    self.assertIn(req_col, mv_cols)
-                row = conn.execute(
-                    "SELECT taxonomic_treatment_subtype, recommended_determination FROM curation_triage WHERE catalogNumber = 'NCU-HYB-1';"
-                ).fetchone()
-                self.assertEqual(tuple(row), ("Hybrid_Introgressant", "Packera dubia x Packera anonyma"))
-            finally:
-                conn.close()
-
-    def test_misid_and_cryptic_schema_20261119_columns_and_migration(self) -> None:
-        """Verify schema 20261119 migrates and persists OOF CDA, self-ellipsoid, open_set_df, spatial-cline, and resurrection_basionym columns."""
-        from scripts.core.db import (
-            ensure_pipeline_run,
-            persist_otu_morphometrics,
-            populate_run_active_cohort,
-            upsert_rows_generic,
-        )
-        from scripts.core.db_schema import PACKERA_SCHEMA_USER_VERSION
-
-        self.assertGreaterEqual(PACKERA_SCHEMA_USER_VERSION, 20261119)
-        with tempfile.TemporaryDirectory() as tmp:
-            db_p = Path(tmp) / "legacy_20261118.sqlite"
-            raw_conn = sqlite3.connect(db_p)
-            raw_conn.executescript(
-                """
-                PRAGMA user_version = 20261118;
-                CREATE TABLE pipeline_runs (run_id TEXT PRIMARY KEY, run_dir TEXT, start_timestamp TEXT, end_timestamp TEXT, git_commit_sha TEXT, cli_arguments_json TEXT, focal_taxon TEXT, intraspecific_mode INTEGER DEFAULT 0);
-                INSERT INTO pipeline_runs (run_id, start_timestamp) VALUES ('r_res', '2026-11-12T12:00:00Z');
-                CREATE TABLE curation_triage (
-                    run_id TEXT NOT NULL,
-                    catalogNumber TEXT NOT NULL,
-                    plant_individual_id INTEGER NOT NULL DEFAULT 0,
-                    taxonomic_status_call TEXT,
-                    taxonomic_treatment_subtype TEXT,
-                    recommended_determination TEXT,
-                    cryptic_cluster_cohesion_pass INTEGER,
-                    hybrid_zone_cohesion_pass INTEGER,
-                    hybrid_parent_1 TEXT,
-                    hybrid_parent_2 TEXT,
-                    is_completed_voucher INTEGER,
-                    PRIMARY KEY (run_id, catalogNumber, plant_individual_id)
-                );
-                INSERT INTO curation_triage VALUES (
-                    'r_res', 'NCU-OLD-1', 0, 'Species_Confirmed', 'Confirmed_Species', 'Packera dubia', 0, 0, NULL, NULL, 1
-                );
-                """
-            )
-            raw_conn.commit()
-            raw_conn.close()
-
-            conn = get_db_connection(db_p, init_schema=True)
-            try:
-                om_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(otu_morphometrics);").fetchall()}
-                ct_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(curation_triage);").fetchall()}
-                mv_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(v_integrative_triage_master);").fetchall()}
-                for req_om in ("cda_oof_posterior_prob", "cl_target_threshold", "self_morph_mahal_d2", "self_morph_df", "open_set_df"):
-                    self.assertIn(req_om, om_cols)
-                    self.assertIn(req_om, mv_cols)
-                for req_ct in ("cryptic_non_clinal_pass", "resurrection_basionym"):
-                    self.assertIn(req_ct, ct_cols)
-                    self.assertIn(req_ct, mv_cols)
-
-                v_rows = [
-                    {
-                        "catalogNumber": "NCU-RES-01",
-                        "institutionCode": "NCU",
-                        "scientificName": "Packera anonyma",
-                        "species_raw": "Senecio earlei",
-                        "species_standardized": "Packera anonyma",
-                        "determiner_tier": "Tier_1_Gold",
-                        "qc_status": "PASS",
-                    }
-                ]
-                upsert_rows_generic(conn, table_name='vouchers', rows=v_rows, pk_cols=('catalogNumber',))
-                ensure_pipeline_run(conn, run_id="r_res")
-                populate_run_active_cohort(conn, run_id="r_res", voucher_rows=v_rows, clear_existing=True)
-                persist_otu_morphometrics(
-                    conn,
-                    run_id="r_res",
-                    otu_rows=[
-                        {
-                            "catalogNumber": "NCU-RES-01",
-                            "plant_individual_id": 0,
-                            "species_standardized": "Packera anonyma",
-                            "determiner_tier": "Tier_1_Gold",
-                            "cda_predicted_taxon": "Packera anonyma",
-                            "cda_posterior_prob": 0.62,
-                            "cda_oof_posterior_prob": 0.54,
-                            "cl_target_threshold": 0.74,
-                            "self_morph_mahal_d2": 9.85,
-                            "self_morph_df": 4,
-                            "min_congener_mahal_d2": 32.4,
-                            "min_congener_taxon": "Packera dubia",
-                            "open_set_novelty_p": 0.0018,
-                            "open_set_df": 14,
-                            "nearest_type_basionym": "Senecio earlei",
-                            "nearest_type_basionym_d2": 2.15,
-                        }
-                    ],
-                )
-                upsert_rows_generic(
-                    conn,
-                    table_name="curation_triage",
-                    rows=[
-                        {
-                            "run_id": "r_res",
-                            "catalogNumber": "NCU-RES-01",
-                            "plant_individual_id": 0,
-                            "taxonomic_status_call": "Taxonomic_Resurrection_Candidate",
-                            "recommended_determination": "Packera anonyma [Resurrect Basionym: Senecio earlei]",
-                            "taxonomic_treatment_broad": "Misidentification / Cryptic Species",
-                            "taxonomic_treatment_subtype": "Putative_Cryptic_Species",
-                            "cryptic_cluster_cohesion_pass": 1,
-                            "cryptic_non_clinal_pass": 1,
-                            "resurrection_basionym": "Senecio earlei",
-                            "hybrid_zone_cohesion_pass": 0,
-                            "is_completed_voucher": 1,
-                        }
-                    ],
-                    pk_cols=("run_id", "catalogNumber", "plant_individual_id"),
-                )
-                mv_row = conn.execute(
-                    """
-                    SELECT cda_oof_posterior_prob, cl_target_threshold, self_morph_mahal_d2, self_morph_df,
-                           open_set_df, cryptic_non_clinal_pass, resurrection_basionym, taxonomic_status_call
-                    FROM v_integrative_triage_master
-                    WHERE run_id = 'r_res' AND catalogNumber = 'NCU-RES-01';
-                    """
-                ).fetchone()
-                self.assertIsNotNone(mv_row)
-                self.assertAlmostEqual(float(mv_row[0]), 0.54, places=3)
-                self.assertAlmostEqual(float(mv_row[1]), 0.74, places=3)
-                self.assertAlmostEqual(float(mv_row[2]), 9.85, places=3)
-                self.assertEqual(int(mv_row[3]), 4)
-                self.assertEqual(int(mv_row[4]), 14)
-                self.assertEqual(int(mv_row[5]), 1)
-                self.assertEqual(str(mv_row[6]), "Senecio earlei")
-                self.assertEqual(str(mv_row[7]), "Taxonomic_Resurrection_Candidate")
-            finally:
-                conn.close()
-
-
-
     def test_legacy_extracted_leaves_check_constraint_rebuilt_on_init_and_purge(self) -> None:
         """Verify pre-LM3 extracted_leaves CHECK constraints and retired NOT NULL columns are stripped by init_db_schema, savepoint transactions, and purge_segments_and_runs."""
         from scripts.core.db import purge_segments_and_runs, record_voucher_segmentation_transaction
@@ -1384,308 +1211,31 @@ local({{
                 self.assertFalse(Path(f"{legacy_r}-shm").exists())
                 self.assertTrue(target_r.is_file())
 
-    def test_curation_triage_genomic_propagation_columns_and_migration(self) -> None:
-        """Verify schema 20261127 migrates from previous schema version and exposes the 6 genomic propagation columns."""
-        from scripts.core.db import ensure_pipeline_run, populate_run_active_cohort
-        from scripts.core.db_schema import PACKERA_SCHEMA_USER_VERSION, PLANTMATICS_SCHEMA_USER_VERSION
-
-        self.assertEqual(PLANTMATICS_SCHEMA_USER_VERSION, 20261127)
-        self.assertEqual(PACKERA_SCHEMA_USER_VERSION, 20261127)
-        prev_ver = PLANTMATICS_SCHEMA_USER_VERSION - 1
-        prop_cols = (
-            "genomic_propagation_tier",
-            "tier0_calibrated_taxon",
-            "tier0_calibrated_prob",
-            "tier0_abstention_flag",
-            "deme_mahal_d2",
-            "cluster_propagated_gdi",
-        )
-
-        with tempfile.TemporaryDirectory() as tmp:
-            db_p = Path(tmp) / "legacy_prop.sqlite"
-            raw_conn = sqlite3.connect(db_p)
-            raw_conn.executescript(
-                f"""
-                PRAGMA user_version = {prev_ver};
-                CREATE TABLE pipeline_runs (
-                    run_id TEXT PRIMARY KEY,
-                    run_dir TEXT,
-                    start_timestamp TEXT,
-                    end_timestamp TEXT,
-                    git_commit_sha TEXT,
-                    cli_arguments_json TEXT,
-                    focal_taxon TEXT,
-                    intraspecific_mode INTEGER DEFAULT 0
-                );
-                INSERT INTO pipeline_runs (run_id, start_timestamp) VALUES ('r_prop', '2026-11-14T00:00:00Z');
-                CREATE TABLE curation_triage (
-                    run_id TEXT NOT NULL,
-                    catalogNumber TEXT NOT NULL,
-                    plant_individual_id INTEGER NOT NULL DEFAULT 0,
-                    taxonomic_status_call TEXT,
-                    taxonomic_treatment_subtype TEXT,
-                    recommended_determination TEXT,
-                    cryptic_cluster_cohesion_pass INTEGER,
-                    is_completed_voucher INTEGER,
-                    PRIMARY KEY (run_id, catalogNumber, plant_individual_id)
-                );
-                INSERT INTO curation_triage VALUES (
-                    'r_prop', 'NCU-PROP-OLD', 0, 'Species_Confirmed', 'Confirmed_Species', 'Packera dubia', 0, 1
-                );
-                """
-            )
-            raw_conn.commit()
-            raw_conn.close()
-
-            conn = get_db_connection(db_p, init_schema=True)
-            try:
-                uv_after = int(conn.execute("PRAGMA user_version;").fetchone()[0])
-                self.assertEqual(uv_after, PLANTMATICS_SCHEMA_USER_VERSION)
-                ct_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(curation_triage);").fetchall()}
-                mv_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(v_integrative_triage_master);").fetchall()}
-                for col in prop_cols:
-                    self.assertIn(col, ct_cols, f"curation_triage missing {col}")
-                    self.assertIn(col, mv_cols, f"v_integrative_triage_master missing {col}")
-
-                kept = conn.execute(
-                    "SELECT recommended_determination FROM curation_triage WHERE run_id = 'r_prop' AND catalogNumber = 'NCU-PROP-OLD';"
-                ).fetchone()
-                self.assertEqual(kept[0], "Packera dubia")
-
-                v_rows = [
-                    {
-                        "catalogNumber": "NCU-PROP-NEW",
-                        "institutionCode": "NCU",
-                        "scientificName": "Packera dubia",
-                        "species_standardized": "Packera dubia",
-                        "determiner_tier": "Tier_2_Silver",
-                        "qc_status": "PASS",
-                    }
-                ]
-                upsert_vouchers_records(conn, v_rows)
-                ensure_pipeline_run(conn, run_id="r_prop")
-                populate_run_active_cohort(conn, run_id="r_prop", voucher_rows=v_rows, clear_existing=False)
-                upsert_rows_generic(
-                    conn,
-                    table_name="curation_triage",
-                    rows=[
-                        {
-                            "run_id": "r_prop",
-                            "catalogNumber": "NCU-PROP-NEW",
-                            "plant_individual_id": 0,
-                            "taxonomic_status_call": "Tier0_Calibrated_Match",
-                            "taxonomic_treatment_subtype": "Confirmed_Species",
-                            "recommended_determination": "Packera dubia",
-                            "genomic_propagation_tier": "Tier0_Projected_Calibrated",
-                            "tier0_calibrated_taxon": "Packera dubia",
-                            "tier0_calibrated_prob": 0.94,
-                            "tier0_abstention_flag": 0,
-                            "deme_mahal_d2": 1.85,
-                            "cluster_propagated_gdi": 0.84,
-                            "is_completed_voucher": 1,
-                        }
-                    ],
-                    pk_cols=("run_id", "catalogNumber", "plant_individual_id"),
-                )
-                mv_row = conn.execute(
-                    """
-                    SELECT genomic_propagation_tier, tier0_calibrated_taxon, tier0_calibrated_prob,
-                           tier0_abstention_flag, deme_mahal_d2, cluster_propagated_gdi
-                    FROM v_integrative_triage_master
-                    WHERE run_id = 'r_prop' AND catalogNumber = 'NCU-PROP-NEW';
-                    """
-                ).fetchone()
-                self.assertIsNotNone(mv_row)
-                self.assertEqual(mv_row[0], "Tier0_Projected_Calibrated")
-                self.assertEqual(mv_row[1], "Packera dubia")
-                self.assertAlmostEqual(float(mv_row[2]), 0.94, places=4)
-                self.assertEqual(int(mv_row[3]), 0)
-                self.assertAlmostEqual(float(mv_row[4]), 1.85, places=4)
-                self.assertAlmostEqual(float(mv_row[5]), 0.84, places=4)
-            finally:
-                conn.close()
-
-    def test_cytology_schema_migration_and_purge_runs_only_preservation(self) -> None:
-        """Verify schema 20261125 -> 20261127 creates cytology tables/columns and purge_runs_only preserves them."""
+    def test_backbone_geochem_wetland_schema_20261127_roundtrip(self) -> None:
+        """Verify 20261118 -> 20261127 consolidated migration creates/migrates all schema tables/columns, roundtrips through v_integrative_triage_master, and preserves Tier A tables across purge_runs_only."""
         from scripts.core.db import (
             ensure_pipeline_run,
+            get_db_connection,
+            persist_otu_morphometrics,
             populate_run_active_cohort,
             purge_runs_only,
             upsert_rows_generic,
             upsert_vouchers_records,
         )
-        from scripts.core.db_schema import PLANTMATICS_SCHEMA_USER_VERSION
+        from scripts.core.db_schema import (
+            PACKERA_SCHEMA_USER_VERSION,
+            PLANTMATICS_SCHEMA_USER_VERSION,
+        )
 
         self.assertEqual(PLANTMATICS_SCHEMA_USER_VERSION, 20261127)
-        cyto_ct_cols = (
-            "cytology_linkage_tier",
-            "voucher_sporophytic_2n",
-            "voucher_ploidy_level",
-            "taxon_reported_cytotypes",
-            "is_multi_cytotype_taxon",
-            "cytotype_reproductive_barrier_pass",
+        self.assertEqual(PACKERA_SCHEMA_USER_VERSION, 20261127)
+        expected_om_cols = (
+            "cda_oof_posterior_prob",
+            "cl_target_threshold",
+            "self_morph_mahal_d2",
+            "self_morph_df",
+            "open_set_df",
         )
-        with tempfile.TemporaryDirectory() as tmp:
-            ws = Path(tmp)
-            db_p = ws / "data" / "plantmatics.sqlite"
-            db_p.parent.mkdir(parents=True, exist_ok=True)
-            raw_conn = sqlite3.connect(db_p)
-            raw_conn.executescript(
-                """
-                PRAGMA user_version = 20261125;
-                CREATE TABLE pipeline_runs (
-                    run_id TEXT PRIMARY KEY,
-                    run_dir TEXT,
-                    start_timestamp TEXT,
-                    end_timestamp TEXT,
-                    git_commit_sha TEXT,
-                    cli_arguments_json TEXT,
-                    focal_taxon TEXT,
-                    intraspecific_mode INTEGER DEFAULT 0
-                );
-                INSERT INTO pipeline_runs (run_id, start_timestamp) VALUES ('r_cyto', '2026-11-14T00:00:00Z');
-                CREATE TABLE curation_triage (
-                    run_id TEXT NOT NULL,
-                    catalogNumber TEXT NOT NULL,
-                    plant_individual_id INTEGER NOT NULL DEFAULT 0,
-                    taxonomic_status_call TEXT,
-                    recommended_determination TEXT,
-                    genomic_propagation_tier TEXT,
-                    tier0_calibrated_taxon TEXT,
-                    tier0_calibrated_prob REAL,
-                    tier0_abstention_flag INTEGER,
-                    deme_mahal_d2 REAL,
-                    cluster_propagated_gdi REAL,
-                    PRIMARY KEY (run_id, catalogNumber, plant_individual_id)
-                );
-                INSERT INTO curation_triage (
-                    run_id, catalogNumber, plant_individual_id, taxonomic_status_call, recommended_determination
-                ) VALUES ('r_cyto', 'NCU-CYTO-OLD', 0, 'Species_Confirmed', 'Packera aurea');
-                """
-            )
-            raw_conn.commit()
-            raw_conn.close()
-
-            conn = get_db_connection(db_p, init_schema=True)
-            try:
-                self.assertEqual(int(conn.execute("PRAGMA user_version;").fetchone()[0]), 20261127)
-                tables = {str(r[0]) for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table';").fetchall()}
-                self.assertIn("cytological_records", tables)
-                self.assertIn("taxon_cytology_summary", tables)
-
-                ct_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(curation_triage);").fetchall()}
-                mv_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(v_integrative_triage_master);").fetchall()}
-                for col in cyto_ct_cols:
-                    self.assertIn(col, ct_cols, f"curation_triage missing {col}")
-                    self.assertIn(col, mv_cols, f"v_integrative_triage_master missing {col}")
-
-                old_row = conn.execute(
-                    "SELECT recommended_determination FROM curation_triage WHERE run_id='r_cyto' AND catalogNumber='NCU-CYTO-OLD';"
-                ).fetchone()
-                self.assertEqual(old_row[0], "Packera aurea")
-
-                upsert_rows_generic(
-                    conn,
-                    table_name="cytological_records",
-                    rows=[
-                        {
-                            "cytology_id": "CYTO-001",
-                            "source_db": "CCDB",
-                            "original_taxon_name": "Senecio aureus",
-                            "basionym_name": "Senecio aureus",
-                            "species_standardized": "Packera aurea",
-                            "catalogNumber": "NCU-CYTO-V1",
-                            "cytology_linkage_tier": "C1_Direct_Cytovoucher",
-                            "sporophytic_2n": 44,
-                            "base_x": 22,
-                            "ploidy_level": 2,
-                        }
-                    ],
-                    pk_cols=("cytology_id",),
-                )
-                upsert_rows_generic(
-                    conn,
-                    table_name="taxon_cytology_summary",
-                    rows=[
-                        {
-                            "species_standardized": "Packera aurea",
-                            "n_cytology_records": 1,
-                            "n_direct_cytovouchers": 1,
-                            "modal_sporophytic_2n": 44,
-                            "modal_base_x": 22,
-                            "modal_ploidy_level": 2,
-                            "reported_cytotypes": "2x",
-                            "is_multi_cytotype_taxon": 0,
-                        }
-                    ],
-                    pk_cols=("species_standardized",),
-                )
-                cyto_vrows = [
-                    {
-                        "catalogNumber": "NCU-CYTO-V1",
-                        "institutionCode": "NCU",
-                        "scientificName": "Packera aurea",
-                        "species_standardized": "Packera aurea",
-                        "determiner_tier": "Tier_1_Gold",
-                        "qc_status": "PASS",
-                    }
-                ]
-                upsert_vouchers_records(conn, cyto_vrows)
-                ensure_pipeline_run(conn, run_id="r_cyto")
-                populate_run_active_cohort(conn, run_id="r_cyto", voucher_rows=cyto_vrows, clear_existing=False)
-                upsert_rows_generic(
-                    conn,
-                    table_name="curation_triage",
-                    rows=[
-                        {
-                            "run_id": "r_cyto",
-                            "catalogNumber": "NCU-CYTO-V1",
-                            "plant_individual_id": 0,
-                            "taxonomic_status_call": "Species_Confirmed",
-                            "recommended_determination": "Packera aurea",
-                            "cytology_linkage_tier": "C1_Direct_Cytovoucher",
-                            "voucher_sporophytic_2n": 44,
-                            "voucher_ploidy_level": 2,
-                            "taxon_reported_cytotypes": "2x, 4x",
-                            "is_multi_cytotype_taxon": 1,
-                            "cytotype_reproductive_barrier_pass": 1,
-                        }
-                    ],
-                    pk_cols=("run_id", "catalogNumber", "plant_individual_id"),
-                )
-                mv_cyto = conn.execute(
-                    """
-                    SELECT cytology_linkage_tier, voucher_sporophytic_2n, voucher_ploidy_level,
-                           taxon_reported_cytotypes, is_multi_cytotype_taxon, cytotype_reproductive_barrier_pass
-                    FROM v_integrative_triage_master
-                    WHERE run_id = 'r_cyto' AND catalogNumber = 'NCU-CYTO-V1';
-                    """
-                ).fetchone()
-                self.assertEqual(tuple(mv_cyto), ("C1_Direct_Cytovoucher", 44, 2, "2x, 4x", 1, 1))
-            finally:
-                conn.close()
-
-            purge_runs_only(workspace_root=ws, db_path=db_p, vacuum=False)
-            conn2 = get_db_connection(db_p, init_schema=False)
-            try:
-                self.assertEqual(conn2.execute("SELECT COUNT(*) FROM cytological_records;").fetchone()[0], 1)
-                self.assertEqual(conn2.execute("SELECT COUNT(*) FROM taxon_cytology_summary;").fetchone()[0], 1)
-                self.assertEqual(conn2.execute("SELECT COUNT(*) FROM curation_triage;").fetchone()[0], 0)
-            finally:
-                conn2.close()
-
-    def test_backbone_geochem_wetland_schema_20261127_roundtrip(self) -> None:
-        """Verify 20261126 -> 20261127 migration creates backbone/wetland/geochem tables/cols and master view aliases."""
-        from scripts.core.db import (
-            ensure_pipeline_run,
-            get_db_connection,
-            populate_run_active_cohort,
-            upsert_rows_generic,
-            upsert_vouchers_records,
-        )
-        from scripts.core.db_schema import PLANTMATICS_SCHEMA_USER_VERSION
-
-        self.assertEqual(PLANTMATICS_SCHEMA_USER_VERSION, 20261127)
         expected_backbone_cols = {
             "species_standardized",
             "target_genus",
@@ -1728,6 +1278,23 @@ local({{
             "nwi_wetland_dist_m",
         )
         expected_ct_cols = (
+            "hybrid_zone_cohesion_pass",
+            "hybrid_parent_1",
+            "hybrid_parent_2",
+            "cryptic_non_clinal_pass",
+            "resurrection_basionym",
+            "genomic_propagation_tier",
+            "tier0_calibrated_taxon",
+            "tier0_calibrated_prob",
+            "tier0_abstention_flag",
+            "deme_mahal_d2",
+            "cluster_propagated_gdi",
+            "cytology_linkage_tier",
+            "voucher_sporophytic_2n",
+            "voucher_ploidy_level",
+            "taxon_reported_cytotypes",
+            "is_multi_cytotype_taxon",
+            "cytotype_reproductive_barrier_pass",
             "hydro_edaphic_niche_regime",
             "wetland_fidelity_concordance",
             "basionym_synonymy_type",
@@ -1741,11 +1308,13 @@ local({{
         )
 
         with tempfile.TemporaryDirectory() as tmp:
-            db_p = Path(tmp) / "legacy_20261126.sqlite"
+            ws = Path(tmp)
+            db_p = ws / "data" / "plantmatics.sqlite"
+            db_p.parent.mkdir(parents=True, exist_ok=True)
             raw_conn = sqlite3.connect(db_p)
             raw_conn.executescript(
                 """
-                PRAGMA user_version = 20261126;
+                PRAGMA user_version = 20261118;
                 CREATE TABLE pipeline_runs (
                     run_id TEXT PRIMARY KEY,
                     run_dir TEXT,
@@ -1757,6 +1326,13 @@ local({{
                     intraspecific_mode INTEGER DEFAULT 0
                 );
                 INSERT INTO pipeline_runs (run_id, start_timestamp) VALUES ('r_27', '2026-11-14T00:00:00Z');
+                CREATE TABLE otu_morphometrics (
+                    run_id TEXT NOT NULL,
+                    catalogNumber TEXT NOT NULL,
+                    plant_individual_id INTEGER NOT NULL DEFAULT 0,
+                    PC1 REAL,
+                    PRIMARY KEY (run_id, catalogNumber, plant_individual_id)
+                );
                 CREATE TABLE environmental_cache (
                     lat_lon_key TEXT PRIMARY KEY,
                     catalogNumber TEXT
@@ -1767,10 +1343,15 @@ local({{
                     catalogNumber TEXT NOT NULL,
                     plant_individual_id INTEGER NOT NULL DEFAULT 0,
                     taxonomic_status_call TEXT,
+                    taxonomic_treatment_subtype TEXT,
                     recommended_determination TEXT,
+                    cryptic_cluster_cohesion_pass INTEGER,
+                    is_completed_voucher INTEGER,
                     PRIMARY KEY (run_id, catalogNumber, plant_individual_id)
                 );
-                INSERT INTO curation_triage VALUES ('r_27', 'NCU-OLD-26', 0, 'Species_Confirmed', 'Packera aurea');
+                INSERT INTO curation_triage VALUES (
+                    'r_27', 'NCU-OLD-26', 0, 'Species_Confirmed', 'Confirmed_Species', 'Packera aurea', 0, 1
+                );
                 """
             )
             raw_conn.commit()
@@ -1779,8 +1360,13 @@ local({{
             conn = get_db_connection(db_p, init_schema=True)
             try:
                 self.assertEqual(int(conn.execute("PRAGMA user_version;").fetchone()[0]), 20261127)
+                tables = {str(r[0]) for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table';").fetchall()}
+                for req_tbl in ("taxon_backbone_profiles", "natureserve_subnational_ranges", "cytological_records", "taxon_cytology_summary"):
+                    self.assertIn(req_tbl, tables)
+
                 tbp_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(taxon_backbone_profiles);").fetchall()}
                 ns_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(natureserve_subnational_ranges);").fetchall()}
+                om_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(otu_morphometrics);").fetchall()}
                 env_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(environmental_cache);").fetchall()}
                 ct_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(curation_triage);").fetchall()}
                 mv_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(v_integrative_triage_master);").fetchall()}
@@ -1788,8 +1374,10 @@ local({{
                 self.assertEqual(len(expected_backbone_cols), 22)
                 self.assertTrue(expected_backbone_cols.issubset(tbp_cols), f"Missing backbone cols: {expected_backbone_cols - tbp_cols}")
                 self.assertTrue(expected_ns_cols.issubset(ns_cols), f"Missing natureserve cols: {expected_ns_cols - ns_cols}")
-                for col in (*expected_env_cols, *expected_ct_cols, *expected_mv_aliases):
+                for col in (*expected_om_cols, *expected_env_cols, *expected_ct_cols, *expected_mv_aliases):
                     self.assertIn(col, mv_cols, f"v_integrative_triage_master missing {col}")
+                for col in expected_om_cols:
+                    self.assertIn(col, om_cols, f"otu_morphometrics missing {col}")
                 for col in expected_env_cols:
                     self.assertIn(col, env_cols, f"environmental_cache missing {col}")
                 for col in expected_ct_cols:
@@ -1847,6 +1435,42 @@ local({{
                     ],
                     pk_cols=("species_standardized", "country_code", "subnation_code"),
                 )
+                upsert_rows_generic(
+                    conn,
+                    table_name="cytological_records",
+                    rows=[
+                        {
+                            "cytology_id": "CYTO-001",
+                            "source_db": "CCDB",
+                            "original_taxon_name": "Packera serpenticola",
+                            "basionym_name": "Packera serpenticola",
+                            "species_standardized": "Packera serpenticola",
+                            "catalogNumber": "NCU-BB-27",
+                            "cytology_linkage_tier": "C1_Direct_Cytovoucher",
+                            "sporophytic_2n": 44,
+                            "base_x": 22,
+                            "ploidy_level": 2,
+                        }
+                    ],
+                    pk_cols=("cytology_id",),
+                )
+                upsert_rows_generic(
+                    conn,
+                    table_name="taxon_cytology_summary",
+                    rows=[
+                        {
+                            "species_standardized": "Packera serpenticola",
+                            "n_cytology_records": 1,
+                            "n_direct_cytovouchers": 1,
+                            "modal_sporophytic_2n": 44,
+                            "modal_base_x": 22,
+                            "modal_ploidy_level": 2,
+                            "reported_cytotypes": "2x",
+                            "is_multi_cytotype_taxon": 0,
+                        }
+                    ],
+                    pk_cols=("species_standardized",),
+                )
                 vrows = [
                     {
                         "catalogNumber": "NCU-BB-27",
@@ -1862,6 +1486,30 @@ local({{
                 upsert_vouchers_records(conn, vrows)
                 ensure_pipeline_run(conn, run_id="r_27")
                 populate_run_active_cohort(conn, run_id="r_27", voucher_rows=vrows, clear_existing=False)
+                persist_otu_morphometrics(
+                    conn,
+                    run_id="r_27",
+                    otu_rows=[
+                        {
+                            "catalogNumber": "NCU-BB-27",
+                            "plant_individual_id": 0,
+                            "species_standardized": "Packera serpenticola",
+                            "determiner_tier": "Tier_1_Gold",
+                            "cda_predicted_taxon": "Packera serpenticola",
+                            "cda_posterior_prob": 0.92,
+                            "cda_oof_posterior_prob": 0.89,
+                            "cl_target_threshold": 0.74,
+                            "self_morph_mahal_d2": 3.25,
+                            "self_morph_df": 4,
+                            "min_congener_mahal_d2": 29.4,
+                            "min_congener_taxon": "Packera obovata",
+                            "open_set_novelty_p": 0.65,
+                            "open_set_df": 14,
+                            "nearest_type_basionym": "Packera serpenticola",
+                            "nearest_type_basionym_d2": 1.15,
+                        }
+                    ],
+                )
                 upsert_rows_generic(
                     conn,
                     table_name="environmental_cache",
@@ -1889,6 +1537,23 @@ local({{
                             "plant_individual_id": 0,
                             "taxonomic_status_call": "Species_Confirmed",
                             "recommended_determination": "Packera serpenticola",
+                            "hybrid_zone_cohesion_pass": 0,
+                            "hybrid_parent_1": None,
+                            "hybrid_parent_2": None,
+                            "cryptic_non_clinal_pass": 0,
+                            "resurrection_basionym": "Senecio earlei",
+                            "genomic_propagation_tier": "Tier0_Projected_Calibrated",
+                            "tier0_calibrated_taxon": "Packera serpenticola",
+                            "tier0_calibrated_prob": 0.94,
+                            "tier0_abstention_flag": 0,
+                            "deme_mahal_d2": 1.85,
+                            "cluster_propagated_gdi": 0.84,
+                            "cytology_linkage_tier": "C1_Direct_Cytovoucher",
+                            "voucher_sporophytic_2n": 44,
+                            "voucher_ploidy_level": 2,
+                            "taxon_reported_cytotypes": "2x, 4x",
+                            "is_multi_cytotype_taxon": 1,
+                            "cytotype_reproductive_barrier_pass": 1,
                             "hydro_edaphic_niche_regime": "Ultramafic_Serpentine_Barren",
                             "wetland_fidelity_concordance": 1.0,
                             "basionym_synonymy_type": "Heterotypic",
@@ -1902,6 +1567,12 @@ local({{
                            nwpl_indicator_code, nwpl_wetland_score,
                            soil_ca_mg_molar_ratio, soil_ultramafic_ni_cr_index, soil_carbonate_c_pct,
                            is_nwi_wetland, nwi_wetland_system, nwi_wetland_dist_m,
+                           cda_oof_posterior_prob, cl_target_threshold, self_morph_mahal_d2, self_morph_df, open_set_df,
+                           hybrid_zone_cohesion_pass, cryptic_non_clinal_pass, resurrection_basionym,
+                           genomic_propagation_tier, tier0_calibrated_taxon, tier0_calibrated_prob,
+                           tier0_abstention_flag, deme_mahal_d2, cluster_propagated_gdi,
+                           cytology_linkage_tier, voucher_sporophytic_2n, voucher_ploidy_level,
+                           taxon_reported_cytotypes, is_multi_cytotype_taxon, cytotype_reproductive_barrier_pass,
                            hydro_edaphic_niche_regime, wetland_fidelity_concordance, basionym_synonymy_type
                     FROM v_integrative_triage_master
                     WHERE run_id = 'r_27' AND catalogNumber = 'NCU-BB-27';
@@ -1921,6 +1592,26 @@ local({{
                         0,
                         "Upland",
                         650.0,
+                        0.89,
+                        0.74,
+                        3.25,
+                        4,
+                        14,
+                        0,
+                        0,
+                        "Senecio earlei",
+                        "Tier0_Projected_Calibrated",
+                        "Packera serpenticola",
+                        0.94,
+                        0,
+                        1.85,
+                        0.84,
+                        "C1_Direct_Cytovoucher",
+                        44,
+                        2,
+                        "2x, 4x",
+                        1,
+                        1,
                         "Ultramafic_Serpentine_Barren",
                         1.0,
                         "Heterotypic",
@@ -1928,6 +1619,19 @@ local({{
                 )
             finally:
                 conn.close()
+
+            purge_runs_only(workspace_root=ws, db_path=db_p, vacuum=False)
+            conn2 = get_db_connection(db_p, init_schema=False)
+            try:
+                self.assertEqual(conn2.execute("SELECT COUNT(*) FROM taxon_backbone_profiles;").fetchone()[0], 1)
+                self.assertEqual(conn2.execute("SELECT COUNT(*) FROM natureserve_subnational_ranges;").fetchone()[0], 1)
+                self.assertEqual(conn2.execute("SELECT COUNT(*) FROM cytological_records;").fetchone()[0], 1)
+                self.assertEqual(conn2.execute("SELECT COUNT(*) FROM taxon_cytology_summary;").fetchone()[0], 1)
+                self.assertEqual(conn2.execute("SELECT COUNT(*) FROM environmental_cache;").fetchone()[0], 2)
+                self.assertEqual(conn2.execute("SELECT COUNT(*) FROM otu_morphometrics;").fetchone()[0], 0)
+                self.assertEqual(conn2.execute("SELECT COUNT(*) FROM curation_triage;").fetchone()[0], 0)
+            finally:
+                conn2.close()
 
 
 if __name__ == "__main__":

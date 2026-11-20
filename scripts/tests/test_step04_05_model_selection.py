@@ -6,7 +6,6 @@ import json
 import math
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -15,6 +14,8 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+from scripts.tests._r_session import run_warm_r_cmd
 
 SKIP_R_REASON = "Skipping batched R Step 04/05 model selection tests under fast audit or missing Rscript."
 SKIP_R_COND = (
@@ -296,13 +297,9 @@ class TestStep0405ModelSelection(unittest.TestCase):
             r_script_path = tmp_path / "run_step04_05_benchmarks.R"
             out_json_path = tmp_path / "results.json"
             r_script_path.write_text(_WARM_R_BENCHMARK, encoding="utf-8")
-            proc = subprocess.run(
+            proc = run_warm_r_cmd(
                 ["Rscript", str(r_script_path), str(out_json_path)],
-                cwd=str(PROJECT_ROOT),
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=180,
+                stage_key="step05", cwd=PROJECT_ROOT, skip_figures=True,
             )
             if proc.returncode != 0 or not out_json_path.exists():
                 raise RuntimeError(

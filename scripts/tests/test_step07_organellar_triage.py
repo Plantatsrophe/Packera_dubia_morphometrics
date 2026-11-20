@@ -3,13 +3,15 @@
 
 from __future__ import annotations
 
-import csv, gzip, io, json, os, random, shutil, subprocess, sys, tempfile, textwrap, unittest, zipfile
+import csv, gzip, io, json, os, random, shutil, sys, tempfile, textwrap, unittest, zipfile
 from pathlib import Path
 from typing import Any, Dict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+from scripts.tests._r_session import run_warm_r_cmd
 
 SKIP_R_COND = (
     os.environ.get("PLANTMATICS_FAST_AUDIT") == "1"
@@ -136,7 +138,7 @@ def _run_warm_r_organellar_suite() -> Dict[str, Any]:
             ).strip() + "\n",
             encoding="utf-8",
         )
-        proc = subprocess.run(["Rscript", str(r_script)], cwd=PROJECT_ROOT, capture_output=True, text=True, check=False)
+        proc = run_warm_r_cmd(["Rscript", str(r_script)], stage_key="step07", cwd=PROJECT_ROOT, skip_figures=True)
         if proc.returncode != 0:
             raise AssertionError(f"Warm R suite failed ({proc.returncode}):\n{proc.stdout}\n{proc.stderr}")
         return json.loads(out_json.read_text(encoding="utf-8"))

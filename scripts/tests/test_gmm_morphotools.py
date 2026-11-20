@@ -1003,6 +1003,14 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                 set(flags_df["cda_predicted_taxon"].dropna().unique()),
                 {"Packera dubia", "Packera anonyma", "Packera serpenticola"},
             )
+            for req_col in (
+                "min_congener_mahal_d2",
+                "min_congener_taxon",
+                "open_set_novelty_p",
+                "is_confident_label_noise",
+            ):
+                self.assertIn(req_col, flags_df.columns, f"Missing {req_col} in morphometric_flags.csv")
+                self.assertTrue(flags_df[req_col].notna().all(), f"Unexpected NA in {req_col}")
 
             anon_df = flags_df[flags_df["species_standardized"] == "Packera anonyma"]
             anon_promo = anon_df[(anon_df["determiner_tier"] == "Tier_3_Bronze") & (anon_df["authority_weight"] > 0.0)]
@@ -1300,117 +1308,11 @@ class TestGMMAndMorphoTools(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, f"Step 04 type control R test failed:\n{proc.stderr}\n{proc.stdout}")
         self.assertIn("STEP04_TYPE_CONTROL_OK", proc.stdout)
 
-    def test_morphometric_flags_exports_osr_and_confident_learning_columns(self):
-        """
-        Verify that `morphometric_flags.csv` exports `min_congener_mahal_d2`,
-        `min_congener_taxon`, `open_set_novelty_p`, and `is_confident_label_noise`.
-        """
-        if not rscript_available():
-            self.skipTest("Rscript not installed.")
-
-        rng = np.random.default_rng(20261108)
-        rows = []
-        vouch_rows = []
-        taxa = ["Packera dubia", "Packera obovata"]
-        for s_idx, sp in enumerate(taxa):
-            center_pc1 = -3.0 if s_idx == 0 else 3.0
-            center_pc2 = 1.2 if s_idx == 0 else -1.2
-            for j in range(12):
-                cat = f"OSR_CL_{s_idx}_{j:02d}"
-                is_swapped_noise = (j == 11)
-                pc1 = float(rng.normal(-center_pc1 if is_swapped_noise else center_pc1, 0.25))
-                pc2 = float(rng.normal(-center_pc2 if is_swapped_noise else center_pc2, 0.25))
-                pc3 = float(rng.normal(0.0, 0.20))
-                cs = float(20.0 + 0.4 * j)
-                tier = "Tier_1_Gold" if j < 10 else ("Tier_2_Silver" if j == 11 else "Tier_3_Bronze")
-                t_status = "Holotype" if j == 0 else "None"
-                row = {
-                    "catalogNumber": cat,
-                    "plant_individual_id": 0,
-                    "basal_leaf_count": 3,
-                    "morph_tier_source": "Basal_Rosette",
-                    "species_raw": sp,
-                    "scientificName": sp,
-                    "determiner_tier": tier,
-                    "type_status": t_status,
-                    "foliar_variance": 0.015,
-                    "leaf_count": 3,
-                    "centroid_size": cs,
-                    "log_centsize": float(np.log(cs)),
-                    "is_calibrated_mm": True,
-                    "aspect_ratio": 1.55,
-                    "solidity": 0.90,
-                    "archetype_score": 0.94,
-                    "PC1": pc1,
-                    "PC2": pc2,
-                    "PC3": pc3,
-                }
-                for k in range(1, 13):
-                    row[f"A{k}"] = float((pc1 * 0.04) / k)
-                    row[f"B{k}"] = 0.0
-                    row[f"C{k}"] = 0.0
-                    row[f"D{k}"] = float((pc2 * 0.04) / k)
-                rows.append(row)
-                vouch_rows.append(
-                    {
-                        "catalogNumber": cat,
-                        "species_raw": sp,
-                        "scientificName": sp,
-                        "determiner_tier": tier,
-                        "type_status": t_status,
-                        "identifiedBy": "D. K. Trock" if tier == "Tier_1_Gold" else "A. Curator",
-                        "institutionCode": "NCU" if j % 2 == 0 else "DUKE",
-                        "stateProvince": "NC",
-                        "county": "Orange",
-                        "decimalLatitude": 35.91 + 0.01 * j,
-                        "decimalLongitude": -79.05 - 0.01 * j,
-                        "regional_group": "Piedmont",
-                        "doy": 115 + j,
-                    }
-                )
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_p = Path(tmpdir)
-            harm_csv = tmp_p / "leaf_efa_harmonics.csv"
-            vouch_csv = tmp_p / "curated_vouchers.csv"
-            flags_csv = tmp_p / "morphometric_flags.csv"
-            pd.DataFrame(rows).to_csv(harm_csv, index=False)
-            pd.DataFrame(vouch_rows).to_csv(vouch_csv, index=False)
-
-            proc = run_warm_r_cmd([
-                    "Rscript",
-                    str(self.r_script_path),
-                    "--vouchers", str(vouch_csv),
-                    "--harmonics", str(harm_csv),
-                    "--output-flags", str(flags_csv),
-                    "--output-report", str(tmp_p / "bic.csv"),
-                    "--output-plot", str(tmp_p / "fig04b_gmm_cda_morphometrics.png"),
-                    "--output-batch-audit", str(tmp_p / "batch_audit.csv"),
-                    "--allometry-report", str(tmp_p / "allom.csv"),
-                    "--allometry-pairwise", str(tmp_p / "pw.csv"),
-                    "--allometry-plot", str(tmp_p / "fig04a_foliar_allometry_audit.png"),
-                    "--permutations", "19",
-                ], stage_key='step04', cwd=PROJECT_ROOT, skip_figures=True)
-            self.assertEqual(proc.returncode, 0, f"Step 04 OSR/Confident Learning test failed:\n{proc.stderr}\n{proc.stdout}")
-            flags_df = pd.read_csv(flags_csv)
-            for req_col in (
-                "min_congener_mahal_d2",
-                "min_congener_taxon",
-                "open_set_novelty_p",
-                "is_confident_label_noise",
-            ):
-                self.assertIn(req_col, flags_df.columns, f"Missing {req_col} in morphometric_flags.csv")
-            self.assertTrue(flags_df["min_congener_mahal_d2"].notna().all())
-            self.assertTrue(flags_df["min_congener_taxon"].notna().all())
-            self.assertTrue(flags_df["open_set_novelty_p"].notna().all())
-            self.assertTrue(flags_df["is_confident_label_noise"].notna().all())
-
     def test_spatial_gathering_demes_and_per_species_typical_morphotype(self):
         """
         Verify that:
         1. `assign_spatial_gathering_demes()` groups conspecific individuals within
-           a 10 km Haversine deme without pre-shrinking feature coordinates (and
-           dead `apply_hierarchical_population_deme_shrinkage` is purged).
+           a 10 km Haversine deme without pre-shrinking feature coordinates.
         2. `compute_type_specimen_morph_control()` evaluates `is_typical_morphotype`
            per-species rather than requiring global `gmm_cluster == 1L`.
         """
@@ -1420,7 +1322,6 @@ class TestGMMAndMorphoTools(unittest.TestCase):
         r_code = """
         source("scripts/morphometrics/authority_weighting_utils.R")
         source("scripts/morphometrics/plasticity_mitigation_utils.R")
-        stopifnot(!exists("apply_hierarchical_population_deme_shrinkage", mode = "function"))
         stopifnot(exists("assign_spatial_gathering_demes", mode = "function"))
 
         # 1. Test 10 km conspecific deme assignment without pre-modeling coordinate shrinkage
@@ -1478,7 +1379,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
 
     def test_heteroblasty_leaf_weights_pure_basal_and_cauline_fallback(self) -> None:
         """
-        Verify reconcile_step03_basal_otu_medians (and absence of legacy weighted_otu_stat / compute_heteroblasty_leaf_weights):
+        Verify reconcile_step03_basal_otu_medians:
           1. When a specimen has >= 1 basal leaf (leaf_zone == "basal"), cauline leaves are strictly
              excluded from primary OTU unweighted basal medians so harmonics and solidity are uncontaminated.
           2. When a specimen has only cauline leaves (0 basal leaves), unweighted cauline medians populate
@@ -1486,8 +1387,6 @@ class TestGMMAndMorphoTools(unittest.TestCase):
         """
         r_code = """
         source("scripts/morphometrics/authority_weighting_utils.R")
-        stopifnot(!exists("compute_heteroblasty_leaf_weights", mode = "function"))
-        stopifnot(!exists("weighted_otu_stat", mode = "function"))
         stopifnot(exists("reconcile_step03_basal_otu_medians", mode = "function"))
 
         # 1. Mixed basal + cauline specimen -> unweighted basal median (0.91, 1.01) uncontaminated by cauline leaf

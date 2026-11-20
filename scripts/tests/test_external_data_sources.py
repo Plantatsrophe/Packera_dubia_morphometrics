@@ -9,7 +9,6 @@ import os
 from pathlib import Path
 import shutil
 import sqlite3
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -24,6 +23,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from scripts.core.db import get_db_connection
 from scripts.core.usda_plants_ranges import filter_vouchers_by_usda_county_range
+from scripts.tests._r_session import run_warm_r_cmd
 from scripts.data_prep import (
     download_geochem_wetland_layers as dl_geochem,
     download_public_packera_sequences as dl_pub,
@@ -386,10 +386,11 @@ class TestExternalDataSourcesOffline(unittest.TestCase):
                 "res <- evaluate_step07_hydro_edaphic_and_basionym_guards(enr, db_conn = con); "
                 "cat(toJSON(res[, c('catalogNumber', 'ultramafic_calcareous_gradient', 'wetland_seepage_index', 'hydro_edaphic_niche_regime', 'wetland_fidelity_concordance', 'basionym_synonymy_type', 'resurrection_basionym')], na = 'null'))"
             )
-            proc = subprocess.run(
+            proc = run_warm_r_cmd(
                 ["Rscript", "-e", r_expr, str(r_util), str(db_path), str(env_dir)],
-                capture_output=True, text=True, check=True, timeout=60,
+                stage_key="step05", cwd=PROJECT_ROOT, skip_figures=True,
             )
+            self.assertEqual(proc.returncode, 0, f"R failed:\n{proc.stdout}\n{proc.stderr}")
             rows = json.loads(proc.stdout.strip().splitlines()[-1])
             by_cat = {r["catalogNumber"]: r for r in rows}
 

@@ -6,7 +6,6 @@ import importlib.util
 import math
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -18,6 +17,8 @@ import numpy as np
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+from scripts.tests._r_session import run_warm_r_cmd
 
 SKIP_R_REASON = "Skipping batched R Step 06 model selection tests under fast audit or missing Rscript."
 SKIP_R_COND = (
@@ -318,12 +319,11 @@ stopifnot(nrow(mmrr_df) >= 4L, "IBD_only" %in% mmrr_df$model_name, "IBD_plus_IBE
 stopifnot("feems_cv_lambda" %in% names(ls_res$summary_df), is.finite(ls_res$summary_df$feems_cv_lambda[1L]))
 cat("ALL_STEP06_MS_R_CHECKS_OK\\n")
 """
-            proc = subprocess.run(
+            proc = run_warm_r_cmd(
                 ["Rscript", "-e", r_script],
-                cwd=str(PROJECT_ROOT),
-                capture_output=True,
-                text=True,
-                check=False,
+                stage_key="step06",
+                cwd=PROJECT_ROOT,
+                skip_figures=True,
             )
             self.assertEqual(
                 proc.returncode,

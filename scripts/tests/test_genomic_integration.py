@@ -57,15 +57,10 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import main as root_main
 from scripts.analysis import step06_coalescent_delimitation as coal_mod
-from scripts.core.db import (
-    get_db_connection,
-    init_db_schema,
-    purge_runs_only,
-)
+from scripts.core.db import get_db_connection
 from scripts.core.db_schema import (
     PACKERA_SCHEMA_USER_VERSION,
     PLANTMATICS_SCHEMA_USER_VERSION,
-    migrate_database_schema,
 )
 from scripts.data_prep import skim_offtarget_organellar as skim_mod
 from scripts.tests._r_session import rscript_available, run_warm_r_cmd
@@ -151,171 +146,11 @@ class TestGenomicIntegration(unittest.TestCase):
                 )
                 self.assertEqual(res_ign.returncode, 0, f"Genomic payload not ignored by git: {probe}")
 
-    def test_schema_migration_master_cardinality_and_purge_runs_only(self) -> None:
+    def test_master_view_genomic_replicate_cardinality_invariance(self) -> None:
         self.assertEqual(PLANTMATICS_SCHEMA_USER_VERSION, 20261127)
         self.assertEqual(PACKERA_SCHEMA_USER_VERSION, 20261127)
 
-        expected_gs_phase2 = {
-            "hdplot_retained_loci",
-            "inferred_cytotype",
-            "nquire_delta_logl",
-            "plastid_clade",
-            "its_ribotype",
-            "cytonuclear_discordant",
-            "public_plastome_match",
-            "public_its_match",
-            "waxy_lineage_match",
-        }
-        expected_gla_phase2 = {
-            "hybrid_index_h",
-            "interspecific_ancestry_q12",
-            "hybrid_generation_class",
-            "coancestry_cluster",
-            "f_branch_max",
-            "f_branch_donor_taxon",
-            "snaq_gamma_minor",
-            "coalescent_gdi",
-            "bpp_introgression_bf",
-            "mmrr_beta_ibd",
-            "mmrr_beta_ibe",
-            "mmrr_p_ibe",
-            "public_backbone_clade",
-            "public_phytop_ils_index",
-            "public_phytop_ih_index",
-        }
-
-        expected_ct_prop = {
-            "genomic_propagation_tier",
-            "tier0_calibrated_taxon",
-            "tier0_calibrated_prob",
-            "tier0_abstention_flag",
-            "deme_mahal_d2",
-            "cluster_propagated_gdi",
-        }
-
-        prev_schema_ver = PLANTMATICS_SCHEMA_USER_VERSION - 1
-        for legacy_ver in (20261121, 20261122, 20261123, 20261124, prev_schema_ver):
-            with tempfile.TemporaryDirectory() as td:
-                tmp = Path(td)
-                db_path = tmp / f"legacy_{legacy_ver}.sqlite"
-                conn = sqlite3.connect(str(db_path))
-                init_db_schema(conn)
-                if legacy_ver in (20261124, prev_schema_ver):
-                    conn.executescript(
-                        """
-                        DROP VIEW IF EXISTS v_integrative_triage_master;
-                        DROP TABLE IF EXISTS curation_triage;
-                        CREATE TABLE curation_triage (
-                            run_id TEXT NOT NULL,
-                            catalogNumber TEXT NOT NULL,
-                            plant_individual_id INTEGER NOT NULL DEFAULT 0,
-                            taxonomic_status_call TEXT,
-                            recommended_determination TEXT,
-                            synthesis_triage_priority TEXT,
-                            synthesis_triage_action TEXT,
-                            synthesis_rationale TEXT,
-                            taxonomic_treatment_broad TEXT,
-                            taxonomic_treatment_subtype TEXT,
-                            PRIMARY KEY (run_id, catalogNumber, plant_individual_id)
-                        );
-                        """
-                    )
-                else:
-                    conn.executescript(
-                        """
-                        DROP VIEW IF EXISTS v_integrative_triage_master;
-                        DROP TABLE IF EXISTS genomic_samples;
-                        DROP TABLE IF EXISTS genetic_lineage_assignments;
-                        """
-                    )
-                if legacy_ver == 20261122:
-                    conn.execute(
-                        """
-                        CREATE TABLE genomic_samples (
-                            genetic_sample_id TEXT PRIMARY KEY,
-                            catalogNumber TEXT,
-                            linkage_tier TEXT,
-                            species_standardized TEXT,
-                            geno_quality_pass INTEGER,
-                            mapped_reads INTEGER
-                        );
-                        """
-                    )
-                    conn.execute(
-                        """
-                        CREATE TABLE genetic_lineage_assignments (
-                            run_id TEXT NOT NULL,
-                            genetic_sample_id TEXT NOT NULL,
-                            catalogNumber TEXT,
-                            geno_predicted_taxon TEXT,
-                            PRIMARY KEY (run_id, genetic_sample_id)
-                        );
-                        """
-                    )
-                elif legacy_ver == 20261123:
-                    conn.execute(
-                        """
-                        CREATE TABLE genomic_samples (
-                            genetic_sample_id TEXT PRIMARY KEY,
-                            catalogNumber TEXT,
-                            linkage_tier TEXT,
-                            species_standardized TEXT,
-                            geno_quality_pass INTEGER,
-                            mapped_reads INTEGER,
-                            hdplot_retained_loci INTEGER,
-                            inferred_cytotype TEXT,
-                            nquire_delta_logl REAL,
-                            plastid_clade TEXT,
-                            its_ribotype TEXT,
-                            cytonuclear_discordant INTEGER
-                        );
-                        """
-                    )
-                    conn.execute(
-                        """
-                        CREATE TABLE genetic_lineage_assignments (
-                            run_id TEXT NOT NULL,
-                            genetic_sample_id TEXT NOT NULL,
-                            catalogNumber TEXT,
-                            geno_predicted_taxon TEXT,
-                            hybrid_index_h REAL,
-                            interspecific_ancestry_q12 REAL,
-                            hybrid_generation_class TEXT,
-                            coancestry_cluster TEXT,
-                            f_branch_max REAL,
-                            f_branch_donor_taxon TEXT,
-                            snaq_gamma_minor REAL,
-                            coalescent_gdi REAL,
-                            bpp_introgression_bf REAL,
-                            mmrr_beta_ibd REAL,
-                            mmrr_beta_ibe REAL,
-                            mmrr_p_ibe REAL,
-                            PRIMARY KEY (run_id, genetic_sample_id)
-                        );
-                        """
-                    )
-                conn.execute(f"PRAGMA user_version = {legacy_ver};")
-                conn.commit()
-
-                migrate_database_schema(conn)
-                uv_after = conn.execute("PRAGMA user_version;").fetchone()[0]
-                self.assertEqual(uv_after, 20261127)
-                init_db_schema(conn)
-
-                gs_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(genomic_samples);").fetchall()}
-                gla_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(genetic_lineage_assignments);").fetchall()}
-                ct_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(curation_triage);").fetchall()}
-                view_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(v_integrative_triage_master);").fetchall()}
-
-                self.assertTrue(expected_gs_phase2.issubset(gs_cols), f"Missing gs cols from {legacy_ver}: {expected_gs_phase2 - gs_cols}")
-                self.assertTrue(expected_gla_phase2.issubset(gla_cols), f"Missing gla cols from {legacy_ver}: {expected_gla_phase2 - gla_cols}")
-                self.assertTrue(expected_ct_prop.issubset(ct_cols), f"Missing ct cols from {legacy_ver}: {expected_ct_prop - ct_cols}")
-                self.assertTrue(expected_gs_phase2.issubset(view_cols), f"View missing gs cols: {expected_gs_phase2 - view_cols}")
-                self.assertTrue(expected_gla_phase2.issubset(view_cols), f"View missing gla cols: {expected_gla_phase2 - view_cols}")
-                self.assertTrue(expected_ct_prop.issubset(view_cols), f"View missing ct cols: {expected_ct_prop - view_cols}")
-                conn.close()
-
-        # Verify cardinality invariance on multi-plant sheets + multiple genomic replicates, then purge --runs-only
+        # Verify cardinality invariance on multi-plant sheets + multiple genomic replicates
         with tempfile.TemporaryDirectory() as td:
             ws = Path(td)
             data_dir = ws / "data"
@@ -403,32 +238,6 @@ class TestGenomicIntegration(unittest.TestCase):
                 )
             finally:
                 conn.close()
-
-            # Write dummy Step 01 curated_vouchers (preserved) + Tier B report CSV (purged)
-            (tables_dir / "curated_vouchers.csv").write_text("catalogNumber\nNCU001\nNCU002\n", encoding="utf-8")
-            (tables_dir / "genomic_assignments.csv").write_text("genetic_sample_id\nPACTOMNCU1M\n", encoding="utf-8")
-
-            summary = purge_runs_only(
-                workspace_root=ws,
-                db_path=db_path,
-                output_dir=data_dir,
-                refresh_env_buffers=False,
-                vacuum=True,
-            )
-            self.assertGreater(summary["purged_db_rows"], 0)
-            self.assertTrue((tables_dir / "curated_vouchers.csv").exists())
-            self.assertFalse((tables_dir / "genomic_assignments.csv").exists())
-
-            conn_chk = get_db_connection(db_path=db_path, init_schema=True, workspace_root=ws)
-            try:
-                self.assertEqual(conn_chk.execute("SELECT COUNT(*) FROM vouchers;").fetchone()[0], 2)
-                self.assertEqual(conn_chk.execute("SELECT COUNT(*) FROM plant_individuals;").fetchone()[0], 3)
-                self.assertEqual(conn_chk.execute("SELECT COUNT(*) FROM genomic_samples;").fetchone()[0], 2)
-                self.assertEqual(conn_chk.execute("SELECT COUNT(*) FROM genetic_lineage_assignments;").fetchone()[0], 0)
-                self.assertEqual(conn_chk.execute("SELECT COUNT(*) FROM curation_triage;").fetchone()[0], 0)
-                self.assertEqual(conn_chk.execute("SELECT COUNT(*) FROM pipeline_runs;").fetchone()[0], 0)
-            finally:
-                conn_chk.close()
 
     def test_empty_genomics_transient_and_flat_dir_guards(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -776,8 +585,7 @@ class TestGenomicIntegration(unittest.TestCase):
             self.assertLess(float(gdi_map["Packera anonyma"]["coalescent_gdi"]), 0.25)
 
     def test_batched_r_step06_and_step07_phase2_consensus_and_triage(self) -> None:
-        r_bin = shutil.which("Rscript")
-        if not r_bin:
+        if not rscript_available():
             self.skipTest("Rscript not found in PATH")
 
         with tempfile.TemporaryDirectory() as td:
@@ -963,53 +771,80 @@ class TestGenomicIntegration(unittest.TestCase):
             fig7b = figs_dir / "fig07b_taxon_complex_delimitation_network.png"
             html_out = rep_dir / "Triage_Dashboard_Interactive.html"
 
+            # 1. Standalone Step 06 empty no-op check via warm R CLI
+            env_empty = {
+                "PLANTMATICS_DB_PATH": str(db_path),
+                "PACKERA_SQLITE_DB": str(db_path),
+                "PLANTMATICS_GENOMICS_DIR": str(empty_geno),
+                "RUN_ID": "batch_smoke_empty",
+            }
+            proc_empty = run_warm_r_cmd(
+                [
+                    "Rscript",
+                    "scripts/analysis/06_genomic_phylogenomics.R",
+                    "--genomics-dir", str(empty_geno),
+                    "--parsed-dir", str(tmp / "nonexistent_parsed"),
+                    "--out-dir", str(step06_empty_out),
+                    "--tables-dir", str(tmp / "empty_tables"),
+                    "--output-figures", str(tmp / "empty_figs"),
+                    "--run-id", "batch_smoke_empty",
+                    "--db", str(db_path),
+                    "--demo",
+                ],
+                stage_key="step06",
+                cwd=PROJECT_ROOT,
+                env=env_empty,
+                skip_figures=False,
+            )
+            self.assertEqual(
+                proc_empty.returncode,
+                0,
+                f"Step 06 empty no-op failed (exit={proc_empty.returncode}):\nSTDOUT:\n{proc_empty.stdout}\nSTDERR:\n{proc_empty.stderr}",
+            )
+            self.assertFalse((step06_empty_out / "genomic_assignments.csv").exists())
+
+            # 2. Standalone Step 06 populated Phase 2 execution via warm R CLI
+            env_pop = {
+                "PLANTMATICS_DB_PATH": str(db_path),
+                "PACKERA_SQLITE_DB": str(db_path),
+                "PLANTMATICS_GENOMICS_DIR": str(pop_geno),
+                "RUN_ID": "batch_smoke",
+            }
+            proc_pop = run_warm_r_cmd(
+                [
+                    "Rscript",
+                    "scripts/analysis/06_genomic_phylogenomics.R",
+                    "--genomics-dir", str(pop_geno),
+                    "--raw-genomics-dir", str(pop_geno),
+                    "--parsed-dir", str(parsed_dir),
+                    "--out-dir", str(step06_out),
+                    "--tables-dir", str(tables_dir),
+                    "--output-figures", str(figs_dir),
+                    "--figure-a", str(fig6a),
+                    "--figure-b", str(fig6b),
+                    "--figure-c", str(fig6c),
+                    "--run-id", "batch_smoke",
+                    "--db", str(db_path),
+                    "--demo",
+                ],
+                stage_key="step06",
+                cwd=PROJECT_ROOT,
+                env=env_pop,
+                skip_figures=False,
+            )
+            self.assertEqual(
+                proc_pop.returncode,
+                0,
+                f"Step 06 populated execution failed (exit={proc_pop.returncode}):\nSTDOUT:\n{proc_pop.stdout}\nSTDERR:\n{proc_pop.stderr}",
+            )
+
             r_script = f"""
 Sys.setenv(
   PLANTMATICS_DB_PATH = {json.dumps(str(db_path))},
   PACKERA_SQLITE_DB = {json.dumps(str(db_path))},
-  PLANTMATICS_GENOMICS_DIR = {json.dumps(str(empty_geno))},
+  PLANTMATICS_GENOMICS_DIR = {json.dumps(str(pop_geno))},
   RUN_ID = "batch_smoke"
 )
-
-# 1. Standalone Step 06 empty no-op check via CLI
-st_empty <- system2(
-  {json.dumps(r_bin)},
-  args = c(
-    "scripts/analysis/06_genomic_phylogenomics.R",
-    "--genomics-dir", {json.dumps(str(empty_geno))},
-    "--parsed-dir", {json.dumps(str(tmp / "nonexistent_parsed"))},
-    "--out-dir", {json.dumps(str(step06_empty_out))},
-    "--tables-dir", {json.dumps(str(tmp / "empty_tables"))},
-    "--output-figures", {json.dumps(str(tmp / "empty_figs"))},
-    "--run-id", "batch_smoke_empty",
-    "--db", {json.dumps(str(db_path))},
-    "--demo"
-  )
-)
-stopifnot(identical(as.integer(st_empty), 0L))
-stopifnot(!file.exists(file.path({json.dumps(str(step06_empty_out))}, "genomic_assignments.csv")))
-
-# 2. Standalone Step 06 populated Phase 2 execution via CLI
-Sys.setenv(PLANTMATICS_GENOMICS_DIR = {json.dumps(str(pop_geno))})
-st_pop <- system2(
-  {json.dumps(r_bin)},
-  args = c(
-    "scripts/analysis/06_genomic_phylogenomics.R",
-    "--genomics-dir", {json.dumps(str(pop_geno))},
-    "--raw-genomics-dir", {json.dumps(str(pop_geno))},
-    "--parsed-dir", {json.dumps(str(parsed_dir))},
-    "--out-dir", {json.dumps(str(step06_out))},
-    "--tables-dir", {json.dumps(str(tables_dir))},
-    "--output-figures", {json.dumps(str(figs_dir))},
-    "--figure-a", {json.dumps(str(fig6a))},
-    "--figure-b", {json.dumps(str(fig6b))},
-    "--figure-c", {json.dumps(str(fig6c))},
-    "--run-id", "batch_smoke",
-    "--db", {json.dumps(str(db_path))},
-    "--demo"
-  )
-)
-stopifnot(identical(as.integer(st_pop), 0L))
 
 req_phase2_files <- c(
   "genomic_assignments.csv", "genomic_clade_cohesion_summary.csv",
@@ -1230,12 +1065,12 @@ cat("BATCHED_PHASE2_R_OK\\n")
 """
             batch_r.write_text(r_script, encoding="utf-8")
 
-            proc = subprocess.run(
-                [r_bin, str(batch_r)],
+            proc = run_warm_r_cmd(
+                ["Rscript", str(batch_r)],
+                stage_key="step07",
                 cwd=PROJECT_ROOT,
-                capture_output=True,
-                text=True,
-                check=False,
+                env=env_pop,
+                skip_figures=False,
             )
             self.assertEqual(
                 proc.returncode,

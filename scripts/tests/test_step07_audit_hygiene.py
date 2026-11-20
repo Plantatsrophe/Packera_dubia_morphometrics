@@ -8,13 +8,17 @@ import json
 import os
 import re
 import shutil
-import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from scripts.tests._r_session import run_warm_r_cmd
 SKIP_R_COND = (
     os.environ.get("PLANTMATICS_FAST_AUDIT") == "1"
     or os.environ.get("PACKERA_FAST_AUDIT") == "1"
@@ -301,9 +305,9 @@ class TestStep07AuditHygiene(unittest.TestCase):
             r_p, out_j = tmp / "probe.R", tmp / "out.json"
             pa, pb = tmp / "fig_a.png", tmp / "fig_b.png"
             r_p.write_text(_WARM_R_CODE, encoding="utf-8")
-            proc = subprocess.run(
+            proc = run_warm_r_cmd(
                 ["Rscript", str(r_p), str(out_j), str(pa), str(pb)],
-                cwd=PROJECT_ROOT, capture_output=True, text=True, check=False, timeout=120,
+                stage_key="step07", cwd=PROJECT_ROOT, skip_figures=False,
             )
             if proc.returncode != 0:
                 raise AssertionError(f"Warm R probe failed ({proc.returncode}):\n{proc.stdout}\n{proc.stderr}")

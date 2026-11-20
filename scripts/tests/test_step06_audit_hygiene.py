@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-import csv, importlib, json, math, os, shutil, sqlite3, subprocess, sys, tempfile, unittest
+import csv, importlib, json, math, os, shutil, sqlite3, sys, tempfile, unittest
 from pathlib import Path
 from typing import Any, Dict
 
@@ -15,6 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from scripts.core.db import get_db_connection, upsert_genomic_samples
 from scripts.core.db_schema import init_db_schema
+from scripts.tests._r_session import run_warm_r_cmd
 
 ING = importlib.import_module("scripts.data_prep.06_ingest_genetic_data")
 PUB_DL = importlib.import_module("scripts.data_prep.download_public_packera_sequences")
@@ -118,7 +119,7 @@ class TestStep06AuditHygiene(unittest.TestCase):
             conn.close()
             r_path, out_json = tmp / "probe.R", tmp / "out.json"
             r_path.write_text(_WARM_R_CODE, encoding="utf-8")
-            proc = subprocess.run(["Rscript", str(r_path), str(out_json), str(db_p)], cwd=PROJECT_ROOT, capture_output=True, text=True, check=False)
+            proc = run_warm_r_cmd(["Rscript", str(r_path), str(out_json), str(db_p)], stage_key="step06", cwd=PROJECT_ROOT, skip_figures=True)
             if proc.returncode != 0:
                 raise AssertionError(f"Warm R probe failed ({proc.returncode}):\n{proc.stdout}\n{proc.stderr}")
             cls.r_res = json.loads(out_json.read_text(encoding="utf-8"))

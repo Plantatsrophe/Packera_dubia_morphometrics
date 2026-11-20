@@ -26,6 +26,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from scripts.core.db import get_db_connection
 from scripts.data_prep import download_public_cytology as dl_cyto
+from scripts.tests._r_session import run_warm_r_cmd
 
 step06 = importlib.import_module("scripts.data_prep.06_ingest_genetic_data")
 
@@ -354,7 +355,7 @@ cat("R_CYTO_PASS\\n")
 """
             r_file = Path(tmp) / "test_cyto.R"
             r_file.write_text(r_code, encoding="utf-8")
-            proc = subprocess.run(["Rscript", str(r_file)], cwd=str(PROJECT_ROOT), capture_output=True, text=True)
+            proc = run_warm_r_cmd(["Rscript", str(r_file)], stage_key="step07", cwd=PROJECT_ROOT, skip_figures=True)
             self.assertEqual(proc.returncode, 0, msg=f"R failed:\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}")
             self.assertIn("R_CYTO_PASS", proc.stdout)
 

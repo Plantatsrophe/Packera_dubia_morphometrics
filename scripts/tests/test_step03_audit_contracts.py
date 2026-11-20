@@ -6,7 +6,6 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -20,7 +19,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.core.db_schema import init_db_schema
-from scripts.tests._r_session import rscript_available
+from scripts.tests._r_session import rscript_available, run_warm_r_cmd
 
 
 def _contour_xy(rx: float, ry: float, asym: float = 0.0, tip_up: bool = True) -> np.ndarray:
@@ -266,7 +265,7 @@ class TestStep03AuditContracts(unittest.TestCase):
             """,
             encoding="utf-8",
         )
-        proc = subprocess.run(["Rscript", str(r_script)], cwd=str(PROJECT_ROOT), capture_output=True, text=True, check=False)
+        proc = run_warm_r_cmd(["Rscript", str(r_script)], stage_key="step03", cwd=PROJECT_ROOT)
         if proc.returncode != 0:
             raise RuntimeError(f"Batched Step 03 Rscript failed:\n{proc.stderr}\n{proc.stdout}")
         cls.data = json.loads(cls.json_out.read_text(encoding="utf-8"))

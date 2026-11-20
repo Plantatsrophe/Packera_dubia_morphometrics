@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
@@ -13,6 +13,10 @@ from pathlib import Path
 from typing import Any, Dict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from scripts.tests._r_session import run_warm_r_cmd
 SKIP_R_COND = (
     os.environ.get("PLANTMATICS_FAST_AUDIT") == "1"
     or os.environ.get("PACKERA_FAST_AUDIT") == "1"
@@ -204,7 +208,7 @@ def _run_warm_r_suite() -> Dict[str, Any]:
     with tempfile.TemporaryDirectory() as tmpdir:
         r_path = Path(tmpdir) / "run_deme_prop_tests.R"
         r_path.write_text(r_code, encoding="utf-8")
-        proc = subprocess.run(["Rscript", str(r_path)], cwd=str(PROJECT_ROOT), capture_output=True, text=True)
+        proc = run_warm_r_cmd(["Rscript", str(r_path)], stage_key="step07", cwd=PROJECT_ROOT, skip_figures=True)
     if proc.returncode != 0:
         raise AssertionError(f"Warm R suite failed (exit={proc.returncode}):\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}")
     raw = proc.stdout.split("<<<JSON_START>>>", 1)[1].split("<<<JSON_END>>>", 1)[0].strip()

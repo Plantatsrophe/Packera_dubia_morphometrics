@@ -19,6 +19,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from scripts.tests._r_session import run_warm_r_cmd
+
 SKIP_R_REASON = "Skipping warm-R thread-scaling parity tests under fast audit or missing Rscript."
 SKIP_R_COND = (
     os.environ.get("PLANTMATICS_FAST_AUDIT") == "1"
@@ -165,9 +167,9 @@ class TestParallelThreadScaling(unittest.TestCase):
         tmp_p = Path(cls._tmp_dir.name)
         r_path, out_json = tmp_p / "run_par_parity.R", tmp_p / "res.json"
         r_path.write_text(_WARM_R_PARITY_SCRIPT, encoding="utf-8")
-        proc = subprocess.run(
+        proc = run_warm_r_cmd(
             ["Rscript", str(r_path), str(out_json), str(tmp_p)],
-            cwd=str(PROJECT_ROOT), capture_output=True, text=True, check=False, timeout=180,
+            stage_key="step05", cwd=PROJECT_ROOT, skip_figures=True,
         )
         if proc.returncode != 0 or not out_json.exists():
             raise RuntimeError(f"Batched R thread-scaling test failed (rc={proc.returncode}):\n{proc.stdout}\n{proc.stderr}")

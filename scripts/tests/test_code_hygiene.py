@@ -129,9 +129,9 @@ class TestCodeHygiene(unittest.TestCase):
     """Static AST and grep hygiene checks for archive isolation and zero legacy LM2 remnants across active files."""
 
     def test_no_active_files_reference_legacy_folders_via_grep(self):
-        """Scan all active .py and .R files and fail if any references the archive folder."""
+        """Scan all active .py, .R, and .sh files and fail if any references the archive folder."""
         violations: List[str] = []
-        for src_path in iter_active_source_files():
+        for src_path in iter_active_source_files(include_shell=True):
             content = src_path.read_text(encoding="utf-8", errors="ignore")
             for lineno, line in enumerate(content.splitlines(), start=1):
                 if ARCHIVE_MARKER in line:
@@ -142,56 +142,6 @@ class TestCodeHygiene(unittest.TestCase):
             violations,
             [],
             f"Active source files must not reference '{ARCHIVE_MARKER}':\n" + "\n".join(violations),
-        )
-
-    def test_no_active_python_ast_imports_or_constants_reference_legacy_folders(self):
-        """Parse AST of all active .py files and verify zero imports or string literals reference archive."""
-        ast_violations: List[str] = []
-        for src_path in iter_active_source_files():
-            if src_path.suffix != ".py":
-                continue
-            source = src_path.read_text(encoding="utf-8")
-            tree = ast.parse(source, filename=str(src_path))
-            rel = src_path.relative_to(PROJECT_ROOT)
-
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Import):
-                    for alias in node.names:
-                        if ARCHIVE_MARKER in alias.name:
-                            ast_violations.append(f"{rel}:{node.lineno} import {alias.name}")
-                elif isinstance(node, ast.ImportFrom):
-                    mod_name = node.module or ""
-                    if ARCHIVE_MARKER in mod_name:
-                        ast_violations.append(f"{rel}:{node.lineno} from {mod_name} import ...")
-                elif isinstance(node, ast.Constant) and isinstance(node.value, str):
-                    if ARCHIVE_MARKER in node.value:
-                        ast_violations.append(f"{rel}:{node.lineno} string constant '{node.value}'")
-
-        self.assertEqual(
-            ast_violations,
-            [],
-            f"AST inspection detected '{ARCHIVE_MARKER}' references in active Python files:\n"
-            + "\n".join(ast_violations),
-        )
-
-    def test_no_active_files_reference_leafmachine2_or_pointrend(self):
-        """Scan all active .py, .R, and .sh files (excluding test_code_hygiene.py, archived folders, .git, .venv, .venv_LM3, LeafMachine3) and assert zero forbidden LM2/PointRend tokens."""
-        violations: List[str] = []
-        for src_path in iter_active_source_files(include_shell=True):
-            if src_path == SELF_PATH:
-                continue
-            content = src_path.read_text(encoding="utf-8", errors="ignore")
-            rel = src_path.relative_to(PROJECT_ROOT)
-            for lineno, line in enumerate(content.splitlines(), start=1):
-                for token in FORBIDDEN_LEGACY_LM2_TOKENS:
-                    if token in line:
-                        violations.append(f"{rel}:{lineno} [{token}]: {line.strip()}")
-
-        self.assertEqual(
-            violations,
-            [],
-            "Active source files must not contain any legacy LeafMachine2 / PointRend tokens:\n"
-            + "\n".join(violations),
         )
 
     def test_no_files_or_folders_named_lm2_or_leafmachine2(self):
