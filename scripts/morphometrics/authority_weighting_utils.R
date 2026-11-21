@@ -3229,11 +3229,12 @@ compute_type_specimen_morph_control <- function(
   # Single-taxon intraspecific mode: query canonical SQLite for congeneric Packera centroids
   # in run-invariant standardized harmonic + vestiture + topology space,
   # falling back strictly to same-run_id PC1..3 when harmonics are absent.
-  db_osr <- tryCatch({
+  # Isolate early return(NULL) and on.exit cleanup inside an IIFE so failed DB reads fall back to local OSR.
+  db_osr <- tryCatch((function() {
     if (!is.null(df) && exists("connect_packera_db", mode = "function") && requireNamespace("DBI", quietly = TRUE)) {
       con <- connect_packera_db(read_only = TRUE)
-      on.exit(tryCatch(DBI::dbDisconnect(con), error = function(e) NULL), add = TRUE)
       if (is.null(con)) return(NULL)
+      on.exit(tryCatch(DBI::dbDisconnect(con), error = function(e) NULL), add = TRUE)
       has_sheet_delta_inv <- ("blade_cie_l_sheet_delta" %in% names(df)) &&
         (mean(is.finite(suppressWarnings(as.numeric(df$blade_cie_l_sheet_delta)))) >= 0.50)
       phot_inv_cands <- c(
@@ -3389,7 +3390,7 @@ compute_type_specimen_morph_control <- function(
         NULL
       }
     } else NULL
-  }, error = function(e) NULL)
+  })(), error = function(e) NULL)
 
   if (!is.null(db_osr)) return(db_osr)
 
